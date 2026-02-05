@@ -842,6 +842,31 @@
     html += '<span>RFC ' + rfc.number + ' &mdash; ' + escapeHtml(rfc.title) + '</span>';
     html += '<a href="https://datatracker.ietf.org/doc/html/rfc' + rfc.number + '" target="_blank" rel="noopener">View original on IETF</a>';
     html += '</div>';
+    html += '<div class="footer-zec">';
+    html += ZCASH_LOGO_SVG;
+    html += '<span class="zec-label">ZEC</span>';
+    html += '<code class="zec-addr">' + ZEC_ADDRESS + '</code>';
+    html += '</div>';
+    html += '</footer>';
+    return html;
+  }
+
+  // ============================================================
+  // Site Footer (ZEC donation)
+  // ============================================================
+
+  var ZEC_ADDRESS = 'ZEC-ADDRESS-REMOVED';
+  var ZCASH_LOGO_SVG = '<svg class="zec-logo" viewBox="0 0 32 32" width="16" height="16" fill="none"><circle cx="16" cy="16" r="16" fill="#F4B728"/><path d="M16.4 18.8h4.8v2.4h-3.1L22 25.6h-3.2l-3.2-4.4v4.4h-2.4v-4.4L10 25.6H6.8l3.9-4.4H7.6v-2.4h4.8v-1.6H7.6v-2.4h3.1L6.8 10.4H10l3.2 4.4V10.4h2.4v4.4l3.2-4.4h3.2l-3.9 4.4h4.1v2.4h-4.8v1.6h-.8z" fill="#231F20"/></svg>';
+
+  function renderSiteFooter() {
+    var html = '<footer class="site-footer">';
+    html += '<div class="site-footer-inner">';
+    html += '<span class="site-footer-zec">';
+    html += ZCASH_LOGO_SVG;
+    html += '<span class="zec-label">ZEC</span>';
+    html += '<code class="zec-addr">' + ZEC_ADDRESS + '</code>';
+    html += '</span>';
+    html += '</div>';
     html += '</footer>';
     return html;
   }
@@ -1112,6 +1137,7 @@
       html += '</section>';
     }
 
+    html += renderSiteFooter();
     html += '</div>'; // landing-page
     contentEl.innerHTML = html;
   }
