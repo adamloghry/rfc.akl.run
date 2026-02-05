@@ -96,11 +96,53 @@
   }
 
   // ============================================================
-  // Theme (dark mode only)
+  // Theme Toggle (default: dark)
   // ============================================================
 
+  var themeToggle = document.getElementById('theme-toggle');
+
+  function getStoredTheme() {
+    try {
+      return localStorage.getItem('rfc-theme');
+    } catch (e) { return null; }
+  }
+
+  function setStoredTheme(theme) {
+    try {
+      localStorage.setItem('rfc-theme', theme);
+    } catch (e) { /* storage unavailable */ }
+  }
+
   function initTheme() {
-    document.documentElement.setAttribute('data-theme', 'dark');
+    var stored = getStoredTheme();
+    var theme = stored || 'dark'; // default to dark
+    document.documentElement.setAttribute('data-theme', theme);
+    updateThemeIcon(theme);
+  }
+
+  function toggleTheme() {
+    var current = document.documentElement.getAttribute('data-theme') || 'dark';
+    var next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    setStoredTheme(next);
+    updateThemeIcon(next);
+  }
+
+  function updateThemeIcon(theme) {
+    if (!themeToggle) return;
+    if (theme === 'dark') {
+      themeToggle.classList.remove('theme-light');
+      themeToggle.classList.add('theme-dark');
+    } else {
+      themeToggle.classList.remove('theme-dark');
+      themeToggle.classList.add('theme-light');
+    }
+  }
+
+  function setupThemeToggle() {
+    if (themeToggle) {
+      themeToggle.addEventListener('click', toggleTheme);
+    }
   }
 
   // ============================================================
@@ -817,6 +859,190 @@
     if (footerEl) footerEl.innerHTML = '';
   }
 
+  // ============================================================
+  // "Life of a Request" Diagram Data
+  // ============================================================
+
+  var REQUEST_JOURNEY = [
+    {
+      step: 1,
+      icon: '🖱️',
+      title: 'You type rfc.akl.run',
+      subtitle: 'URL Parsing & Intent',
+      description: 'The browser parses the URL into its components: scheme (https), host (rfc.akl.run), and path (/). The URI standard defines how every web address is structured.',
+      color: 'cyan',
+      rfcs: [
+        { number: 3986, label: 'URI Syntax' },
+        { number: 2396, label: 'URI Generic Syntax (original)' }
+      ]
+    },
+    {
+      step: 2,
+      icon: '🔍',
+      title: 'DNS Resolution',
+      subtitle: 'Translating name to address',
+      description: 'Your machine asks a recursive resolver to translate "rfc.akl.run" into an IP address. The query travels through a hierarchy of nameservers — root, TLD (.org), and authoritative — until the A/AAAA record is found.',
+      color: 'green',
+      rfcs: [
+        { number: 1034, label: 'DNS Concepts' },
+        { number: 1035, label: 'DNS Implementation' },
+        { number: 6891, label: 'EDNS(0) Extensions' },
+        { number: 4033, label: 'DNSSEC Introduction' },
+        { number: 7858, label: 'DNS over TLS' },
+        { number: 8484, label: 'DNS over HTTPS' }
+      ]
+    },
+    {
+      step: 3,
+      icon: '🌐',
+      title: 'IP Routing',
+      subtitle: 'Packets find their path',
+      description: 'With the server\'s IP address resolved, packets are routed across the Internet. Each router examines the destination IP and forwards the packet hop-by-hop using BGP-learned routes, decrementing the TTL at each hop.',
+      color: 'purple',
+      rfcs: [
+        { number: 791, label: 'IPv4' },
+        { number: 8200, label: 'IPv6' },
+        { number: 792, label: 'ICMP' },
+        { number: 4271, label: 'BGP-4' },
+        { number: 2460, label: 'IPv6 Specification' }
+      ]
+    },
+    {
+      step: 4,
+      icon: '🤝',
+      title: 'TCP Handshake',
+      subtitle: 'Establishing a reliable connection',
+      description: 'A three-way handshake (SYN → SYN-ACK → ACK) establishes a reliable, ordered byte-stream between your browser and the server. TCP handles flow control, congestion avoidance, and retransmission.',
+      color: 'orange',
+      rfcs: [
+        { number: 793, label: 'TCP (original)' },
+        { number: 9293, label: 'TCP (current)' },
+        { number: 5681, label: 'Congestion Control' },
+        { number: 7323, label: 'TCP Extensions' },
+        { number: 6298, label: 'Retransmission Timer' }
+      ]
+    },
+    {
+      step: 5,
+      icon: '🔒',
+      title: 'TLS Handshake',
+      subtitle: 'Encrypting the connection',
+      description: 'Before any HTTP data flows, TLS 1.3 negotiates a shared secret using a single round-trip. The server presents its X.509 certificate, the browser verifies the chain of trust, and symmetric encryption begins.',
+      color: 'red',
+      rfcs: [
+        { number: 8446, label: 'TLS 1.3' },
+        { number: 5280, label: 'X.509 Certificates' },
+        { number: 6066, label: 'TLS Extensions' },
+        { number: 6960, label: 'OCSP' },
+        { number: 8555, label: 'ACME (Let\'s Encrypt)' }
+      ]
+    },
+    {
+      step: 6,
+      icon: '📤',
+      title: 'HTTP Request',
+      subtitle: 'GET /index.html HTTP/2',
+      description: 'The browser sends an HTTP request over the encrypted channel. HTTP/2 uses binary framing and multiplexing to send headers (compressed with HPACK) and the request in parallel streams over a single connection.',
+      color: 'blue',
+      rfcs: [
+        { number: 9110, label: 'HTTP Semantics' },
+        { number: 9112, label: 'HTTP/1.1' },
+        { number: 9113, label: 'HTTP/2' },
+        { number: 9114, label: 'HTTP/3' },
+        { number: 9000, label: 'QUIC Transport' }
+      ]
+    },
+    {
+      step: 7,
+      icon: '📥',
+      title: 'HTTP Response',
+      subtitle: '200 OK — Content delivered',
+      description: 'The server responds with status 200, content-type headers, and the HTML body. The response may be compressed with gzip or Brotli, chunked for streaming, and include cache-control directives for future visits.',
+      color: 'yellow',
+      rfcs: [
+        { number: 9110, label: 'HTTP Semantics' },
+        { number: 9111, label: 'HTTP Caching' },
+        { number: 2854, label: 'text/html Media Type' },
+        { number: 1952, label: 'GZIP Format' },
+        { number: 6265, label: 'HTTP Cookies' }
+      ]
+    },
+    {
+      step: 8,
+      icon: '🖥️',
+      title: 'Rendering',
+      subtitle: 'Pixels on your screen',
+      description: 'The browser parses HTML, fetches CSS and JavaScript (each over their own HTTP streams), builds the DOM and CSSOM, and paints the page. You see rfc.akl.run — every step above happened in milliseconds.',
+      color: 'pink',
+      rfcs: [
+        { number: 2854, label: 'text/html' },
+        { number: 3986, label: 'URI References in HTML' },
+        { number: 6454, label: 'Web Origin Concept' },
+        { number: 7034, label: 'X-Frame-Options' },
+        { number: 6797, label: 'HTTP Strict Transport Security' }
+      ]
+    }
+  ];
+
+  function renderRequestJourney() {
+    var html = '';
+
+    html += '<section class="journey rfc-section">';
+    html += '<div class="journey-header">';
+    html += '<h2 class="journey-title">Life of a Request to rfc.akl.run</h2>';
+    html += '<p class="journey-subtitle">Every step your browser takes — from keystroke to pixels — and the RFCs that make it possible</p>';
+    html += '</div>';
+
+    html += '<div class="journey-timeline">';
+
+    for (var i = 0; i < REQUEST_JOURNEY.length; i++) {
+      var step = REQUEST_JOURNEY[i];
+      html += '<div class="journey-step hero-color-' + step.color + '">';
+
+      // Timeline connector
+      html += '<div class="journey-connector">';
+      html += '<div class="journey-dot">' + step.icon + '</div>';
+      if (i < REQUEST_JOURNEY.length - 1) {
+        html += '<div class="journey-line"></div>';
+      }
+      html += '</div>';
+
+      // Step content
+      html += '<div class="journey-content">';
+      html += '<div class="journey-step-header">';
+      html += '<span class="journey-step-num">Step ' + step.step + '</span>';
+      html += '<h3 class="journey-step-title">' + escapeHtml(step.title) + '</h3>';
+      html += '<span class="journey-step-subtitle">' + escapeHtml(step.subtitle) + '</span>';
+      html += '</div>';
+
+      html += '<p class="journey-step-desc">' + escapeHtml(step.description) + '</p>';
+
+      // RFC links
+      html += '<div class="journey-rfcs">';
+      for (var j = 0; j < step.rfcs.length; j++) {
+        var rfc = step.rfcs[j];
+        var exists = !!rfcMap[rfc.number];
+        if (exists) {
+          html += '<a href="#rfc' + rfc.number + '" class="journey-rfc-link">';
+        } else {
+          html += '<a href="https://datatracker.ietf.org/doc/html/rfc' + rfc.number + '" target="_blank" rel="noopener" class="journey-rfc-link journey-rfc-external">';
+        }
+        html += '<span class="journey-rfc-num">RFC ' + rfc.number + '</span>';
+        html += '<span class="journey-rfc-label">' + escapeHtml(rfc.label) + '</span>';
+        html += '</a>';
+      }
+      html += '</div>'; // journey-rfcs
+
+      html += '</div>'; // journey-content
+      html += '</div>'; // journey-step
+    }
+
+    html += '</div>'; // journey-timeline
+    html += '</section>'; // journey
+
+    return html;
+  }
+
   function renderLandingPage() {
     var html = '';
     html += '<div class="landing-page">';
@@ -826,6 +1052,9 @@
     html += '<h1 class="landing-title">Requests for Comments</h1>';
     html += '<p class="landing-subtitle">Exploring the documents that built the Internet</p>';
     html += '</section>';
+
+    // Life of a Request diagram
+    html += renderRequestJourney();
 
     // Featured RFCs grid
     var featured = rfcData.filter(function (r) { return r.featured; });
@@ -1471,8 +1700,9 @@
     // 4. Setup hash-based routing
     setupRouting();
 
-    // 5. Dark mode always
+    // 5. Theme (default dark, toggle supported)
     initTheme();
+    setupThemeToggle();
 
     // 6. Setup search
     buildSearchIndex();

@@ -15,11 +15,17 @@
           pname = "rfc-akl-run";
           version = "1.0.0";
 
-          src = ./site;
+          src = ./.;
+
+          nativeBuildInputs = [ pkgs.nodejs ];
+
+          buildPhase = ''
+            node scripts/build.js
+          '';
 
           installPhase = ''
             mkdir -p $out
-            cp -r ./* $out/
+            cp -r site/* $out/
           '';
         };
       in
@@ -31,6 +37,7 @@
 
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            nodejs
             python3
             nodePackages.live-server
           ];
