@@ -11,7 +11,7 @@
   // Constants
   // ============================================================
 
-  var DEFAULT_RFC = 903;
+  var DEFAULT_RFC = null; // null = show landing page
 
   var CATEGORY_ORDER = [
     'core', 'dns', 'http', 'transport', 'security',
@@ -65,7 +65,6 @@
   var searchInput = document.getElementById('search-input');
   var searchOverlay = document.getElementById('search-overlay');
   var searchResults = document.getElementById('search-results');
-  var themeToggle = document.getElementById('theme-toggle');
   var ietfLink = document.getElementById('ietf-link');
   var bgCanvas = document.getElementById('bg-canvas');
 
@@ -97,35 +96,11 @@
   }
 
   // ============================================================
-  // Theme
+  // Theme (dark mode only)
   // ============================================================
 
-  function setTheme(theme) {
-    document.documentElement.setAttribute('data-theme', theme);
-    try {
-      localStorage.setItem('rfc-theme', theme);
-    } catch (e) { /* storage unavailable */ }
-  }
-
   function initTheme() {
-    var saved = null;
-    try {
-      saved = localStorage.getItem('rfc-theme');
-    } catch (e) { /* storage unavailable */ }
-
-    if (saved) {
-      setTheme(saved);
-    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
-      setTheme('light');
-    }
-  }
-
-  function setupThemeToggle() {
-    if (!themeToggle) return;
-    themeToggle.addEventListener('click', function () {
-      var current = document.documentElement.getAttribute('data-theme');
-      setTheme(current === 'light' ? 'dark' : 'light');
-    });
+    document.documentElement.setAttribute('data-theme', 'dark');
   }
 
   // ============================================================
@@ -539,15 +514,28 @@
 
   function parseHash() {
     var hash = window.location.hash;
-    if (!hash) return DEFAULT_RFC;
+    if (!hash || hash === '#' || hash === '#home') return null; // landing page
 
     var match = hash.match(/^#rfc(\d+)$/i);
     if (match) return parseInt(match[1], 10);
 
-    return DEFAULT_RFC;
+    return null; // unknown hash -> landing page
   }
 
   function navigateTo(rfcNumber) {
+    // Landing page
+    if (rfcNumber === null) {
+      currentRFC = null;
+      renderLandingPage();
+      clearSidebarPanels();
+      updateSidebarActive(null);
+      document.title = 'rfc.akl.run - RFC Viewer';
+      if (ietfLink) ietfLink.href = 'https://www.ietf.org/standards/rfcs/';
+      window.scrollTo(0, 0);
+      setupScrollReveal();
+      return;
+    }
+
     var rfc = rfcMap[rfcNumber];
 
     if (!rfc) {
@@ -809,20 +797,94 @@
   function renderDocFooter(rfc) {
     var html = '<footer class="rfc-footer">';
     html += '<div class="footer-content">';
-
-    html += '<div class="footer-left">';
-    html += '<span class="footer-logo">[rfc.akl.run]</span>';
-    html += '<span class="footer-tagline">Interactive RFC Viewer</span>';
-    html += '</div>';
-
-    html += '<div class="footer-right">';
     html += '<span>RFC ' + rfc.number + ' &mdash; ' + escapeHtml(rfc.title) + '</span>';
     html += '<a href="https://datatracker.ietf.org/doc/html/rfc' + rfc.number + '" target="_blank" rel="noopener">View original on IETF</a>';
     html += '</div>';
-
-    html += '</div>'; // footer-content
     html += '</footer>';
     return html;
+  }
+
+  // ============================================================
+  // Rendering: Landing Page
+  // ============================================================
+
+  function clearSidebarPanels() {
+    var headerEl = document.getElementById('sidebar-rfc-header');
+    if (headerEl) headerEl.innerHTML = '';
+    var tocEl = document.getElementById('sidebar-toc');
+    if (tocEl) { tocEl.innerHTML = ''; tocEl.style.display = 'none'; }
+    var footerEl = document.getElementById('sidebar-footer');
+    if (footerEl) footerEl.innerHTML = '';
+  }
+
+  function renderLandingPage() {
+    var html = '';
+    html += '<div class="landing-page">';
+
+    // Hero area
+    html += '<section class="landing-hero visible">';
+    html += '<h1 class="landing-title">Requests for Comments</h1>';
+    html += '<p class="landing-subtitle">Exploring the documents that built the Internet</p>';
+    html += '</section>';
+
+    // Featured RFCs grid
+    var featured = rfcData.filter(function (r) { return r.featured; });
+
+    // Group featured by category, render each category
+    var categoryBuckets = {};
+    featured.forEach(function (rfc) {
+      var cat = rfc.category || 'meta';
+      if (!categoryBuckets[cat]) categoryBuckets[cat] = [];
+      categoryBuckets[cat].push(rfc);
+    });
+
+    CATEGORY_ORDER.forEach(function (catKey) {
+      var rfcsInCat = categoryBuckets[catKey];
+      if (!rfcsInCat || rfcsInCat.length === 0) return;
+
+      html += '<section class="landing-category rfc-section">';
+      html += '<h2 class="landing-category-title">' + escapeHtml(CATEGORY_NAMES[catKey] || catKey) + '</h2>';
+      html += '<div class="landing-grid">';
+
+      rfcsInCat.forEach(function (rfc) {
+        var heroColor = (rfc.hero && rfc.hero.color) ? rfc.hero.color : 'cyan';
+        var statusClass = getStatusClass(rfc.status);
+        html += '<a href="#rfc' + rfc.number + '" class="landing-card hero-color-' + heroColor + '">';
+        html += '<div class="landing-card-number">RFC ' + rfc.number + '</div>';
+        html += '<div class="landing-card-title">' + escapeHtml(rfc.shortTitle || rfc.title) + '</div>';
+        html += '<div class="landing-card-desc">' + escapeHtml(rfc.title) + '</div>';
+        html += '<div class="landing-card-meta">';
+        html += '<span class="landing-card-status status-' + statusClass + '">' + escapeHtml(rfc.status) + '</span>';
+        html += '<span class="landing-card-date">' + escapeHtml(rfc.date) + '</span>';
+        html += '</div>';
+        html += '</a>';
+      });
+
+      html += '</div>'; // landing-grid
+      html += '</section>';
+    });
+
+    // All RFCs section
+    var basic = rfcData.filter(function (r) { return !r.featured; });
+    if (basic.length > 0) {
+      html += '<section class="landing-category rfc-section">';
+      html += '<h2 class="landing-category-title">All Other RFCs</h2>';
+      html += '<div class="landing-list">';
+
+      basic.forEach(function (rfc) {
+        html += '<a href="#rfc' + rfc.number + '" class="landing-list-item">';
+        html += '<span class="landing-list-num">RFC ' + rfc.number + '</span>';
+        html += '<span class="landing-list-name">' + escapeHtml(rfc.shortTitle || rfc.title) + '</span>';
+        html += '<span class="landing-list-date">' + escapeHtml(rfc.date) + '</span>';
+        html += '</a>';
+      });
+
+      html += '</div>';
+      html += '</section>';
+    }
+
+    html += '</div>'; // landing-page
+    contentEl.innerHTML = html;
   }
 
   // ============================================================
@@ -1409,9 +1471,8 @@
     // 4. Setup hash-based routing
     setupRouting();
 
-    // 5. Setup theme toggle
+    // 5. Dark mode always
     initTheme();
-    setupThemeToggle();
 
     // 6. Setup search
     buildSearchIndex();
