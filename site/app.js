@@ -1108,7 +1108,8 @@
         html += '<div class="landing-card-title">' + escapeHtml(rfc.shortTitle || rfc.title) + '</div>';
         html += '<div class="landing-card-desc">' + escapeHtml(rfc.title) + '</div>';
         html += '<div class="landing-card-meta">';
-        html += '<span class="landing-card-status status-' + statusClass + '">' + escapeHtml(rfc.status) + '</span>';
+        var displayStatus = (rfc.number === 903) ? 'HISTORIC, BUT A FAVORITE' : rfc.status;
+        html += '<span class="landing-card-status status-' + statusClass + '">' + escapeHtml(displayStatus) + '</span>';
         html += '<span class="landing-card-date">' + escapeHtml(rfc.date) + '</span>';
         html += '</div>';
         html += '</a>';
