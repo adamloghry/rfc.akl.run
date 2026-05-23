@@ -113,15 +113,32 @@
     } catch (e) { /* storage unavailable */ }
   }
 
+  function prefersDark() {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+
   function initTheme() {
     var stored = getStoredTheme();
-    var theme = stored || 'dark'; // default to dark
+    var theme = stored || (prefersDark() ? 'dark' : 'light');
     document.documentElement.setAttribute('data-theme', theme);
     updateThemeIcon(theme);
+
+    // Follow OS changes unless the user has made an explicit choice.
+    if (!stored && window.matchMedia) {
+      var mql = window.matchMedia('(prefers-color-scheme: dark)');
+      var onChange = function (e) {
+        if (getStoredTheme()) return; // user picked something, stop following
+        var next = e.matches ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', next);
+        updateThemeIcon(next);
+      };
+      if (mql.addEventListener) mql.addEventListener('change', onChange);
+      else if (mql.addListener) mql.addListener(onChange);
+    }
   }
 
   function toggleTheme() {
-    var current = document.documentElement.getAttribute('data-theme') || 'dark';
+    var current = document.documentElement.getAttribute('data-theme') || 'light';
     var next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
     setStoredTheme(next);
@@ -1087,7 +1104,7 @@
       var rfcsInCat = categoryBuckets[catKey];
       if (!rfcsInCat || rfcsInCat.length === 0) return;
 
-      html += '<section class="landing-category rfc-section">';
+      html += '<section class="landing-category rfc-section" data-category="' + catKey + '">';
       html += '<h2 class="landing-category-title">' + escapeHtml(CATEGORY_NAMES[catKey] || catKey) + '</h2>';
       html += '<div class="landing-grid">';
 
@@ -1113,7 +1130,7 @@
     // All RFCs section
     var basic = rfcData.filter(function (r) { return !r.featured; });
     if (basic.length > 0) {
-      html += '<section class="landing-category rfc-section">';
+      html += '<section class="landing-category rfc-section" data-category="all">';
       html += '<h2 class="landing-category-title">All Other RFCs</h2>';
       html += '<div class="landing-list">';
 
@@ -1729,8 +1746,7 @@
     // 7. Setup mobile sidebar toggle
     setupMobileSidebar();
 
-    // 8. Setup background canvas particle animation
-    setupCanvas();
+    // 8. Background canvas no longer rendered (replaced by CSS gradient).
 
     // 9. Listen for scroll events (active section tracking)
     window.addEventListener('scroll', onScroll, { passive: true });
