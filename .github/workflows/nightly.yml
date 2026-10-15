@@ -1,0 +1,62 @@
+name: Nightly build and deploy
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      init:
+        description: Pass --init (set bucket website config; first deploy only)
+        type: boolean
+        default: false
+      fix_headers:
+        description: Pass --fix-headers (re-stamp Cache-Control on unchanged objects)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  id-token: write # workload identity federation
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # No index cache: the nightly build always fetches a fresh rfc-index.xml.
+      - run: npm test
+      - run: npm run lint
+      - name: Fetch reader demand
+        run: node scripts/fetch-demand.js
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: node scripts/build.js
+      - run: node scripts/check-dist.js
+      - name: Coverage diff vs deployed site
+        run: |
+          if curl -fsS --max-time 30 https://rfc.akl.run/data/coverage.json -o "$RUNNER_TEMP/old-coverage.json"; then
+            :
+          else
+            echo "deployed coverage.json unavailable; skipping baseline"
+            rm -f "$RUNNER_TEMP/old-coverage.json"
+          fi
+          node scripts/coverage-diff.js "$RUNNER_TEMP/old-coverage.json" dist/data/coverage.json
+      # Deploy only from trunk (scheduled runs use the default branch; manual runs may pick another).
+      - if: github.ref == 'refs/heads/trunk'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+      - if: github.ref == 'refs/heads/trunk'
+        uses: google-github-actions/setup-gcloud@v2
+      - if: github.ref == 'refs/heads/trunk'
+        run: bash scripts/deploy-gcs.sh ${{ inputs.init && '--init' || '' }} ${{ inputs.fix_headers && '--fix-headers' || '' }}
+        env:
+          BUCKET: rfc.akl.run
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

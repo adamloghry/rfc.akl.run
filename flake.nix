@@ -1,57 +1,41 @@
 {
-  description = "rfc.akl.run - A cool RFC viewer website";
+  description = "rfc.akl.run - static RFC explainer site";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
+  # There is deliberately no `packages.*` output. Nix builds are sandboxed with no
+  # network, but the build needs the live RFC Editor index (fetched and cached to
+  # .cache/, never committed) and npm dependencies. A derivation could not produce
+  # the real site, so builds run in the working tree via `npm` / `nix run`.
   outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-
-        site = pkgs.stdenv.mkDerivation {
-          pname = "rfc-akl-run";
-          version = "1.0.0";
-
-          src = ./.;
-
-          nativeBuildInputs = [ pkgs.nodejs ];
-
-          buildPhase = ''
-            node scripts/build.js
-          '';
-
-          installPhase = ''
-            mkdir -p $out
-            cp -r site/* $out/
-          '';
-        };
       in
       {
-        packages = {
-          default = site;
-          site = site;
-        };
-
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            nodejs
+            nodejs_22
             python3
-            nodePackages.live-server
+            google-cloud-sdk
           ];
 
           shellHook = ''
-            echo "rfc.akl.run dev shell"
-            echo "Run 'python3 -m http.server 8080 --directory site' to preview"
+            echo "rfc.akl.run dev shell: npm ci && npm run build && npm run serve"
           '';
         };
 
         apps.default = {
           type = "app";
           program = toString (pkgs.writeShellScript "serve-rfc" ''
-            ${pkgs.python3}/bin/python3 -m http.server 8080 --directory ${site}
+            set -euo pipefail
+            export PATH=${pkgs.lib.makeBinPath [ pkgs.nodejs_22 pkgs.python3 ]}:$PATH
+            npm ci
+            npm run build
+            npm run serve
           '');
         };
       }
