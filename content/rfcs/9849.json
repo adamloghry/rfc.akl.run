@@ -1,0 +1,537 @@
+{
+  "number": 9849,
+  "title": "TLS Encrypted Client Hello",
+  "shortTitle": "TLS Encrypted Client Hello",
+  "authors": [
+    "E. Rescorla",
+    "K. Oku",
+    "N. Sullivan",
+    "C. A. Wood"
+  ],
+  "category": "security",
+  "tags": [
+    "TLS",
+    "Privacy",
+    "SNI"
+  ],
+  "subtitle": "How a browser hides which website it is asking for, even from the network that carries the bytes.",
+  "summary": "<p>Encrypted Client Hello (ECH) lets a TLS client encrypt the first handshake message, the ClientHello, under a public key the server publishes. That hides the server name (SNI) and other sensitive fields from anyone watching the network. The real hello sits inside an ordinary-looking outer hello, and the server either decrypts it and carries on, or rejects it and sends the client a fresh configuration to retry with.</p>",
+  "eli5": {
+    "summary": "<p>When you ask a school office for a certain classroom, you normally say its name out loud in the hallway. ECH puts the name in a sealed envelope that only the office can open, so people walking past can't tell which classroom you want.</p>"
+  },
+  "questions": [
+    "what is encrypted client hello",
+    "how does ech hide the sni",
+    "what is the difference between shared mode and split mode in ech",
+    "why does ech need encrypted dns",
+    "what happens when ech is rejected",
+    "what is the ech public name",
+    "what is grease ech",
+    "how does a client know ech was accepted"
+  ],
+  "tldr": {
+    "problem": "Even in TLS 1.3 the ClientHello travels in plaintext, so the server name and ALPN list leak to anyone on the path.",
+    "mechanism": "The client seals the real ClientHello with HPKE to a key from the server's ECHConfig and sends it inside an outer ClientHello, and the server signals acceptance in ServerHello.random.",
+    "outcome": "Observers see only the provider's public name, though the destination can still leak through DNS or IP addresses.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Extension code point",
+      "value": "0xfe0d"
+    },
+    {
+      "label": "Alert",
+      "value": "ech_required (121)"
+    },
+    {
+      "label": "Encryption",
+      "value": "HPKE (RFC 9180)"
+    },
+    {
+      "label": "Status",
+      "value": "Proposed Standard"
+    },
+    {
+      "label": "Published",
+      "value": "March 2026"
+    }
+  ],
+  "today": "<p>RFC 9849 was published in March 2026 as a Proposed Standard from the IETF TLS working group, with <a href=\"/9848/\">RFC 9848</a> defining how the configuration is advertised in DNS. ECH grew out of an earlier proposal known as ESNI, which the draft name <code>draft-ietf-tls-esni</code> still reflects.</p>",
+  "glossary": [],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>TLS 1.3 encrypts most of the handshake, including the server certificate. One thing it leaves in plain sight is the Server Name Indication (SNI) in the first message, the ClientHello. SNI names the site the client wants to reach, so anyone on the path can read it. The RFC calls it \"perhaps the most sensitive information left unencrypted in TLS 1.3\". The ALPN list, which says which application protocols the client speaks, is exposed too.</p><p>Encrypted Client Hello (ECH) closes that gap. The client encrypts its real ClientHello to a public key published by the server, and sends it inside a second, innocuous ClientHello. Servers with matching, externally visible TLS behavior form an <em>anonymity set</em>. An observer can see that the client is talking to the provider but not which server in the set ends up handling the connection.</p><div class=\"callout callout-note\"><p>ECH is not enough on its own to hide where you are going. The target name can still leak through plaintext DNS queries or through a server IP address that only one site uses. The RFC points to encrypted DNS (<a href=\"/8484/\">RFC 8484</a> and others) as the companion.</p></div><p>The mechanism works with TLS 1.3 and DTLS 1.3 (<a href=\"/9147/\">RFC 9147</a>) and newer versions.</p>",
+      "eli5": "<p>When you walk into a big building, the guard at the door can read the note you wrote on the front of your envelope, \"Please deliver to Room 12\". ECH puts that note inside a sealed second envelope. The outside of the envelope only says the name of the building, and only the building's mail room has the key to open it.</p>"
+    },
+    {
+      "id": "topologies",
+      "number": "2",
+      "title": "Shared mode and split mode",
+      "content": "<p>ECH is built for two layouts. In <strong>shared mode</strong> one server is both the ECH provider and the TLS terminator. It holds the ECH private key, decrypts the inner hello, and finishes the handshake itself. In <strong>split mode</strong> the provider is only a front door: it decrypts the inner hello and forwards it to a separate origin server, which finishes the handshake with the client. The provider never sees the plaintext of the connection beyond the unencrypted parts of the handshake.</p><p>The RFC names the roles <em>client-facing server</em> (the ECH provider) and <em>backend server</em> (the TLS terminator). In shared mode they are the same machine. A shared-mode server that receives a ClientHello of type <code>inner</code> straight from the network must abort with <code>illegal_parameter</code>, because such a message should never arrive that way.</p><div class=\"callout callout-info\"><p>In split mode the RFC assumes the link from client-facing to backend server is authenticated, and that an attacker cannot match traffic on the two sides. How to do that is left out of scope.</p></div>",
+      "eli5": "<p>In one kind of post office, the clerk who opens the sealed envelope is also the person who answers it. In another, the clerk opens it and hands the letter through a window to someone in a back office, who writes the reply. ECH works in both.</p>"
+    },
+    {
+      "id": "ech-config",
+      "number": "3",
+      "title": "The ECH configuration",
+      "content": "<p>A server turns ECH on by publishing an <code>ECHConfig</code>: a public key plus the metadata a client needs. Clients can get it from DNS (<a href=\"/9848/\">RFC 9848</a> describes the SVCB and HTTPS record carriage, building on <a href=\"/9460/\">RFC 9460</a>) or have it preconfigured. A list of them, <code>ECHConfigList</code>, is ordered by decreasing preference.</p><p>Each <code>ECHConfig</code> starts with a 16-bit <code>version</code>, which is <code>0xfe0d</code> for this RFC, and a 16-bit <code>length</code> so that clients can skip versions they do not understand. The contents hold an <code>HpkeKeyConfig</code> (a one-byte <code>config_id</code>, the HPKE KEM id, the public key, and the list of KDF/AEAD pairs), a <code>maximum_name_length</code>, a <code>public_name</code> of 1 to 255 bytes, and a list of extensions.</p><p>The <code>public_name</code> is the DNS name of the client-facing server. It goes in the outer <code>server_name</code> and is the name the client authenticates if ECH is rejected. The <code>maximum_name_length</code> is zero if unknown and drives padding. Extensions follow the TLS rules except that a type with the high bit set is <em>mandatory</em>: a client that does not understand it must ignore the whole <code>ECHConfig</code>.</p>",
+      "eli5": "<p>The server posts a card on a public board that says: \"Here is my padlock. These are the kinds of locks I know how to use. If you get confused, knock on my front door under this name.\"</p>"
+    },
+    {
+      "id": "encoding-the-inner-hello",
+      "number": "4",
+      "title": "The extension and the inner ClientHello",
+      "content": "<p>The client builds two ClientHellos. <code>ClientHelloInner</code> is the real one. <code>ClientHelloOuter</code> is the public one, and it carries an <code>encrypted_client_hello</code> extension (code point <code>0xfe0d</code>) of type <code>outer</code>: the chosen cipher suite, the <code>config_id</code>, the HPKE encapsulated key <code>enc</code>, and the encrypted <code>payload</code>. The inner hello carries the same extension with type <code>inner</code> and an empty body, because a server may not answer with an extension the client did not send.</p><p>Before encryption, the inner hello is turned into an <code>EncodedClientHelloInner</code>: the hello with an empty <code>legacy_session_id</code>, followed by zero padding. To avoid sending big extensions such as post-quantum key shares twice, the client may replace extensions that also appear in the outer hello with one <code>ech_outer_extensions</code> extension (<code>0xfd00</code>) that lists their types.</p><p>The outer hello is authenticated, not hidden. It is passed to HPKE as associated data (<code>ClientHelloOuterAAD</code>, with the payload replaced by zeros of the same length), so an attacker cannot swap in a different outer hello while keeping the same inner one.</p>",
+      "eli5": "<p>You write your real letter, pad it with blank paper so every letter is the same thickness, and seal it. You also write a boring cover letter, and the seal is stamped over both so nobody can swap the cover without breaking it.</p>"
+    },
+    {
+      "id": "client-behavior",
+      "number": "5",
+      "title": "What the client does",
+      "content": "<p>A client that holds a usable <code>ECHConfig</code> offers ECH. The inner hello must not offer TLS 1.2 or below. The outer hello must offer TLS 1.3 or above, copy the session id, use a fresh random value, and should put the config's <code>public_name</code> in <code>server_name</code>. The client then runs HPKE with the info string <code>\"tls ech\" || 0x00 || ECHConfig</code> and seals the encoded inner hello.</p><p>The recommended padding rounds the encoded inner hello up to a multiple of 32 bytes, and pads the SNI up to <code>maximum_name_length</code>. A client without a usable config should still send a GREASE ECH extension with random contents, so that ECH traffic does not stand out.</p><p>The client learns the result from the server's first message. If the last 8 bytes of <code>ServerHello.random</code> equal the computed <code>accept_confirmation</code>, ECH was accepted and the handshake continues with the inner hello. Otherwise ECH was rejected. The client then completes the handshake against the <code>public_name</code>, never sends application data, and aborts with an <code>ech_required</code> alert. If the server supplied <code>retry_configs</code>, the client retries on a new connection with them.</p><div class=\"callout callout-warning\"><p>Unless the client has securely learned that ECH is disabled, it must not fall back to a plaintext ClientHello. That would let a network attacker read the very name ECH hides.</p></div>",
+      "eli5": "<p>The kid sends the sealed letter. If the answer comes back with the right secret handshake in it, the kid knows the right person opened it. If not, the kid does not tell any secrets to whoever answered, and asks the front desk for the newest padlock.</p>"
+    },
+    {
+      "id": "server-behavior",
+      "number": "6",
+      "title": "What the servers do",
+      "content": "<p>On an <code>outer</code> extension, the client-facing server picks candidate configs, normally by matching <code>config_id</code>, and tries to decrypt with each. On success it rebuilds <code>ClientHelloInner</code>, checks it has the inner extension and does not offer TLS 1.2 or below, and passes it to the backend server. After that it relays every message unchanged. If anything fails to decrypt, the server carries on with the outer hello. It does not treat this as an error, since a GREASE extension looks the same. If it has any ECH configs, it adds <code>retry_configs</code> to its EncryptedExtensions.</p><p>The backend server signals acceptance by overwriting the last 8 bytes of <code>ServerHello.random</code> with a value derived from the inner handshake (the formula is shown below).</p><p>If a HelloRetryRequest is needed, the same signal goes in an <code>encrypted_client_hello</code> extension of 8 bytes instead (<code>hrr_accept_confirmation</code>). The second ClientHelloOuter must keep the same config and suite, leave <code>enc</code> empty, and reuse the HPKE context.</p>",
+      "eli5": "<p>The front desk tries its keys. If one fits, it hands the real letter to the back office. The back office replies with a tiny hidden stamp that only the sender can check, and that proves the right person read it.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "7",
+      "title": "Deployment and compatibility",
+      "content": "<p>ECH needs changes to clients, client-facing servers and backend servers. Unlike most TLS extensions, putting the SNI inside ECH is not interoperable with servers that only look at the plaintext extension. Operators should therefore make sure servers understand a set of ECH keys before they advertise them, and keep old keys for as long as cached configurations may still use them.</p><p>The protocol is designed to survive mismatches, at the cost of an extra round trip. If DNS and the server disagree, the server rejects ECH and replies with <code>retry_configs</code>. This works only if every endpoint that might receive the connection has a certificate for the public name. Middleboxes that terminate TLS act as ordinary clients and servers and do not echo the ECH extension, so they cannot silently turn ECH off for a client that checks the public name.</p><p>Anything that relied on seeing the SNI, for example SNI-based load balancing or filtering, may stop working. The RFC suggests managed networks could disable ECH by policy, if clients honor it, or decrypt connections.</p><div class=\"callout callout-info\"><p>Unless an application profile says otherwise, a compliant implementation must support DHKEM(X25519, HKDF-SHA256), HKDF-SHA256 and AES-128-GCM.</p></div>",
+      "eli5": "<p>Everybody in the mail system needs the new locks at the same time, or letters bounce. So the system has a built-in way to say \"your padlock is out of date, here is the new one\" and try again.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security considerations",
+      "content": "<p>The stated goals are security preservation (ECH does not weaken TLS), handshake privacy (a connection to one name in the anonymity set looks like any other) and downgrade resistance (an attacker cannot make a client silently drop ECH). The RFC cites a formal analysis of these properties. The anonymity set is only as big as the client-facing server makes it: if each name uses a distinct <code>ECHConfig</code>, the set has one member, since <code>config_id</code> is visible.</p><p>The RFC also lists risks. A malicious provider could hand out unique configs per client to track them, and unauthenticated DNS lets an attacker strip or forge ECH configs, although an attacker who controls DNS can defeat any scheme of this kind. Padding that is too thin leaks the length of the inner hello. ECH can mislead other parts of a handshake if the outer hello reveals things the inner hides, such as an ALPN list, or if a backend reuses key shares.</p><p>Several active-attack mitigations are built in: a fresh random in the outer hello, a reused HPKE context across a HelloRetryRequest, authentication of the whole outer hello, and strict rules on <code>ech_outer_extensions</code> so a crafted packet cannot be expanded into a much larger inner hello.</p>",
+      "eli5": "<p>The sealed envelope hides the address, but it cannot hide that you are mailing the post office. A bigger crowd of senders makes it harder to tell who is who, and padding makes every envelope the same size so nobody can guess from its thickness.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "What an on-path observer sees",
+      "data": {
+        "columns": [
+          "Item",
+          "Plain TLS 1.3",
+          "With ECH"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Server name (SNI)",
+              "The real site name",
+              "The provider's public_name"
+            ]
+          },
+          {
+            "cells": [
+              "ALPN list",
+              "Visible",
+              "Hidden in the inner hello"
+            ]
+          },
+          {
+            "cells": [
+              "Server certificate",
+              "Encrypted",
+              "Encrypted"
+            ]
+          },
+          {
+            "cells": [
+              "Which server in the set answers",
+              "Revealed by the SNI",
+              "Not revealed"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "topologies",
+      "position": "after",
+      "caption": "Roles in the two topologies",
+      "data": {
+        "layers": [
+          {
+            "label": "Client",
+            "detail": "Builds ClientHelloInner and ClientHelloOuter"
+          },
+          {
+            "label": "Client-facing server",
+            "detail": "Holds the ECH private key; decrypts the outer hello; its public_name is what observers see",
+            "highlight": true
+          },
+          {
+            "label": "Backend server",
+            "detail": "Terminates TLS using ClientHelloInner. Same machine as the client-facing server in shared mode"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "ech-config",
+      "position": "after",
+      "caption": "FIG 3.1 · ECHCONFIG · EXAMPLE ENCODING",
+      "data": {
+        "title": "ECHConfig with one cipher suite (example sizes)",
+        "bytes": 69,
+        "width": 32,
+        "fields": [
+          {
+            "key": "version",
+            "name": "version",
+            "bits": 16,
+            "desc": "ECH version; the same value as the extension code point.",
+            "value": "0xfe0d"
+          },
+          {
+            "key": "length",
+            "name": "length",
+            "bits": 16,
+            "desc": "Length in bytes of everything that follows, so clients can skip unknown versions.",
+            "value": "0x0041"
+          },
+          {
+            "key": "config-id",
+            "name": "config_id",
+            "bits": 8,
+            "desc": "One-byte identifier of this key configuration (HpkeKeyConfig).",
+            "value": "0x2a"
+          },
+          {
+            "key": "kem-id",
+            "name": "kem_id",
+            "bits": 16,
+            "desc": "HPKE KEM identifier for the public key. 0x0020 is DHKEM(X25519, HKDF-SHA256) in RFC 9180.",
+            "value": "0x0020"
+          },
+          {
+            "key": "pk-len",
+            "name": "public_key length",
+            "bits": 16,
+            "desc": "Length prefix of the HpkePublicKey vector (1 to 2^16-1 bytes).",
+            "value": "0x0020"
+          },
+          {
+            "key": "pk",
+            "name": "public_key",
+            "bits": 256,
+            "desc": "HPKE public key used to encrypt ClientHelloInner. 32 bytes for an X25519 key; the real field is variable length.",
+            "value": "32-byte key"
+          },
+          {
+            "key": "cs-len",
+            "name": "cipher_suites length",
+            "bits": 16,
+            "desc": "Length prefix of the list of KDF/AEAD pairs (at least 4 bytes).",
+            "value": "0x0004"
+          },
+          {
+            "key": "cs",
+            "name": "kdf_id, aead_id",
+            "bits": 32,
+            "desc": "One HpkeSymmetricCipherSuite: a 16-bit KDF id and a 16-bit AEAD id. Shown as HKDF-SHA256 and AES-128-GCM.",
+            "value": "0x0001 0x0001"
+          },
+          {
+            "key": "max-name",
+            "name": "maximum_name_length",
+            "bits": 8,
+            "desc": "Longest backend name, if known, else zero. Used only to compute padding.",
+            "value": "0x2a"
+          },
+          {
+            "key": "pn-len",
+            "name": "public_name length",
+            "bits": 8,
+            "desc": "Length prefix of public_name (1 to 255 bytes).",
+            "value": "18"
+          },
+          {
+            "key": "pn",
+            "name": "public_name",
+            "bits": 144,
+            "desc": "DNS name of the client-facing server. Shown here for 18 bytes; the real field is variable length.",
+            "value": "public.example.com"
+          },
+          {
+            "key": "ext-len",
+            "name": "extensions length",
+            "bits": 16,
+            "desc": "Length prefix of the ECHConfigExtension list; zero here.",
+            "value": "0x0000"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "encoding-the-inner-hello",
+      "position": "after",
+      "caption": "FIG 4.1 · ECHCLIENTHELLO (OUTER) · EXAMPLE ENCODING",
+      "data": {
+        "title": "encrypted_client_hello extension data, type outer (example sizes)",
+        "bytes": 50,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "type",
+            "bits": 8,
+            "desc": "ECHClientHelloType: outer(0) or inner(1). The inner variant has no other fields.",
+            "value": "0"
+          },
+          {
+            "key": "kdf",
+            "name": "cipher_suite.kdf_id",
+            "bits": 16,
+            "desc": "HPKE KDF chosen from the config's cipher_suites list.",
+            "value": "0x0001"
+          },
+          {
+            "key": "aead",
+            "name": "cipher_suite.aead_id",
+            "bits": 16,
+            "desc": "HPKE AEAD chosen from the same list.",
+            "value": "0x0001"
+          },
+          {
+            "key": "outer-config-id",
+            "name": "config_id",
+            "bits": 8,
+            "desc": "The config_id of the chosen ECHConfig.",
+            "value": "0x2a"
+          },
+          {
+            "key": "enc-len",
+            "name": "enc length",
+            "bits": 16,
+            "desc": "Length prefix of enc. The enc field is empty in a ClientHelloOuter sent after a HelloRetryRequest.",
+            "value": "0x0020"
+          },
+          {
+            "key": "enc",
+            "name": "enc",
+            "bits": 256,
+            "desc": "HPKE encapsulated key the server uses to decrypt the payload. 32 bytes for X25519.",
+            "value": "32-byte value"
+          },
+          {
+            "key": "payload-len",
+            "name": "payload length",
+            "bits": 16,
+            "desc": "Length prefix of payload (1 to 2^16-1).",
+            "value": "len"
+          },
+          {
+            "key": "payload",
+            "name": "payload",
+            "bits": 64,
+            "desc": "The HPKE-sealed EncodedClientHelloInner. Truncated here for display; real payloads are hundreds of bytes and a multiple-of-32 plus the AEAD tag.",
+            "value": "ciphertext…"
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "client-behavior",
+      "position": "after",
+      "caption": "ECH accepted · shared or split mode",
+      "data": {
+        "lanes": [
+          {
+            "key": "c",
+            "label": "Client"
+          },
+          {
+            "key": "f",
+            "label": "Client-facing"
+          },
+          {
+            "key": "b",
+            "label": "Backend",
+            "dashed": true
+          }
+        ],
+        "messages": [
+          {
+            "from": "c",
+            "to": "f",
+            "label": "ClientHelloOuter (SNI=public_name, ECH ext)",
+            "color": "blue",
+            "note": "Carries the HPKE-sealed ClientHelloInner."
+          },
+          {
+            "from": "f",
+            "to": "b",
+            "label": "ClientHelloInner",
+            "color": "neutral",
+            "note": "Decrypted with the ECH private key; in shared mode this step is internal."
+          },
+          {
+            "from": "b",
+            "to": "f",
+            "label": "ServerHello (random ends with accept_confirmation)",
+            "color": "green",
+            "note": "Last 8 bytes of ServerHello.random signal acceptance."
+          },
+          {
+            "from": "f",
+            "to": "c",
+            "label": "ServerHello and rest of handshake",
+            "color": "green",
+            "note": "All later messages are relayed unmodified."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "client-behavior",
+      "position": "after",
+      "caption": "ECH rejected · retry with retry_configs",
+      "data": {
+        "lanes": [
+          {
+            "key": "c",
+            "label": "Client"
+          },
+          {
+            "key": "s",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "c",
+            "to": "s",
+            "label": "ClientHelloOuter (stale or unknown config)",
+            "color": "blue",
+            "note": "The server cannot decrypt the payload."
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "ServerHello .. EncryptedExtensions with retry_configs",
+            "color": "neutral",
+            "note": "Handshake proceeds against the public name; certificate must be valid for it."
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "alert ech_required",
+            "color": "neutral",
+            "note": "Sent before any application data."
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "New connection: ClientHelloOuter with retry config",
+            "color": "green",
+            "note": "One retry only; the new config replaces the old."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "server-behavior",
+      "position": "after",
+      "caption": "How the backend server signals acceptance (Section 7.2)",
+      "data": {
+        "title": "accept_confirmation",
+        "lang": "text",
+        "code": "accept_confirmation = HKDF-Expand-Label(\n   HKDF-Extract(0, ClientHelloInner.random),\n   \"ech accept confirmation\",\n   transcript_ech_conf,\n   8)\n\n# transcript_ech_conf: transcript hash of ClientHelloInner up to and\n# including the ServerHello whose last 8 random bytes were zeroed.\n# The result replaces those last 8 bytes of ServerHello.random."
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "Goals",
+      "data": {
+        "items": [
+          {
+            "title": "Security preservation",
+            "text": "Using ECH does not weaken any property TLS has without it."
+          },
+          {
+            "title": "Handshake privacy",
+            "text": "A connection to one name in the anonymity set is indistinguishable from a connection to any other name in it."
+          },
+          {
+            "title": "Downgrade resistance",
+            "text": "An attacker cannot push a connection that tries ECH down to one that does not use it."
+          },
+          {
+            "title": "Look like everyone else",
+            "text": "GREASE ECH gives non-ECH connections the same outward shape, so ECH users do not stand out."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[2]",
+      "text": "Barnes, R., Bhargavan, K., Lipp, B., and C. Wood, \"Hybrid Public Key Encryption\", RFC 9180, February 2022.",
+      "rfc": 9180
+    },
+    {
+      "number": "[3]",
+      "text": "Schwartz, B., Bishop, M., and E. Nygren, \"Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records)\", RFC 9460, November 2023.",
+      "rfc": 9460
+    },
+    {
+      "number": "[4]",
+      "text": "\"Bootstrapping TLS Encrypted ClientHello with DNS Service Bindings\", RFC 9848, March 2026.",
+      "rfc": 9848
+    },
+    {
+      "number": "[5]",
+      "text": "Rescorla, E., Tschofenig, H., and N. Modadugu, \"The Datagram Transport Layer Security (DTLS) Protocol Version 1.3\", RFC 9147, April 2022.",
+      "rfc": 9147
+    },
+    {
+      "number": "[6]",
+      "text": "Huitema, C. and E. Rescorla, \"Issues and Requirements for Server Name Identification (SNI) Encryption in TLS\", RFC 8744, July 2020.",
+      "rfc": 8744
+    },
+    {
+      "number": "[7]",
+      "text": "Benjamin, D., \"Applying Generate Random Extensions And Sustain Extensibility (GREASE) to TLS Extensibility\", RFC 8701, January 2020.",
+      "rfc": 8701
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-15",
+    "reviewedBy": null
+  },
+  "updated": "2026-10-15"
+}

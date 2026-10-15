@@ -1,0 +1,538 @@
+{
+  "number": 4120,
+  "title": "The Kerberos Network Authentication Service (V5)",
+  "shortTitle": "Kerberos V5",
+  "authors": [
+    "Clifford Neuman",
+    "Tom Yu",
+    "Sam Hartman",
+    "Kenneth Raeburn"
+  ],
+  "category": "security",
+  "tags": [
+    "Authentication",
+    "Tickets",
+    "Single sign-on"
+  ],
+  "subtitle": "How you prove who you are to many servers while typing your password once and never sending it.",
+  "summary": "<p>Kerberos lets a client and a server on an untrusted network prove their identities to each other through a trusted third party, the Key Distribution Center (KDC). The user logs in once to get a ticket-granting ticket, then trades it for per-service tickets without re-entering a password, and the password never crosses the network. RFC 4120 is the full Version 5 specification and replaces RFC 1510.</p>",
+  "eli5": {
+    "summary": "<p>Imagine a theme park where you show your ID once at the front gate and get a wristband. After that, every ride checks the wristband instead of asking for your ID again, and you never hand your ID to a ride operator.</p>"
+  },
+  "questions": [
+    "what is kerberos",
+    "how does kerberos authentication work",
+    "what is a ticket granting ticket",
+    "what is the difference between as-req and tgs-req",
+    "why does kerberos need synchronized clocks",
+    "what port does kerberos use",
+    "what is a kerberos realm and principal",
+    "what is kerberos pre-authentication"
+  ],
+  "tldr": {
+    "problem": "Sending a password to every server you use is unsafe, and servers cannot trust a client's claim about who it is.",
+    "mechanism": "A trusted KDC issues a ticket-granting ticket after a login, then issues service tickets that carry a fresh session key. The client proves it holds that key by sending an authenticator containing a timestamp.",
+    "outcome": "One login gives access to many services without the password or long-term keys crossing the network. It is the basis of Active Directory authentication and many Unix and Hadoop deployments.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Port",
+      "value": "UDP/TCP 88"
+    },
+    {
+      "label": "Status",
+      "value": "Proposed Standard"
+    },
+    {
+      "label": "Obsoletes",
+      "value": "RFC 1510"
+    },
+    {
+      "label": "Clock skew",
+      "value": "~5 minutes"
+    },
+    {
+      "label": "Required cipher",
+      "value": "AES256-CTS-HMAC-SHA1-96"
+    }
+  ],
+  "lineage": {
+    "title": "Kerberos V5 specifications",
+    "rfcs": [
+      1510,
+      3961,
+      3962,
+      4120,
+      4121
+    ]
+  },
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction and Overview",
+      "content": "<p>Kerberos is a network authentication service. A client wants to talk to a server, and each side needs to be sure of the other's identity, even though the network between them may be watched or tampered with. The two parties do not already share a secret. Instead, each shares a secret key with a trusted third party, the <strong>Key Distribution Center (KDC)</strong>.</p><p>The KDC is described as two logical services: the Authentication Service (AS) and the Ticket-Granting Service (TGS). The RFC notes that in practice they are \"different protocol entry points within a single Kerberos server.\" The client first asks the AS for a ticket-granting ticket (TGT). It later presents the TGT to the TGS to get a ticket for a particular application server. Only then does it contact that server.</p><p>Two things make the design work. A <strong>ticket</strong> is a record the client cannot read or forge, encrypted in the target server's key. An <strong>authenticator</strong> is a small encrypted timestamp the client builds with the shared session key to show it is the ticket's rightful holder. The document also covers integrity-protected and encrypted application messages (KRB_SAFE and KRB_PRIV), credential forwarding (KRB_CRED), and cross-realm operation.</p><div class=\"callout callout-note\"><p>Kerberos provides authentication, not authorization. A valid ticket proves who the client is; the application still decides what that principal may do.</p></div>",
+      "eli5": "<p>Two strangers cannot trust each other directly, but both trust the same helper. The helper hands the visitor a sealed note that only the other stranger can open, so each knows the other is real.</p>"
+    },
+    {
+      "id": "names-and-tickets",
+      "number": "2",
+      "title": "Principals, Realms and Tickets",
+      "content": "<p>Everything in Kerberos is named. A <strong>principal</strong> is a client or a service, written as a realm plus a name made of one or more components. A <strong>realm</strong> is an administrative domain with its own KDC and database; by convention Internet-style realm names are upper-case versions of DNS names. The ticket-granting service has a reserved principal whose name has the first component <code>krbtgt</code>, for example (\"krbtgt\", \"ATHENA.MIT.EDU\").</p><p>A <strong>Ticket</strong> is an application-tagged ASN.1 structure with four fields: <code>tkt-vno</code> (always 5), <code>realm</code>, <code>sname</code> (the service) and <code>enc-part</code>. The encrypted part, <code>EncTicketPart</code>, holds the flags, the fresh session <code>key</code>, the client's realm and name (<code>crealm</code>, <code>cname</code>), the <code>transited</code> list of realms crossed, and the times <code>authtime</code>, <code>starttime</code>, <code>endtime</code> and <code>renew-till</code>. It can also carry client addresses and authorization data.</p><p>Ticket flags are a bit field numbered 0 to 13: forwardable, forwarded, proxiable, proxy, may-postdate, postdated, invalid, renewable, initial, pre-authent, hw-authent, and the two added since RFC 1510, transited-policy-checked and ok-as-delegate. Flags let a ticket be renewed, postdated, forwarded to another host, or used by a proxy.</p>",
+      "eli5": "<p>Every person and every service gets a name tag that also says which club they belong to. A ticket is a sealed envelope with that name tag inside, plus a secret password that is good for one visit.</p>"
+    },
+    {
+      "id": "authentication-exchange",
+      "number": "3",
+      "title": "The Authentication Service Exchange",
+      "content": "<p>The first exchange gets the client its initial ticket, usually a TGT. The client sends <strong>KRB_AS_REQ</strong> (application tag 10) to the AS. It is sent in the clear and contains the client name (<code>cname</code>), realm, requested service name (<code>sname</code>, usually the TGS), the requested expiry <code>till</code>, a random <code>nonce</code>, and an <code>etype</code> list of encryption types in preference order.</p><p>The KDC looks up the client. If the principal is unknown it returns KDC_ERR_C_PRINCIPAL_UNKNOWN. Otherwise it replies with <strong>KRB_AS_REP</strong> (tag 11). The reply contains the ticket, encrypted in the TGS's key, and an encrypted part addressed to the client, encrypted in the client's secret key. That part carries the new session key and echoes the nonce. For a user, the key is derived from the password, so only someone who knows the password can decrypt the reply and recover the session key.</p><p>Because anyone can ask for a reply for any principal, a realm should demand <strong>pre-authentication</strong>. The KDC then answers the first request with KDC_ERR_PREAUTH_REQUIRED and METHOD-DATA naming the accepted methods. The client retries with a PA-ENC-TIMESTAMP, a timestamp encrypted in the client key. Section 10 states that without pre-authentication an attacker can collect ciphertext for offline password guessing.</p><div class=\"callout callout-info\"><p>The password itself is never transmitted. It is used locally to derive the key that unlocks the reply.</p></div>",
+      "eli5": "<p>You tell the front gate your name. The gate gives you a wristband locked with a lock that only your own secret can open. If you really are you, you can open it. Nobody else can.</p>"
+    },
+    {
+      "id": "ticket-granting-exchange",
+      "number": "4",
+      "title": "The Ticket-Granting Service Exchange",
+      "content": "<p>With a TGT in hand, the client asks for tickets to individual services. It sends <strong>KRB_TGS_REQ</strong> (tag 12), which has the same KDC-REQ layout as the AS request but now names the target service in <code>sname</code>. The padata field carries a PA-TGS-REQ, which is an ordinary AP-REQ containing the TGT and an authenticator. This is how the client proves to the TGS that it holds the TGT's session key.</p><p>The KDC checks the TGT and authenticator, then returns <strong>KRB_TGS_REP</strong> (tag 13). The reply holds a new ticket for the service, encrypted in the service's key, and a copy of the new service session key encrypted in the TGT's session key (or an authenticator subkey if the client supplied one). The client's password is not involved again.</p><p>This is the point of the two-step design. The user's long-term key is used once, at login. After that, only short-lived session keys are used. A client can also use the TGS to get a ticket for a service in another realm, passing through intermediate realms linked by inter-realm keys, and the ticket records the realms it traversed in its <code>transited</code> field.</p><div class=\"key-points\"><div class=\"key-point\"><div class=\"key-point-title\">AS exchange</div><div class=\"key-point-text\">Password-derived key, used once at login. Result: a TGT.</div></div><div class=\"key-point\"><div class=\"key-point-title\">TGS exchange</div><div class=\"key-point-text\">TGT session key. Result: a service ticket, no password needed.</div></div></div>",
+      "eli5": "<p>Once you have the wristband, you show it at a booth and get a little ticket for each ride you want. You never have to prove who you are from scratch again.</p>"
+    },
+    {
+      "id": "client-server-exchange",
+      "number": "5",
+      "title": "The Client/Server Exchange and Mutual Authentication",
+      "content": "<p>To use a service, the client sends it <strong>KRB_AP_REQ</strong> (tag 14). It holds <code>ap-options</code>, the service <code>ticket</code>, and an <code>authenticator</code> encrypted with the ticket's session key. The authenticator contains the client's realm and name, <code>cusec</code> and <code>ctime</code> (the client's clock), and optionally a checksum, a subkey and a sequence number.</p><p>The server decrypts the ticket with its own long-term key and recovers the session key. It decrypts the authenticator with that key. It then compares the names, checks the client address if the ticket has one, and checks that <code>ctime</code> is within the allowable clock skew. The RFC gives \"e.g., 5 minutes\"; otherwise it returns KRB_AP_ERR_SKEW. It must also reject authenticators it has already seen, with KRB_AP_ERR_REPEAT, which normally means keeping a replay cache.</p><p>If the client set the mutual-required option, the server returns <strong>KRB_AP_REP</strong> (tag 15). It encrypts the client's <code>ctime</code> and <code>cusec</code> in the session key. Only a server that could decrypt the ticket would know the key, so a correct reply proves the server's identity as well.</p><div class=\"callout callout-warning\"><p>Kerberos needs loosely synchronized clocks. A host whose clock drifts beyond the skew limit will fail authentication even with a valid ticket and password.</p></div>",
+      "eli5": "<p>The ride operator opens your ticket with a special key and checks that the time you wrote on your note matches the clock. The operator then sends back a note only the real operator could write, so you know the ride is real too.</p>"
+    },
+    {
+      "id": "protected-messages",
+      "number": "6",
+      "title": "Protected Messages and Credential Forwarding",
+      "content": "<p>Authentication alone does not protect what comes next. RFC 4120 therefore defines three optional application-level messages that use the session key or a negotiated subkey.</p><p><strong>KRB_SAFE</strong> (tag 20) carries user data with a keyed checksum: it gives integrity, but the data is not hidden. <strong>KRB_PRIV</strong> (tag 21) encrypts the data and gives both privacy and integrity. Both carry timestamps or sequence numbers for replay and reordering protection, so errors such as KRB_AP_ERR_MODIFIED, KRB_AP_ERR_REPEAT and KRB_AP_ERR_BADORDER can arise. <strong>KRB_CRED</strong> (tag 22) transfers tickets and their session keys to another host, which is how credentials are forwarded.</p><p>The RFC also describes user-to-user authentication (ENC-TKT-IN-SKEY), where the service has no long-term key and the ticket is encrypted in the service's TGT session key.</p><p>Section 10 is blunt: completing the AP-REQ and AP-REP exchange without further protection gives only authentication, not confidentiality or integrity of what follows. Applications must use KRB_PRIV or KRB_SAFE, or their own protection that is securely linked to the authentication step. Many real applications use the GSS-API wrapper described in <a href=\"/4121/\">RFC 4121</a> instead of calling these messages directly.</p>",
+      "eli5": "<p>Showing your ticket only proves who you are. If you then want to whisper or sign a letter, there are special envelopes for that. Some seal the letter shut, and some just add a stamp that shows no one changed it.</p>"
+    },
+    {
+      "id": "messages-and-encoding",
+      "number": "7",
+      "title": "Message Encoding, Errors and Transport",
+      "content": "<p>All Kerberos messages are defined in ASN.1 and encoded with the Distinguished Encoding Rules (DER). Each top-level message has a fixed application tag: 1 Ticket, 10 AS-REQ, 11 AS-REP, 12 TGS-REQ, 13 TGS-REP, 14 AP-REQ, 15 AP-REP, 20 KRB-SAFE, 21 KRB-PRIV, 22 KRB-CRED and 30 KRB-ERROR. Times are GeneralizedTime with no fractional seconds, for example <code>19851106210627Z</code>. Encrypted data is an <code>EncryptedData</code> structure with <code>etype</code>, an optional key version <code>kvno</code>, and the <code>cipher</code>. The key is combined with a <em>key usage number</em> (for example 3 for the encrypted part of an AS-REP and 11 for an AP-REQ authenticator) so one key never encrypts two kinds of message the same way.</p><p>Failures return <strong>KRB-ERROR</strong> (tag 30) with an <code>error-code</code> such as 6 (KDC_ERR_C_PRINCIPAL_UNKNOWN), 25 (KDC_ERR_PREAUTH_REQUIRED), 32 (KRB_AP_ERR_TKT_EXPIRED), 34 (KRB_AP_ERR_REPEAT) or 37 (KRB_AP_ERR_SKEW).</p><p>KDCs <em>must</em> accept requests over both UDP and TCP and should listen on port 88. A UDP exchange uses one datagram each way. If the reply is too big the KDC returns KRB_ERR_RESPONSE_TOO_BIG (52), and the client retries over TCP. Clients should find KDCs using DNS SRV records such as <code>_kerberos._udp.EXAMPLE.COM</code>.</p>",
+      "eli5": "<p>Every kind of message has a number on the front so the receiver knows what it is. Small notes go by postcard, and if the note is too big the sender has to use a proper package instead.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Interoperability and Security Considerations",
+      "content": "<p>Section 8 defines a minimal profile, Specification 2. Implementations must support both UDP and TCP, the encryption type AES256-CTS-HMAC-SHA1-96 from <a href=\"/3962/\">RFC 3962</a> with its checksum, the PA-ENC-TIMESTAMP client method, ETYPE-INFO2, DOMAIN-X500-COMPRESS transited encoding, and mutual authentication. DES-CBC-MD5 and 3DES are only \"SHOULD\" and the RFC warns that single DES is weak. The recommended KDC defaults are a 1-day maximum ticket lifetime, a 1-week maximum renewable lifetime, a 5-minute minimum lifetime and 5-minute clock skew.</p><p>Section 10 lists what Kerberos does not solve. The KDC database holds every principal's key, so a compromised KDC compromises its whole realm. Denial of service is not addressed, and a Kerberos outage can take down every service that depends on it. Password guessing is not prevented, because ciphertext under a password-derived key allows an offline dictionary attack. The RFC strongly encourages pre-authentication and randomly generated keys for service principals. Principal names must not be quickly recycled, or a new principal inherits stale ACL entries. A server that loses its replay cache must reject requests until the clock-skew window has passed.</p><div class=\"callout callout-warning\"><p>Proper decryption of an AS-REP does not prove the KDC is genuine. To verify a login, a local service should obtain a service ticket and complete an AP exchange with it.</p></div>",
+      "eli5": "<p>The helper's big book of secrets must be guarded very carefully, and weak secrets like easy passwords can still be guessed. The clocks also need to roughly agree, or a good ticket will look too old or too new.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "The three Kerberos exchanges",
+      "data": {
+        "lanes": [
+          {
+            "key": "c",
+            "label": "Client"
+          },
+          {
+            "key": "kdc",
+            "label": "KDC (AS + TGS)"
+          },
+          {
+            "key": "s",
+            "label": "Application server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "c",
+            "to": "kdc",
+            "label": "KRB_AS_REQ (10)",
+            "color": "blue",
+            "note": "Who I am, which service (the TGS), a nonce, accepted etypes."
+          },
+          {
+            "from": "kdc",
+            "to": "c",
+            "label": "KRB_AS_REP (11)",
+            "color": "green",
+            "note": "TGT plus a session key sealed in the client's key."
+          },
+          {
+            "from": "c",
+            "to": "kdc",
+            "label": "KRB_TGS_REQ (12)",
+            "color": "blue",
+            "note": "TGT and an authenticator, naming the target service."
+          },
+          {
+            "from": "kdc",
+            "to": "c",
+            "label": "KRB_TGS_REP (13)",
+            "color": "green",
+            "note": "Service ticket plus the service session key."
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "KRB_AP_REQ (14)",
+            "color": "blue",
+            "note": "Service ticket and authenticator with a timestamp."
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "KRB_AP_REP (15)",
+            "color": "green",
+            "note": "Optional proof of the server's identity (mutual authentication)."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "names-and-tickets",
+      "position": "after",
+      "caption": "What is inside a Ticket",
+      "data": {
+        "root": {
+          "label": "Ticket [APPLICATION 1]",
+          "note": "sent as an opaque blob",
+          "children": [
+            {
+              "label": "tkt-vno",
+              "note": "5"
+            },
+            {
+              "label": "realm",
+              "note": "issuing realm"
+            },
+            {
+              "label": "sname",
+              "note": "service principal name"
+            },
+            {
+              "label": "enc-part",
+              "note": "encrypted in the service's key: EncTicketPart",
+              "children": [
+                {
+                  "label": "flags",
+                  "note": "bits 0 to 13"
+                },
+                {
+                  "label": "key",
+                  "note": "session key"
+                },
+                {
+                  "label": "crealm, cname",
+                  "note": "who the ticket was issued to"
+                },
+                {
+                  "label": "transited",
+                  "note": "realms crossed"
+                },
+                {
+                  "label": "authtime, starttime, endtime, renew-till"
+                },
+                {
+                  "label": "caddr",
+                  "note": "optional client addresses"
+                },
+                {
+                  "label": "authorization-data",
+                  "note": "optional"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "authentication-exchange",
+      "position": "after",
+      "data": {
+        "title": "KDC-REQ-BODY (ASN.1, abridged from RFC 4120 section 5.4.1)",
+        "lang": "text",
+        "code": "AS-REQ   ::= [APPLICATION 10] KDC-REQ\nTGS-REQ  ::= [APPLICATION 12] KDC-REQ\n\nKDC-REQ ::= SEQUENCE {\n    pvno     [1] INTEGER (5),\n    msg-type [2] INTEGER (10 -- AS -- | 12 -- TGS --),\n    padata   [3] SEQUENCE OF PA-DATA OPTIONAL,\n    req-body [4] KDC-REQ-BODY\n}\n\nKDC-REQ-BODY ::= SEQUENCE {\n    kdc-options [0] KDCOptions,\n    cname       [1] PrincipalName OPTIONAL,  -- AS-REQ only\n    realm       [2] Realm,\n    sname       [3] PrincipalName OPTIONAL,\n    from        [4] KerberosTime OPTIONAL,\n    till        [5] KerberosTime,\n    rtime       [6] KerberosTime OPTIONAL,\n    nonce       [7] UInt32,\n    etype       [8] SEQUENCE OF Int32,       -- in preference order\n    addresses   [9] HostAddresses OPTIONAL,\n    ...\n}"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "ticket-granting-exchange",
+      "position": "after",
+      "caption": "Which key protects what",
+      "data": {
+        "columns": [
+          "Exchange",
+          "Request proves identity with",
+          "Reply sealed in",
+          "Result"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "AS (login)",
+              "Nothing, or PA-ENC-TIMESTAMP with pre-auth",
+              "Client's long-term key",
+              "TGT and TGS session key"
+            ]
+          },
+          {
+            "cells": [
+              "TGS (get service ticket)",
+              "TGT plus authenticator",
+              "TGT session key or subkey",
+              "Service ticket and service session key"
+            ]
+          },
+          {
+            "cells": [
+              "AP (use service)",
+              "Service ticket plus authenticator",
+              "Service session key (for AP-REP)",
+              "Authenticated session, optional mutual proof"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "client-server-exchange",
+      "position": "after",
+      "caption": "Checks the server makes on an AP-REQ",
+      "data": {
+        "items": [
+          {
+            "title": "Can I open the ticket?",
+            "text": "The server decrypts it with its own key. Failure means the ticket was not issued for this service."
+          },
+          {
+            "title": "Does the authenticator match?",
+            "text": "The client name and realm in the authenticator must match the ticket (KRB_AP_ERR_BADMATCH otherwise)."
+          },
+          {
+            "title": "Is the clock close enough?",
+            "text": "ctime must be within the allowed skew, typically 5 minutes (KRB_AP_ERR_SKEW)."
+          },
+          {
+            "title": "Is this a replay?",
+            "text": "The server remembers recent authenticators and rejects a duplicate (KRB_AP_ERR_REPEAT)."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "protected-messages",
+      "position": "after",
+      "caption": "Application-level messages",
+      "data": {
+        "columns": [
+          "Message",
+          "Tag",
+          "Protects",
+          "Hides data?"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "KRB_SAFE",
+              "20",
+              "Integrity (keyed checksum)",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "KRB_PRIV",
+              "21",
+              "Integrity and privacy",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "KRB_CRED",
+              "22",
+              "Forwarded tickets and session keys",
+              "Yes"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "messages-and-encoding",
+      "position": "after",
+      "caption": "Application tag numbers",
+      "data": {
+        "columns": [
+          "Tag",
+          "Type",
+          "Role"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "1",
+              "Ticket",
+              "PDU"
+            ]
+          },
+          {
+            "cells": [
+              "2",
+              "Authenticator",
+              "non-PDU"
+            ]
+          },
+          {
+            "cells": [
+              "3",
+              "EncTicketPart",
+              "non-PDU"
+            ]
+          },
+          {
+            "cells": [
+              "10 / 11",
+              "AS-REQ / AS-REP",
+              "PDU"
+            ]
+          },
+          {
+            "cells": [
+              "12 / 13",
+              "TGS-REQ / TGS-REP",
+              "PDU"
+            ]
+          },
+          {
+            "cells": [
+              "14 / 15",
+              "AP-REQ / AP-REP",
+              "PDU"
+            ]
+          },
+          {
+            "cells": [
+              "20 / 21 / 22",
+              "KRB-SAFE / KRB-PRIV / KRB-CRED",
+              "PDU"
+            ]
+          },
+          {
+            "cells": [
+              "30",
+              "KRB-ERROR",
+              "PDU"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "What each layer gives you",
+      "data": {
+        "layers": [
+          {
+            "label": "Application data",
+            "detail": "Protected only if the application uses KRB_PRIV, KRB_SAFE or its own protection"
+          },
+          {
+            "label": "Authenticator and AP exchange",
+            "detail": "Proves the client holds the session key, with replay detection from timestamps and a replay cache",
+            "highlight": true
+          },
+          {
+            "label": "Tickets from the KDC",
+            "detail": "Authenticated, time-limited credentials sealed in the service's key",
+            "highlight": true
+          },
+          {
+            "label": "UDP or TCP port 88",
+            "detail": "No confidentiality for the exchange itself; ticket contents such as names are visible"
+          }
+        ]
+      }
+    }
+  ],
+  "today": "<p>Kerberos Version 5 is widely deployed. It is the default authentication protocol in Microsoft Active Directory domains and is used by MIT Kerberos and Heimdal on Unix and Linux. Hadoop and many other enterprise systems also rely on it. Applications usually reach it through GSS-API (<a href=\"/4121/\">RFC 4121</a>) or SASL rather than calling it directly. RFC 4120 has since been updated by a number of later RFCs; for example <a href=\"/6649/\">RFC 6649</a> deprecates DES and other weak algorithms that this document still lists as SHOULD.</p>",
+  "implementations": [
+    {
+      "name": "MIT Kerberos",
+      "url": "https://web.mit.edu/kerberos/",
+      "note": "The reference implementation from the protocol's origin."
+    },
+    {
+      "name": "Heimdal",
+      "url": "https://github.com/heimdal/heimdal",
+      "note": "Independent open-source Kerberos 5 implementation."
+    },
+    {
+      "name": "Microsoft Active Directory",
+      "note": "Uses Kerberos V5 as its default domain authentication protocol."
+    }
+  ],
+  "glossary": [
+    "kerberos",
+    "kdc",
+    "principal",
+    "realm",
+    "ticket",
+    "tgt",
+    "authenticator",
+    "session-key",
+    "pre-authentication",
+    "replay-cache"
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Kohl, J. and C. Neuman, \"The Kerberos Network Authentication Service (V5)\", RFC 1510, September 1993.",
+      "rfc": 1510
+    },
+    {
+      "number": "[2]",
+      "text": "Raeburn, K., \"Encryption and Checksum Specifications for Kerberos 5\", RFC 3961, February 2005.",
+      "rfc": 3961
+    },
+    {
+      "number": "[3]",
+      "text": "Raeburn, K., \"Advanced Encryption Standard (AES) Encryption for Kerberos 5\", RFC 3962, February 2005.",
+      "rfc": 3962
+    },
+    {
+      "number": "[4]",
+      "text": "Zhu, L., Jaganathan, K. and S. Hartman, \"The Kerberos Version 5 Generic Security Service Application Program Interface (GSS-API) Mechanism: Version 2\", RFC 4121, July 2005.",
+      "rfc": 4121
+    },
+    {
+      "number": "[5]",
+      "text": "Eastlake, D., Schiller, J. and S. Crocker, \"Randomness Requirements for Security\", RFC 4086, June 2005.",
+      "rfc": 4086
+    },
+    {
+      "number": "See also",
+      "text": "Hornquist Astrand, L. and T. Yu, \"Deprecate DES, RC4-HMAC-EXP, and Other Weak Cryptographic Algorithms in Kerberos\", RFC 6649, July 2012.",
+      "rfc": 6649
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-15",
+    "reviewedBy": null
+  },
+  "updated": "2026-10-15"
+}

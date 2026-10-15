@@ -1,0 +1,793 @@
+{
+  "number": 1661,
+  "title": "The Point-to-Point Protocol (PPP)",
+  "shortTitle": "PPP",
+  "authors": [
+    "W. Simpson (Editor)"
+  ],
+  "category": "core",
+  "tags": [
+    "Link layer",
+    "Dial-up"
+  ],
+  "subtitle": "How two machines on a single wire agree on how to talk, who they are, and what to carry.",
+  "summary": "<p>PPP is a standard way to carry network-layer packets over a link that joins exactly two peers, such as a dial-up modem line. It has three parts: an encapsulation that labels each packet with a Protocol number, a Link Control Protocol (LCP) that opens, configures, tests and closes the link, and a family of Network Control Protocols (NCPs) that set up IP or other network protocols on top. RFC 1661 is an Internet Standard (STD 51) and replaced the earlier specification in RFC 1548.</p>",
+  "eli5": {
+    "summary": "<p>Two walkie-talkies on a private channel first agree how loud to talk and what language to use, then check each other's name, and only then start chatting about real things. PPP is that polite handshake for two computers joined by one wire.</p>"
+  },
+  "questions": [
+    "what is ppp",
+    "how does ppp establish a connection",
+    "what is lcp in ppp",
+    "what is the difference between configure-nak and configure-reject",
+    "what is the ppp magic number",
+    "how does ppp authentication work"
+  ],
+  "tldr": {
+    "problem": "Many different hosts, bridges and routers needed one common way to run several network protocols over a simple two-party link, with no hand-configuration on each end.",
+    "mechanism": "Every packet carries a Protocol field. LCP negotiates link options, then an optional authentication step runs, then one NCP per network protocol brings that protocol up. All of them use the same option-negotiation state machine.",
+    "outcome": "It became the standard framing and setup for dial-up, serial and many broadband links, and the same ideas live on in PPP over Ethernet.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Status",
+      "value": "Internet Standard, STD 51"
+    },
+    {
+      "label": "Obsoletes",
+      "value": "RFC 1548"
+    },
+    {
+      "label": "LCP Protocol value",
+      "value": "0xC021"
+    },
+    {
+      "label": "Default MRU",
+      "value": "1500 octets"
+    },
+    {
+      "label": "Restart timer",
+      "value": "3 s default"
+    }
+  ],
+  "lineage": {
+    "title": "How PPP grew up",
+    "rfcs": [
+      1171,
+      1331,
+      1548,
+      1661,
+      1662,
+      2516
+    ]
+  },
+  "today": "<p>PPP is still very much around. It runs over serial and dial-up lines, and PPP over Ethernet (PPPoE, <a href=\"/2516/\">RFC 2516</a>) is a common way for broadband providers to authenticate and configure customer connections. Many VPN and tunnelling systems also carry PPP inside them. Packet analyzers such as Wireshark decode PPP, LCP and the NCPs, and the <code>pppd</code> daemon on Linux and other Unix systems implements the automaton described here.</p>",
+  "implementations": [
+    {
+      "name": "pppd",
+      "url": "https://github.com/ppp-project/ppp",
+      "note": "The long-standing PPP daemon for Linux and other Unix systems."
+    },
+    {
+      "name": "Wireshark",
+      "note": "Decodes PPP frames, LCP packets, and the Network Control Protocols."
+    }
+  ],
+  "glossary": [
+    "ppp",
+    "lcp",
+    "ncp",
+    "hdlc",
+    "pap",
+    "chap",
+    "magic-number",
+    "mru",
+    "finite-state-machine",
+    "link-layer",
+    "ip-address",
+    "multiplexing"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>The Point-to-Point Protocol is designed for \"simple links which transport packets between two peers.\" These links are full-duplex and are assumed to deliver packets in order. The goal, in the RFC's words, is a common solution for the easy connection of a wide variety of hosts, bridges and routers.</p><p>PPP is built from three parts. An <strong>encapsulation</strong> multiplexes different network-layer protocols over one link. The <strong>Link Control Protocol (LCP)</strong> automatically agrees on encapsulation options, handles varying packet-size limits, detects a looped-back link and other misconfiguration, and terminates the link. A family of <strong>Network Control Protocols (NCPs)</strong> handles the needs of each network-layer protocol, such as assigning an IP address, which the RFC notes is \"especially difficult\" over dial-up modem servers.</p><div class=\"callout callout-note\"><p>RFC 1661 deliberately leaves framing and the individual NCPs to companion documents. The default HDLC-like framing is in <a href=\"/1662/\">RFC 1662</a>, and the IP NCP is in <a href=\"/1332/\">RFC 1332</a>. Inside that default framing the encapsulation adds only 8 octets.</p></div>",
+      "eli5": "<p>Two kids hold two cups joined by a string. Before they can pass notes, they need to agree on the rules: how long a note can be, and what kind of notes they will pass. PPP is the set of rules, plus a way to agree on them.</p>"
+    },
+    {
+      "id": "encapsulation",
+      "number": "2",
+      "title": "PPP Encapsulation",
+      "content": "<p>Each packet on the link is a <strong>Protocol</strong> field, an <strong>Information</strong> field and optional <strong>Padding</strong>. The Protocol field is one or two octets, sent most significant octet first, and names the kind of data in the Information field. Because its form follows the ISO 3309 extension mechanism, every legal Protocol value is odd (the least significant bit of the last octet is 1) and the least significant bit of the first octet is 0. A frame that breaks these rules is treated as having an unrecognized Protocol.</p><p>The Information field holds the datagram. Its maximum length, including padding but not the Protocol field, is the <strong>Maximum Receive Unit (MRU)</strong>, which defaults to 1500 octets and can be changed by negotiation. The high digits of the Protocol value tell you which family the packet belongs to, as the table shows.</p><p>The RFC itself reserves only a few values, such as <code>c021</code> for LCP; the full list lives in the IANA registry. For instance, IP is <code>0x0021</code> and IP's NCP is <code>0x8021</code> there.</p>",
+      "eli5": "<p>Every message starts with a little label that says what is inside, like writing \"homework\" or \"birthday card\" on the envelope. Labels come in a short size and a long size, and they are built so you can always tell which one you are reading.</p>"
+    },
+    {
+      "id": "link-phases",
+      "number": "3",
+      "title": "Link Phases",
+      "content": "<p>A PPP link moves through five phases. It begins and ends in <strong>Link Dead</strong>, where the physical layer is not ready. When something such as carrier detection says it is ready, PPP enters <strong>Link Establishment</strong>, where LCP exchanges Configure packets. The phase completes, and LCP reaches the Opened state, once a Configure-Ack has been both sent and received. Any non-LCP packet during this phase is silently discarded.</p><p>Next comes an optional <strong>Authentication</strong> phase. By default it is not mandatory; a peer that wants one must request a specific authentication protocol during link establishment. Only LCP, authentication and link-quality packets are allowed here. The RFC says progress to the Network phase \"MUST NOT occur until authentication has completed.\"</p><p>In the <strong>Network-Layer Protocol</strong> phase each network protocol is configured separately by its NCP, and each NCP may be opened and closed at any time. Finally <strong>Link Termination</strong> uses Terminate-Request and Terminate-Ack and then PPP goes back to Dead. Closing one NCP is not enough to close the link, even if it was the last open one.</p>",
+      "eli5": "<p>First the wire is plugged in. Then the two sides agree on the rules, then show their ID cards if needed, then talk about real things. When they are done they say goodbye and hang up.</p>"
+    },
+    {
+      "id": "option-negotiation",
+      "number": "4",
+      "title": "The Option Negotiation Automaton",
+      "content": "<p>LCP and every NCP share one finite-state automaton for negotiating options. It has ten states, numbered 0 to 9: Initial, Starting, Closed, Stopped, Closing, Stopping, Request-Sent, Ack-Received, Ack-Sent and Opened. Events include the lower layer coming Up or going Down, administrative Open and Close, timeouts, and receiving each kind of packet. Actions include sending packets and signalling the layers above and below, such as This-Layer-Up.</p><p>The normal path goes from Initial to Closed when the lower layer comes Up, then to Request-Sent on Open, where a Configure-Request is sent. If the peer's request is acceptable we send a Configure-Ack and move to Ack-Sent; when our own request is acked, we reach <strong>Opened</strong>. Receiving the peer's ack first leads through Ack-Received instead.</p><p>One Restart timer paces retransmission of Configure-Requests and Terminate-Requests. It must be configurable and should default to three seconds. Three counters bound the retries: Max-Terminate (default 2), Max-Configure (default 10) and Max-Failure (default 5), which limits Configure-Naks sent before assuming negotiation is not converging.</p><div class=\"callout callout-warning\"><p>The RFC states that \"the protocol does NOT guarantee that loops will not happen.\" Two ends configured with conflicting policies may never converge, so implementations should add loop detection or higher-level timeouts.</p></div>",
+      "eli5": "<p>Each side is like a traffic light with ten possible lights. Messages from the other side, or timers running out, tell it which light to switch to next. When both sides have said \"yes, I accept your rules\", the light goes green.</p>"
+    },
+    {
+      "id": "lcp-packets",
+      "number": "5",
+      "title": "LCP Packets",
+      "content": "<p>LCP has three classes of packet: <strong>link configuration</strong> (Configure-Request, -Ack, -Nak, -Reject), <strong>link termination</strong> (Terminate-Request and -Ack) and <strong>link maintenance</strong> (Code-Reject, Protocol-Reject, Echo-Request, Echo-Reply, Discard-Request). Exactly one LCP packet travels in the Information field, with the PPP Protocol value <code>c021</code>. Every packet starts with a Code (1 to 11), an Identifier that matches replies to requests, and a Length covering the whole packet.</p><p>There is deliberately no version field. A working LCP always answers unknown Protocols and Codes in a recognizable way, so a newer implementation can fall back. Codes 1 to 7 are always sent as if no options were negotiated, so they stay readable even if one end wrongly thinks the link is open.</p><p>The three answers to a Configure-Request differ in meaning, as the grid shows. The sequence below shows one possible exchange, in which one peer will not use CHAP and suggests PAP instead.</p><div class=\"callout callout-info\"><p>The numbers in that example (MRU 1280 and so on) are illustrative, not from the RFC. Options set to their defaults should not be listed at all.</p></div>",
+      "eli5": "<p>You can answer a request three ways. \"Yes, exactly that.\" Or \"Not that, how about this instead.\" Or \"I don't do that at all, so please stop asking.\"</p>"
+    },
+    {
+      "id": "configuration-options",
+      "number": "6",
+      "title": "Configuration Options",
+      "content": "<p>Each option is a Type octet, a Length octet (covering Type, Length and Data) and optional Data. Every option has a default that lets the link work without negotiating it, so a Configure-Request need not mention defaults. Unless stated otherwise an option applies to one direction: the receive direction from the point of view of the sender of the Configure-Request. The design aim is that an implementation which understands no options should still interoperate with one that knows them all.</p><p>RFC 1661 defines six options. Maximum-Receive-Unit tells the peer you can receive bigger packets, or asks it to send smaller ones; even then an implementation must still accept 1500 octets in case link synchronization is lost. Authentication-Protocol and Quality-Protocol carry a two-octet protocol number such as <code>c023</code> (PAP), <code>c223</code> (CHAP) or <code>c025</code> (Link Quality Report). Protocol-Field-Compression and Address-and-Control-Field-Compression save bytes on slow links, and are never applied to LCP packets.</p><p><strong>Magic-Number</strong> detects a looped-back link. Each end picks a random 32-bit number; if a received Configure-Request carries the number we last sent, a Configure-Nak with a different value is sent. On a real loop this repeats forever, while on a normal link the two numbers quickly diverge. A Magic-Number of zero is illegal and must always be Nak'd or Rejected.</p>",
+      "eli5": "<p>Options are little knobs on the connection: how big a message can be, whether to check ID cards, whether to use shorthand. The magic number is a secret random ticket each side draws; if you ever get your own ticket back, you are talking to a mirror.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>RFC 1661 has no separate security protocol. Its short Security Considerations section points to three places: the Authentication phase, the Close event, and the Authentication-Protocol option.</p><p>Authentication is optional and off by default. If one side wants it, it requests a specific protocol in its Configure-Request, and agreeing with a Configure-Ack commits the other side to authenticate. Each direction may use a different protocol, or none. Authentication should happen as soon as possible after the link is up, and the network phase must not begin until it has finished. If it fails, the authenticator should move to Link Termination.</p><p>Two implementation notes aim at abuse. A peer should not fail authentication on a single timeout; it should allow retransmission and give up after a number of attempts. And after a failed authentication the link should be terminated and disconnected, \"to prevent attack by repetition and denial of service to other users.\"</p><div class=\"callout callout-note\"><p>The RFC only reserves protocol numbers for PAP and CHAP. How they work is defined elsewhere, and CHAP's current definition is in <a href=\"/1994/\">RFC 1994</a>.</p></div>",
+      "eli5": "<p>Showing an ID card is optional, but if the guard asks and you fail, you are sent away and the door is closed, so you cannot keep trying again and again to get in.</p>"
+    },
+    {
+      "id": "place-in-the-family",
+      "number": "8",
+      "title": "Place in the PPP Family",
+      "content": "<p>RFC 1661 is the third revision of the core PPP specification. The first, <a href=\"/1171/\">RFC 1171</a> (1990), was replaced by <a href=\"/1331/\">RFC 1331</a> (1992) and then <a href=\"/1548/\">RFC 1548</a> (December 1993). RFC 1661 obsoletes RFC 1548 and was promoted to Internet Standard 51, and it was published in the same month as the HDLC-like framing in <a href=\"/1662/\">RFC 1662</a>. A single later RFC, <a href=\"/2153/\">RFC 2153</a> (PPP Vendor Extensions), updates it.</p><p>The RFC states that the NCPs, the authentication protocols and the framing are separate documents. That split has let PPP grow. Later specifications restated CHAP, added EAP-based authentication and carried PPP over Ethernet, all reusing the Protocol field, LCP and the same option negotiation.</p><p>The timeline shows the path from the first specification to PPP over Ethernet.</p>",
+      "eli5": "<p>PPP is a big family. This RFC is the parent who sets the house rules, while the aunts and uncles in other RFCs handle the details.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "layers",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "Where PPP sits",
+      "data": {
+        "layers": [
+          {
+            "label": "Network-layer protocols",
+            "detail": "IP and other protocols, carried one datagram at a time in the Information field"
+          },
+          {
+            "label": "Network Control Protocols (NCPs)",
+            "detail": "One per network protocol; configure it once the link is ready"
+          },
+          {
+            "label": "Authentication (optional)",
+            "detail": "A protocol chosen during link establishment"
+          },
+          {
+            "label": "PPP: encapsulation and LCP",
+            "detail": "Protocol field, Information field, and the Link Control Protocol (0xC021)",
+            "highlight": true
+          },
+          {
+            "label": "Framing",
+            "detail": "Defined in companion documents, such as HDLC-like framing"
+          },
+          {
+            "label": "Physical link",
+            "detail": "A point-to-point link with two peers, e.g. a modem line"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "encapsulation",
+      "position": "after",
+      "caption": "Protocol field ranges",
+      "data": {
+        "columns": [
+          "Protocol value",
+          "Identifies",
+          "Example"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0*** to 3***",
+              "Network-layer protocol packets",
+              "IP datagrams"
+            ]
+          },
+          {
+            "cells": [
+              "4*** to 7***",
+              "Low-volume protocols with no associated NCP",
+              "None defined here"
+            ]
+          },
+          {
+            "cells": [
+              "8*** to b***",
+              "Packets of a Network Control Protocol",
+              "NCP for a network protocol"
+            ]
+          },
+          {
+            "cells": [
+              "c*** to f***",
+              "Link-layer control protocols",
+              "c021 LCP, c023 PAP, c025 Link Quality Report, c223 CHAP"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "link-phases",
+      "position": "after",
+      "caption": "PPP phase diagram",
+      "data": {
+        "states": [
+          {
+            "key": "dead",
+            "label": "Link Dead",
+            "initial": true
+          },
+          {
+            "key": "establish",
+            "label": "Link Establishment"
+          },
+          {
+            "key": "authenticate",
+            "label": "Authentication"
+          },
+          {
+            "key": "network",
+            "label": "Network-Layer Protocol"
+          },
+          {
+            "key": "terminate",
+            "label": "Link Termination"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "dead",
+            "to": "establish",
+            "label": "UP"
+          },
+          {
+            "from": "establish",
+            "to": "authenticate",
+            "label": "OPENED"
+          },
+          {
+            "from": "establish",
+            "to": "dead",
+            "label": "FAIL"
+          },
+          {
+            "from": "authenticate",
+            "to": "network",
+            "label": "SUCCESS/NONE"
+          },
+          {
+            "from": "authenticate",
+            "to": "terminate",
+            "label": "FAIL"
+          },
+          {
+            "from": "network",
+            "to": "terminate",
+            "label": "CLOSING"
+          },
+          {
+            "from": "terminate",
+            "to": "dead",
+            "label": "DOWN"
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "option-negotiation",
+      "position": "after",
+      "caption": "Option negotiation automaton, principal transitions",
+      "data": {
+        "states": [
+          {
+            "key": "initial",
+            "label": "0 Initial",
+            "initial": true
+          },
+          {
+            "key": "starting",
+            "label": "1 Starting"
+          },
+          {
+            "key": "closed",
+            "label": "2 Closed"
+          },
+          {
+            "key": "stopped",
+            "label": "3 Stopped"
+          },
+          {
+            "key": "closing",
+            "label": "4 Closing"
+          },
+          {
+            "key": "stopping",
+            "label": "5 Stopping"
+          },
+          {
+            "key": "reqsent",
+            "label": "6 Request-Sent"
+          },
+          {
+            "key": "ackrcvd",
+            "label": "7 Ack-Received"
+          },
+          {
+            "key": "acksent",
+            "label": "8 Ack-Sent"
+          },
+          {
+            "key": "opened",
+            "label": "9 Opened"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "initial",
+            "to": "closed",
+            "label": "Up"
+          },
+          {
+            "from": "initial",
+            "to": "starting",
+            "label": "Open (tls)"
+          },
+          {
+            "from": "starting",
+            "to": "reqsent",
+            "label": "Up (irc, scr)"
+          },
+          {
+            "from": "starting",
+            "to": "initial",
+            "label": "Close (tlf)"
+          },
+          {
+            "from": "closed",
+            "to": "reqsent",
+            "label": "Open (irc, scr)"
+          },
+          {
+            "from": "closed",
+            "to": "initial",
+            "label": "Down"
+          },
+          {
+            "from": "reqsent",
+            "to": "ackrcvd",
+            "label": "Receive-Configure-Ack (irc)"
+          },
+          {
+            "from": "reqsent",
+            "to": "acksent",
+            "label": "Receive-Configure-Request, good (sca)"
+          },
+          {
+            "from": "reqsent",
+            "to": "reqsent",
+            "label": "Timeout with counter > 0 (scr)"
+          },
+          {
+            "from": "reqsent",
+            "to": "stopped",
+            "label": "Timeout with counter expired (tlf)"
+          },
+          {
+            "from": "reqsent",
+            "to": "closing",
+            "label": "Close (irc, str)"
+          },
+          {
+            "from": "ackrcvd",
+            "to": "opened",
+            "label": "Receive-Configure-Request, good (sca, tlu)"
+          },
+          {
+            "from": "ackrcvd",
+            "to": "reqsent",
+            "label": "Receive-Configure-Ack, crossed connection (scr)"
+          },
+          {
+            "from": "acksent",
+            "to": "opened",
+            "label": "Receive-Configure-Ack (irc, tlu)"
+          },
+          {
+            "from": "acksent",
+            "to": "reqsent",
+            "label": "Receive-Configure-Request, bad (scn)"
+          },
+          {
+            "from": "acksent",
+            "to": "closing",
+            "label": "Close (irc, str)"
+          },
+          {
+            "from": "stopped",
+            "to": "acksent",
+            "label": "Receive-Configure-Request, good (irc, scr, sca)"
+          },
+          {
+            "from": "stopped",
+            "to": "starting",
+            "label": "Down (tls)"
+          },
+          {
+            "from": "opened",
+            "to": "acksent",
+            "label": "Receive-Configure-Request, good (tld, scr, sca)"
+          },
+          {
+            "from": "opened",
+            "to": "reqsent",
+            "label": "Receive-Configure-Request, bad (tld, scr, scn)"
+          },
+          {
+            "from": "opened",
+            "to": "stopping",
+            "label": "Receive-Terminate-Request (tld, zrc, sta)"
+          },
+          {
+            "from": "opened",
+            "to": "closing",
+            "label": "Close (tld, irc, str)"
+          },
+          {
+            "from": "opened",
+            "to": "starting",
+            "label": "Down (tld)"
+          },
+          {
+            "from": "closing",
+            "to": "closed",
+            "label": "Receive-Terminate-Ack (tlf)"
+          },
+          {
+            "from": "closing",
+            "to": "closing",
+            "label": "Timeout with counter > 0 (str)"
+          },
+          {
+            "from": "stopping",
+            "to": "stopped",
+            "label": "Receive-Terminate-Ack (tlf)"
+          },
+          {
+            "from": "stopping",
+            "to": "starting",
+            "label": "Down"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "id": "lcp-packet-fig",
+      "anchor": "lcp-packets",
+      "position": "after",
+      "caption": "FIG 5.1 · LCP PACKET HEADER · 4 OCTETS PLUS DATA",
+      "data": {
+        "title": "LCP packet (header)",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "code",
+            "name": "Code",
+            "bits": 8,
+            "desc": "Kind of LCP packet. 1 Configure-Request, 2 Configure-Ack, 3 Configure-Nak, 4 Configure-Reject, 5 Terminate-Request, 6 Terminate-Ack, 7 Code-Reject, 8 Protocol-Reject, 9 Echo-Request, 10 Echo-Reply, 11 Discard-Request. An unknown Code draws a Code-Reject.",
+            "value": "1"
+          },
+          {
+            "key": "identifier",
+            "name": "Identifier",
+            "bits": 8,
+            "desc": "Matches replies to requests. A reply copies the request's Identifier. A packet with an invalid Identifier is silently discarded.",
+            "value": "1"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Length of the whole LCP packet, including Code, Identifier, Length and Data. It must not exceed the MRU. Octets beyond it are padding.",
+            "value": "14"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "lcp-packets",
+      "position": "after",
+      "caption": "Three ways to answer a Configure-Request",
+      "data": {
+        "items": [
+          {
+            "title": "Configure-Ack (code 2)",
+            "text": "Every option is recognized and every value is acceptable. The options are returned unchanged and in the same order."
+          },
+          {
+            "title": "Configure-Nak (code 3)",
+            "text": "Options are recognized but some values are unacceptable. Only those options come back, with suggested acceptable values."
+          },
+          {
+            "title": "Configure-Reject (code 4)",
+            "text": "Options are not recognized or not negotiable. They come back untouched and must not be asked for again. Options with no value must be rejected, not Nak'd."
+          },
+          {
+            "title": "Identifier matches",
+            "text": "All three copy the Identifier of the Configure-Request they answer, so a stale or out-of-sequence reply is silently discarded."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "lcp-packets",
+      "position": "after",
+      "caption": "Illustrative LCP negotiation",
+      "data": {
+        "lanes": [
+          {
+            "key": "a",
+            "label": "Peer A"
+          },
+          {
+            "key": "b",
+            "label": "Peer B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Configure-Request (id 1)",
+            "color": "blue",
+            "note": "MRU 1280, Magic-Number"
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "label": "Configure-Ack (id 1)",
+            "color": "green",
+            "note": "Same options, unchanged"
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "label": "Configure-Request (id 1)",
+            "color": "blue",
+            "note": "Authentication-Protocol c223 (CHAP)"
+          },
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Configure-Nak (id 1)",
+            "color": "neutral",
+            "note": "Suggests c023 (PAP) instead"
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "label": "Configure-Request (id 2)",
+            "color": "blue",
+            "note": "Authentication-Protocol c023; Identifier changed because the options changed"
+          },
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Configure-Ack (id 2)",
+            "color": "green",
+            "note": "Both sides now Opened; authentication phase begins"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "configuration-options",
+      "position": "after",
+      "caption": "LCP configuration options in RFC 1661",
+      "data": {
+        "columns": [
+          "Type",
+          "Option",
+          "Length",
+          "Notes"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "1",
+              "Maximum-Receive-Unit",
+              "4",
+              "Default 1500 octets"
+            ]
+          },
+          {
+            "cells": [
+              "3",
+              "Authentication-Protocol",
+              "4 or more",
+              "c023 PAP, c223 CHAP; one option per request"
+            ]
+          },
+          {
+            "cells": [
+              "4",
+              "Quality-Protocol",
+              "4 or more",
+              "c025 Link Quality Report; off by default"
+            ]
+          },
+          {
+            "cells": [
+              "5",
+              "Magic-Number",
+              "6",
+              "Loop detection; zero is illegal"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "7",
+              "Protocol-Field-Compression",
+              "2",
+              "Protocol field in one octet"
+            ]
+          },
+          {
+            "cells": [
+              "8",
+              "Address-and-Control-Field-Compression",
+              "2",
+              "Never used on LCP packets"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "id": "mru-option-fig",
+      "anchor": "configuration-options",
+      "position": "after",
+      "caption": "FIG 6.1 · MAXIMUM-RECEIVE-UNIT OPTION · 4 OCTETS",
+      "data": {
+        "title": "MRU configuration option",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "opt-type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "Option type. 1 means Maximum-Receive-Unit.",
+            "value": "1"
+          },
+          {
+            "key": "opt-length",
+            "name": "Length",
+            "bits": 8,
+            "desc": "Length of the option, including Type, Length and Data. Always 4 for this option.",
+            "value": "4"
+          },
+          {
+            "key": "opt-mru",
+            "name": "Maximum-Receive-Unit",
+            "bits": 16,
+            "desc": "Largest Information plus Padding the sender can receive. It excludes framing, the Protocol field and the FCS. The default is 1500; 1280 is shown as an example.",
+            "value": "0x0500 (1280)"
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeline",
+      "anchor": "place-in-the-family",
+      "position": "after",
+      "caption": "PPP specifications",
+      "data": {
+        "events": [
+          {
+            "year": "1990",
+            "label": "First PPP specification",
+            "rfc": 1171
+          },
+          {
+            "year": "1992",
+            "label": "Revised as RFC 1331; IPCP defined",
+            "rfc": 1332
+          },
+          {
+            "year": "1993",
+            "label": "RFC 1548, the version RFC 1661 replaces",
+            "rfc": 1548
+          },
+          {
+            "year": "1994",
+            "label": "RFC 1661 becomes Internet Standard 51",
+            "rfc": 1661
+          },
+          {
+            "year": "1994",
+            "label": "HDLC-like framing",
+            "rfc": 1662
+          },
+          {
+            "year": "1996",
+            "label": "CHAP restated",
+            "rfc": 1994
+          },
+          {
+            "year": "1999",
+            "label": "PPP over Ethernet",
+            "rfc": 2516
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Perkins, D., \"Requirements for an Internet Standard Point-to-Point Protocol\", RFC 1547, December 1993.",
+      "rfc": 1547
+    },
+    {
+      "number": "[2]",
+      "text": "Reynolds, J. and J. Postel, \"Assigned Numbers\", STD 2, RFC 1340, July 1992.",
+      "rfc": 1340
+    },
+    {
+      "number": "See also",
+      "text": "Simpson, W., Editor, \"PPP in HDLC-like Framing\", RFC 1662, July 1994.",
+      "rfc": 1662
+    },
+    {
+      "number": "See also",
+      "text": "McGregor, G., \"The PPP Internet Protocol Control Protocol (IPCP)\", RFC 1332, May 1992.",
+      "rfc": 1332
+    },
+    {
+      "number": "See also",
+      "text": "Simpson, W., \"PPP Challenge Handshake Authentication Protocol (CHAP)\", RFC 1994, August 1996.",
+      "rfc": 1994
+    },
+    {
+      "number": "See also",
+      "text": "Mamakos, L. et al., \"A Method for Transmitting PPP Over Ethernet (PPPoE)\", RFC 2516, February 1999.",
+      "rfc": 2516
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-15",
+    "reviewedBy": null
+  },
+  "updated": "2026-10-15"
+}

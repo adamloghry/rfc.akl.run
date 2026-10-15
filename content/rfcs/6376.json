@@ -1,0 +1,562 @@
+{
+  "number": 6376,
+  "title": "DomainKeys Identified Mail (DKIM) Signatures",
+  "shortTitle": "DKIM",
+  "authors": [
+    "D. Crocker",
+    "T. Hansen",
+    "M. Kucherawy"
+  ],
+  "organization": "",
+  "date": "September 2011",
+  "status": "Internet Standard",
+  "category": "email",
+  "featured": false,
+  "obsoletedBy": null,
+  "obsoletes": "RFC 4871, RFC 5672",
+  "tags": [
+    "Email",
+    "Authentication",
+    "DNS"
+  ],
+  "subtitle": "How a domain signs the email it sends, so receivers can check the mail really passed through it unchanged.",
+  "summary": "<p>DKIM lets a domain put a cryptographic signature on an email message. The signature goes in a <code>DKIM-Signature</code> header field, and the matching public key is published in the signer's DNS. A receiving server fetches the key, recomputes two hashes and learns that the named domain took responsibility for the message and that the signed parts were not altered on the way. It does not say the message is good, only whose name stands behind it.</p>",
+  "eli5": {
+    "summary": "<p>Before mailing a letter, the sender presses a special wax seal on it that only they can make. Anyone can look up a picture of the seal in a public book and check it, and if somebody changed the letter, the seal no longer matches.</p>"
+  },
+  "questions": [
+    "what is dkim",
+    "how does dkim signing work",
+    "what is a dkim selector",
+    "what does the dkim-signature header mean",
+    "how does dkim verification work",
+    "where is the dkim public key stored",
+    "what is the difference between relaxed and simple canonicalization"
+  ],
+  "tldr": {
+    "problem": "Email has no built-in way to show which organization really sent a message, or that it was not altered in transit.",
+    "mechanism": "The sending domain hashes the body and chosen headers, signs the hash with a private key and adds a DKIM-Signature header. The receiver looks up the public key in DNS at selector._domainkey.domain and checks it.",
+    "outcome": "A verified signature gives the receiver a trustworthy domain name to attach reputation to, with no certificate authority involved. It does not stop spoofing of other domains by itself, which is why DMARC builds on it.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Header field",
+      "value": "DKIM-Signature"
+    },
+    {
+      "label": "Key lookup",
+      "value": "selector._domainkey.domain"
+    },
+    {
+      "label": "Record type",
+      "value": "DNS TXT"
+    },
+    {
+      "label": "Algorithms",
+      "value": "rsa-sha256, rsa-sha1"
+    },
+    {
+      "label": "Status",
+      "value": "Internet Standard (STD 76)"
+    }
+  ],
+  "lineage": {
+    "title": "The DKIM specification over time",
+    "rfcs": [
+      4871,
+      5672,
+      6376,
+      8301,
+      8463
+    ]
+  },
+  "today": "<p>DKIM is in use on a large share of legitimate email today. Major mailbox providers verify it, and large senders sign with it. Receivers use it alongside SPF and DMARC (<a href=\"/7489/\">RFC 7489</a>) when deciding what to do with a message. Later RFCs changed the cryptography: <a href=\"/8301/\">RFC 8301</a> removed rsa-sha1 and set stricter key-size rules, and <a href=\"/8463/\">RFC 8463</a> added the Ed25519-SHA256 signature method. The framing in this RFC (selectors, tags, canonicalization, the DNS record) is unchanged.</p>",
+  "implementations": [
+    {
+      "name": "OpenDKIM",
+      "note": "Open-source DKIM signing and verifying library and milter filter."
+    },
+    {
+      "name": "Rspamd and SpamAssassin",
+      "note": "Spam filters that verify DKIM signatures and use the result when scoring."
+    },
+    {
+      "name": "Postfix, Exim and similar MTAs",
+      "note": "Typically sign and verify through a milter or a built-in module."
+    }
+  ],
+  "glossary": [],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>DomainKeys Identified Mail (DKIM) lets a person, role or organization claim responsibility for a message by associating a domain name they are authorized to use with it. The claim is backed by a cryptographic signature, and the verifier gets the matching public key by querying the signer's own domain.</p><p>The RFC lists what makes DKIM different from earlier signing schemes such as S/MIME and OpenPGP: the signature lives in a header field, so ordinary mail clients are not confused by it; there is no dependency on well-known certificate authorities; no new protocol or service is needed for key distribution; and a failed verification does not force the message to be rejected. DKIM makes no attempt at encryption, and archiving is not a design goal.</p><div class=\"callout callout-info\"><p>This RFC obsoletes <a href=\"/4871/\">RFC 4871</a> and <a href=\"/5672/\">RFC 5672</a>, folding the original specification and its errata update into one document. It is also published as STD 76.</p></div>",
+      "eli5": "<p>Email is like a postcard: anyone can write any return name on it. DKIM adds a seal that only the real sender's mail room can make, so the post office can check the seal and know which mail room it came from.</p>"
+    },
+    {
+      "id": "design-goals",
+      "number": "2",
+      "title": "Design Goals",
+      "content": "<p>DKIM was built to fit the email system that already exists. It is meant to be transparent to the fullest extent possible, to need minimal new infrastructure, to be implementable without changes to mail clients, to be deployable incrementally, and to allow signing to be delegated to a third party.</p><p>Two ideas stand out. First, DKIM separates the identity of the signer from the apparent author of the message. The signing domain, called the SDID (<code>d=</code>), is what a signature vouches for, and it is not required to match any address in the message. Second, key management is as simple as possible: the verifier asks the signer's domain directly for the public key, normally through DNS, instead of going through a certificate authority.</p><div class=\"callout callout-note\"><p>A signature only says that the hashed content has not changed since it was signed. It says nothing else about protecting the end-to-end integrity of the message, and nothing about whether the content is trustworthy.</p></div>",
+      "eli5": "<p>The seal says <em>which mail room</em> sent the letter, not whether the letter is nice. Deciding whether to trust that mail room is a separate job.</p>"
+    },
+    {
+      "id": "signature-header",
+      "number": "3",
+      "title": "The DKIM-Signature Header Field",
+      "content": "<p>Everything a verifier needs to start is in one header field, <code>DKIM-Signature</code>, whose value is a list of <code>tag=value</code> pairs separated by semicolons. Unknown tags are ignored by verifiers, but they are still included in the signature calculation.</p><p>Seven tags are required: <code>v=1</code> (version), <code>a=</code> (algorithm), <code>d=</code> (the signing domain), <code>s=</code> (the selector), <code>h=</code> (which header fields were signed), <code>bh=</code> (hash of the canonicalized body) and <code>b=</code> (the signature itself, a base64 value). Optional tags include <code>c=</code> (canonicalization, default <code>simple/simple</code>), <code>i=</code> (the agent or user identifier), <code>l=</code> (a body length limit), <code>q=</code> (query method, <code>dns/txt</code>), <code>t=</code> (timestamp), <code>x=</code> (expiration) and <code>z=</code> (copied header fields for diagnostics).</p><p>The <code>From</code> header field must always be listed in <code>h=</code>. The header field should be placed at the top of the header block, like a trace field.</p>",
+      "eli5": "<p>The seal comes with a small label that says who made it, which stamp they used, which parts of the letter it covers, and a code that proves the seal is real.</p>"
+    },
+    {
+      "id": "canonicalization",
+      "number": "4",
+      "title": "Canonicalization and Hashing",
+      "content": "<p>Mail systems often make small changes in transit, such as re-wrapping long lines or changing runs of spaces. Canonicalization prepares the message before hashing so that harmless changes do not break the signature. Two algorithms exist for headers and for the body, and the <code>c=</code> tag names them as header/body. With no <code>c=</code> tag, both default to <code>simple</code>.</p><p><code>simple</code> tolerates almost nothing. For the body it only ignores empty lines at the end. <code>relaxed</code> lowercases header field names, unfolds continuation lines, collapses runs of whitespace to a single space and strips whitespace around the colon and at line ends.</p><p>Signing then needs two hashes. First, the canonicalized body (cut to <code>l=</code> octets if that tag is present) is hashed and the result goes into <code>bh=</code>. Second, the header fields listed in <code>h=</code>, in that order, followed by the <code>DKIM-Signature</code> field itself with an empty <code>b=</code>, are hashed and that hash is signed with the private key to produce <code>b=</code>.</p><div class=\"callout callout-info\"><p>Canonicalization only prepares the data for hashing. It never changes the message that is actually sent.</p></div>",
+      "eli5": "<p>Before sealing, you smooth out the letter so that a crease or a bit of extra spacing does not matter. The smoothing is only done in your head. The letter itself is sent as it was.</p>"
+    },
+    {
+      "id": "key-records",
+      "number": "5",
+      "title": "Keys in DNS",
+      "content": "<p>Instead of certificates, DKIM publishes public keys in DNS. A key lives in a TXT record at <code>selector._domainkey.domain</code>, where the selector comes from the <code>s=</code> tag and the domain from <code>d=</code>. A selector lets one domain have many keys at once, so a company can use separate keys for different mail streams or rotate keys without a flag day.</p><p>The record is itself a tag=value list. <code>v=DKIM1</code> (if present, it must be first), <code>k=</code> is the key type (default <code>rsa</code>), <code>p=</code> holds the base64 public key, <code>h=</code> and <code>s=</code> restrict hash algorithms and service types, <code>n=</code> carries human notes, and <code>t=</code> carries flags. The flag <code>y</code> means the domain is testing DKIM and verifiers must not treat failing mail differently from unsigned mail. The flag <code>s</code> says the signer's <code>i=</code> domain must match <code>d=</code> exactly instead of allowing subdomains. An empty <code>p=</code> means the key has been revoked.</p><p>Signers must use RSA keys of at least 1024 bits for long-lived keys, and verifiers must be able to check keys from 512 to 2048 bits. A later RFC tightened this guidance.</p>",
+      "eli5": "<p>The picture of the seal is kept in a public book under the sender's own name, on a page labeled with the name of the stamp. Having many stamp names lets the sender change stamps without telling anyone.</p>"
+    },
+    {
+      "id": "signer-and-verifier",
+      "number": "6",
+      "title": "Signer and Verifier Actions",
+      "content": "<p>A signer decides whether to sign, picks a key and selector, normalizes the message so it will arrive in the form that was signed, chooses the header fields (the RFC suggests From, Reply-To, Subject, Date, To, Cc, and similar), computes the hashes and inserts the new <code>DKIM-Signature</code> header field above any others. A message may carry several signatures, for example from the author's domain and from a mailing-list service. Each is evaluated on its own merits.</p><p>A verifier extracts the signature, strictly validates its syntax, fetches the key from DNS, then checks the body hash against <code>bh=</code> and the signature against the header hash. Results are PERMFAIL for permanent problems (bad syntax, no key, revoked key, body hash or signature mismatch) and TEMPFAIL when the DNS lookup cannot be answered. Verification failure should not by itself cause rejection, and a cryptographic failure must never provoke a 4xx SMTP reply. Results are often passed on in an <code>Authentication-Results</code> header field (<a href=\"/5451/\">RFC 5451</a>).</p>",
+      "eli5": "<p>The mail room makes the seal and sends the letter. The receiving mail room looks up the seal picture, rubs the seal against it and either says yes or says it does not match. A letter without a good seal is not thrown away, it just does not get the extra trust.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The RFC spends a lot of space on what DKIM does not protect against. A valid signature proves a domain signed the message, not that the message is honest. A spammer can send a message through a well-known signing service and then replay the signed copy to many recipients, borrowing the signer's reputation. The <code>x=</code> expiration tag is explicitly not an anti-replay defense.</p><p>Other risks include a stolen private key, which lets an attacker sign as the domain, and the <code>l=</code> body length limit, which leaves everything after the limit unsigned so an attacker can append content. The RFC advises signers to be wary of <code>l=</code> and assessors to consider ignoring signatures that use it. The <code>relaxed</code> body algorithm allows crude ASCII-art tricks by changing spacing. Extra header fields can be added after signing; a signer can list a name in <code>h=</code> one more time than it appears to make an added copy break the signature.</p><div class=\"callout callout-warning\"><p>DKIM itself attaches no policy to a missing or failing signature. A receiver should not reject mail solely because it has no signature or an unverifiable one, which is what later work such as DMARC addresses.</p></div>",
+      "eli5": "<p>A real seal does not prove the letter is kind. A thief could copy a sealed letter and mail it to lots of people, or steal the stamp. The seal says <em>who</em>, not <em>whether you should believe it</em>.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "timeline",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "From the original spec to today",
+      "data": {
+        "events": [
+          {
+            "year": "2007",
+            "label": "DKIM Signatures published as a Proposed Standard",
+            "rfc": 4871
+          },
+          {
+            "year": "2009",
+            "label": "Update clarifying 4871 after errata",
+            "rfc": 5672
+          },
+          {
+            "year": "2011",
+            "label": "This RFC merges both and becomes an Internet Standard",
+            "rfc": 6376
+          },
+          {
+            "year": "2018",
+            "label": "Removes rsa-sha1 and tightens key sizes",
+            "rfc": 8301
+          },
+          {
+            "year": "2018",
+            "label": "Adds the Ed25519-SHA256 algorithm",
+            "rfc": 8463
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "design-goals",
+      "position": "after",
+      "caption": "What DKIM sets out to be",
+      "data": {
+        "items": [
+          {
+            "title": "Fits existing email",
+            "text": "The signature is a header field, so unaware mail systems and clients simply pass it along."
+          },
+          {
+            "title": "No certificate authority",
+            "text": "The verifier asks the signing domain for its public key, normally through DNS."
+          },
+          {
+            "title": "Signer is not the author",
+            "text": "The signed domain (d=) is separate from the From address, and it can belong to a third party."
+          },
+          {
+            "title": "Failure is not rejection",
+            "text": "A signature that fails to verify is treated like no signature, not as proof of fraud."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "signature-header",
+      "position": "after",
+      "caption": "An example DKIM-Signature",
+      "data": {
+        "title": "DKIM-Signature header field",
+        "lang": "text",
+        "code": "DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;\n  d=example.net; s=brisbane; t=1117574938; x=1118006938;\n  h=from:to:subject:date;\n  bh=MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=;\n  b=dzdVyOfAKCdLXdJOc9G2q8LoXSlEniSbav+yuU4zGeeruD00lszZVo..."
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "signature-header",
+      "position": "after",
+      "caption": "Tags of the DKIM-Signature header field",
+      "data": {
+        "columns": [
+          "Tag",
+          "Meaning",
+          "Required?"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "v",
+              "Version, must be 1",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "a",
+              "Signing algorithm: rsa-sha1 or rsa-sha256",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "b",
+              "Signature data, base64",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "bh",
+              "Hash of the canonicalized body, base64",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "d",
+              "Signing domain (SDID)",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "h",
+              "Colon-separated list of signed header fields",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "s",
+              "Selector",
+              "Required"
+            ]
+          },
+          {
+            "cells": [
+              "c",
+              "Canonicalization, default simple/simple",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "i",
+              "Agent or user identifier (AUID)",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "l",
+              "Body length limit",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "q",
+              "Query method, dns/txt",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "t",
+              "Signature timestamp (seconds since 1970)",
+              "Recommended"
+            ]
+          },
+          {
+            "cells": [
+              "x",
+              "Signature expiration",
+              "Recommended"
+            ]
+          },
+          {
+            "cells": [
+              "z",
+              "Copied header fields, for diagnostics",
+              "Optional"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "canonicalization",
+      "position": "after",
+      "caption": "simple vs relaxed",
+      "data": {
+        "columns": [
+          "Part",
+          "simple",
+          "relaxed"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Header names",
+              "Unchanged",
+              "Lowercased"
+            ]
+          },
+          {
+            "cells": [
+              "Header whitespace",
+              "Unchanged",
+              "Runs reduced to one space; trimmed around the colon and at the end"
+            ]
+          },
+          {
+            "cells": [
+              "Folded header lines",
+              "Unchanged",
+              "Unfolded"
+            ]
+          },
+          {
+            "cells": [
+              "Body whitespace",
+              "Unchanged",
+              "Trailing whitespace on lines dropped; runs reduced to one space"
+            ]
+          },
+          {
+            "cells": [
+              "Trailing empty lines",
+              "Ignored",
+              "Ignored"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "key-records",
+      "position": "after",
+      "caption": "A key record in DNS",
+      "data": {
+        "title": "TXT record at brisbane._domainkey.example.net",
+        "lang": "text",
+        "code": "brisbane._domainkey.example.net. IN TXT (\n  \"v=DKIM1; k=rsa; t=y;\"\n  \"p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDwIRP/UC3SBsEm...\" )"
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "signer-and-verifier",
+      "position": "after",
+      "caption": "Signing and verification",
+      "data": {
+        "lanes": [
+          {
+            "key": "signer",
+            "label": "Signing domain"
+          },
+          {
+            "key": "relay",
+            "label": "Mail in transit"
+          },
+          {
+            "key": "verifier",
+            "label": "Receiving server"
+          },
+          {
+            "key": "dns",
+            "label": "DNS",
+            "dashed": true
+          }
+        ],
+        "messages": [
+          {
+            "from": "signer",
+            "to": "signer",
+            "label": "Hash body into bh=; hash headers; sign with private key",
+            "color": "blue",
+            "note": "Insert DKIM-Signature at the top of the header block"
+          },
+          {
+            "from": "signer",
+            "to": "relay",
+            "label": "Send message with DKIM-Signature",
+            "color": "neutral"
+          },
+          {
+            "from": "relay",
+            "to": "verifier",
+            "label": "Deliver, usually unchanged",
+            "color": "neutral"
+          },
+          {
+            "from": "verifier",
+            "to": "dns",
+            "label": "TXT query: selector._domainkey.domain",
+            "color": "blue"
+          },
+          {
+            "from": "dns",
+            "to": "verifier",
+            "label": "Key record with p= public key",
+            "color": "green"
+          },
+          {
+            "from": "verifier",
+            "to": "verifier",
+            "label": "Recompute hashes; compare bh=; check b=",
+            "color": "green",
+            "note": "Success, or PERMFAIL / TEMPFAIL"
+          }
+        ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "signer-and-verifier",
+      "position": "after",
+      "caption": "Verifier outcomes",
+      "data": {
+        "root": {
+          "label": "Verify one DKIM-Signature",
+          "children": [
+            {
+              "label": "Signature header malformed or tag missing",
+              "note": "PERMFAIL"
+            },
+            {
+              "label": "DNS lookup gets no answer",
+              "note": "TEMPFAIL, may retry later"
+            },
+            {
+              "label": "No key record, or key record malformed",
+              "note": "PERMFAIL"
+            },
+            {
+              "label": "Key revoked (empty p=)",
+              "note": "PERMFAIL"
+            },
+            {
+              "label": "Body hash differs from bh=",
+              "note": "PERMFAIL"
+            },
+            {
+              "label": "Signature does not verify against b=",
+              "note": "PERMFAIL"
+            },
+            {
+              "label": "Everything checks out",
+              "note": "SUCCESS"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "What to watch for",
+      "data": {
+        "items": [
+          {
+            "title": "Replay",
+            "text": "A genuine signed message can be re-sent to many people, borrowing the signer's reputation."
+          },
+          {
+            "title": "Stolen keys",
+            "text": "A compromised private key lets an attacker sign as the domain until the key record is removed."
+          },
+          {
+            "title": "Body length limit (l=)",
+            "text": "Anything beyond the limit is unsigned and can be appended by an intermediary."
+          },
+          {
+            "title": "Extra header fields",
+            "text": "List a header name in h= one extra time to make an added copy invalidate the signature."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Crocker, D., Ed., Hansen, T., Ed., and M. Kucherawy, Ed., \"DomainKeys Identified Mail (DKIM) Signatures\", RFC 6376, September 2011.",
+      "rfc": 6376
+    },
+    {
+      "number": "[2]",
+      "text": "Resnick, P., Ed., \"Internet Message Format\", RFC 5322, October 2008.",
+      "rfc": 5322
+    },
+    {
+      "number": "[3]",
+      "text": "Klensin, J., \"Simple Mail Transfer Protocol\", RFC 5321, October 2008.",
+      "rfc": 5321
+    },
+    {
+      "number": "See also",
+      "text": "Hansen, T., Crocker, D., and P. Hallam-Baker, \"DomainKeys Identified Mail (DKIM) Service Overview\", RFC 5585, July 2009.",
+      "rfc": 5585
+    },
+    {
+      "number": "See also",
+      "text": "Hansen, T., Siegel, E., Hallam-Baker, P., and D. Crocker, \"DomainKeys Identified Mail (DKIM) Development, Deployment, and Operations\", RFC 5863, May 2010.",
+      "rfc": 5863
+    },
+    {
+      "number": "See also",
+      "text": "Kucherawy, M. and E. Zwicky, \"Domain-based Message Authentication, Reporting, and Conformance (DMARC)\", RFC 7489, March 2015.",
+      "rfc": 7489
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-15",
+    "reviewedBy": null
+  },
+  "updated": "2026-10-15"
+}
