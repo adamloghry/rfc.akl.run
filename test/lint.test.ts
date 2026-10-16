@@ -167,8 +167,12 @@ test('checkHtml: direct allowlist behaviour', () => {
   for (const good of ACCEPT) assert.deepEqual(checkHtml(good), [], good);
 });
 
-// TODO(W1-B): re-enable once Viz.astro registers a viz render check in scripts/lint-content.ts (vizChecks).
-test.todo('a viz that throws is reported with file and index, not a bare TypeError');
+test('a viz that throws is reported with file and index, not a bare TypeError', () => {
+  const dir = baseline();
+  edit(dir, 826, (j) => { j.viz = [{ type: 'packet', anchor: 'x', position: 'after', data: {} }]; });
+  const r = lint(dir, index, {});
+  assert.ok(has(r.errors, /826\.json: \/viz\/0: .*fields/), r.errors.join('\n'));
+});
 
 test('unsafe HTML in glossary and journeys', () => {
   const dir = baseline();

@@ -1,9 +1,12 @@
 import { defineConfig } from 'vitest/config';
 
-// Pure-lib and CLI tests. Component tests (W1) use the Astro Container API via getViteConfig from astro/config.
+// Two projects: plain-Vite tests (pure libs, CLI scripts) and Astro component tests (*.astro.test.ts),
+// which need Astro's Vite plugins for the Container API (see vitest.viz.config.ts).
 export default defineConfig({
   test: {
-    include: ['test/**/*.test.ts'],
-    environment: 'node',
+    projects: [
+      { extends: false, test: { name: 'unit', include: ['test/**/*.test.ts'], exclude: ['test/**/*.astro.test.ts', '**/node_modules/**'], environment: 'node' } },
+      './vitest.viz.config.ts',
+    ],
   },
 });

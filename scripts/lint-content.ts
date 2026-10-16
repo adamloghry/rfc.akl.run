@@ -8,6 +8,7 @@ import path from 'node:path';
 import { rfcSchema, journeySchema, glossarySchema } from '../src/lib/schemas';
 import { checkContent, walkStrings } from '../src/lib/sanitize-check';
 import { loadIndex } from '../src/lib/rfc-index';
+import { validateViz } from '../src/components/viz/validate';
 
 const ROOT = process.cwd();
 const RESERVED_SLUGS = new Set(['atlas', 'journeys', 'areas', 'glossary', 'coverage', 'contribute', 'graph', 'about', 'search', 'data', 'assets', 'feed', 'sitemap', 'robots', '404', 'index']);
@@ -20,12 +21,12 @@ export type IndexLike = { entries?: Map<number, unknown>; issued?: number[]; not
 export interface LintResult { errors: string[]; warnings: string[] }
 
 /**
- * TODO(W1-B): viz render check. Once src/components/viz/Viz.astro exists, register a checker here that
- * renders each spec (Astro Container API) and returns an error message, e.g.
- * `vizChecks.push((spec, stub) => { try { render(spec, stub); return null; } catch (e) { return e.message; } })`.
- * Errors are reported as `<file>: /viz/<i>: <message>`.
+ * Viz render check. Errors are reported as `<file>: /viz/<i>: <message>`. The Container API needs Vite, so the
+ * checker is the pure per-type validator shared with Viz.astro (src/components/viz/validate.ts).
  */
-export const vizChecks: Array<(spec: any, stub: { number: number; content: any; url: string }) => string | null> = [];
+export const vizChecks: Array<(spec: any, stub: { number: number; content: any; url: string }) => string | null> = [
+  (spec) => validateViz(spec),
+];
 
 function readJson(file: string): any {
   return JSON.parse(fs.readFileSync(file, 'utf8'));

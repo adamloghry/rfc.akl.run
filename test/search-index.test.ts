@@ -8,12 +8,8 @@ import { buildSite } from '../src/lib/model';
 import * as idx from '../src/lib/search-index';
 
 const HERE = process.cwd() + '/test';
-// The client search core ships with W1-C as src/scripts/search-core.ts (exports tokenize, shardOf, plan, rank, shardsOf, docRow).
-// Until it exists the tests that need it are skipped.
-let core: any = null;
-const CORE_PATH = '../src/scripts/search-core';
-try { core = await import(/* @vite-ignore */ CORE_PATH); } catch { /* not there yet */ }
-const withCore = core ? test : test.skip;
+import * as core from '../src/scripts/search-core';
+const withCore = test;
 
 const site = buildSite({
   index: parseIndex(fs.readFileSync(path.join(HERE, 'fixtures', 'rfc-index.sample.xml'), 'utf8')),
