@@ -21,6 +21,7 @@ const BUDGET = {
 };
 const JS_BUDGET = 25 * KB;
 const COVERAGE_BUDGET = 25 * KB;
+const QUESTIONS_BUDGET = 30 * KB;
 const FILE_LIMIT = 20000; // Cloudflare Workers static assets, Free plan, files per version
 const FILE_WARN = 18000;
 const MAX_STATIC_REDIRECTS = 2000;
@@ -344,7 +345,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     const tier = tm ? tm[1] : null;
     let budget = tier && tier in BUDGET ? BUDGET[tier as keyof typeof BUDGET] : BUDGET.default;
     if (!tier && rel.startsWith('areas/')) budget = BUDGET.areas;
-    if (!tier && rel === 'glossary/index.html') budget = BUDGET.glossary;
+    if (!tier && /^glossary\/[^/]+\/index\.html$/.test(rel)) budget = BUDGET.glossary;
     const gz = zlib.gzipSync(html, { level: 6 }).length;
     const key = tier || (rel.startsWith('areas/') ? 'areas' : 'other');
     stats.byTier[key] = (stats.byTier[key] || 0) + 1;
@@ -435,6 +436,11 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     const g = gzSize('data/coverage.json');
     stats.coverageGz = g;
     if (g > COVERAGE_BUDGET) errors.push(`data/coverage.json: gzip ${(g / KB).toFixed(1)} KB exceeds ${COVERAGE_BUDGET / KB} KB`);
+  }
+  if (fileSet.has('data/questions.json')) {
+    const g = gzSize('data/questions.json');
+    stats.questionsGz = g;
+    if (g > QUESTIONS_BUDGET) errors.push(`data/questions.json: gzip ${(g / KB).toFixed(1)} KB exceeds ${QUESTIONS_BUDGET / KB} KB`);
   }
   return { errors, warnings, stats };
 }

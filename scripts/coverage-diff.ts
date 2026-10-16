@@ -8,7 +8,8 @@
  * baseline": the script prints a note and exits 0.
  *
  * Cell byte = (categoryIndex << 4) | state; state: 0 not issued, 1 reserved,
- * 2 index, 3 summary, 4 explainer, 5 interactive; category 15 = none.
+ * 2 historic or obsoleted, 3 unknown, 4 informational or experimental,
+ * 5 standard or BCP (the status class); category 15 = none.
  * Note: coverage.json carries no relation data, so "covered pages whose
  * relations changed" is not derivable here; status/tier/category changes are.
  */
@@ -28,7 +29,7 @@ interface DiffResult {
   changed: Array<{ n: number; from: string; to: string }>;
 }
 
-const STATES = ['not issued', 'reserved', 'index', 'summary', 'explainer', 'interactive'];
+const STATES = ['not issued', 'reserved', 'historic or obsoleted', 'unknown status', 'informational or experimental', 'standard or BCP'];
 
 export function decode(cov: CoverageJson): Cell[] {
   const buf = Buffer.from(cov.cells || '', 'base64');
