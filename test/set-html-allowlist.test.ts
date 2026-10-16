@@ -24,7 +24,6 @@ const ALLOWED = [
   'components/viz/SequenceSim.astro :: safeJson',
   'layouts/BaseLayout.astro :: PREPAINT',
   'pages/index.astro :: HASH_FORWARDER',
-  'pages/contribute/index.astro :: t',
 ].sort();
 
 function astroFiles(dir: string): string[] {

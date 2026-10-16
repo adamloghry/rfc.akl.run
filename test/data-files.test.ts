@@ -5,7 +5,6 @@ import { test } from 'vitest';
 import {
   coverageJson,
   dataFiles,
-  feedXml,
   graphJson,
   questionsJson,
   redirectsFile,
@@ -49,8 +48,7 @@ test('titles shards, questions and graph', () => {
   for (const v of Object.values<Record<string, unknown>>(g)) assert.ok('o' in v && 'ub' in v && 't' in v && 'y' in v);
 });
 
-test('feed, sitemap, robots', () => {
-  assert.match(feedXml(site), /^<\?xml[\s\S]*<feed xmlns="http:\/\/www.w3.org\/2005\/Atom">[\s\S]*<\/feed>\n$/);
+test('sitemap, robots, redirects', () => {
   const urls = sitemapUrls(site);
   assert.equal(urls[0], '/');
   assert.ok(urls.includes('/903/') && urls.includes('/areas/core/') && urls.includes('/journeys/diskless-boot/'));

@@ -1,6 +1,5 @@
 import type { RfcRecord, Site } from '../../lib/model';
 
-export const REPO = 'https://github.com/adamloghry/rfc.akl.run';
 export const BLOCK = 1000;
 
 export const DESCRIPTIONS: Record<string, string> = {
@@ -24,7 +23,6 @@ export const strip = (s: unknown) =>
     .trim();
 export const byNum = (a: RfcRecord, b: RfcRecord) => a.number - b.number;
 export const byPri = (a: RfcRecord, b: RfcRecord) => b.priority - a.priority || a.number - b.number;
-export const pct = (a: number, b: number) => `${b ? ((a / b) * 100).toFixed(1) : '0.0'}%`;
 
 export interface Tally {
   total: number;
@@ -56,5 +54,3 @@ export function indexBlocks(list: RfcRecord[]): { sorted: RfcRecord[]; blocks: [
   }
   return { sorted, blocks: [...blocks] };
 }
-
-export const issueUrl = (t: string) => `${REPO}/issues/new?template=${t}`;

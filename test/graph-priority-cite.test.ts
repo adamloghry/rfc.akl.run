@@ -7,9 +7,9 @@ import { entry, rec, siteOf } from './builders';
 
 describe('priority score', () => {
   const buildDate = new Date('2026-10-15T00:00:00Z');
-  const scoreOf = (e: Parameters<typeof entry>[1], opts: { traffic?: number; demand?: number; title?: string } = {}) => {
+  const scoreOf = (e: Parameters<typeof entry>[1], opts: { traffic?: number; title?: string } = {}) => {
     const s = siteOf([entry(1, { title: opts.title ?? 'Plain', ...e })], { buildDate });
-    const r = { ...rec(s, 1), demand: opts.demand ?? 0 };
+    const r = { ...rec(s, 1) };
     return priority.score(r, s, opts.traffic ?? 0);
   };
 
@@ -90,9 +90,8 @@ describe('priority score', () => {
     });
   });
 
-  test('demand and traffic add log-scaled bonuses', () => {
+  test('traffic adds a log-scaled bonus', () => {
     const base = scoreOf({ status: 'HISTORIC' });
-    assert.equal(scoreOf({ status: 'HISTORIC' }, { demand: 3 }), Math.round((base + 2 * Math.log2(4)) * 100) / 100);
     assert.equal(scoreOf({ status: 'HISTORIC' }, { traffic: 300 }), Math.round((base + Math.log2(4)) * 100) / 100);
   });
 

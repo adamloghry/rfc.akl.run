@@ -51,7 +51,6 @@ export interface RfcRecord {
   mentionedIn: number[];
   journeys: string[];
   priority: number;
-  demand: number;
   url: string;
 }
 
@@ -92,7 +91,6 @@ export interface Site {
   glossary: Map<string, Term>;
   categories: { key: string; name: string }[];
   counts: { total: number; index: number; summary: number; explainer: number; interactive: number };
-  newest: RfcRecord[];
   only?: Set<number>;
 }
 
@@ -157,7 +155,6 @@ export function buildSite(opts: BuildSiteOptions): Site {
   const contentDir = opts.contentDir || path.join(process.cwd(), 'content');
   const buildDate = opts.buildDate || new Date();
   const legacy = new Set<number>(readJson(path.join(contentDir, 'legacy-reviewed.json'), []));
-  const demand = readJson<Record<string, number>>(path.join(contentDir, 'signals', 'demand.json'), {});
   const traffic = readJson<Record<string, number>>(path.join(contentDir, 'signals', 'traffic.json'), {});
 
   let rfcData = opts.rfcs;
@@ -218,7 +215,6 @@ export function buildSite(opts: BuildSiteOptions): Site {
       mentionedIn: [],
       journeys: [],
       priority: 0,
-      demand: Number(demand[number]) || 0,
       url: `/${number}/`,
     });
   }
@@ -267,11 +263,9 @@ export function buildSite(opts: BuildSiteOptions): Site {
     glossary,
     categories: areas.CATEGORIES.map((c) => ({ ...c })),
     counts,
-    newest: [],
   };
 
   graph.mentions(site);
   for (const r of rfcs.values()) r.priority = priority.score(r, site, Number(traffic[r.number]) || 0);
-  site.newest = [...rfcs.values()].sort((a, b) => graph.byDate(b, a)).slice(0, 10);
   return site;
 }

@@ -280,47 +280,29 @@ describe('IndexTier', () => {
     expect(out).toContain('href="/826/"');
   });
 
-  test('coverage ladder: 4 cells, done ink, next tint, demand line', async () => {
-    const out = await it(r5952());
-    expect((out.match(/class="it-cell/g) || []).length).toBe(4);
-    expect((out.match(/class="it-dot it-done">✓</g) || []).length).toBe(2);
-    expect((out.match(/it-cell it-next/g) || []).length).toBe(1);
-    expect(out).toMatch(/it-next[\s\S]*?>3</);
-    expect(out).not.toContain('readers requested');
-    expect(((await it(must(site.rfcs.get(1)))).match(/class="it-dot it-done">✓</g) || []).length).toBe(1);
-    expect(await it({ ...r5952(), demand: 3 })).toContain('3 readers requested an explainer · counted daily');
+  test('no solicitation: no ladder, help box, demand line or GitHub link', async () => {
+    for (const r of [r5952(), must(site.rfcs.get(1)), { ...must(site.rfcs.get(10055)), isNew: true }]) {
+      const out = await it(r);
+      expect(out).not.toMatch(/it-lad|it-cell|it-dot|COVERAGE FOR THIS RFC|NO EXPLAINER YET|HELP COVER IT|it-box/);
+      expect(out).not.toMatch(/github|Start the explainer|Request an explainer|How explainers work|readers requested|\/contribute\//i);
+      expect(out).not.toMatch(/no explainer yet|no summary yet|hasn't been written yet/i);
+    }
   });
 
-  test('help cover it links', async () => {
-    const out = await it(r5952());
-    const start = out.match(
-      /href="(https:\/\/github.com\/adamloghry\/rfc.org\/new\/trunk\/content\/rfcs\?filename=5952.json&amp;value=[^"]+)"/,
-    );
-    expect(start).toBeTruthy();
-    const val = decodeURIComponent(must(start)[1]?.split('value=')[1] ?? '');
-    expect(JSON.parse(val)).toEqual({ number: 5952, category: 'core', summary: '', eli5: { summary: '' }, questions: [] });
-    expect(out).toContain(
-      'href="https://github.com/adamloghry/rfc.akl.run/issues/new?template=request.yml&amp;title=Explainer%20request%3A%20RFC%205952"',
-    );
-    expect(out).toContain('href="/contribute/"');
-    expect(out).toContain('Start the explainer ↗');
-    expect(out).toContain('How explainers work');
-  });
-
-  test('index tier: abstract is lede, AUTO notice, NEW badge, no-abstract wording', async () => {
+  test('index tier: abstract is lede, no AUTO notice, NEW badge, no-abstract wording', async () => {
     const rfc = must(site.rfcs.get(10055));
     expect(rfc.tier).toBe('index');
     const out = await it({ ...rfc, isNew: true });
     expect(out).toContain('<meta name="rfc-tier" content="index">');
     expect(out).toMatch(/badge-dashed[^>]*>INDEX PAGE</);
-    expect(out).toContain('Abstract from the RFC Editor index · no summary yet');
+    expect(out).toContain('Abstract from the RFC Editor index');
     expect(out).toContain('class="it-lede"');
-    expect(out).toContain('AUTO');
+    expect(out).not.toContain('it-auto');
     expect(out).toMatch(/badge-new[^>]*>NEW · OCT 2026</);
     expect(out).not.toContain("AUTHORS' ABSTRACT");
     expect(await it(must(site.rfcs.get(1)))).not.toContain('badge-new');
     const none = await it({ ...must(site.rfcs.get(1)), abstract: null });
-    expect(none).toContain('has no abstract for this RFC; read the original for details');
+    expect(none).toContain('No abstract in the RFC Editor index');
     expect(none).not.toContain("Below is the authors' abstract");
   });
 

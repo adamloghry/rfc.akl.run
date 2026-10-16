@@ -128,19 +128,11 @@ describe('merging index and content', () => {
     assert.equal(rec(s, 1).category, 'dns');
   });
 
-  test('demand and traffic signals feed demand and priority', () => {
-    const dir = tmpContent({ 'signals/demand.json': { '7': 4 }, 'signals/traffic.json': { '7': 10000 } });
+  test('the traffic signal feeds priority', () => {
+    const dir = tmpContent({ 'signals/traffic.json': { '7': 10000 } });
     const base = siteOf([entry(7)]);
     const s = buildSite({ index: indexOf([entry(7)]), contentDir: dir, rfcs: [], journeys: [], glossary: [], buildDate: base.buildDate });
-    assert.equal(rec(s, 7).demand, 4);
     assert.ok(rec(s, 7).priority > rec(base, 7).priority);
-    assert.equal(rec(base, 7).demand, 0);
-  });
-
-  test('a non-numeric demand value counts as zero', () => {
-    const dir = tmpContent({ 'signals/demand.json': { '7': 'lots' } });
-    const s = buildSite({ index: indexOf([entry(7)]), contentDir: dir, rfcs: [], journeys: [], glossary: [] });
-    assert.equal(rec(s, 7).demand, 0);
   });
 });
 
@@ -203,16 +195,6 @@ describe('counts and gaps', () => {
     assert.deepEqual([...s.notIssued], [3]);
     assert.equal(s.max, 6);
     assert.equal(s.categories.length, 11);
-  });
-
-  test('newest lists the ten latest by date then number', () => {
-    const entries = Array.from({ length: 12 }, (_, i) => entry(i + 1, { year: 2000, month: 1 + (i % 12) }));
-    const s = siteOf(entries);
-    assert.equal(s.newest.length, 10);
-    assert.deepEqual(
-      s.newest.map((r) => r.number),
-      [12, 11, 10, 9, 8, 7, 6, 5, 4, 3],
-    );
   });
 });
 

@@ -20,6 +20,16 @@ test.describe('Atlas (home)', () => {
     await expect.poll(painted).toBeGreaterThan(5000);
   });
 
+  test('hero flows into the map: no coverage or just-published panels, no GitHub, no feed', async ({ page }) => {
+    await page.goto('/');
+    await expect(page).toHaveTitle('rfc.akl.run — the RFCs, explained');
+    await expect(page.locator('.at-goal, .at-fresh, .at-cov')).toHaveCount(0);
+    const body = await page.locator('body').innerText();
+    expect(body).not.toMatch(/GOAL ·|JUST PUBLISHED|Coverage report|Follow \(RSS\)|Contribute an explainer|github/i);
+    await expect(page.locator('a[href*="feed.xml"], a[href*="/contribute"], a[href*="/coverage"]')).toHaveCount(0);
+    await expect(page.locator('.at-legend')).toContainText('Summary');
+  });
+
   test('hover shows a caption and clicking a cell navigates to that RFC', async ({ page }) => {
     await page.goto('/');
     const canvas = page.locator('#atlas-map');

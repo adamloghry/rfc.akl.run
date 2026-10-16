@@ -2,15 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'vitest';
-import {
-  areasModel,
-  coverageModel,
-  HASH_FORWARDER,
-  journeysModel,
-  rfcPath,
-  SUGGESTIONS,
-  timelineModel,
-} from '../src/components/atlas/atlas-data';
+import { areasModel, HASH_FORWARDER, journeysModel, rfcPath, SUGGESTIONS, timelineModel } from '../src/components/atlas/atlas-data';
 import { buildSite, type Site } from '../src/lib/model';
 import { parseIndex } from '../src/lib/rfc-index';
 import { decode } from '../src/scripts/atlas';
@@ -21,24 +13,11 @@ const site = buildSite({
   contentDir: path.join(FIX, 'content'),
   buildDate: new Date('2026-10-15'),
 });
-site.newest = [...site.rfcs.values()].sort((a, b) => b.year - a.year || b.month - a.month || b.number - a.number).slice(0, 10);
 const withSite = (extra: Partial<Site>): Site => Object.assign(Object.create(Object.getPrototypeOf(site)), site, extra);
 
 test('hash forwarder and 4 suggestions', () => {
   assert.equal(HASH_FORWARDER, "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/'+(+m[1])+'/');");
   assert.equal(SUGGESTIONS.length, 4);
-});
-
-test('coverage band computed from site.counts', () => {
-  const c = site.counts;
-  const m = coverageModel(site);
-  assert.equal(m.pct, `${(((c.summary + c.explainer + c.interactive) / c.total) * 100).toFixed(1)}%`);
-  assert.equal(m.fresh.length, 3);
-  assert.match(m.fresh[0].meta, /[A-Z][a-z]{2} \d{4} · [^·]+ · (index|summary|explainer|interactive) page/);
-  const big = coverageModel(withSite({ counts: { total: 10065, index: 9800, summary: 200, explainer: 52, interactive: 13 } }));
-  assert.equal(big.total, '10,065');
-  assert.equal(big.pct, '2.6%');
-  assert.equal(big.ladder.length, 4);
 });
 
 test('journeys: feature + up to 4 cards, zero and no-featured cases', () => {
@@ -101,6 +80,9 @@ withDist('built index.html: cool palette, site header, inline forwarder in head,
   assert.equal((built.match(/class="at-pill"/g) || []).length, 4);
   assert.ok(built.includes('<canvas') && /<noscript>[\s\S]*href="\/areas\/"[\s\S]*<\/noscript>/.test(built));
   assert.equal((built.match(/class="at-chip"/g) || []).length, 12);
-  assert.equal((built.match(/class="at-fresh-row"/g) || []).length, 3);
+  assert.ok(!built.includes('at-fresh') && !built.includes('at-goal') && !built.includes('at-ladder'));
+  assert.ok(!/JUST PUBLISHED|GOAL ·|Coverage report|Follow \(RSS\)/.test(built));
+  assert.match(built, /<title>rfc\.akl\.run — the RFCs, explained<\/title>/);
+  assert.match(built, /class="at-legend"[\s\S]*Summary ·/);
   assert.equal((built.match(/class="at-acard"/g) || []).length, 11);
 });

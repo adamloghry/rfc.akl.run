@@ -1,36 +1,13 @@
 // Pure view-model helpers for the Atlas home sections (unit-tested in test/atlas.test.ts).
 import type { Site } from '../../lib/model';
 
-export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const SUGGESTIONS = ['How does email get delivered?', 'Why is the padlock there?', 'TLS 1.3', '2119'];
 export const HASH_FORWARDER = "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/'+(+m[1])+'/');";
 
 export const fmt = (n: number) => Number(n).toLocaleString('en-US');
-export const pct1 = (n: number, d: number) => `${d ? ((n / d) * 100).toFixed(1) : '0.0'}%`;
 export const w = (n: number, d: number) => `${d ? ((n / d) * 100).toFixed(2) : '0'}%`;
 const covered = (r: any) => r.tier !== 'index';
 const featured = (r: any) => r.tier === 'explainer' || r.tier === 'interactive';
-
-export function coverageModel(site: Site) {
-  const c = site.counts;
-  const cov = c.summary + c.explainer + c.interactive;
-  const ladder = [
-    { label: 'Index page', count: fmt(c.total), hint: 'Automatic, from the RFC Editor', color: 'var(--map-feat-dim)' },
-    { label: 'Summary', count: fmt(c.summary), hint: 'Plain-language abstract + ELI5', color: 'var(--accent-2)' },
-    { label: 'Explainer', count: fmt(c.explainer), hint: 'Sections, diagrams, glossary', color: 'var(--accent)' },
-    { label: 'Interactive', count: c.interactive ? fmt(c.interactive) : '—', hint: 'Simulation or explorable', color: 'var(--ink)' },
-  ];
-  return {
-    pct: pct1(cov, c.total),
-    total: fmt(c.total),
-    ladder,
-    barDeep: w(c.explainer + c.interactive, c.total),
-    barSummary: w(c.summary, c.total),
-    fresh: site.newest
-      .slice(0, 3)
-      .map((r: any) => ({ ...r, meta: `${MONTHS[r.month - 1]} ${r.year} · ${r.statusLabel} · ${r.tier} page` })),
-  };
-}
 
 export function rfcPath(j: any): number[] {
   const seen: number[] = [];

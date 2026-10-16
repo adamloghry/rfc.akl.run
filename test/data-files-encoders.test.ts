@@ -1,12 +1,10 @@
 import assert from 'node:assert/strict';
-import { XMLParser } from 'fast-xml-parser';
 import { describe, test } from 'vitest';
 import { decode as decodeCoverageDiff } from '../scripts/coverage-diff';
 import { CATEGORIES } from '../src/lib/areas';
 import {
   coverageJson,
   dataFiles,
-  feedXml,
   graphJson,
   ORIGIN,
   questionsJson,
@@ -147,68 +145,6 @@ describe('title shards, questions, graph', () => {
   });
 });
 
-describe('feed.xml', () => {
-  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@', isArray: (n) => n === 'entry' });
-  const parse = (xml: string) => parser.parse(xml).feed as { entry: Array<Record<string, string>>; updated: string };
-  const build = new Date('2026-10-15T12:00:00Z');
-
-  test('is well-formed Atom with the build date as feed update time', () => {
-    const f = parse(feedXml(siteOf([entry(1), entry(2)], { buildDate: build })));
-    assert.equal(f.updated, '2026-10-15T12:00:00.000Z');
-    assert.equal(f.entry.length, 2);
-  });
-
-  test('the 30 newest RFCs, newest first; summary is the first abstract paragraph or the title', () => {
-    const many = Array.from({ length: 35 }, (_, i) =>
-      entry(i + 1, { year: 1960 + i, abstract: i === 34 ? 'First para & <b>.\n\nSecond.' : null }),
-    );
-    const f = parse(feedXml(siteOf(many, { buildDate: build })));
-    assert.equal(f.entry.length, 30);
-    const first = f.entry[0] as Record<string, string>;
-    assert.equal(first.title, 'RFC 35: Title of RFC 35');
-    assert.equal(first.summary, 'First para & <b>.');
-    assert.equal(first.id, `${ORIGIN}/35/`);
-    assert.equal(f.entry[1]?.summary, 'Title of RFC 34');
-  });
-
-  test('titles and summaries are XML-escaped', () => {
-    const xml = feedXml(siteOf([entry(1, { title: 'A & B <C> "D" \'E\'' })], { buildDate: build }));
-    assert.ok(xml.includes('A &amp; B &lt;C&gt; &quot;D&quot; &#39;E&#39;'), xml);
-    assert.doesNotThrow(() => parse(xml));
-  });
-
-  test('recent summary/explainer/interactive pages get their own entry; old, future, index-tier and invalid ones do not', () => {
-    const s = siteOf(
-      [1, 2, 3, 4, 5, 6, 7].map((n) => entry(n, { year: 1990 })),
-      {
-        buildDate: build,
-        contents: [
-          { number: 1, summary: '<p>x</p>', updated: '2026-10-01' },
-          { number: 2, sections: [{ id: 'a' }], updated: '2026-08-01' },
-          { number: 3, viz: [{ type: 'sequence-sim' }], updated: '2026-10-15' },
-          { number: 4, summary: '<p>x</p>', updated: '2026-06-01' }, // older than 90 days
-          { number: 5, summary: '<p>x</p>', updated: '2026-12-01' }, // in the future
-          { number: 6, summary: '<p>x</p>', updated: 'not a date' },
-          { number: 7, updated: '2026-10-01' }, // index tier
-        ],
-      },
-    );
-    const f = parse(feedXml(s));
-    const updates = f.entry.filter((e) => /now has/.test(e.title ?? ''));
-    assert.deepEqual(
-      updates.map((e) => e.title),
-      ['RFC 3 now has a interactive explainer', 'RFC 1 now has a summary', 'RFC 2 now has a full explainer'],
-    );
-    assert.equal(updates[1]?.id, `${ORIGIN}/1/#summary-2026-10-01`);
-  });
-
-  test('at most 60 entries', () => {
-    const many = Array.from({ length: 80 }, (_, i) => entry(i + 1, { year: 2026, month: 1 }));
-    const contents = many.map((e) => ({ number: e.number, summary: '<p>x</p>', updated: '2026-10-10' }));
-    assert.equal(parse(feedXml(siteOf(many, { buildDate: build, contents }))).entry.length, 60);
-  });
-});
-
 describe('sitemap, robots, redirects', () => {
   test('sitemap urls: static pages, each RFC, areas and journeys; "/" first then natural order', () => {
     const s = siteOf([entry(10), entry(2), entry(100)], { journeys: [{ slug: 'trip', title: 'T', steps: [] }] });
@@ -216,6 +152,7 @@ describe('sitemap, robots, redirects', () => {
     assert.equal(urls[0], '/');
     assert.ok(urls.indexOf('/2/') < urls.indexOf('/10/') && urls.indexOf('/10/') < urls.indexOf('/100/'), 'numeric-aware order');
     assert.ok(urls.includes('/journeys/trip/') && urls.includes('/areas/dns/') && urls.includes('/graph/'));
+    assert.ok(!urls.includes('/contribute/') && !urls.includes('/coverage/'));
     assert.equal(new Set(urls).size, urls.length);
   });
 

@@ -82,6 +82,12 @@ test.describe('404 handling', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'No page here' })).toBeVisible();
   });
 
+  for (const p of ['/contribute/', '/contribute/question/', '/coverage/', '/feed.xml']) {
+    test(`removed surface ${p} is a 404`, async ({ request }) => {
+      expect((await request.get(p, noFollow)).status()).toBe(404);
+    });
+  }
+
   test('/not-found/ is not a page (only 404.html exists)', async ({ request }) => {
     expect((await request.get('/not-found/', noFollow)).status()).toBe(404);
   });

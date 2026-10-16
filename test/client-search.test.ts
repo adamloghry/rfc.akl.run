@@ -280,24 +280,15 @@ describe('questions and full text', () => {
 });
 
 describe('empty state', () => {
-  test('a miss longer than two characters offers to suggest the question', async () => {
+  test('a miss longer than two characters shows a plain message with no links', async () => {
     stubFetch(routes);
     dispose = init();
     await search(header(), 'zzzzqqq');
     const empty = el('.search-empty', popOf(header()));
     expect(empty.hidden).toBe(false);
-    expect(empty.textContent).toContain('No matching RFC or question');
-    const a = el<HTMLAnchorElement>('a', empty);
-    expect(a.textContent).toBe('suggest this question');
-    expect(a.href).toContain('issues/new?template=question.yml&title=zzzzqqq');
+    expect(empty.textContent).toBe('No matching RFC or question. Try a protocol name or a number.');
+    expect(empty.querySelector('a')).toBeNull();
     expect(rows(header()).length).toBe(0);
-  });
-
-  test('the suggestion link encodes the query', async () => {
-    stubFetch(routes);
-    dispose = init();
-    await search(header(), 'qqq & zzz?');
-    expect(el<HTMLAnchorElement>('.search-empty a', popOf(header())).href).toContain('title=qqq%20%26%20zzz%3F');
   });
 
   test('a miss of one or two characters just closes the popup', async () => {

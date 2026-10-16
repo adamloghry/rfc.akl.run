@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { test } from 'vitest';
-import { checkDist, headersRuleStats, parseJsonc, redirectsSyntaxErrors } from '../scripts/check-dist';
+import { checkDist, forbiddenStrings, headersRuleStats, parseJsonc, redirectsSyntaxErrors } from '../scripts/check-dist';
 
 const zlibGz = (str: string) => zlib.gzipSync(str, { level: 6 }).length;
 
@@ -43,6 +43,25 @@ test('clean dist has 0 errors', () => {
   const r = checkDist(d);
   assert.deepEqual(r.errors, []);
   assert.equal(r.stats.pages, 4); // 2 pages + the two 404 pages
+});
+
+test('forbidden strings in built HTML: github (any case), Contribute, Request an explainer, feed.xml', () => {
+  assert.deepEqual(forbiddenStrings('<p>plain text about RFCs</p>'), []);
+  assert.deepEqual(forbiddenStrings('<a href="https://GitHub.com/x">x</a>'), ['github']);
+  // official RFC Editor text: exempt on RFC 8874/8875/6749, and the two official titles anywhere
+  assert.deepEqual(forbiddenStrings('<h1>Working Group GitHub Usage Guidance</h1>', '8874/index.html'), []);
+  assert.deepEqual(forbiddenStrings('<li>RFC 8875 Working Group GitHub Administration</li>', 'areas/meta/index.html'), []);
+  assert.deepEqual(forbiddenStrings('<p>"Sign in with Google/GitHub/Facebook"</p>', 'areas/security/index.html'), []);
+  assert.deepEqual(forbiddenStrings('<p>Use GitHub today</p>', '1/index.html'), ['github']);
+  assert.deepEqual(forbiddenStrings('<a href="https://github.com/x">x</a>', '8874/index.html'), ['github']);
+  assert.deepEqual(forbiddenStrings('<a href="/contribute/">Contribute an explainer</a>'), ['Contribute']);
+  assert.deepEqual(forbiddenStrings('<a href="/x/">Contribute</a>'), ['Contribute']);
+  assert.deepEqual(forbiddenStrings('<h1>RFC 6417 — How to Contribute Research Results</h1>'), []);
+  assert.deepEqual(forbiddenStrings('Request an explainer'), ['Request an explainer']);
+  assert.deepEqual(forbiddenStrings('<link href="/feed.xml">'), ['feed.xml']);
+  const d = dist({ '1/index.html': page('<a href="https://github.com/a/b">src</a>'), '2/index.html': page('ok') });
+  const r = checkDist(d);
+  assert.deepEqual(r.errors, ['1/index.html: contains forbidden string "github"']);
 });
 
 test('budgets: index-tier page over 8 KB gz is an error', () => {

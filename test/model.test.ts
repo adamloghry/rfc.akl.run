@@ -178,16 +178,6 @@ test('isNew: within 30 days, last day of month when day is null', () => {
   assert.equal(must(mk(new Date('1997-03-10T00:00:00Z')).get(2131)).isNew, true);
 });
 
-test('newest: 10 most recent by date desc then number desc', () => {
-  const s = site();
-  assert.equal(s.newest[0].number, 5952);
-  assert.deepEqual(
-    s.newest.slice(1, 3).map((r) => r.number),
-    [2132, 2131],
-  );
-  assert.equal(s.newest.length, 10);
-});
-
 test('mentionedIn: content references and links', () => {
   const s = site();
   assert.ok(must(s.rfcs.get(826)).mentionedIn.includes(903));
@@ -256,7 +246,6 @@ test('priority monotonic and multipliers', () => {
   assert.ok(priority.score({ ...base, updatedBy: [1, 2] }, s, 0) > p0);
   assert.ok(priority.score({ ...base, mentionedIn: [1, 2, 3] }, s, 0) > p0);
   assert.ok(priority.score(base, s, 5000) > p0);
-  assert.ok(priority.score({ ...base, demand: 10 }, s, 0) > p0);
   const dead = priority.score({ ...base, obsoletedBy: [9999] }, s, 0);
   assert.equal(dead, Math.round(p0 * 0.3 * 100) / 100);
   const reg = priority.score({ ...base, title: 'IANA Registry for Foo' }, s, 0);
@@ -265,7 +254,7 @@ test('priority monotonic and multipliers', () => {
 
 test('priority: exact value for a known case', () => {
   const s = site();
-  const r = { ...must(s.rfcs.get(903)), mentionedIn: [], updatedBy: [], obsoletes: [], demand: 0 };
+  const r = { ...must(s.rfcs.get(903)), mentionedIn: [], updatedBy: [], obsoletes: [] };
   // internet-standard 4 + STD 3 ; stream IETF but old
   assert.equal(priority.score(r, s, 0), 7);
 });

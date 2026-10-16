@@ -52,6 +52,33 @@ function walk(dir: string, rel: string, out: string[]): string[] {
   return out;
 }
 
+/** Strings that must never appear in built HTML (site policy: no GitHub, no contribution or feed surfaces). */
+export const FORBIDDEN: { label: string; re: RegExp }[] = [
+  // links to GitHub and the project's own repository are forbidden everywhere
+  { label: 'github', re: /github\.com|adamloghry\/rfc/i },
+  // RFC titles such as "How to Contribute Research Results" are legitimate, so only the site's own link is matched
+  { label: 'Contribute', re: /Contribute an explainer|>\s*Contribute\s*<|href="[^"]*\/contribute\// },
+  { label: 'Request an explainer', re: /Request an explainer/ },
+  { label: 'feed.xml', re: /feed\.xml/ },
+];
+
+/**
+ * Official RFC Editor text may name GitHub: RFC 8874 and 8875 (their titles and abstracts), and RFC 6749's
+ * hand-written tagline. Their own pages are exempt from the bare-word rule, and the two official titles and
+ * the 6749 tagline are ignored where other pages list them.
+ */
+const BARE_WORD_EXEMPT_PAGES = new Set(['8874/index.html', '8875/index.html', '6749/index.html']);
+const OFFICIAL_TITLES = /Working Group GitHub (?:Usage Guidance|Administration)|Sign in with Google\/GitHub\/Facebook/g;
+
+/** Labels of the forbidden strings found in a page's HTML (`rel` is the page path within dist/, when known). */
+export function forbiddenStrings(html: string, rel = ''): string[] {
+  const found = FORBIDDEN.filter((f) => f.re.test(html)).map((f) => f.label);
+  if (!BARE_WORD_EXEMPT_PAGES.has(rel) && /github/i.test(html.replace(OFFICIAL_TITLES, ''))) {
+    if (!found.includes('github')) found.unshift('github');
+  }
+  return found;
+}
+
 /** Strip // and /* *\/ comments and trailing commas from JSONC, leaving string contents alone. */
 export function parseJsonc(text: string): any {
   let out = '';
@@ -266,6 +293,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
         }
       }
     }
+    for (const label of forbiddenStrings(html, rel)) errors.push(`${rel}: contains forbidden string "${label}"`);
     const pageUrl = rel === 'index.html' ? '/' : `/${rel.replace(/index\.html$/, '')}`;
     const broken = new Map(); // message -> count
     const bump = (m: string) => broken.set(m, (broken.get(m) || 0) + 1);

@@ -45,6 +45,13 @@ test('abstract paragraphs joined, whitespace collapsed', () => {
   assert.ok(r.abstract && !/\s{3,}/.test(r.abstract));
 });
 
+test('titles and abstracts are kept verbatim, including the word GitHub', () => {
+  const xml = `<rfc-index xmlns="https://www.rfc-editor.org/rfc-index"><rfc-entry><doc-id>RFC8874</doc-id><title>WG GitHub Usage</title><date><month>August</month><year>2020</year></date><abstract><p>Use GitHub.</p></abstract><current-status>INFORMATIONAL</current-status></rfc-entry></rfc-index>`;
+  const e = parseIndex(xml).entries.get(8874);
+  assert.equal(e?.title, 'WG GitHub Usage');
+  assert.equal(e?.abstract, 'Use GitHub.');
+});
+
 test('status kept raw', () => {
   assert.strictEqual(get(5952).status, 'PROPOSED STANDARD');
 });

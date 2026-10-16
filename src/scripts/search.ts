@@ -188,11 +188,7 @@ function attach(input: SearchInput, ids: { n: number }, data: Loader, off: Retur
         return;
       }
       empty.hidden = false;
-      empty.appendChild(document.createTextNode('No matching RFC or question. Try a protocol name or a number, or '));
-      const a = make('a', null, 'suggest this question');
-      a.href = `https://github.com/adamloghry/rfc.akl.run/issues/new?template=question.yml&title=${encodeURIComponent(q)}`;
-      empty.appendChild(a);
-      empty.appendChild(document.createTextNode('.'));
+      empty.appendChild(document.createTextNode('No matching RFC or question. Try a protocol name or a number.'));
     } else {
       items.forEach((it, i) => {
         const a = make('a', 'search-row');

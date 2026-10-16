@@ -1,24 +1,16 @@
 /**
  * Builders for the non-page files in dist/: coverage.json, titles shards, graph.json,
- * questions.json, feed.xml, sitemap.xml, robots.txt. Astro endpoints call these.
+ * questions.json, sitemap.xml, robots.txt. Astro endpoints call these.
  */
 import { createHash } from 'node:crypto';
-import { byDate, pubDate } from './graph';
 import type { Site } from './model';
 import { buildSearchIndex } from './search-index';
 
 export const ORIGIN = 'https://rfc.akl.run';
 export const STATE: Record<string, number> = { 'not-issued': 0, reserved: 1, index: 2, summary: 3, explainer: 4, interactive: 5 };
-const TIER_NOUN: Record<string, string> = { summary: 'summary', explainer: 'full explainer', interactive: 'interactive explainer' };
-const DAY = 86400000;
 
 export function xmlEsc(s: unknown): string {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-/** HTML-escape for text/attribute context (also escapes '). */
-function esc(s: unknown): string {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 }
 
 export function coverageJson(site: Site): string {
@@ -99,60 +91,9 @@ export function dataFiles(site: Site): Record<string, string> {
   return files;
 }
 
-export function feedXml(site: Site): string {
-  const entries: { id: string; title: string; href: string; date: Date; summary: string }[] = [];
-  const newest = [...site.rfcs.values()].sort((a, b) => byDate(b, a)).slice(0, 30);
-  for (const r of newest) {
-    entries.push({
-      id: `${ORIGIN}${r.url}`,
-      title: `RFC ${r.number}: ${r.title}`,
-      href: `${ORIGIN}${r.url}`,
-      date: pubDate(r),
-      summary: r.abstract ? r.abstract.split('\n\n')[0] : r.title,
-    });
-  }
-  for (const r of site.rfcs.values()) {
-    const upd = r.content?.updated;
-    if (!upd || r.tier === 'index') continue;
-    const d = new Date(upd);
-    if (Number.isNaN(d.getTime())) continue;
-    const age = (site.buildDate.getTime() - d.getTime()) / DAY;
-    if (age < 0 || age > 90) continue;
-    entries.push({
-      id: `${ORIGIN}${r.url}#${r.tier}-${upd}`,
-      title: `RFC ${r.number} now has a ${TIER_NOUN[r.tier]}`,
-      href: `${ORIGIN}${r.url}`,
-      date: d,
-      summary: r.title,
-    });
-  }
-  entries.sort((a, b) => b.date.getTime() - a.date.getTime() || a.id.localeCompare(b.id));
-  const list = entries.slice(0, 60);
-  return `<?xml version="1.0" encoding="utf-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-<title>rfc.akl.run: new RFCs and explainers</title>
-<link href="${ORIGIN}/feed.xml" rel="self"/>
-<link href="${ORIGIN}/"/>
-<id>${ORIGIN}/</id>
-<updated>${site.buildDate.toISOString()}</updated>
-${list
-  .map(
-    (e) => `<entry>
-<title>${esc(e.title)}</title>
-<link href="${esc(e.href)}"/>
-<id>${esc(e.id)}</id>
-<updated>${e.date.toISOString()}</updated>
-<summary>${esc(e.summary)}</summary>
-</entry>`,
-  )
-  .join('\n')}
-</feed>
-`;
-}
-
 /** Sitemap URL paths: '/', every issued RFC, area pages, static pages and journeys; numeric-aware order. */
 export function sitemapUrls(site: Site): string[] {
-  const urls = new Set<string>(['/', '/areas/', '/contribute/', '/coverage/', '/glossary/', '/graph/', '/journeys/']);
+  const urls = new Set<string>(['/', '/areas/', '/glossary/', '/graph/', '/journeys/']);
   for (const n of site.rfcs.keys()) urls.add(`/${n}/`);
   for (const c of site.categories) urls.add(`/areas/${c.key}/`);
   for (const j of site.journeys) urls.add(`/journeys/${j.slug}/`);

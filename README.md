@@ -4,18 +4,9 @@ A statically generated explainer site for the Internet's RFCs. Every RFC number 
 
 The nightly build refreshes the committed RFC Editor index snapshot (`data/rfc-index.xml`), merges it with the hand-written JSON in `content/`, and renders about 10,000 RFC pages (plus a static search index) into `dist/` in under a minute with Astro 7.
 
-## The coverage ladder
+## Page tiers
 
-Every RFC climbs the same ladder, and each page states its own level.
-
-| Level | What the page has | How it gets there |
-|---|---|---|
-| Index | Title, authors, status, abstract, lineage, backlinks, prev/next | Automatic, from the RFC Editor index |
-| Summary | Plain-language summary, ELI5 paragraph, area, curated questions | One small JSON file in `content/rfcs/` |
-| Explainer | Sections, glossary terms, at least one diagram, references | Larger reviewed JSON file |
-| Interactive | Packet inspector or sequence simulator from the viz library | `viz` blocks in the same JSON file |
-
-`/coverage/` is the public progress report.
+Every RFC page states its own tier: **Index** (title, authors, status, abstract, lineage; generated from the RFC Editor index), **Summary** (plain-language summary and ELI5 from a small JSON file in `content/rfcs/`), **Explainer** (sections, glossary terms, diagrams) and **Interactive** (packet inspector or sequence simulator from the viz library).
 
 ## Local development
 
@@ -37,7 +28,7 @@ Other commands:
 | `npm test` | Vitest: unit tests, happy-dom client-script tests and Astro component tests (Container API) |
 | `npm run test:coverage` | `npm test` with v8 coverage over `src/lib/**` and `src/scripts/**`; fails below the thresholds in `vitest.config.ts` |
 | `npm run lint` | Content lint (Zod schemas, cross-references, viz rendering and anchors, permalink lock, HTML sanitizer). `--only <file>` lints specific files |
-| `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), that `404.html`, `404/index.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), the Cloudflare file-count limit and `_redirects` rule limits |
+| `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), forbidden strings in built HTML (GitHub, Contribute, "Request an explainer", feed.xml), that `404.html`, `404/index.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), the Cloudflare file-count limit and `_redirects` rule limits |
 | `npm run check:types` | `astro check` (TypeScript and Astro diagnostics) |
 | `npm run parity` | Dev tool: structural comparison of `dist/` pages against a golden directory (see below) |
 | `npm run test:e2e` | Playwright (desktop and 390px mobile) against `wrangler dev --local` serving `dist/` (build first) |
@@ -94,13 +85,13 @@ node --import tsx scripts/parity.ts [paths...] [--golden .work/golden] [--dist d
 
 The golden directory defaults to `.work/golden` (git-ignored).
 
-## Content authoring
+## Content
 
 Content lives in `content/` as JSON and is loaded through Astro content collections (`src/content.config.ts`: `rfcs`, `journeys`, `glossary`). Every file is validated at build time with the Zod schemas in `src/lib/schemas.ts`, which are the source of truth for the shape (the same schemas power `npm run lint`). A bad file fails the build with the collection, id and field path.
 
 - RFC files: `content/rfcs/<n>.json` (plain number, e.g. `content/rfcs/903.json`; no zero-padding). Start from an existing file of similar level.
 - Journeys: `content/journeys/<slug>.json`. Glossary terms: `content/glossary/<term-id>.json`.
-- Optional signals: `content/signals/demand.json` (written by CI from `explainer-request` issues) and `traffic.json`.
+- Optional signal: `content/signals/traffic.json` (per-RFC traffic counts that feed the priority score).
 - **Permalink lock:** section ids become URL anchors (`/903/#how-it-works`). `content/section-ids.lock.json` records every published id, and lint fails if one disappears. After adding sections, run `node --import tsx scripts/lint-content.ts --update-lock` and commit the lock. Never rename a published id.
 - **Sanitizer:** every HTML field (`summary`, `today`, `eli5`, section `content`/`eli5`, glossary `definition`) is checked against an allowlist of tags and attributes (`src/lib/sanitize-check.ts`). Both lint and the build run the check and fail on violations.
 - **Provenance policy:** LLM-drafted content is always labeled. A machine-drafted file carries `provenance.source = "llm-draft"` and `provenance.reviewedBy = null`, and its page shows "Draft · machine-assisted, not yet reviewed". A human must review the content against the RFC text before `reviewedBy` is set. Nothing is generated at request time.
@@ -112,7 +103,7 @@ content/              Hand-written JSON: rfcs/, journeys/, glossary/, signals/, 
 src/
   content.config.ts   Content collections (glob loaders + Zod schemas)
   pages/              Routes: [n].astro (every RFC), index (Atlas), areas/, journeys/, glossary/, graph/,
-                      coverage/, contribute/, not-found.astro (built to dist/404.html), data/ and feed/sitemap/robots endpoints
+                      not-found.astro (built to dist/404.html), data/ and sitemap/robots endpoints
   components/         Astro components: chrome/, rfc/, atlas/, viz/ (packet and sequence viewers, diagrams)
   layouts/            BaseLayout.astro
   lib/                Site model, RFC index loader, schemas, sanitizer, search index, data-file builders
@@ -120,7 +111,7 @@ src/
   scripts/            Browser scripts (theme, search, atlas, graph, packet, sim, reader)
   styles/             CSS
 scripts/              CLI tools run with node --import tsx: lint-content, check-dist, parity,
-                      fetch-demand, coverage-diff, import-summaries, merge-glossary, make-summary-batches
+                      coverage-diff, import-summaries, merge-glossary, make-summary-batches
 test/                 Vitest suites and fixtures
 e2e/                  Playwright specs (run against wrangler dev)
 docs/                 Design and build specs
@@ -136,7 +127,7 @@ Hosting is Cloudflare Workers static assets (free plan; details in [docs/cloudfl
 
 - `ci.yml` (pull requests and pushes to `trunk`): installs Nix, restores a store cache, runs `nix flake check -L`. That builds the site against the locked RFC index and runs every check, including e2e.
 - `preview.yml` (pull requests): `nix run .#preview-deploy -- --preview-alias pr-<n>` uploads a Worker version (not a deployment) and comments its URL on the PR. Skipped when the Cloudflare secrets are absent (fork PRs). Only this job has `pull-requests: write`.
-- `nightly.yml`: `nix develop -c npm ci`, `nix run .#refresh-index`, commits `data/rfc-index.xml` to trunk as `github-actions[bot]` when it changed (trunk only; the push must be allowed, see `docs/cloudflare.md`), fetches reader demand, builds and prints the coverage diff against the live site, runs `nix flake check -L`, then on `trunk` runs `nix run .#deploy` from that commit.
+- `nightly.yml`: `nix develop -c npm ci`, `nix run .#refresh-index`, commits `data/rfc-index.xml` to trunk as `github-actions[bot]` when it changed (trunk only; the push must be allowed, see `docs/cloudflare.md`), builds and prints the coverage diff against the live site, runs `nix flake check -L`, then on `trunk` runs `nix run .#deploy` from that commit.
 
 ### Why file count matters
 
@@ -157,6 +148,5 @@ The free plan allows 20,000 files per deployed version (100,000 on Paid) and 25 
 3. In the Cloudflare dashboard, Workers & Pages > `rfc-akl-run` > Settings > Domains & Routes: add the custom domain `rfc.akl.run` (and `www` if wanted, redirecting to the apex).
 4. **Disable any existing Cloudflare Git-integration build** for this repo that runs the old `wrangler deploy --assets=./site`; `site/` no longer exists and it will fail or deploy stale content. (Alternative: set its build command to `npm ci && npx astro build` and its deploy command to `npx wrangler deploy`. The recommended path is GitHub Actions only.)
 5. The Worker name `rfc-akl-run` matches the one the old site deployed to, so `wrangler deploy` updates it in place and an existing `rfc.akl.run` custom domain keeps working; nothing to migrate.
-6. Create the GitHub label `explainer-request` so `scripts/fetch-demand.ts` has something to read.
 
 RFC text is (c) IETF Trust; explanations are on rfc.akl.run.

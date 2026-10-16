@@ -27,7 +27,7 @@ export function score(rfc: RfcRecord, site?: { buildDate?: Date }, traffic = 0):
     ((rfc.isAlso || []).some((x) => /^STD/i.test(x)) ? 3 : 0);
   const age = (now.getTime() - pubDate(rfc).getTime()) / DAY;
   if (rfc.stream === 'IETF' && STANDARDS.has(rfc.status) && age >= 0 && age <= 365) p += 2;
-  p += 2 * lg(rfc.demand || 0) + Math.log2(1 + (traffic || 0) / 100);
+  p += Math.log2(1 + (traffic || 0) / 100);
   if (rfc.obsoletedBy.length > 0) p *= 0.3;
   if (BOILERPLATE.test(rfc.title)) p *= 0.2;
   return Math.round(p * 100) / 100;
