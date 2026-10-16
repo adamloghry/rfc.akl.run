@@ -1,350 +1,444 @@
-// @ts-nocheck
 // Sequence simulator client script; self-initializes on all matching figures.
-(function () {
-  'use strict';
+import { disposer, listen, onReady, qs, qsa, storageGet, storageSet } from './dom';
 
-  var LENSES = [['eli5', 'Like I’m 5'], ['std', 'Engineer'], ['orig', 'RFC text']];
-  var GLYPH = { client: '?', host: 'H', server: 'S', router: 'R' };
+type Lens = 'eli5' | 'std' | 'orig';
+type NodeKind = 'client' | 'host' | 'server' | 'router';
+type NodeStateInfo = { state?: string; label?: string };
 
-  function h(tag, cls, text) {
-    var e = document.createElement(tag);
-    if (cls) e.className = cls;
-    if (text !== undefined && text !== null) e.textContent = text;
-    return e;
-  }
-  function store(k, v) {
-    try {
-      if (v === undefined) return localStorage.getItem(k);
-      localStorage.setItem(k, v);
-    } catch (e) { /* storage unavailable */ }
+interface SimNode {
+  key: string;
+  label: string;
+  kind: NodeKind;
+  x: number;
+  failureX?: number;
+}
+interface SimRouter {
+  key: string;
+  label: string;
+  toggleLabel: string;
+  boundaryX: number;
+  boundaryLabel: string;
+  blockedThrough?: number;
+}
+interface SimStep {
+  tag?: string;
+  title: string;
+  eli5?: string;
+  spec?: string;
+  orig?: string;
+  why?: string;
+  packetTitle?: string;
+  packet?: Record<string, string | number | null | undefined>;
+  highlight?: string[];
+  nodes?: Record<string, NodeStateInfo>;
+  packetPos: number;
+  packetLabel?: string;
+  packetColor?: string;
+  packetOpacity?: number;
+}
+interface SimData {
+  title?: string;
+  packetTitle?: string;
+  nodes: SimNode[];
+  router?: SimRouter | null;
+  packetFields?: Array<{ key: string; name: string }>;
+  table?: { title: string; caption?: string; rows: string[][]; matchRow?: number; fromStep?: number };
+  steps: SimStep[];
+  failureSteps?: SimStep[];
+  replacedBy?: Array<{ number: number; label: string }>;
+  replacedNote?: string;
+}
+
+const LENSES: Array<[Lens, string]> = [
+  ['eli5', 'Like I’m 5'],
+  ['std', 'Engineer'],
+  ['orig', 'RFC text'],
+];
+const GLYPH: Record<string, string> = { client: '?', host: 'H', server: 'S', router: 'R' };
+
+function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string | null): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = text;
+  return e;
+}
+
+function button(cls: string, label?: string): HTMLButtonElement {
+  const b = h('button', cls, label);
+  b.type = 'button';
+  return b;
+}
+
+function parseData(el: Element): SimData | null {
+  try {
+    const d = JSON.parse(el.textContent ?? '') as SimData;
+    return d?.steps?.length ? d : null;
+  } catch {
     return null;
   }
+}
 
-  function setup(fig) {
-    var root = fig.querySelector('.sim');
-    var dataEl = fig.querySelector('script.sim-data');
-    if (!root || !dataEl) return;
-    var data;
-    try { data = JSON.parse(dataEl.textContent); } catch (e) { return; }
-    if (!data.steps || !data.steps.length) return;
+function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
+  const root = qs('.sim', fig);
+  const dataEl = qs('script.sim-data', fig);
+  if (!root || !dataEl) return;
+  const data = parseData(dataEl);
+  if (!data) return;
 
-    var rfc = root.getAttribute('data-rfc') || '';
-    var total = data.steps.length;
-    var router = data.router || null;
-    var fails = data.failureSteps || [];
-    var blockedThrough = router && typeof router.blockedThrough === 'number' ? router.blockedThrough : 2;
-    var state = { step: 0, router: false, lens: 'std' };
+  const rfc = root.getAttribute('data-rfc') || '';
+  const total = data.steps.length;
+  const router = data.router || null;
+  const fails = data.failureSteps || [];
+  const blockedThrough = router && typeof router.blockedThrough === 'number' ? router.blockedThrough : 2;
+  const state: { step: number; router: boolean; lens: Lens } = { step: 0, router: false, lens: 'std' };
 
-    var lens = store('rfc-lens');
-    if (lens !== 'eli5' && lens !== 'std' && lens !== 'orig') lens = store('rfc-level') === 'eli5' ? 'eli5' : 'std';
-    state.lens = lens;
+  const stored = storageGet('rfc-lens');
+  state.lens = stored === 'eli5' || stored === 'std' || stored === 'orig' ? stored : storageGet('rfc-level') === 'eli5' ? 'eli5' : 'std';
 
-    var mq = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
-    function applyMotion() { fig.classList.toggle('is-reduced', !!(mq && mq.matches)); }
-    applyMotion();
-    if (mq && mq.addEventListener) mq.addEventListener('change', applyMotion);
+  const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+  const applyMotion = (): void => {
+    fig.classList.toggle('is-reduced', !!mq?.matches);
+  };
+  applyMotion();
+  mq?.addEventListener?.('change', applyMotion);
 
-    // ---- build UI -------------------------------------------------------
-    var ui = h('div', 'sim-ui');
+  // ---- build UI -------------------------------------------------------
+  const ui = h('div', 'sim-ui');
 
-    // permalink chip in the figure caption bar
-    var chip = h('a', 'sim-permalink');
-    chip.addEventListener('click', function (e) { e.preventDefault(); });
-    var bar = fig.querySelector('.viz-cap-bar');
-    if (bar) bar.appendChild(chip);
+  // permalink chip in the figure caption bar
+  const chip = h('a', 'sim-permalink');
+  chip.addEventListener('click', (e) => e.preventDefault());
+  qs('.viz-cap-bar', fig)?.appendChild(chip);
 
-    // stage
-    var wrap = h('div', 'sim-stage-wrap');
-    var stage = h('div', 'sim-stage');
-    wrap.appendChild(stage);
-    var bus = h('div', 'sim-bus');
-    var bus2 = h('div', 'sim-bus2');
-    var boundary = h('div', 'sim-boundary');
-    var bLabel = h('span', 'sim-boundary-label', router ? router.boundaryLabel : '');
-    stage.appendChild(boundary); stage.appendChild(bLabel); stage.appendChild(bus); stage.appendChild(bus2);
+  // stage
+  const wrap = h('div', 'sim-stage-wrap');
+  const stage = h('div', 'sim-stage');
+  wrap.appendChild(stage);
+  const bus = h('div', 'sim-bus');
+  const bus2 = h('div', 'sim-bus2');
+  const boundary = h('div', 'sim-boundary');
+  const bLabel = h('span', 'sim-boundary-label', router ? router.boundaryLabel : '');
+  stage.append(boundary, bLabel, bus, bus2);
 
-    var nodeEls = {};
-    var nodeList = data.nodes.slice();
-    if (router) nodeList.push({ key: router.key, label: router.label, kind: 'router', x: router.boundaryX });
-    nodeList.forEach(function (n) {
-      var el = h('div', 'sim-node');
-      el.setAttribute('data-kind', n.kind);
-      var tile = h('div', 'sim-tile', GLYPH[n.kind] || '');
-      el.appendChild(tile);
-      el.appendChild(h('div', 'sim-stem'));
-      el.appendChild(h('span', 'sim-name', n.label));
-      var sub = h('span', 'sim-sub');
-      el.appendChild(sub);
-      stage.appendChild(el);
-      nodeEls[n.key] = { el: el, tile: tile, sub: sub, def: n };
+  type NodeEls = { el: HTMLElement; tile: HTMLElement; sub: HTMLElement; def: SimNode };
+  const nodeEls: Record<string, NodeEls> = {};
+  const nodeList: SimNode[] = data.nodes.slice();
+  if (router) nodeList.push({ key: router.key, label: router.label, kind: 'router', x: router.boundaryX });
+  for (const n of nodeList) {
+    const el = h('div', 'sim-node');
+    el.setAttribute('data-kind', n.kind);
+    const tile = h('div', 'sim-tile', GLYPH[n.kind] || '');
+    el.appendChild(tile);
+    el.appendChild(h('div', 'sim-stem'));
+    el.appendChild(h('span', 'sim-name', n.label));
+    const sub = h('span', 'sim-sub');
+    el.appendChild(sub);
+    stage.appendChild(el);
+    nodeEls[n.key] = { el, tile, sub, def: n };
+  }
+  const pkt = h('div', 'sim-packet');
+  const pill = h('div', 'sim-pill');
+  pkt.appendChild(pill);
+  stage.appendChild(pkt);
+  const xMark = h('div', 'sim-x', '✕');
+  xMark.setAttribute('aria-hidden', 'true');
+  stage.appendChild(xMark);
+
+  // controls
+  const controls = h('div', 'sim-controls');
+  const prev = button('sim-btn', '←');
+  prev.setAttribute('aria-label', 'Previous step');
+  const primary = button('sim-primary');
+  const segsEl = h('div', 'sim-segs');
+  const segs = data.steps.map((s, i) => {
+    const b = button('sim-seg');
+    b.setAttribute('aria-label', `Go to step ${i + 1}: ${s.title}`);
+    b.addEventListener('click', () => go(i));
+    segsEl.appendChild(b);
+    return b;
+  });
+  controls.append(prev, primary, segsEl);
+  let sw: HTMLButtonElement | null = null;
+  if (router && fails.length) {
+    sw = button('sim-switch');
+    sw.setAttribute('role', 'switch');
+    sw.setAttribute('aria-checked', 'false');
+    sw.appendChild(h('span', 'sim-track'));
+    sw.appendChild(h('span', '', router.toggleLabel));
+    sw.addEventListener('click', () => {
+      state.router = !state.router;
+      render();
     });
-    var pkt = h('div', 'sim-packet');
-    var pill = h('div', 'sim-pill');
-    pkt.appendChild(pill);
-    stage.appendChild(pkt);
-    var xMark = h('div', 'sim-x', '✕');
-    xMark.setAttribute('aria-hidden', 'true');
-    stage.appendChild(xMark);
+    controls.appendChild(sw);
+  }
+  prev.addEventListener('click', () => go(Math.max(0, state.step - 1)));
+  primary.addEventListener('click', () => go(state.step >= total - 1 ? 0 : state.step + 1));
+
+  // narrative + inspector
+  const lower = h('div', 'sim-lower');
+  const narr = h('div', 'sim-card sim-narr');
+  const top = h('div', 'sim-narr-top');
+  const eyebrow = h('span', 'sim-eyebrow');
+  const lensBox = h('div', 'sim-lens');
+  lensBox.setAttribute('role', 'group');
+  lensBox.setAttribute('aria-label', 'Explanation level');
+  const lensBtns = LENSES.map(([key, label]) => {
+    const b = button('', label);
+    b.setAttribute('data-lens', key);
+    b.addEventListener('click', () => {
+      state.lens = key;
+      storageSet('rfc-lens', key);
+      render();
+    });
+    lensBox.appendChild(b);
+    return b;
+  });
+  top.append(eyebrow, lensBox);
+  const title = h('h3', 'sim-step-title');
+  const eli5Body = h('p');
+  const stdBody = h('p');
+  const origText = document.createTextNode('');
+  const lensWraps: Record<Lens, HTMLElement> = {
+    eli5: h('div', 'sim-lensbody'),
+    std: h('div', 'sim-lensbody'),
+    orig: h('div', 'sim-lensbody'),
+  };
+  for (const k of ['eli5', 'std', 'orig'] as const) {
+    const d = lensWraps[k];
+    d.setAttribute('data-level', k);
+    if (k === 'orig') {
+      const box = h('div', 'sim-orig');
+      box.appendChild(origText);
+      box.appendChild(document.createElement('br'));
+      if (rfc) {
+        const a = h('a', '', `Read in RFC ${rfc} ↗`);
+        a.href = `https://www.rfc-editor.org/rfc/rfc${rfc}`;
+        box.appendChild(a);
+      }
+      d.appendChild(box);
+    } else d.appendChild(k === 'eli5' ? eli5Body : stdBody);
+    narr.appendChild(d);
+  }
+  // order: top, title, bodies, why
+  narr.insertBefore(title, narr.firstChild);
+  narr.insertBefore(top, narr.firstChild);
+  const whyRow = h('div', 'sim-whyrow');
+  whyRow.appendChild(h('span', 'sim-whybadge', 'WHY'));
+  const whyText = h('span', 'sim-whytext');
+  whyRow.appendChild(whyText);
+  narr.appendChild(whyRow);
+
+  const insp = h('div', 'sim-card sim-insp');
+  const inspH = h('div', 'sim-insp-h');
+  inspH.appendChild(h('b', '', 'Packet on the wire'));
+  const inspTitle = h('span');
+  inspH.appendChild(inspTitle);
+  const rowsEl = h('div', 'sim-rows');
+  const rowEls = (data.packetFields || []).map((f) => {
+    const r = h('div', 'sim-row');
+    const v = h('span', 'v');
+    r.append(h('span', 'k', f.key.toUpperCase()), h('span', 'n', f.name), v);
+    rowsEl.appendChild(r);
+    return { key: f.key, el: r, v };
+  });
+  insp.appendChild(inspH);
+  insp.appendChild(rowsEl);
+  insp.appendChild(h('span', 'sim-foot', 'Highlighted fields matter in this step.'));
+  lower.append(narr, insp);
+
+  // lookup table + replaced
+  let lower2: HTMLElement | null = null;
+  const lookupRows: HTMLElement[] = [];
+  const table = data.table;
+  if (table || data.replacedBy?.length) {
+    lower2 = h('div', 'sim-lower2');
+    if (table) {
+      const lk = h('div', 'sim-card sim-lookup');
+      const lh = h('div', 'sim-lookup-h');
+      lh.appendChild(h('b', '', table.title));
+      if (table.caption) lh.appendChild(h('span', '', table.caption));
+      const lb = h('div', 'sim-lookup-b');
+      lb.setAttribute('role', 'table');
+      lb.setAttribute('aria-label', table.title);
+      for (const row of table.rows) {
+        const r = h('div', 'sim-lrow');
+        r.setAttribute('role', 'row');
+        for (const c of row) {
+          const s = h('span', '', c);
+          s.setAttribute('role', 'cell');
+          r.appendChild(s);
+        }
+        lb.appendChild(r);
+        lookupRows.push(r);
+      }
+      lk.append(lh, lb);
+      lower2.appendChild(lk);
+    } else {
+      lower2.className += ' is-single';
+    }
+    if (data.replacedBy?.length) {
+      const rc = h('div', 'sim-card sim-replaced-card');
+      rc.appendChild(h('b', '', 'What replaced it'));
+      for (const r of data.replacedBy) {
+        const a = h('a', 'sim-rep');
+        a.href = `/${r.number}/`;
+        a.append(h('span', '', r.label), h('span', '', `RFC ${r.number}`));
+        rc.appendChild(a);
+      }
+      if (data.replacedNote) rc.appendChild(h('p', '', data.replacedNote));
+      lower2.appendChild(rc);
+    }
+  }
+
+  ui.append(wrap, controls, lower);
+  if (lower2) ui.appendChild(lower2);
+  root.appendChild(ui);
+  // keep the <ol> fallback for screen readers only
+  const fb = qs('.sim-fallback', root);
+  if (fb) {
+    fb.classList.add('visually-hidden');
+    // no invisible tab stops: the visible UI has its own replaced-by links
+    for (const r of qsa('.sim-replaced', fb)) {
+      r.setAttribute('inert', '');
+      r.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  // ---- render ---------------------------------------------------------
+  function current(): { s: SimStep; fail: boolean } {
+    const fail = state.router && fails.length > 0 && state.step >= 1;
+    const s = (fail ? fails[Math.min(state.step - 1, fails.length - 1)] : data?.steps[state.step]) as SimStep;
+    return { s, fail };
+  }
+
+  function render(): void {
+    const c = current();
+    const s = c.s;
+    const i = state.step;
+    chip.textContent = `rfc.akl.run/${rfc}/#step-${i + 1}`;
+    chip.href = `#step-${i + 1}`;
+
+    // bus + boundary
+    const rd = state.router ? '' : 'none';
+    boundary.style.display = rd;
+    bLabel.style.display = rd;
+    bus2.style.display = rd;
+    if (router) {
+      boundary.style.left = `${router.boundaryX}%`;
+      bLabel.style.left = `${router.boundaryX + 1}%`;
+      bus2.style.left = `${router.boundaryX + 3}%`;
+    }
+    bus.style.right = state.router && router ? `${100 - router.boundaryX}%` : '5%';
+
+    // nodes
+    let routerLabel = '';
+    for (const f of fails) if (!routerLabel && router && f.nodes?.[router.key]) routerLabel = f.nodes[router.key]?.label || '';
+    for (const k of Object.keys(nodeEls)) {
+      const n = nodeEls[k] as NodeEls;
+      const def = n.def;
+      const isRouter = !!router && k === router.key;
+      const st: NodeStateInfo = s.nodes?.[k] || (isRouter ? { state: 'idle', label: routerLabel } : { state: 'idle', label: '' });
+      n.el.style.display = !isRouter || state.router ? '' : 'none';
+      let x = def.x;
+      if (state.router && def.failureX !== undefined) x = def.failureX;
+      n.el.style.left = `${x}%`;
+      n.el.setAttribute('data-state', st.state || 'idle');
+      n.sub.textContent = st.label || '';
+      let g = GLYPH[def.kind] || '';
+      if (def.kind === 'client' && st.state === 'done') g = '✓';
+      if (def.kind === 'host' && st.state === 'ignores') g = '–';
+      n.tile.textContent = g;
+    }
+
+    // packet
+    const held = c.fail && i > blockedThrough;
+    const shown = !!s.packetLabel && !held;
+    pkt.style.left = `${s.packetPos}%`;
+    pkt.style.opacity = String(shown ? (s.packetOpacity !== undefined ? s.packetOpacity : 1) : 0);
+    pkt.style.setProperty('--c', `var(--sim-${s.packetColor || 'cyan'})`);
+    pill.style.setProperty('--c', `var(--sim-${s.packetColor || 'cyan'})`);
+    if (s.packetLabel) pill.textContent = s.packetLabel;
+    const dropped = c.fail && router && s.nodes?.[router.key]?.state === 'dropped' && i <= blockedThrough;
+    xMark.style.display = dropped ? '' : 'none';
+    if (router) xMark.style.left = `${router.boundaryX}%`;
 
     // controls
-    var controls = h('div', 'sim-controls');
-    var prev = h('button', 'sim-btn', '←');
-    prev.type = 'button'; prev.setAttribute('aria-label', 'Previous step');
-    var primary = h('button', 'sim-primary');
-    primary.type = 'button';
-    var segsEl = h('div', 'sim-segs');
-    var segs = data.steps.map(function (s, i) {
-      var b = h('button', 'sim-seg');
-      b.type = 'button';
-      b.setAttribute('aria-label', 'Go to step ' + (i + 1) + ': ' + s.title);
-      b.addEventListener('click', function () { go(i); });
-      segsEl.appendChild(b);
-      return b;
+    prev.disabled = i === 0;
+    primary.textContent = i === 0 ? 'Play step 1 →' : i >= total - 1 ? 'Restart' : 'Next step →';
+    segs.forEach((b, k) => {
+      b.classList.toggle('is-on', k <= i);
+      b.classList.toggle('is-fail', k <= i && c.fail && k >= 1);
+      if (k === i) b.setAttribute('aria-current', 'step');
+      else b.removeAttribute('aria-current');
     });
-    controls.appendChild(prev); controls.appendChild(primary); controls.appendChild(segsEl);
-    var sw = null;
-    if (router && fails.length) {
-      sw = h('button', 'sim-switch');
-      sw.type = 'button'; sw.setAttribute('role', 'switch'); sw.setAttribute('aria-checked', 'false');
-      sw.appendChild(h('span', 'sim-track'));
-      sw.appendChild(h('span', '', router.toggleLabel));
-      sw.addEventListener('click', function () { state.router = !state.router; render(); });
-      controls.appendChild(sw);
-    }
-    prev.addEventListener('click', function () { go(Math.max(0, state.step - 1)); });
-    primary.addEventListener('click', function () { go(state.step >= total - 1 ? 0 : state.step + 1); });
+    sw?.setAttribute('aria-checked', state.router ? 'true' : 'false');
 
-    // narrative + inspector
-    var lower = h('div', 'sim-lower');
-    var narr = h('div', 'sim-card sim-narr');
-    var top = h('div', 'sim-narr-top');
-    var eyebrow = h('span', 'sim-eyebrow');
-    var lensBox = h('div', 'sim-lens');
-    lensBox.setAttribute('role', 'group'); lensBox.setAttribute('aria-label', 'Explanation level');
-    var lensBtns = LENSES.map(function (l) {
-      var b = h('button', '', l[1]);
-      b.type = 'button'; b.setAttribute('data-lens', l[0]);
-      b.addEventListener('click', function () { state.lens = l[0]; store('rfc-lens', l[0]); render(); });
-      lensBox.appendChild(b);
-      return b;
-    });
-    top.appendChild(eyebrow); top.appendChild(lensBox);
-    var title = h('h3', 'sim-step-title');
-    var body = {};
-    ['eli5', 'std', 'orig'].forEach(function (k) {
-      var d = h('div', 'sim-lensbody'); d.setAttribute('data-level', k);
-      if (k === 'orig') {
-        var box = h('div', 'sim-orig');
-        body.origText = document.createTextNode('');
-        box.appendChild(body.origText);
-        box.appendChild(document.createElement('br'));
-        if (rfc) {
-          var a = h('a', '', 'Read in RFC ' + rfc + ' \u2197');
-          a.href = 'https://www.rfc-editor.org/rfc/rfc' + rfc;
-          box.appendChild(a);
-        }
-        d.appendChild(box);
-      } else {
-        body[k] = h('p'); d.appendChild(body[k]);
-      }
-      body[k + 'Wrap'] = d;
-      narr.appendChild(d);
-    });
-    // order: top, title, bodies, why
-    narr.insertBefore(title, narr.firstChild);
-    narr.insertBefore(top, narr.firstChild);
-    var whyRow = h('div', 'sim-whyrow');
-    whyRow.appendChild(h('span', 'sim-whybadge', 'WHY'));
-    var whyText = h('span', 'sim-whytext');
-    whyRow.appendChild(whyText);
-    narr.appendChild(whyRow);
+    // narrative
+    eyebrow.textContent = `step ${i + 1} of ${total}${s.tag ? ` · ${s.tag}` : ''}`;
+    title.textContent = s.title;
+    eli5Body.textContent = s.eli5 || '';
+    stdBody.textContent = s.spec || '';
+    origText.nodeValue = s.orig || '';
+    for (const k of ['eli5', 'std', 'orig'] as const) lensWraps[k].hidden = state.lens !== k;
+    for (const b of lensBtns) b.setAttribute('aria-pressed', b.getAttribute('data-lens') === state.lens ? 'true' : 'false');
+    whyText.textContent = s.why || '';
+    whyRow.hidden = !s.why;
 
-    var insp = h('div', 'sim-card sim-insp');
-    var inspH = h('div', 'sim-insp-h');
-    inspH.appendChild(h('b', '', 'Packet on the wire'));
-    var inspTitle = h('span');
-    inspH.appendChild(inspTitle);
-    var rowsEl = h('div', 'sim-rows');
-    var rowEls = (data.packetFields || []).map(function (f) {
-      var r = h('div', 'sim-row');
-      var k = h('span', 'k', f.key.toUpperCase());
-      var n = h('span', 'n', f.name);
-      var v = h('span', 'v');
-      r.appendChild(k); r.appendChild(n); r.appendChild(v);
-      rowsEl.appendChild(r);
-      return { key: f.key, el: r, v: v };
-    });
-    insp.appendChild(inspH); insp.appendChild(rowsEl);
-    insp.appendChild(h('span', 'sim-foot', 'Highlighted fields matter in this step.'));
-    lower.appendChild(narr); lower.appendChild(insp);
-
-    // lookup table + replaced
-    var lower2 = null;
-    var lookupRows = [];
-    if (data.table || (data.replacedBy && data.replacedBy.length)) {
-      lower2 = h('div', 'sim-lower2');
-      if (data.table) {
-        var lk = h('div', 'sim-card sim-lookup');
-        var lh = h('div', 'sim-lookup-h');
-        lh.appendChild(h('b', '', data.table.title));
-        if (data.table.caption) lh.appendChild(h('span', '', data.table.caption));
-        var lb = h('div', 'sim-lookup-b');
-        lb.setAttribute('role', 'table'); lb.setAttribute('aria-label', data.table.title);
-        data.table.rows.forEach(function (row) {
-          var r = h('div', 'sim-lrow'); r.setAttribute('role', 'row');
-          row.forEach(function (c) { var s = h('span', '', c); s.setAttribute('role', 'cell'); r.appendChild(s); });
-          lb.appendChild(r); lookupRows.push(r);
-        });
-        lk.appendChild(lh); lk.appendChild(lb);
-        lower2.appendChild(lk);
-      } else {
-        lower2.className += ' is-single';
-      }
-      if (data.replacedBy && data.replacedBy.length) {
-        var rc = h('div', 'sim-card sim-replaced-card');
-        rc.appendChild(h('b', '', 'What replaced it'));
-        data.replacedBy.forEach(function (r) {
-          var a = h('a', 'sim-rep');
-          a.href = '/' + r.number + '/';
-          a.appendChild(h('span', '', r.label));
-          a.appendChild(h('span', '', 'RFC ' + r.number));
-          rc.appendChild(a);
-        });
-        if (data.replacedNote) rc.appendChild(h('p', '', data.replacedNote));
-        lower2.appendChild(rc);
-      }
+    // inspector
+    inspTitle.textContent = s.packetTitle || data?.packetTitle || data?.title || '';
+    const hl = s.highlight || [];
+    for (const r of rowEls) {
+      const v = s.packet?.[r.key];
+      r.v.textContent = v === undefined || v === null ? '—' : String(v);
+      r.el.classList.toggle('is-hl', hl.includes(r.key));
     }
 
-    ui.appendChild(wrap); ui.appendChild(controls); ui.appendChild(lower);
-    if (lower2) ui.appendChild(lower2);
-    root.appendChild(ui);
-    // keep the <ol> fallback for screen readers only
-    var fb = root.querySelector('.sim-fallback');
-    if (fb) {
-      fb.classList.add('visually-hidden');
-      // no invisible tab stops: the visible UI has its own replaced-by links
-      Array.prototype.forEach.call(fb.querySelectorAll('.sim-replaced'), function (r) {
-        r.setAttribute('inert', '');
-        r.setAttribute('aria-hidden', 'true');
+    // lookup table
+    if (table) {
+      const on = !c.fail && i + 1 >= (table.fromStep || 1);
+      lookupRows.forEach((r, k) => {
+        r.classList.toggle('is-match', on && k === table.matchRow);
       });
     }
+  }
 
-    // ---- render ---------------------------------------------------------
-    function current() {
-      var fail = state.router && fails.length && state.step >= 1;
-      var s = fail ? fails[Math.min(state.step - 1, fails.length - 1)] : data.steps[state.step];
-      return { s: s, fail: !!fail };
-    }
-
-    function render() {
-      var c = current(), s = c.s, i = state.step;
-      chip.textContent = 'rfc.akl.run/' + rfc + '/#step-' + (i + 1);
-      chip.href = '#step-' + (i + 1);
-
-      // bus + boundary
-      var rd = state.router ? '' : 'none';
-      boundary.style.display = rd; bLabel.style.display = rd; bus2.style.display = rd;
-      if (router) {
-        boundary.style.left = router.boundaryX + '%';
-        bLabel.style.left = (router.boundaryX + 1) + '%';
-        bus2.style.left = (router.boundaryX + 3) + '%';
-      }
-      bus.style.right = state.router && router ? (100 - router.boundaryX) + '%' : '5%';
-
-      // nodes
-      var routerLabel = '';
-      fails.forEach(function (f) { if (!routerLabel && router && f.nodes && f.nodes[router.key]) routerLabel = f.nodes[router.key].label || ''; });
-      Object.keys(nodeEls).forEach(function (k) {
-        var n = nodeEls[k], def = n.def;
-        var st = (s.nodes && s.nodes[k]) || (router && k === router.key ? { state: 'idle', label: routerLabel } : { state: 'idle', label: '' });
-        var visible = !(router && k === router.key) || state.router;
-        n.el.style.display = visible ? '' : 'none';
-        var x = def.x;
-        if (state.router && def.failureX !== undefined) x = def.failureX;
-        n.el.style.left = x + '%';
-        n.el.setAttribute('data-state', st.state || 'idle');
-        n.sub.textContent = st.label || '';
-        var g = GLYPH[def.kind] || '';
-        if (def.kind === 'client' && st.state === 'done') g = '✓';
-        if (def.kind === 'host' && st.state === 'ignores') g = '–';
-        n.tile.textContent = g;
-      });
-
-      // packet
-      var held = c.fail && i > blockedThrough;
-      var shown = !!s.packetLabel && !held;
-      pkt.style.left = s.packetPos + '%';
-      pkt.style.opacity = shown ? (s.packetOpacity !== undefined ? s.packetOpacity : 1) : 0;
-      pkt.style.setProperty('--c', 'var(--sim-' + (s.packetColor || 'cyan') + ')');
-      pill.style.setProperty('--c', 'var(--sim-' + (s.packetColor || 'cyan') + ')');
-      if (s.packetLabel) pill.textContent = s.packetLabel;
-      var dropped = c.fail && router && s.nodes && s.nodes[router.key] && s.nodes[router.key].state === 'dropped' && i <= blockedThrough;
-      xMark.style.display = dropped ? '' : 'none';
-      if (router) xMark.style.left = router.boundaryX + '%';
-
-      // controls
-      prev.disabled = i === 0;
-      primary.textContent = i === 0 ? 'Play step 1 →' : i >= total - 1 ? 'Restart' : 'Next step →';
-      segs.forEach(function (b, k) {
-        b.classList.toggle('is-on', k <= i);
-        b.classList.toggle('is-fail', k <= i && c.fail && k >= 1);
-        if (k === i) b.setAttribute('aria-current', 'step'); else b.removeAttribute('aria-current');
-      });
-      if (sw) sw.setAttribute('aria-checked', state.router ? 'true' : 'false');
-
-      // narrative
-      eyebrow.textContent = 'step ' + (i + 1) + ' of ' + total + (s.tag ? ' · ' + s.tag : '');
-      title.textContent = s.title;
-      body.eli5.textContent = s.eli5 || '';
-      body.std.textContent = s.spec || '';
-      body.origText.nodeValue = s.orig || '';
-      ['eli5', 'std', 'orig'].forEach(function (k) { body[k + 'Wrap'].hidden = state.lens !== k; });
-      lensBtns.forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-lens') === state.lens ? 'true' : 'false'); });
-      whyText.textContent = s.why || '';
-      whyRow.hidden = !s.why;
-
-      // inspector
-      inspTitle.textContent = s.packetTitle || data.packetTitle || data.title || '';
-      var hl = s.highlight || [];
-      rowEls.forEach(function (r) {
-        var v = s.packet && s.packet[r.key];
-        r.v.textContent = v === undefined || v === null ? '—' : v;
-        r.el.classList.toggle('is-hl', hl.indexOf(r.key) >= 0);
-      });
-
-      // lookup table
-      if (data.table) {
-        var on = !c.fail && i + 1 >= (data.table.fromStep || 1);
-        lookupRows.forEach(function (r, k) { r.classList.toggle('is-match', on && k === data.table.matchRow); });
-      }
-    }
-
-    function go(i) {
-      state.step = Math.max(0, Math.min(total - 1, i));
-      render();
-      try { history.replaceState(null, '', '#step-' + (state.step + 1)); } catch (e) { /* ignore */ }
-    }
-
-    function fromHash() {
-      var m = /^#step-(\d+)$/.exec(location.hash || '');
-      if (!m) return false;
-      var n = parseInt(m[1], 10);
-      if (!(n >= 1)) return false;
-      state.step = Math.min(total - 1, n - 1);
-      return true;
-    }
-
-    var had = fromHash();
+  function go(i: number): void {
+    state.step = Math.max(0, Math.min(total - 1, i));
     render();
-    if (had) fig.scrollIntoView({ block: 'start' });
-    window.addEventListener('hashchange', function () { if (fromHash()) render(); });
+    try {
+      history.replaceState(null, '', `#step-${state.step + 1}`);
+    } catch {
+      /* ignore */
+    }
   }
 
-  function init() {
-    Array.prototype.forEach.call(document.querySelectorAll('figure[data-viz="sequence-sim"]'), setup);
+  function fromHash(): boolean {
+    const m = /^#step-(\d+)$/.exec(location.hash || '');
+    if (!m?.[1]) return false;
+    const n = Number.parseInt(m[1], 10);
+    if (!(n >= 1)) return false;
+    state.step = Math.min(total - 1, n - 1);
+    return true;
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-  else init();
-})();
-export {};
+  const had = fromHash();
+  render();
+  if (had) fig.scrollIntoView({ block: 'start' });
+  off.add(
+    listen(window, 'hashchange', () => {
+      if (fromHash()) render();
+    }),
+  );
+  off.add(() => mq?.removeEventListener?.('change', applyMotion));
+}
+
+/** Build the simulator for every sequence-sim figure under `root`. Returns a function that removes the window listeners. */
+export function init(root: ParentNode = document): () => void {
+  const off = disposer();
+  for (const fig of qsa('figure[data-viz="sequence-sim"]', root)) setup(fig, off);
+  return off.run;
+}
+
+onReady(() => {
+  init();
+});

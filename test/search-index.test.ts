@@ -1,14 +1,15 @@
-// @ts-nocheck -- ported tests; types to be tightened in follow-up
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseIndex } from '../src/lib/rfc-index';
+import { test } from 'vitest';
 import { buildSite } from '../src/lib/model';
+import { parseIndex } from '../src/lib/rfc-index';
 import * as idx from '../src/lib/search-index';
 
-const HERE = process.cwd() + '/test';
 import * as core from '../src/scripts/search-core';
+import { must } from './helpers';
+
+const HERE = `${process.cwd()}/test`;
 const withCore = test;
 
 const site = buildSite({
@@ -17,20 +18,24 @@ const site = buildSite({
   buildDate: new Date('2026-10-15'),
 });
 // The fixture's RFC 903 has no questions and a different title; give it the real ones.
-const r903 = site.rfcs.get(903);
-site.rfcs.set(903, { ...r903, title: 'A Reverse Address Resolution Protocol', content: { ...r903.content, questions: ['how does a diskless computer get an ip address'] } });
+const r903 = must(site.rfcs.get(903));
+site.rfcs.set(903, {
+  ...r903,
+  title: 'A Reverse Address Resolution Protocol',
+  content: { ...r903.content, questions: ['how does a diskless computer get an ip address'] },
+});
 const built = idx.buildSearchIndex(site);
-const byPath = new Map(built.files.map((f) => [f.path, JSON.parse(f.json)]));
-const docs = byPath.get('data/search/docs.json');
-const meta = byPath.get('data/search/meta.json');
-const prefix = byPath.get('data/search/prefix.json');
+const byPath = new Map<string, unknown>(built.files.map((f) => [f.path, JSON.parse(f.json)]));
+const docs = byPath.get('data/search/docs.json') as core.DocRowIn[];
+const meta = byPath.get('data/search/meta.json') as { version: number; shards: number; docCount: number };
+const prefix = byPath.get('data/search/prefix.json') as Record<string, string[]>;
 
 /** Run a query end to end against the built files, using the client logic. */
-function query(q) {
+function query(q: string) {
   const p = core.plan(q, prefix);
-  const postings = {};
+  const postings: core.Postings = {};
   for (const k of core.shardsOf(p, meta.shards)) Object.assign(postings, byPath.get(`data/search/t-${String(k).padStart(2, '0')}.json`));
-  return core.rank(p, postings, 10).map((r) => core.docRow(docs[r.id]));
+  return core.rank(p, postings, 10).map((r) => core.docRow(must(docs[r.id])));
 }
 
 test('tokenize: lowercase, ASCII fold, split, stopwords, short tokens', () => {
@@ -68,24 +73,37 @@ test('file count and paths', () => {
   assert.equal(new Set(paths).size, paths.length);
   assert.ok(buildFewer(8).files.length === 11);
 });
-function buildFewer(n) { return idx.buildSearchIndex(site, { shards: n }); }
+function buildFewer(n: number) {
+  return idx.buildSearchIndex(site, { shards: n });
+}
 
 test('doc table rows are [url, number|null, title, shortTitle, tier]', () => {
-  const row = docs.find((d) => d[1] === 903);
+  const row = must(docs.find((d) => d[1] === 903));
   assert.equal(row[0], '/903/');
   assert.equal(typeof row[2], 'string');
-  const j = docs.find((d) => d[0] === '/journeys/diskless-boot/');
+  const j = must(docs.find((d) => d[0] === '/journeys/diskless-boot/'));
   assert.equal(j[1], null);
   assert.equal(j[4], 'journey');
 });
 
 withCore('RFC 903 is found by name, title words, question text and number', () => {
-  for (const q of ['rarp', 'reverse address', 'diskless', 'how does a diskless computer get an ip address', '903', 'rfc 903', 'reverse addr']) {
+  for (const q of [
+    'rarp',
+    'reverse address',
+    'diskless',
+    'how does a diskless computer get an ip address',
+    '903',
+    'rfc 903',
+    'reverse addr',
+  ]) {
     const hits = query(q);
-    assert.ok(hits.some((h) => h.href === '/903/'), `"${q}" should find /903/, got ${JSON.stringify(hits.map((h) => h.href))}`);
+    assert.ok(
+      hits.some((h) => h.href === '/903/'),
+      `"${q}" should find /903/, got ${JSON.stringify(hits.map((h) => h.href))}`,
+    );
   }
-  assert.equal(query('903')[0].href, '/903/');
-  assert.equal(query('rarp')[0].href, '/903/');
+  assert.equal(must(query('903')[0]).href, '/903/');
+  assert.equal(must(query('rarp')[0]).href, '/903/');
   assert.ok(query('diskless').some((h) => h.href === '/903/'));
 });
 
@@ -105,28 +123,70 @@ withCore('AND ranking, no junk for unmatched terms, empty query', () => {
 test('postings are capped and sorted by score', () => {
   for (const [p, shard] of byPath) {
     if (!/t-\d+\.json$/.test(p)) continue;
-    for (const list of Object.values(shard)) {
+    for (const list of Object.values(shard as core.Postings)) {
       assert.ok(list.length <= idx.MAX_POSTINGS);
-      for (let i = 1; i < list.length; i++) assert.ok(list[i - 1][1] >= list[i][1]);
+      for (let i = 1; i < list.length; i++) assert.ok(must(list[i - 1])[1] >= must(list[i])[1]);
     }
   }
 });
 
 withCore('rank: AND first, then best partial; prefix expands the last token only', () => {
   const p = core.plan('alpha beta', {});
-  const r = core.rank(p, { alpha: [[1, 5], [2, 9]], beta: [[1, 1], [3, 8]] }, 5);
-  assert.deepEqual(r.map((x) => x.id), [1]);
-  const r2 = core.rank(core.plan('alpha gamma', {}), { alpha: [[1, 5], [2, 9]] }, 5);
-  assert.deepEqual(r2.map((x) => x.id), [2, 1]);
+  const r = core.rank(
+    p,
+    {
+      alpha: [
+        [1, 5],
+        [2, 9],
+      ],
+      beta: [
+        [1, 1],
+        [3, 8],
+      ],
+    },
+    5,
+  );
+  assert.deepEqual(
+    r.map((x) => x.id),
+    [1],
+  );
+  const r2 = core.rank(
+    core.plan('alpha gamma', {}),
+    {
+      alpha: [
+        [1, 5],
+        [2, 9],
+      ],
+    },
+    5,
+  );
+  assert.deepEqual(
+    r2.map((x) => x.id),
+    [2, 1],
+  );
   const pp = core.plan('alpha bet', { bet: ['beta', 'better'] });
-  assert.deepEqual(pp.slots[0].map((c) => c.term), ['alpha']);
-  assert.deepEqual(pp.slots[1].map((c) => c.term), ['bet', 'beta', 'better']);
-  assert.deepEqual(core.plan('alpha bet ', { bet: ['beta'] }).slots[1].map((c) => c.term), ['bet']);
+  assert.deepEqual(
+    pp.slots[0].map((c) => c.term),
+    ['alpha'],
+  );
+  assert.deepEqual(
+    pp.slots[1].map((c) => c.term),
+    ['bet', 'beta', 'better'],
+  );
+  assert.deepEqual(
+    core.plan('alpha bet ', { bet: ['beta'] }).slots[1].map((c) => c.term),
+    ['bet'],
+  );
   assert.deepEqual(core.shardsOf(pp, 64).length > 0, true);
 });
 
 withCore('docRow formats like the old Pagefind rows', () => {
-  assert.deepEqual(core.docRow(['/903/', 903, 'A Reverse Address Resolution Protocol', 'RARP', 'interactive']),
-    { label: 'RFC 903', title: 'RARP: A Reverse Address Resolution Protocol', tag: 'INTERACTIVE', tier: 'interactive', href: '/903/' });
+  assert.deepEqual(core.docRow(['/903/', 903, 'A Reverse Address Resolution Protocol', 'RARP', 'interactive']), {
+    label: 'RFC 903',
+    title: 'RARP: A Reverse Address Resolution Protocol',
+    tag: 'INTERACTIVE',
+    tier: 'interactive',
+    href: '/903/',
+  });
   assert.equal(core.docRow(['/journeys/x/', null, 'T', null, 'journey']).label, 'JOURNEY');
 });

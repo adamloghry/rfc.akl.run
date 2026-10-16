@@ -2,7 +2,7 @@
 
 A statically generated explainer site for the Internet's RFCs. Every RFC number from 1 to the latest gets a permanent page at `rfc.akl.run/<n>/`; the ones that have been written up get plain-language summaries, diagrams and interactive packet and sequence viewers. Everything is pre-rendered HTML: no server code, no runtime services, no third-party requests.
 
-The nightly build reads the RFC Editor index, merges it with the hand-written JSON in `content/`, and renders about 10,000 RFC pages (plus a static search index) into `dist/` in under a minute with Astro 7.
+The nightly build refreshes the committed RFC Editor index snapshot (`data/rfc-index.xml`), merges it with the hand-written JSON in `content/`, and renders about 10,000 RFC pages (plus a static search index) into `dist/` in under a minute with Astro 7.
 
 ## The coverage ladder
 
@@ -24,8 +24,9 @@ Built with Astro 7 (static output, TypeScript). Requires Node >= 22.22.
 ```sh
 npm ci
 npm run dev            # Astro dev server with HMR
-npm run build          # fetches (and caches) the RFC Editor index, writes dist/
-npm run build:offline  # RFC_OFFLINE=1: uses the cached .cache/rfc-index.xml, no network
+npm run build          # reads the committed data/rfc-index.xml (never the network), writes dist/
+npm run build:offline  # same as build; kept as an alias
+npm run refresh-index  # the only networked step: re-fetches data/rfc-index.xml from rfc-editor.org
 npm run preview        # serves dist/ locally
 ```
 
@@ -33,16 +34,55 @@ Other commands:
 
 | Command | What it does |
 |---|---|
-| `npm test` | Vitest: unit tests plus Astro component tests (Container API) |
-| `npm run lint` | Content lint (Zod schemas, cross-references, viz rendering and anchors, permalink lock, HTML sanitizer). `--offline` skips the index fetch; `--only <file>` lints specific files |
+| `npm test` | Vitest: unit tests, happy-dom client-script tests and Astro component tests (Container API) |
+| `npm run test:coverage` | `npm test` with v8 coverage over `src/lib/**` and `src/scripts/**`; fails below the thresholds in `vitest.config.ts` |
+| `npm run lint` | Content lint (Zod schemas, cross-references, viz rendering and anchors, permalink lock, HTML sanitizer). `--only <file>` lints specific files |
 | `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), that `404.html`, `404/index.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), the Cloudflare file-count limit and `_redirects` rule limits |
 | `npm run check:types` | `astro check` (TypeScript and Astro diagnostics) |
 | `npm run parity` | Dev tool: structural comparison of `dist/` pages against a golden directory (see below) |
-| `npm run deploy` | Build, check, then `wrangler deploy` (CI does this nightly) |
+| `npm run test:e2e` | Playwright (desktop and 390px mobile) against `wrangler dev --local` serving `dist/` (build first) |
+| `npm run lint:code` | Biome check (lint and format) |
+| `npm run refresh-index` | Fetch the RFC Editor index into `data/rfc-index.xml` (see below) |
+| `npm run deploy` | Build, check, then `wrangler deploy` (uses `$WRANGLER_BIN` when set, as in `nix develop`) |
 
 The scripts run TypeScript through `node --import tsx`, which works everywhere (the `tsx` CLI itself can fail in sandboxes that block its IPC socket).
 
-With Nix: `nix develop` gives a shell with Node 22 and Python 3; `nix run` runs `npm ci && npm run build && npm run preview` in the working tree.
+### Test layers
+
+1. **Unit and coverage** (`npm test`, `npm run test:coverage`): pure `src/lib` logic, CLI scripts, and the browser scripts in `src/scripts` driven through happy-dom against markup fixtures extracted from the real build (`scripts/extract-client-fixtures.ts`). Coverage thresholds (per-glob, in `vitest.config.ts`) fail the run when they drop.
+2. **Component tests**: the same Vitest run renders Astro components through the Container API and checks the HTML.
+3. **End to end** (`npm run test:e2e`): Playwright drives Chromium against `wrangler dev --local` (Cloudflare's workerd runtime) serving the built `dist/`, so redirects, `_headers`, the CSP (any violation fails a test), the custom 404 and the mobile layout are tested as Cloudflare will serve them. Needs `wrangler` and a Playwright Chromium (`npx playwright install chromium`, or `nix develop`). `WRANGLER_BIN` and `E2E_BASE_URL` override the server.
+4. **`nix flake check -L`**: runs all of the above plus types, Biome, the site build with `npm run preflight`, and formatting, in the Nix sandbox. This is what CI runs.
+
+### Nix (optional, recommended)
+
+The flake builds, checks and deploys the site with no network access during the build. The RFC Editor index is a committed snapshot, `data/rfc-index.xml` (see "The RFC index snapshot" below), so a given commit always produces the same site. The npm path above keeps working for anyone without Nix.
+
+```sh
+nix develop                  # Node 22, nixpkgs wrangler, biome, Playwright browsers, nixfmt
+nix build                    # packages.default: the built site (dist/ contents) in ./result
+nix flake check -L           # unit, lint, types, code-style, site (build + preflight), e2e, formatting
+nix run                      # serve the Nix-built site with `wrangler dev` on :8787 (PORT=... to change)
+nix run .#deploy             # wrangler deploy of the Nix-built site (needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID)
+nix run .#preview-deploy     # wrangler versions upload (preview version, not promoted)
+nix run .#refresh-index      # refresh data/rfc-index.xml (needs node_modules: npm ci)
+nix fmt                      # nixfmt on flake.nix and nix/*.nix
+```
+
+- **After changing `package-lock.json`:** the npm dependency cache is a fixed-output derivation. Set `npmDepsHash` in `nix/common.nix` to a fake hash, run `nix build`, and paste the `got:` hash.
+- **Flakes only see git-tracked files.** `git add` (or `git add -N`) new files before `nix build`.
+- **Why wrangler comes from nixpkgs:** the `workerd` binary that npm installs is not patched for NixOS, and `npm run` prepends `node_modules/.bin` to `PATH`, which would shadow the nixpkgs wrangler even inside `nix develop`. So the dev shell sets `WRANGLER_BIN` to the nixpkgs wrangler, and `npm run preview:cf`, `deploy`, `deploy:preview` and the Playwright web server run `${WRANGLER_BIN:-wrangler}`.
+- **Pinned tool versions:** `nix/common.nix` asserts that nixpkgs' wrangler, playwright-driver and biome match the versions in `package-lock.json`, and fails evaluation with a message if they drift.
+- **Web Analytics token:** `PUBLIC_CF_BEACON_TOKEN` is baked in with `nix build --impure --expr '(builtins.getFlake (toString ./.)).packages.${builtins.currentSystem}.site.override { beaconToken = "..."; }'` (see `docs/cloudflare.md`).
+- **Build date:** `SOURCE_DATE_EPOCH` is the flake's `lastModified` (commit time); evaluation fails for sources without one instead of building a 1970 date.
+- **Formatter:** `nix fmt` runs nixfmt on `flake.nix` and `nix/*.nix`; arguments pass through (`nix fmt -- --check`), and the files are appended unless you name an existing path.
+- Layout: `nix/common.nix` (source filter, build env, npm hash), `nix/package.nix` (the site), `nix/checks.nix`, `nix/apps.nix`, `nix/shell.nix`.
+
+### The RFC index snapshot
+
+`data/rfc-index.xml` is a committed copy of https://www.rfc-editor.org/rfc-index.xml (about 14 MB of XML; git delta-compresses the daily changes well). Builds, tests, lint and the Nix checks read only this file, so they never touch the network and a commit always builds the same site. `RFC_INDEX_FILE=<path>` overrides it (tests use this).
+
+Refresh it with `npm run refresh-index` or `nix run .#refresh-index`. The script fetches the live index, checks that it parses and has at least as many entries as the snapshot, writes the file, and prints `changed` or `unchanged`. Commit the result. The nightly workflow does exactly this and commits `chore(data): refresh RFC Editor index` to trunk as `github-actions[bot]` before it builds and deploys (it needs permission to push to trunk; see `docs/cloudflare.md`).
 
 ### Parity tool
 
@@ -82,13 +122,21 @@ src/
 scripts/              CLI tools run with node --import tsx: lint-content, check-dist, parity,
                       fetch-demand, coverage-diff, import-summaries, merge-glossary, make-summary-batches
 test/                 Vitest suites and fixtures
+e2e/                  Playwright specs (run against wrangler dev)
 docs/                 Design and build specs
-.github/workflows/    ci.yml (PRs and trunk), nightly.yml (build + deploy)
+flake.nix, nix/        Nix package, checks, apps and dev shell
+.github/workflows/    ci.yml (PRs and trunk), preview.yml (PR previews), nightly.yml (build + deploy)
 ```
 
 ## Deploy
 
-Hosting is Cloudflare Workers static assets (free plan), configured by `wrangler.jsonc` (assets-only Worker `rfc-akl-run` serving `dist/`, custom 404 page, `auto-trailing-slash`). `.github/workflows/nightly.yml` builds daily at 06:17 UTC (and on demand) and, on `trunk` only, runs `npx wrangler@4.151.0 deploy`. Static asset requests are free and unlimited.
+Hosting is Cloudflare Workers static assets (free plan; details in [docs/cloudflare.md](docs/cloudflare.md)), configured by `wrangler.jsonc` (assets-only Worker `rfc-akl-run` serving `dist/`, custom 404 page, `auto-trailing-slash`). `.github/workflows/nightly.yml` builds daily at 06:17 UTC (and on demand) and, on `trunk` only, runs `nix run .#deploy` (nixpkgs wrangler). Static asset requests are free and unlimited.
+
+### CI
+
+- `ci.yml` (pull requests and pushes to `trunk`): installs Nix, restores a store cache, runs `nix flake check -L`. That builds the site against the locked RFC index and runs every check, including e2e.
+- `preview.yml` (pull requests): `nix run .#preview-deploy -- --preview-alias pr-<n>` uploads a Worker version (not a deployment) and comments its URL on the PR. Skipped when the Cloudflare secrets are absent (fork PRs). Only this job has `pull-requests: write`.
+- `nightly.yml`: `nix develop -c npm ci`, `nix run .#refresh-index`, commits `data/rfc-index.xml` to trunk as `github-actions[bot]` when it changed (trunk only; the push must be allowed, see `docs/cloudflare.md`), fetches reader demand, builds and prints the coverage diff against the live site, runs `nix flake check -L`, then on `trunk` runs `nix run .#deploy` from that commit.
 
 ### Why file count matters
 
@@ -96,7 +144,7 @@ The free plan allows 20,000 files per deployed version (100,000 on Paid) and 25 
 
 ### Redirects and caching
 
-- `/rfc903` -> `/903/` comes from `_redirects` (`/rfc:num /:num/ 301`). This placeholder-in-segment form should be verified on a preview deploy (`npx wrangler@4.151.0 versions upload`); if it does not match, delete the rule. It is optional, since the old site never had `/rfcN` URLs.
+- `/rfc903` -> `/903/` comes from `_redirects` (`/rfc:num /:num/ 301`). Verified against Cloudflare's local runtime (301); `/404` -> `/404/` (301) is listed before it. `/903` -> `/903/` is Cloudflare's own `auto-trailing-slash` (307). See [docs/cloudflare.md](docs/cloudflare.md) for the observed behaviour, header rules and CSP.
 - Legacy `/#rfcNNN` links are forwarded to `/NNN/` by the Atlas page's inline script.
 - Slug aliases for explainers (`/<slug>` -> `/<n>/`) are also in `_redirects`.
 - `_headers`: `/assets/*` is `public, max-age=31536000, immutable`; everything else (HTML, `data/`) is `public, max-age=300`; the static search index under `data/search/` is `max-age=60` since its file names are not hashed. Cloudflare handles edge caching for static assets itself.
@@ -104,7 +152,7 @@ The free plan allows 20,000 files per deployed version (100,000 on Paid) and 25 
 
 ### One-time owner setup
 
-1. Create the Worker `rfc-akl-run` (the first `npx wrangler@4.151.0 deploy` creates it) or reuse the existing one under the same name.
+1. Create the Worker `rfc-akl-run` (the first `nix run .#deploy` creates it) or reuse the existing one under the same name.
 2. Add GitHub repository secrets `CLOUDFLARE_API_TOKEN` (token with the "Edit Cloudflare Workers" template) and `CLOUDFLARE_ACCOUNT_ID`.
 3. In the Cloudflare dashboard, Workers & Pages > `rfc-akl-run` > Settings > Domains & Routes: add the custom domain `rfc.akl.run` (and `www` if wanted, redirecting to the apex).
 4. **Disable any existing Cloudflare Git-integration build** for this repo that runs the old `wrangler deploy --assets=./site`; `site/` no longer exists and it will fail or deploy stale content. (Alternative: set its build command to `npm ci && npx astro build` and its deploy command to `npx wrangler deploy`. The recommended path is GitHub Actions only.)

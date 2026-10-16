@@ -1,19 +1,18 @@
-// @ts-nocheck -- ported tests; types to be tightened in follow-up
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { checkDist } from '../scripts/check-dist';
+import { test } from 'vitest';
+import { checkDist, headersRuleStats, parseJsonc, redirectsSyntaxErrors } from '../scripts/check-dist';
 
-const zlibGz = (str) => zlib.gzipSync(str, { level: 6 }).length;
-const HERE = process.cwd() + '/test';
+const zlibGz = (str: string) => zlib.gzipSync(str, { level: 6 }).length;
 
-const REQUIRED = { '404.html': '<!doctype html>err', '404/index.html': '<!doctype html>rfc 404', '_redirects': '', '_headers': '' };
+const REQUIRED = { '404.html': '<!doctype html>err', '404/index.html': '<!doctype html>rfc 404', _redirects: '', _headers: '' };
 
 /** A dist/ with the required files present (so tests exercise one thing at a time). */
-function dist(files, { bare = false } = {}) {
+function dist(files: Record<string, string>, { bare = false } = {}) {
   files = bare ? files : { ...REQUIRED, ...files };
   const d = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'rfc-dist-'));
   for (const [p, c] of Object.entries(files)) {
@@ -22,11 +21,13 @@ function dist(files, { bare = false } = {}) {
   }
   return d;
 }
-const page = (body, tier = 'explainer') => `<!doctype html><meta name="rfc-tier" content="${tier}"><body>${body}</body>`;
+const page = (body: string, tier = 'explainer') => `<!doctype html><meta name="rfc-tier" content="${tier}"><body>${body}</body>`;
 
 test('broken link and missing anchor are errors', () => {
   const d = dist({
-    '1/index.html': page('<a href="/2/">ok</a><a href="/nope/">bad</a><a href="/2/#missing">bad anchor</a><a href="/2/#here">good</a><a href="#self">s</a><h1 id="self">x</h1>'),
+    '1/index.html': page(
+      '<a href="/2/">ok</a><a href="/nope/">bad</a><a href="/2/#missing">bad anchor</a><a href="/2/#here">good</a><a href="#self">s</a><h1 id="self">x</h1>',
+    ),
     '2/index.html': page('<h2 id="here">h</h2>'),
   });
   const r = checkDist(d);
@@ -73,7 +74,11 @@ test('sitemap URLs that do not resolve to a file are errors', () => {
 });
 
 test('file count: error at the 20,000 limit, warning at 18,000', () => {
-  const mk = (n) => { const f = {}; for (let i = 0; i < n; i++) f[`d/${i}.txt`] = ''; return dist(f); };
+  const mk = (n: number) => {
+    const f: Record<string, string> = {};
+    for (let i = 0; i < n; i++) f[`d/${i}.txt`] = '';
+    return dist(f);
+  };
   const warn = checkDist(mk(18000));
   assert.deepEqual(warn.errors, []);
   assert.equal(warn.warnings.length, 1);
@@ -85,11 +90,11 @@ test('file count: error at the 20,000 limit, warning at 18,000', () => {
 });
 
 test('_redirects rule limits: 2000 static, 100 dynamic', () => {
-  const rules = (n, f) => Array.from({ length: n }, (_, i) => f(i)).join('\n');
-  const ok = checkDist(dist({ '_redirects': '# c\n' + rules(2000, (i) => `/a${i} /1/ 301`) + '\n' + rules(100, (i) => `/b${i}/:x /1/ 301`) }));
+  const rules = (n: number, f: (i: number) => string) => Array.from({ length: n }, (_, i) => f(i)).join('\n');
+  const ok = checkDist(dist({ _redirects: `# c\n${rules(2000, (i) => `/a${i} /1/ 301`)}\n${rules(100, (i) => `/b${i}/:x /1/ 301`)}` }));
   assert.deepEqual(ok.errors, []);
   assert.deepEqual(ok.stats.redirects, { static: 2000, dynamic: 100 });
-  const bad = checkDist(dist({ '_redirects': rules(2001, (i) => `/a${i} /1/ 301`) + '\n' + rules(101, (i) => `/b${i}/* /1/ 301`) }));
+  const bad = checkDist(dist({ _redirects: `${rules(2001, (i) => `/a${i} /1/ 301`)}\n${rules(101, (i) => `/b${i}/* /1/ 301`)}` }));
   assert.equal(bad.errors.length, 2);
 });
 
@@ -100,7 +105,10 @@ test('missing 404.html, 404/index.html, _redirects or _headers is an error', () 
     const d = dist({ '1/index.html': page('x'), ...REQUIRED }, { bare: true });
     fs.rmSync(path.join(d, f));
     const r = checkDist(d);
-    assert.ok(r.errors.some((e) => e.startsWith(f + ' is missing')), `${f}: ${JSON.stringify(r.errors)}`);
+    assert.ok(
+      r.errors.some((e) => e.startsWith(`${f} is missing`)),
+      `${f}: ${JSON.stringify(r.errors)}`,
+    );
   }
 });
 
@@ -129,4 +137,90 @@ test('JS budget follows static imports recursively, deduped per page', () => {
   // the entry alone is tiny: without following imports this page would pass
   const d2 = dist({ '1/index.html': page('<script src="/assets/e.js"></script>'), 'assets/e.js': 'console.log(1)' });
   assert.deepEqual(checkDist(d2).errors, []);
+});
+
+test('_headers: 100 rules pass, 101 fail; overlong lines fail', () => {
+  const rules = (n: number) => Array.from({ length: n }, (_, i) => `/p${i}/*\n  X-A: 1\n`).join('\n');
+  assert.deepEqual(checkDist(dist({ _headers: rules(100) })).errors, []);
+  const bad = checkDist(dist({ _headers: rules(101) }));
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0], /101 rules exceeds the limit of 100/);
+  const long = checkDist(dist({ _headers: `/*\n  X-A: ${'x'.repeat(2000)}\n` }));
+  assert.match(long.errors.join('\n'), /longer than 2000/);
+  assert.deepEqual(headersRuleStats('# c\n/*\n  A: 1\n\n/b/*\n  B: 2\n'), { rules: 2, longLines: 0 });
+});
+
+test('_redirects syntax: valid placeholders pass; malformed rules are errors', () => {
+  const ok = '# c\n/404 /404/ 301\n/rfc:num /:num/ 301\n/old/* /new/:splat 302\n/x https://example.com/y 308\n';
+  assert.deepEqual(redirectsSyntaxErrors(ok), []);
+  assert.deepEqual(checkDist(dist({ _redirects: ok })).errors, []);
+  assert.match(redirectsSyntaxErrors('/a')[0], /expected "source target/);
+  assert.match(redirectsSyntaxErrors('a /b/ 301')[0], /must start with "\/"/);
+  assert.match(redirectsSyntaxErrors('/a b 301')[0], /target "b" must be a path/);
+  assert.match(redirectsSyntaxErrors('/a /b/ 200')[0], /status "200"/);
+  assert.match(redirectsSyntaxErrors('/a/*/b/* /c/ 301')[0], /more than one splat/);
+  assert.match(redirectsSyntaxErrors('/a/:x /b/:y 301')[0], /uses :y/);
+  assert.match(redirectsSyntaxErrors('/a /b/:splat 301')[0], /uses :splat/);
+  assert.match(checkDist(dist({ _redirects: '/a /b/:y 301\n' })).errors.join(), /uses :y/);
+});
+
+test('files over 25 MiB are errors', () => {
+  const d = dist({ '1/index.html': page('x') });
+  fs.writeFileSync(path.join(d, 'big.bin'), Buffer.alloc(25 * 1024 * 1024 + 1));
+  fs.writeFileSync(path.join(d, 'ok.bin'), Buffer.alloc(25 * 1024 * 1024));
+  const r = checkDist(d);
+  assert.equal(r.errors.length, 1, JSON.stringify(r.errors));
+  assert.match(r.errors[0], /^big\.bin: 25\.0 MiB exceeds the Cloudflare limit of 25 MiB per file/);
+});
+
+test('wrangler.jsonc assets.directory must equal the checked dist dir', () => {
+  const d = dist({ '1/index.html': page('x') });
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'rfc-wr-'));
+  const cfg = path.join(root, 'wrangler.jsonc');
+  const write = (directory: string) =>
+    fs.writeFileSync(
+      cfg,
+      `{\n  // comment with "quotes" and a // slash\n  "name": "x", /* block */\n  "assets": { "directory": ${JSON.stringify(directory)}, "url": "http://a//b", },\n}\n`,
+    );
+  write(path.relative(root, d));
+  assert.deepEqual(checkDist(d, { wranglerConfig: cfg }).errors, []);
+  write('./dist');
+  const bad = checkDist(d, { wranglerConfig: cfg });
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0], /assets\.directory "\.\/dist" resolves to .*not the checked directory/);
+  fs.writeFileSync(cfg, '{"name":"x"}');
+  assert.match(checkDist(d, { wranglerConfig: cfg }).errors[0], /assets\.directory is not set/);
+  assert.match(checkDist(d, { wranglerConfig: path.join(root, 'missing.jsonc') }).errors[0], /cannot read or parse/);
+  assert.deepEqual(parseJsonc('{"a":"x//y" /* c */, // d\n "b":[1,],}'), { a: 'x//y', b: [1] });
+});
+
+test('the repo wrangler.jsonc points at dist/', () => {
+  const cfg = parseJsonc(fs.readFileSync(path.join(process.cwd(), 'wrangler.jsonc'), 'utf8'));
+  assert.equal(path.resolve(cfg.assets.directory), path.resolve(process.cwd(), 'dist'));
+  assert.equal(cfg.name, 'rfc-akl-run');
+  assert.equal(cfg.workers_dev, true);
+  assert.equal(cfg.preview_urls, true);
+  assert.equal(cfg.assets.not_found_handling, '404-page');
+});
+
+test('inline scripts must be covered by the _headers CSP', () => {
+  const code = 'document.title="x"';
+  const hash = `'sha256-${createHash('sha256').update(code).digest('base64')}'`;
+  const pg = page(`<script>${code}</script><script type="application/json">{"a":1}</script><script src="/assets/a.js"></script>`);
+  const csp = (s: string) => `/*\n  Content-Security-Policy: default-src 'self'; script-src 'self' ${s}\n`;
+  assert.deepEqual(checkDist(dist({ '1/index.html': pg, 'assets/a.js': '', _headers: csp(hash) })).errors, []);
+  const bad = checkDist(dist({ '1/index.html': pg, 'assets/a.js': '', _headers: csp('') }));
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0], /inline script 'sha256-.*' is not allowed/);
+});
+
+test('inline <style> elements must be covered by the _headers CSP style-src', () => {
+  const css = 'body{color:red}';
+  const hash = `'sha256-${createHash('sha256').update(css).digest('base64')}'`;
+  const pg = page(`<style>${css}</style>`);
+  const csp = (s: string) => `/*\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' ${s}\n`;
+  assert.deepEqual(checkDist(dist({ '1/index.html': pg, _headers: csp(hash) })).errors, []);
+  const bad = checkDist(dist({ '1/index.html': pg, _headers: csp('') }));
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0], /inline style 'sha256-.*' is not allowed/);
 });

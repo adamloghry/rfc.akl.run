@@ -1,22 +1,22 @@
-import { describe, test, expect } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { experimental_AstroContainer as AstroContainer } from 'astro/container';
+import { describe, expect, test } from 'vitest';
 import Viz from '../src/components/viz/Viz.astro';
-import { vizScripts, validateViz, VIZ_TYPES } from '../src/components/viz/validate';
+import { VIZ_TYPES, validateViz, vizScripts } from '../src/components/viz/validate';
+import { must } from './helpers';
 
 const FIX = path.join(__dirname, 'fixtures', 'viz');
-const load = (n: string) => JSON.parse(fs.readFileSync(path.join(FIX, n + '.json'), 'utf8'));
+const load = (n: string) => JSON.parse(fs.readFileSync(path.join(FIX, `${n}.json`), 'utf8'));
 const container = await AstroContainer.create();
-const out = async (spec: any, rfc?: any) =>
+const out = async (spec: unknown, rfc?: unknown) =>
   container.renderToString(Viz, { props: { spec, rfc: rfc || { number: 903, content: { viz: [spec] } } } });
 
 const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr']);
 function balance(s: string): string | null {
   const stack: string[] = [];
   const re = /<script\b[^>]*>[\s\S]*?<\/script>|<!--[\s\S]*?-->|<(\/?)([a-zA-Z][a-zA-Z0-9-]*)\b[^>]*?(\/?)>/g;
-  let m;
-  while ((m = re.exec(s))) {
+  for (let m = re.exec(s); m; m = re.exec(s)) {
     if (!m[2]) continue;
     const name = m[2].toLowerCase();
     if (VOID.has(name) || m[3] === '/') continue;
@@ -31,7 +31,7 @@ describe('viz components', () => {
     const h = await out(load('rarp-packet'));
     expect((h.match(/ id="field-/g) || []).length).toBe(9);
     expect(h).toMatch(/<figure class="viz viz-packet" id="packet-0" data-viz="packet"/);
-    const tbody = h.match(/<table class="viz-packet-table"[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/)![1];
+    const tbody = must(h.match(/<table class="viz-packet-table"[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/))[1] as string;
     expect((tbody.match(/<tr/g) || []).length).toBe(9);
     for (const k of ['oper', 'sha', 'spa', 'tpa']) expect(h).toMatch(new RegExp(`id="field-${k}"[^>]*data-changed="rep"`));
     expect(h).not.toMatch(/id="field-tha"[^>]*data-changed/);
@@ -64,7 +64,7 @@ describe('viz components', () => {
     expect(h.includes('id="step-7"')).toBe(false);
     const m = h.match(/<script type="application\/json" class="sim-data">([\s\S]*?)<\/script>/);
     expect(m).toBeTruthy();
-    expect(JSON.parse(m![1])).toEqual(spec);
+    expect(JSON.parse(must(m)[1] as string)).toEqual(spec);
     expect(h).toMatch(/class="sim-steps sim-failure-steps"/);
     expect(h).toMatch(/The request dies at the router/);
     expect(h).toMatch(/data-rfc="903"/);
@@ -74,7 +74,7 @@ describe('viz components', () => {
     const spec = load('rarp-sim');
     spec.steps[0].why = 'evil </script><script>alert(1)</script> <!-- x';
     const h = await out(spec);
-    const m = h.match(/class="sim-data">([\s\S]*?)<\/script>/)!;
+    const m = must(h.match(/class="sim-data">([\s\S]*?)<\/script>/));
     expect(m[1]).toContain('<\\/script>');
     expect(m[1]).not.toContain('</script');
     expect(m[1]).not.toContain('<!--');

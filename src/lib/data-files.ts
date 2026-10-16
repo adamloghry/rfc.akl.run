@@ -2,9 +2,10 @@
  * Builders for the non-page files in dist/: coverage.json, titles shards, graph.json,
  * questions.json, feed.xml, sitemap.xml, robots.txt. Astro endpoints call these.
  */
-import { buildSearchIndex } from './search-index';
-import { pubDate, byDate } from './graph';
+import { createHash } from 'node:crypto';
+import { byDate, pubDate } from './graph';
 import type { Site } from './model';
+import { buildSearchIndex } from './search-index';
 
 export const ORIGIN = 'https://rfc.akl.run';
 export const STATE: Record<string, number> = { 'not-issued': 0, reserved: 1, index: 2, summary: 3, explainer: 4, interactive: 5 };
@@ -17,7 +18,7 @@ export function xmlEsc(s: unknown): string {
 
 /** HTML-escape for text/attribute context (also escapes '). */
 function esc(s: unknown): string {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 }
 
 export function coverageJson(site: Site): string {
@@ -27,7 +28,8 @@ export function coverageJson(site: Site): string {
   const cells = Buffer.alloc(site.max);
   for (let n = 1; n <= site.max; n++) {
     const r = site.rfcs.get(n);
-    let state: number, cat = 15;
+    let state: number,
+      cat = 15;
     if (r) {
       state = STATE[r.tier];
       const i = catKeys.indexOf(r.category);
@@ -36,7 +38,10 @@ export function coverageJson(site: Site): string {
     cells[n - 1] = (cat << 4) | state; // low 3 bits state, high 4 bits category (15 = none)
   }
   return JSON.stringify({
-    max: site.max, buildDate: site.buildDate.toISOString().slice(0, 10), categories: catKeys, cells: cells.toString('base64'),
+    max: site.max,
+    buildDate: site.buildDate.toISOString().slice(0, 10),
+    categories: catKeys,
+    cells: cells.toString('base64'),
   });
 }
 
@@ -45,7 +50,9 @@ export function titleShards(site: Site): Record<string, string> {
   const titles: Record<number, Record<number, [string | null, string, number, string]>> = {};
   for (const r of site.rfcs.values()) {
     const k = Math.floor((r.number - 1) / 1000);
-    (titles[k] = titles[k] || {})[r.number] = [r.shortTitle || null, r.title, r.year, r.status];
+    const shard = titles[k] ?? {};
+    titles[k] = shard;
+    shard[r.number] = [r.shortTitle || null, r.title, r.year, r.status];
   }
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(titles)) out[k] = JSON.stringify(v);
@@ -60,7 +67,7 @@ export function questionsJson(site: Site): string {
   for (const r of site.rfcs.values()) {
     if (r.tier !== 'explainer' && r.tier !== 'interactive') continue;
     const t = r.shortTitle ? `${r.shortTitle}: ${r.title}` : r.title;
-    for (const q of (r.content && r.content.questions) || []) questions.push({ q, href: r.url, label: `RFC ${r.number}`, title: t });
+    for (const q of r.content?.questions || []) questions.push({ q, href: r.url, label: `RFC ${r.number}`, title: t });
   }
   return JSON.stringify(questions);
 }
@@ -97,23 +104,29 @@ export function feedXml(site: Site): string {
   const newest = [...site.rfcs.values()].sort((a, b) => byDate(b, a)).slice(0, 30);
   for (const r of newest) {
     entries.push({
-      id: `${ORIGIN}${r.url}`, title: `RFC ${r.number}: ${r.title}`, href: `${ORIGIN}${r.url}`,
-      date: pubDate(r), summary: r.abstract ? r.abstract.split('\n\n')[0] : r.title,
+      id: `${ORIGIN}${r.url}`,
+      title: `RFC ${r.number}: ${r.title}`,
+      href: `${ORIGIN}${r.url}`,
+      date: pubDate(r),
+      summary: r.abstract ? r.abstract.split('\n\n')[0] : r.title,
     });
   }
   for (const r of site.rfcs.values()) {
-    const upd = r.content && r.content.updated;
+    const upd = r.content?.updated;
     if (!upd || r.tier === 'index') continue;
     const d = new Date(upd);
-    if (isNaN(d.getTime())) continue;
+    if (Number.isNaN(d.getTime())) continue;
     const age = (site.buildDate.getTime() - d.getTime()) / DAY;
     if (age < 0 || age > 90) continue;
     entries.push({
-      id: `${ORIGIN}${r.url}#${r.tier}-${upd}`, title: `RFC ${r.number} now has a ${TIER_NOUN[r.tier]}`,
-      href: `${ORIGIN}${r.url}`, date: d, summary: r.title,
+      id: `${ORIGIN}${r.url}#${r.tier}-${upd}`,
+      title: `RFC ${r.number} now has a ${TIER_NOUN[r.tier]}`,
+      href: `${ORIGIN}${r.url}`,
+      date: d,
+      summary: r.title,
     });
   }
-  entries.sort((a, b) => (b.date.getTime() - a.date.getTime()) || a.id.localeCompare(b.id));
+  entries.sort((a, b) => b.date.getTime() - a.date.getTime() || a.id.localeCompare(b.id));
   const list = entries.slice(0, 60);
   return `<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -122,13 +135,17 @@ export function feedXml(site: Site): string {
 <link href="${ORIGIN}/"/>
 <id>${ORIGIN}/</id>
 <updated>${site.buildDate.toISOString()}</updated>
-${list.map((e) => `<entry>
+${list
+  .map(
+    (e) => `<entry>
 <title>${esc(e.title)}</title>
 <link href="${esc(e.href)}"/>
 <id>${esc(e.id)}</id>
 <updated>${e.date.toISOString()}</updated>
 <summary>${esc(e.summary)}</summary>
-</entry>`).join('\n')}
+</entry>`,
+  )
+  .join('\n')}
 </feed>
 `;
 }
@@ -143,8 +160,9 @@ export function sitemapUrls(site: Site): string[] {
 }
 
 export function sitemapXml(urls: string[]): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${
-    urls.map((u) => `<url><loc>${xmlEsc(ORIGIN + u)}</loc></url>`).join('\n')}\n</urlset>\n`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls
+    .map((u) => `<url><loc>${xmlEsc(ORIGIN + u)}</loc></url>`)
+    .join('\n')}\n</urlset>\n`;
 }
 
 export function robotsTxt(): string {
@@ -152,32 +170,92 @@ export function robotsTxt(): string {
 }
 
 const REDIRECTS_HEAD = `# Generated by src/integrations/build-files.ts. Cloudflare Workers static assets: max 2,000 static + 100 dynamic rules.
-# NOTE: a placeholder inside a segment ("/rfc:num") must be verified on a preview deploy.
-# If it does not match, delete this rule; /rfcN links are a convenience, the old site never had them.
+# "/rfc:num" (placeholder inside a segment) is verified by e2e/cloudflare.spec.ts against wrangler's local runtime.
 # Legacy "/#rfcNNN" links are forwarded client-side by the Atlas page.
-/rfc:num /:num/ 301
+# Static rules come first (Cloudflare evaluates them before dynamic ones anyway).
 /404 /404/ 301
 `;
+const REDIRECTS_TAIL = '/rfc:num /:num/ 301\n';
 
 /** dist/_redirects content. */
 export function redirectsFile(site: Site): string {
   const lines: string[] = [];
   for (const r of site.rfcs.values()) {
-    const slug = r.slug || (r.content && r.content.slug);
+    const slug = r.slug || r.content?.slug;
     if (slug) lines.push(`/${slug} /${r.number}/ 301`);
   }
-  return REDIRECTS_HEAD + lines.join('\n') + (lines.length ? '\n' : '');
+  return REDIRECTS_HEAD + lines.join('\n') + (lines.length ? '\n' : '') + REDIRECTS_TAIL;
 }
 
-/** dist/_headers content. */
-export const HEADERS_FILE = `# Generated by src/integrations/build-files.ts
+export interface HeadersOptions {
+  /** 'sha256-...' source tokens for every executable inline script in the built HTML */
+  scriptHashes?: string[];
+  /** 'sha256-...' tokens for inline <style> blocks */
+  styleHashes?: string[];
+  /** Cloudflare Web Analytics token; when set the beacon origins are added to the CSP */
+  beaconToken?: string;
+}
+
+export const BEACON_SCRIPT_ORIGIN = 'https://static.cloudflareinsights.com';
+export const BEACON_CONNECT_ORIGIN = 'https://cloudflareinsights.com';
+
+/** sha256 CSP source token ('sha256-<base64>') of inline code, exactly as the browser sees it. */
+export function cspHash(code: string): string {
+  return `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`;
+}
+
+/**
+ * The site-wide Content-Security-Policy. Pages are static, so one policy covers every page: inline
+ * scripts/styles are allowed by hash only (computed from the built HTML by the integration).
+ * Style attributes (style="--n:5") cannot be hashed without 'unsafe-hashes', so style-src-attr allows them;
+ * that does not permit <style> elements or scripts.
+ */
+export function buildCsp(o: HeadersOptions = {}): string {
+  const beacon = !!o.beaconToken;
+  const uniq = (a: string[] = []) => [...new Set(a)].sort();
+  const script = ["'self'", ...uniq(o.scriptHashes), ...(beacon ? [BEACON_SCRIPT_ORIGIN] : [])];
+  const style = ["'self'", ...uniq(o.styleHashes)];
+  const connect = ["'self'", ...(beacon ? [BEACON_CONNECT_ORIGIN] : [])];
+  return [
+    "default-src 'self'",
+    `script-src ${script.join(' ')}`,
+    `style-src ${style.join(' ')}`,
+    "style-src-attr 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    `connect-src ${connect.join(' ')}`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+/**
+ * dist/_headers content. Cloudflare joins same-named headers from every matching rule with ", ",
+ * so the cache rules use "! Cache-Control" to detach the default set by /*.
+ * Rule count is far below the 100-rule limit (checked by scripts/check-dist.ts).
+ */
+export function headersFile(o: HeadersOptions = {}): string {
+  return `# Generated by src/integrations/build-files.ts
 /*
   X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()
+  X-Frame-Options: DENY
+  Strict-Transport-Security: max-age=31536000
+  Content-Security-Policy: ${buildCsp(o)}
   Cache-Control: public, max-age=300
 
 /assets/*
+  ! Cache-Control
   Cache-Control: public, max-age=31536000, immutable
 
 /data/search/*
+  ! Cache-Control
   Cache-Control: public, max-age=60
 `;
+}
+
+/** Headers with no inline-code hashes (tests, and the default before a build has run). */
+export const HEADERS_FILE = headersFile();

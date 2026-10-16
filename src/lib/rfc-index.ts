@@ -1,24 +1,40 @@
 export interface IndexEntry {
-  number: number; title: string; authors: string[];
+  number: number;
+  title: string;
+  authors: string[];
   /** subset of authors whose <author> has <title>Editor</title> */
   editors: string[];
-  year: number; month: number; day: number | null;
-  status: string; pubStatus: string;
-  stream: string | null; area: string | null; wg: string | null;
+  year: number;
+  month: number;
+  day: number | null;
+  status: string;
+  pubStatus: string;
+  stream: string | null;
+  area: string | null;
+  wg: string | null;
   abstract: string | null;
-  keywords: string[]; pageCount: number | null; doi: string | null; errataUrl: string | null;
+  keywords: string[];
+  pageCount: number | null;
+  doi: string | null;
+  errataUrl: string | null;
   isAlso: string[];
-  obsoletes: number[]; obsoletedBy: number[]; updates: number[]; updatedBy: number[];
+  obsoletes: number[];
+  obsoletedBy: number[];
+  updates: number[];
+  updatedBy: number[];
 }
-export interface RfcIndex { entries: Map<number, IndexEntry>; notIssued: Set<number>; max: number }
+export interface RfcIndex {
+  entries: Map<number, IndexEntry>;
+  notIssued: Set<number>;
+  max: number;
+}
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { XMLParser } from 'fast-xml-parser';
 
 const INDEX_URL = 'https://www.rfc-editor.org/rfc-index.xml';
-const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
-  'August', 'September', 'October', 'November', 'December'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 const parser = new XMLParser({
   ignoreAttributes: true,
@@ -44,15 +60,21 @@ function rfcNumber(id: unknown, ctx: string): number {
 
 /** doc-id list → RFC numbers only (non-RFC ids such as STD/BCP/FYI are dropped). */
 function rfcRefs(node: any): number[] {
-  const ids = (node && node['doc-id']) || [];
-  return ids.map((x: unknown) => /^RFC0*(\d+)$/.exec(String(x).trim())).filter(Boolean).map((m: RegExpExecArray | null) => Number(m![1]));
+  const ids: unknown[] = node?.['doc-id'] || [];
+  return ids
+    .map((x) => /^RFC0*(\d+)$/.exec(String(x).trim()))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map((m) => Number(m[1]));
 }
 
-function opt(v: any): string | null { const s = v == null ? '' : clean(v); return s === '' ? null : s; }
+function opt(v: any): string | null {
+  const s = v == null ? '' : clean(v);
+  return s === '' ? null : s;
+}
 
 export function parseIndex(xml: string): RfcIndex {
   const root = (parser.parse(xml) as any)['rfc-index'];
-  const raw = (root && root['rfc-entry']) || [];
+  const raw = root?.['rfc-entry'] || [];
   if (raw.length < 1) throw new Error('rfc-index: no rfc-entry elements found (format drift?)');
 
   const entries = new Map<number, IndexEntry>();
@@ -84,11 +106,16 @@ export function parseIndex(xml: string): RfcIndex {
       if (a.title != null && clean(a.title) === 'Editor') editors.push(name);
     }
 
-    const paras = ((e.abstract && e.abstract.p) || []).map(clean).filter(Boolean);
+    const paras = (e.abstract?.p || []).map(clean).filter(Boolean);
     const pages = e['page-count'] == null ? NaN : Number(e['page-count']);
 
     entries.set(number, {
-      number, title, authors, editors, year, month,
+      number,
+      title,
+      authors,
+      editors,
+      year,
+      month,
       day: d.day == null ? null : Number(d.day),
       status,
       pubStatus: opt(e['publication-status']) || status,
@@ -96,14 +123,14 @@ export function parseIndex(xml: string): RfcIndex {
       area: opt(e.area),
       wg: opt(e.wg_acronym),
       abstract: paras.length ? paras.join('\n\n') : null,
-      keywords: ((e.keywords && e.keywords.kw) || []).map(clean).filter(Boolean),
+      keywords: (e.keywords?.kw || []).map(clean).filter(Boolean),
       pageCount: Number.isInteger(pages) ? pages : null,
       // The index's <doi> is unpadded (10.17487/RFC903) but the registered DOI is
       // zero-padded to 4 digits (10.17487/RFC0903), so derive it from the number.
       // The one place RFC numbers stay zero-padded: the registered DOI form (10.17487/RFC0903).
-      doi: '10.17487/RFC' + String(number).padStart(4, '0'),
+      doi: `10.17487/RFC${String(number).padStart(4, '0')}`,
       errataUrl: opt(e['errata-url']),
-      isAlso: ((e['is-also'] && e['is-also']['doc-id']) || []).map((x: unknown) => String(x).trim()),
+      isAlso: (e['is-also']?.['doc-id'] || []).map((x: unknown) => String(x).trim()),
       obsoletes: rfcRefs(e.obsoletes),
       obsoletedBy: rfcRefs(e['obsoleted-by']),
       updates: rfcRefs(e.updates),
@@ -123,27 +150,31 @@ export function parseIndex(xml: string): RfcIndex {
   return { entries, notIssued, max };
 }
 
-export async function loadIndex(opts: { cacheDir?: string; maxAgeHours?: number; offline?: boolean; file?: string | null } = {}): Promise<RfcIndex> {
-  const { cacheDir = '.cache', maxAgeHours = 20, offline = false, file = null } = opts;
-  const cachePath = file || path.join(cacheDir, 'rfc-index.xml');
-  let stat: fs.Stats | null = null;
-  try { stat = fs.statSync(cachePath); } catch { /* no cache */ }
+/** The committed snapshot of the RFC Editor index (refresh with `npm run refresh-index`). */
+export const SNAPSHOT_PATH = path.join('data', 'rfc-index.xml');
 
-  if (file || offline) {
-    if (!stat) throw new Error(`rfc-index: ${offline ? 'offline mode requires' : 'file not found:'} ${cachePath}`);
-    return parseIndex(fs.readFileSync(cachePath, 'utf8'));
+/**
+ * Loads the RFC index from a local file; the build never touches the network.
+ * Source, in order: the `file` option, $RFC_INDEX_FILE, the committed snapshot data/rfc-index.xml.
+ */
+export function loadIndex(opts: { file?: string | null; snapshot?: string } = {}): RfcIndex {
+  const file = opts.file ?? (process.env.RFC_INDEX_FILE || null) ?? null;
+  const snapshot = opts.snapshot ?? SNAPSHOT_PATH;
+  const source = file || snapshot;
+  if (!fs.existsSync(source)) {
+    throw new Error(
+      file
+        ? `rfc-index: file not found: ${source}`
+        : `rfc-index: snapshot ${source} is missing (restore it from git, or run \`npm run refresh-index\`)`,
+    );
   }
-  if (stat && Date.now() - stat.mtimeMs < maxAgeHours * 3600 * 1000) {
-    return parseIndex(fs.readFileSync(cachePath, 'utf8'));
-  }
+  return parseIndex(fs.readFileSync(source, 'utf8'));
+}
 
-  const res = await fetch(INDEX_URL, { signal: AbortSignal.timeout(30000) });
+/** Fetches the live index and validates it parses. Only the refresh script uses this. */
+export async function fetchIndex(fetchImpl: typeof fetch = fetch): Promise<{ xml: string; index: RfcIndex }> {
+  const res = await fetchImpl(INDEX_URL, { signal: AbortSignal.timeout(60000) });
   if (res.status !== 200) throw new Error(`rfc-index: fetch ${INDEX_URL} failed with HTTP ${res.status}`);
   const xml = await res.text();
-  const parsed = parseIndex(xml); // validate before caching
-  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-  const tmp = `${cachePath}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, xml);
-  fs.renameSync(tmp, cachePath);
-  return parsed;
+  return { xml, index: parseIndex(xml) }; // validate before the caller writes anything
 }

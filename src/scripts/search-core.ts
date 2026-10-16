@@ -17,7 +17,10 @@ export function parseNumber(q: string, max: number): number | null {
 }
 
 export function matchQuestions<T extends Question>(q: string, list: T[] | null | undefined): T[] {
-  const words = String(q).toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
+  const words = String(q)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length >= 3);
   if (!words.length || !list) return [];
   return list.filter((item) => {
     const s = String(item.q).toLowerCase();
@@ -25,7 +28,9 @@ export function matchQuestions<T extends Question>(q: string, list: T[] | null |
   });
 }
 
-const STOP = new Set('a an and are as at be by do does for from how in is it of on or rfc that the this to was what when where which who why with'.split(' '));
+const STOP = new Set(
+  'a an and are as at be by do does for from how in is it of on or rfc that the this to was what when where which who why with'.split(' '),
+);
 
 export function tokenize(text: unknown): string[] {
   let s = String(text == null ? '' : text);
@@ -49,7 +54,11 @@ export function plan(q: string, prefixMap?: Record<string, string[]> | null): Pl
   const toks: string[] = [];
   const seen = new Set<string>();
   const all = tokenize(q);
-  for (const t of all) if (!seen.has(t)) { seen.add(t); toks.push(t); }
+  for (const t of all)
+    if (!seen.has(t)) {
+      seen.add(t);
+      toks.push(t);
+    }
   const slots: Cand[][] = toks.map((t) => [{ term: t, w: 1 }]);
   const endsOpen = !/\s$/.test(String(q));
   const last = all.length ? all[all.length - 1] : null;
@@ -68,7 +77,10 @@ export function termsOf(p: Plan): string[] {
 
 export function shardsOf(p: Plan, n: number): number[] {
   const out: number[] = [];
-  for (const t of termsOf(p)) { const k = shardOf(t, n); if (out.indexOf(k) < 0) out.push(k); }
+  for (const t of termsOf(p)) {
+    const k = shardOf(t, n);
+    if (out.indexOf(k) < 0) out.push(k);
+  }
   return out;
 }
 
@@ -85,7 +97,8 @@ export function rank(p: Plan, postings: Postings, limit?: number): Ranked[] {
       }
     }
     for (const id of Object.keys(best)) {
-      const a = acc[id] || (acc[id] = { id: +id, score: 0, hits: 0 });
+      const a = acc[id] ?? { id: +id, score: 0, hits: 0 };
+      acc[id] = a;
       a.score += best[id];
       a.hits++;
     }
@@ -102,8 +115,8 @@ export function rank(p: Plan, postings: Postings, limit?: number): Ranked[] {
 export function docRow(d: DocRowIn): Row {
   const tier = d[4] || '';
   return {
-    label: d[1] ? 'RFC ' + d[1] : tier === 'journey' ? 'JOURNEY' : 'PAGE',
-    title: d[3] ? d[3] + ': ' + d[2] : d[2],
+    label: d[1] ? `RFC ${d[1]}` : tier === 'journey' ? 'JOURNEY' : 'PAGE',
+    title: d[3] ? `${d[3]}: ${d[2]}` : d[2],
     tag: tier === 'journey' ? 'JOURNEY' : tier.toUpperCase(),
     tier: tier === 'journey' ? '' : tier,
     href: d[0],

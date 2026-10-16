@@ -1,15 +1,16 @@
-// @ts-nocheck -- ported tests; types to be tightened in follow-up
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { checkHtml } from '../src/lib/sanitize-check';
+import { test } from 'vitest';
 import { lint } from '../scripts/lint-content';
+import { checkHtml } from '../src/lib/sanitize-check';
 
-const HERE = process.cwd() + '/test';
+const FIX = path.join(process.cwd(), 'test', 'fixtures', 'content');
 
-const FIX = path.join(HERE, 'fixtures', 'content');
+// Content JSON is edited in place to break one rule at a time; its shape is exactly what the linter validates.
+// biome-ignore lint/suspicious/noExplicitAny: deliberately untyped fixture documents
+type Doc = any;
 const index = {
   entries: new Map([826, 903, 5952, 1, 951, 1542, 2131].map((n) => [n, { number: n }])),
   notIssued: new Set([2]),
@@ -21,8 +22,8 @@ function tmpContent() {
   fs.cpSync(FIX, dir, { recursive: true });
   return dir;
 }
-const rfcPath = (dir, n) => path.join(dir, 'rfcs', n + '.json');
-function edit(dir, n, fn) {
+const rfcPath = (dir: string, n: number): string => path.join(dir, 'rfcs', `${n}.json`);
+function edit(dir: string, n: number, fn: (j: Doc) => void): void {
   const p = rfcPath(dir, n);
   const j = JSON.parse(fs.readFileSync(p, 'utf8'));
   fn(j);
@@ -34,7 +35,7 @@ function baseline() {
   assert.deepEqual(r.errors, []);
   return dir;
 }
-const has = (list, re) => list.some((m) => re.test(m));
+const has = (list: string[], re: RegExp): boolean => list.some((m) => re.test(m));
 
 test('clean fixtures lint without errors and write the lock', () => {
   const dir = baseline();
@@ -45,33 +46,44 @@ test('clean fixtures lint without errors and write the lock', () => {
 
 test('schema error reports file and path', () => {
   const dir = baseline();
-  edit(dir, 903, (j) => { j.sections[0].id = 'Bad Id'; });
+  edit(dir, 903, (j: Doc) => {
+    j.sections[0].id = 'Bad Id';
+  });
   const r = lint(dir, index, {});
   assert.ok(has(r.errors, /903\.json.*\/sections\/0\/id/), r.errors.join('\n'));
 });
 
 test('unknown viz type is a schema error', () => {
   const dir = baseline();
-  edit(dir, 903, (j) => { j.viz[0].type = 'nope'; });
+  edit(dir, 903, (j: Doc) => {
+    j.viz[0].type = 'nope';
+  });
   assert.ok(has(lint(dir, index, {}).errors, /903\.json.*\/viz\/0\/type/));
 });
 
 test('unknown glossary id is an error', () => {
   const dir = baseline();
-  edit(dir, 903, (j) => { j.glossary = ['mac-address', 'no-such-term']; });
+  edit(dir, 903, (j: Doc) => {
+    j.glossary = ['mac-address', 'no-such-term'];
+  });
   assert.ok(has(lint(dir, index, {}).errors, /no-such-term/));
 });
 
 test('removed locked section id is a permalink break', () => {
   const dir = baseline();
-  edit(dir, 903, (j) => { j.sections = j.sections.filter((s) => s.id !== 'packet-format'); delete j.viz; });
+  edit(dir, 903, (j: Doc) => {
+    j.sections = j.sections.filter((s: Doc) => s.id !== 'packet-format');
+    delete j.viz;
+  });
   const r = lint(dir, index, {});
   assert.ok(r.errors.includes('permalink break: 903#packet-format'), r.errors.join('\n'));
 });
 
 test('new section id is a warning unless updateLock', () => {
   const dir = baseline();
-  edit(dir, 826, (j) => { j.sections.push({ id: 'extra', title: 'Extra', content: '<p>x</p>' }); });
+  edit(dir, 826, (j: Doc) => {
+    j.sections.push({ id: 'extra', title: 'Extra', content: '<p>x</p>' });
+  });
   const r = lint(dir, index, {});
   assert.deepEqual(r.errors, []);
   assert.ok(has(r.warnings, /826#extra/));
@@ -98,23 +110,34 @@ test('missing eli5 on summary+ tiers is a warning', () => {
   assert.ok(has(r.warnings, /5952.*eli5/i));
   assert.ok(has(r.warnings, /826.*eli5/i));
   assert.ok(!has(r.warnings, /903.*eli5/i));
-  edit(dir, 5952, (j) => { j.eli5 = { summary: '<p>ok</p>' }; });
+  edit(dir, 5952, (j: Doc) => {
+    j.eli5 = { summary: '<p>ok</p>' };
+  });
   r = lint(dir, index, {});
   assert.ok(!has(r.warnings, /5952.*eli5/i));
 });
 
 test('internal link above max is an error; legacy #rfc link is an error', () => {
   const dir = baseline();
-  edit(dir, 826, (j) => { j.sections[0].content = '<p><a href="/99999/">x</a></p>'; });
+  edit(dir, 826, (j: Doc) => {
+    j.sections[0].content = '<p><a href="/99999/">x</a></p>';
+  });
   assert.ok(has(lint(dir, index, {}).errors, /826.*99999/));
-  edit(dir, 826, (j) => { j.sections[0].content = '<p><a href="#rfc903">x</a></p>'; });
+  edit(dir, 826, (j: Doc) => {
+    j.sections[0].content = '<p><a href="#rfc903">x</a></p>';
+  });
   assert.ok(has(lint(dir, index, {}).errors, /826.*#rfc903/));
-  edit(dir, 826, (j) => { j.sections[0].content = '<p><a href="/903/">fine</a></p>'; });
+  edit(dir, 826, (j: Doc) => {
+    j.sections[0].content = '<p><a href="/903/">fine</a></p>';
+  });
   assert.deepEqual(lint(dir, index, {}).errors, []);
 });
 
 const REJECT = [
-  '<script>x</script>', '<SCRIPT>x</SCRIPT>', '<iframe src="x"></iframe>', '<style>a{}</style>',
+  '<script>x</script>',
+  '<SCRIPT>x</SCRIPT>',
+  '<iframe src="x"></iframe>',
+  '<style>a{}</style>',
   '<svg/onload=alert(1)>',
   '<a href="java&#115;cript:alert(1)">x</a>',
   '<a href="&#x6A;avascript:x">',
@@ -149,7 +172,9 @@ const ACCEPT = [
 test('unsafe HTML is rejected', () => {
   for (const bad of REJECT) {
     const dir = baseline();
-    edit(dir, 826, (j) => { j.sections[0].content = bad; });
+    edit(dir, 826, (j: Doc) => {
+      j.sections[0].content = bad;
+    });
     assert.ok(has(lint(dir, index, {}).errors, /826.*unsafe/i), bad);
   }
 });
@@ -157,7 +182,9 @@ test('unsafe HTML is rejected', () => {
 test('legacy and plain markup passes the allowlist', () => {
   for (const good of ACCEPT) {
     const dir = baseline();
-    edit(dir, 826, (j) => { j.sections[0].content = good; });
+    edit(dir, 826, (j: Doc) => {
+      j.sections[0].content = good;
+    });
     assert.deepEqual(lint(dir, index, {}).errors, [], good);
   }
 });
@@ -169,7 +196,9 @@ test('checkHtml: direct allowlist behaviour', () => {
 
 test('a viz that throws is reported with file and index, not a bare TypeError', () => {
   const dir = baseline();
-  edit(dir, 826, (j) => { j.viz = [{ type: 'packet', anchor: 'x', position: 'after', data: {} }]; });
+  edit(dir, 826, (j: Doc) => {
+    j.viz = [{ type: 'packet', anchor: 'x', position: 'after', data: {} }];
+  });
   const r = lint(dir, index, {});
   assert.ok(has(r.errors, /826\.json: \/viz\/0: .*fields/), r.errors.join('\n'));
 });
@@ -194,8 +223,12 @@ test('journey referencing a non-issued RFC is an error', () => {
 
 test('--only validates just the named files, and uses .work/glossary', () => {
   const dir = baseline();
-  edit(dir, 826, (j) => { j.sections[0].content = '<script>x</script>'; });
-  edit(dir, 903, (j) => { j.glossary = ['mac-address', 'draft-term']; });
+  edit(dir, 826, (j: Doc) => {
+    j.sections[0].content = '<script>x</script>';
+  });
+  edit(dir, 903, (j: Doc) => {
+    j.glossary = ['mac-address', 'draft-term'];
+  });
   const only903 = lint(dir, index, { only: [rfcPath(dir, 903)] });
   assert.ok(has(only903.errors, /draft-term/));
   assert.ok(!has(only903.errors, /826/));
@@ -218,17 +251,25 @@ test('index summary shape works as the index argument', () => {
   const dir = baseline();
   const summary = { max: 6000, issued: [826, 903, 5952, 1, 951, 1542, 2131], notIssued: [2] };
   assert.deepEqual(lint(dir, summary, { only: [rfcPath(dir, 903)] }).errors, []);
-  edit(dir, 903, (j) => { j.sections[0].content = '<a href="/7000/">x</a>'; });
+  edit(dir, 903, (j: Doc) => {
+    j.sections[0].content = '<a href="/7000/">x</a>';
+  });
   assert.ok(has(lint(dir, summary, { only: [rfcPath(dir, 903)] }).errors, /7000/));
 });
 
 test('slug collisions with numbers or pages are errors', () => {
   const dir = baseline();
-  edit(dir, 903, (j) => { j.slug = 'glossary'; });
+  edit(dir, 903, (j: Doc) => {
+    j.slug = 'glossary';
+  });
   assert.ok(has(lint(dir, index, {}).errors, /slug/i));
-  edit(dir, 903, (j) => { j.slug = '826'; });
+  edit(dir, 903, (j: Doc) => {
+    j.slug = '826';
+  });
   assert.ok(has(lint(dir, index, {}).errors, /slug/i));
-  edit(dir, 903, (j) => { j.slug = 'rarp'; });
+  edit(dir, 903, (j: Doc) => {
+    j.slug = 'rarp';
+  });
   assert.deepEqual(lint(dir, index, {}).errors, []);
 });
 

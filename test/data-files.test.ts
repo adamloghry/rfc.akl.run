@@ -1,13 +1,25 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseIndex } from '../src/lib/rfc-index';
+import { test } from 'vitest';
+import {
+  coverageJson,
+  dataFiles,
+  feedXml,
+  graphJson,
+  questionsJson,
+  redirectsFile,
+  robotsTxt,
+  sitemapUrls,
+  sitemapXml,
+  titleShards,
+} from '../src/lib/data-files';
 import { buildSite } from '../src/lib/model';
-import { coverageJson, titleShards, graphJson, questionsJson, feedXml, sitemapUrls, sitemapXml, robotsTxt, dataFiles, redirectsFile } from '../src/lib/data-files';
-import { rfcSchema, journeySchema, glossarySchema } from '../src/lib/schemas';
+import { parseIndex } from '../src/lib/rfc-index';
+import { glossarySchema, journeySchema, rfcSchema } from '../src/lib/schemas';
+import { must } from './helpers';
 
-const HERE = process.cwd() + '/test';
+const HERE = `${process.cwd()}/test`;
 const site = buildSite({
   index: parseIndex(fs.readFileSync(path.join(HERE, 'fixtures', 'rfc-index.sample.xml'), 'utf8')),
   contentDir: path.join(HERE, 'fixtures', 'content'),
@@ -20,7 +32,7 @@ test('coverage.json packs state and category per number', () => {
   assert.equal(c.buildDate, '2026-10-15');
   const cells = Buffer.from(c.cells, 'base64');
   assert.equal(cells.length, site.max);
-  const r = site.rfcs.get(903)!;
+  const r = must(site.rfcs.get(903));
   assert.equal(cells[902] & 7, 5); // interactive
   assert.equal(c.categories[cells[902] >> 4], r.category);
 });
@@ -28,10 +40,13 @@ test('coverage.json packs state and category per number', () => {
 test('titles shards, questions and graph', () => {
   const t = titleShards(site);
   assert.ok(t['0']);
-  assert.deepEqual(Object.keys(JSON.parse(t['0'])).every((k) => Number(k) <= 1000), true);
+  assert.deepEqual(
+    Object.keys(JSON.parse(t['0'])).every((k) => Number(k) <= 1000),
+    true,
+  );
   assert.ok(Array.isArray(JSON.parse(questionsJson(site))));
   const g = JSON.parse(graphJson(site));
-  for (const v of Object.values<any>(g)) assert.ok('o' in v && 'ub' in v && 't' in v && 'y' in v);
+  for (const v of Object.values<Record<string, unknown>>(g)) assert.ok('o' in v && 'ub' in v && 't' in v && 'y' in v);
 });
 
 test('feed, sitemap, robots', () => {
@@ -46,14 +61,26 @@ test('feed, sitemap, robots', () => {
 
 test('dataFiles covers coverage, titles, questions, graph and the search index', () => {
   const files = Object.keys(dataFiles(site));
-  for (const f of ['data/coverage.json', 'data/titles/0.json', 'data/questions.json', 'data/graph.json', 'data/search/meta.json', 'data/search/docs.json', 'data/search/t-00.json']) {
+  for (const f of [
+    'data/coverage.json',
+    'data/titles/0.json',
+    'data/questions.json',
+    'data/graph.json',
+    'data/search/meta.json',
+    'data/search/docs.json',
+    'data/search/t-00.json',
+  ]) {
     assert.ok(files.includes(f), f);
   }
 });
 
 test('every content file validates against the Zod schemas', () => {
   const bad: string[] = [];
-  for (const [dir, schema] of [['rfcs', rfcSchema], ['journeys', journeySchema], ['glossary', glossarySchema]] as const) {
+  for (const [dir, schema] of [
+    ['rfcs', rfcSchema],
+    ['journeys', journeySchema],
+    ['glossary', glossarySchema],
+  ] as const) {
     const d = path.join(process.cwd(), 'content', dir);
     for (const f of fs.readdirSync(d).filter((x) => x.endsWith('.json'))) {
       const r = schema.safeParse(JSON.parse(fs.readFileSync(path.join(d, f), 'utf8')));

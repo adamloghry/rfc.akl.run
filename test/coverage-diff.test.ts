@@ -1,15 +1,15 @@
-// @ts-nocheck -- ported tests; types to be tightened in follow-up
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
-import { diff, decode, render } from '../scripts/coverage-diff';
-
-const HERE = process.cwd() + '/test';
+import { test } from 'vitest';
+import { decode, diff, render } from '../scripts/coverage-diff';
 
 const cats = ['core', 'routing'];
-function cov(bytes, extra) {
-  return Object.assign({ max: bytes.length, buildDate: '2026-10-15', categories: cats, cells: Buffer.from(bytes).toString('base64') }, extra);
+function cov(bytes: number[], extra?: Record<string, unknown>) {
+  return Object.assign(
+    { max: bytes.length, buildDate: '2026-10-15', categories: cats, cells: Buffer.from(bytes).toString('base64') },
+    extra,
+  );
 }
-const b = (cat, state) => (cat << 4) | state;
+const b = (cat: number, state: number): number => (cat << 4) | state;
 const NONE = 15;
 
 test('decode: state is low 3 bits, category index is high 4 bits', () => {

@@ -1,6 +1,6 @@
 import type { APIRoute, GetStaticPaths } from 'astro';
-import { getSite } from '../../../lib/site';
 import { searchFiles } from '../../../lib/data-files';
+import { getSite } from '../../../lib/site';
 
 // Memoized: every shard endpoint shares one index build.
 let files: Promise<Record<string, string>> | null = null;

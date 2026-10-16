@@ -18,10 +18,15 @@ const PREFIX_MIN_DF = 3;
 
 const W = { shortTitle: 12, title: 10, number: 20, question: 8, section: 3, summary: 2, abstract: 1, description: 3 };
 
-const STOP = new Set<string>(('a an and are as at be by do does for from how in is it of on or rfc that the this to was what when where which who why with').split(' '));
+const STOP = new Set<string>(
+  'a an and are as at be by do does for from how in is it of on or rfc that the this to was what when where which who why with'.split(' '),
+);
 
 export function tokenize(text: unknown): string[] {
-  const s = String(text == null ? '' : text).normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const s = String(text == null ? '' : text)
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase();
   const out: string[] = [];
   for (const t of s.split(/[^a-z0-9]+/)) {
     if (t.length < 2 || STOP.has(t)) continue;
@@ -40,11 +45,19 @@ export function shardOf(term: string, n = DEFAULT_SHARDS): number {
   return (h >>> 0) % n;
 }
 
-export function shardName(i: number): string { return `data/search/t-${String(i).padStart(2, '0')}.json`; }
+export function shardName(i: number): string {
+  return `data/search/t-${String(i).padStart(2, '0')}.json`;
+}
 
 export function stripHtml(h: unknown): string {
-  return String(h == null ? '' : h).replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'");
+  return String(h == null ? '' : h)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'");
 }
 
 /** Accumulates weighted term frequencies for one doc. */
@@ -58,7 +71,10 @@ function fieldTerms(fields: [number, unknown[]][]): Map<string, number> {
   return m;
 }
 
-export function buildSearchIndex(site: Site, opts: { shards?: number } = {}): { files: { path: string; json: string }[]; stats: Record<string, number> } {
+export function buildSearchIndex(
+  site: Site,
+  opts: { shards?: number } = {},
+): { files: { path: string; json: string }[]; stats: Record<string, number> } {
   const shards = opts.shards || DEFAULT_SHARDS;
   const docs: unknown[][] = [];
   const postings = new Map<string, [number, number][]>(); // term -> [[id, score]]
@@ -67,7 +83,10 @@ export function buildSearchIndex(site: Site, opts: { shards?: number } = {}): { 
     docs.push(row);
     for (const [term, score] of fieldTerms(fields)) {
       let p = postings.get(term);
-      if (!p) postings.set(term, (p = []));
+      if (!p) {
+        p = [];
+        postings.set(term, p);
+      }
       p.push([id, score]);
     }
   };
@@ -80,23 +99,31 @@ export function buildSearchIndex(site: Site, opts: { shards?: number } = {}): { 
       [W.title, [r.title]],
       [W.number, [String(r.number)]],
       [W.question, c.questions || []],
-      [W.section, (c.sections || []).map((s: any) => s.title)],
+      [W.section, (c.sections || []).map((s: { title?: unknown }) => s.title)],
       [W.summary, [stripHtml(c.summary)]],
     ];
     if (r.tier === 'index') fields.push([W.abstract, [r.abstract]]);
     add([r.url, r.number, r.title, r.shortTitle || null, r.tier], fields);
   }
   for (const j of site.journeys || []) {
-    add([`/journeys/${j.slug}/`, null, j.title, null, 'journey'], [
-      [W.title, [j.title]], [W.question, j.questions || []], [W.description, [j.description]],
-    ]);
+    add(
+      [`/journeys/${j.slug}/`, null, j.title, null, 'journey'],
+      [
+        [W.title, [j.title]],
+        [W.question, j.questions || []],
+        [W.description, [j.description]],
+      ],
+    );
   }
 
   const shardMaps: Record<string, [number, number][]>[] = Array.from({ length: shards }, () => ({}));
   const df = new Map<string, number>();
   for (const [term, p] of postings) {
     df.set(term, p.length);
-    if (p.length > MAX_POSTINGS) { p.sort((a, b) => b[1] - a[1] || a[0] - b[0]); p.length = MAX_POSTINGS; }
+    if (p.length > MAX_POSTINGS) {
+      p.sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+      p.length = MAX_POSTINGS;
+    }
     p.sort((a, b) => b[1] - a[1] || a[0] - b[0]);
     shardMaps[shardOf(term, shards)][term] = p;
   }
@@ -104,20 +131,33 @@ export function buildSearchIndex(site: Site, opts: { shards?: number } = {}): { 
   const byPrefix: Record<string, [string, number][]> = {};
   for (const [term, n] of df) {
     if (term.length < 4 || n < PREFIX_MIN_DF) continue;
-    (byPrefix[term.slice(0, 3)] = byPrefix[term.slice(0, 3)] || []).push([term, n]);
+    const key = term.slice(0, 3);
+    const list = byPrefix[key] ?? [];
+    byPrefix[key] = list;
+    list.push([term, n]);
   }
   const prefix: Record<string, string[]> = {};
   for (const k of Object.keys(byPrefix).sort()) {
-    prefix[k] = byPrefix[k].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, PREFIX_TERMS).map((x) => x[0]);
+    prefix[k] = byPrefix[k]
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+      .slice(0, PREFIX_TERMS)
+      .map((x) => x[0]);
   }
 
-  const sortKeys = (o: Record<string, unknown>) => Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]]));
+  const sortKeys = (o: Record<string, unknown>) =>
+    Object.fromEntries(
+      Object.keys(o)
+        .sort()
+        .map((k) => [k, o[k]]),
+    );
   const files: { path: string; json: string }[] = [
     { path: 'data/search/meta.json', json: JSON.stringify({ version: VERSION, shards, docCount: docs.length }) },
     { path: 'data/search/docs.json', json: JSON.stringify(docs) },
     { path: 'data/search/prefix.json', json: JSON.stringify(prefix) },
   ];
-  shardMaps.forEach((m, i) => files.push({ path: shardName(i), json: JSON.stringify(sortKeys(m)) }));
+  shardMaps.forEach((m, i) => {
+    files.push({ path: shardName(i), json: JSON.stringify(sortKeys(m)) });
+  });
   const stats = { docs: docs.length, terms: postings.size, shards, prefixes: Object.keys(prefix).length, files: files.length };
   return { files, stats };
 }

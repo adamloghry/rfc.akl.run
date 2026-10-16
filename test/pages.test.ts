@@ -1,14 +1,14 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { rfcSchema } from '../src/lib/schemas';
+import { test } from 'vitest';
 import { SAMPLES, SHAPES, starters } from '../src/components/pages/contribute-data';
-import { tally, indexBlocks, groups, pct, strip, DESCRIPTIONS } from '../src/components/pages/util';
+import { DESCRIPTIONS, groups, indexBlocks, pct, strip, tally } from '../src/components/pages/util';
+import { buildSite, type RfcRecord } from '../src/lib/model';
 import { parseIndex } from '../src/lib/rfc-index';
-import { buildSite } from '../src/lib/model';
+import { rfcSchema } from '../src/lib/schemas';
 
-const HERE = process.cwd() + '/test';
+const HERE = `${process.cwd()}/test`;
 const site = buildSite({
   index: parseIndex(fs.readFileSync(path.join(HERE, 'fixtures', 'rfc-index.sample.xml'), 'utf8')),
   contentDir: path.join(HERE, 'fixtures', 'content'),
@@ -18,9 +18,9 @@ const site = buildSite({
 test('contribute starters validate against the rfc schema', () => {
   for (const [k, v] of Object.entries(starters())) {
     const r = rfcSchema.safeParse(v);
-    assert.ok(r.success, k + JSON.stringify((r as any).error?.issues));
-    assert.ok(Number.isInteger((v as any).number));
-    assert.equal((v as any).provenance.reviewedBy, null);
+    assert.ok(r.success, k + JSON.stringify((r as { error?: { issues: unknown } }).error?.issues));
+    assert.ok(Number.isInteger((v as { number: number }).number));
+    assert.equal((v as { provenance: { reviewedBy: unknown } }).provenance.reviewedBy, null);
   }
 });
 
@@ -33,16 +33,20 @@ test('areas: eleven categories each with a description; groups cover all RFCs', 
   assert.equal(site.categories.length, 11);
   for (const c of site.categories) assert.ok(DESCRIPTIONS[c.key], c.key);
   const g = groups(site);
-  assert.equal([...g.values()].reduce((a, l) => a + l.length, 0), site.rfcs.size);
+  assert.equal(
+    [...g.values()].reduce((a, l) => a + l.length, 0),
+    site.rfcs.size,
+  );
   const t = tally([...site.rfcs.values()]);
   assert.equal(t.total, site.counts.total);
   assert.equal(t.interactive, site.counts.interactive);
 });
 
 test('areas: index blocks paginate per 1000', () => {
-  const list: any[] = [];
+  const list: Array<Pick<RfcRecord, 'number'>> = [];
   for (let n = 1; n <= 2500; n++) list.push({ number: n });
-  const { blocks } = indexBlocks(list);
+  // indexBlocks only reads `number`, so bare stand-ins are enough.
+  const { blocks } = indexBlocks(list as RfcRecord[]);
   assert.equal(blocks.length, 3);
   assert.equal(blocks[2][1].length, 500);
 });

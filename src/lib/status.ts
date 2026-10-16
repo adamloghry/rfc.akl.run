@@ -1,6 +1,10 @@
 /** C5 status map. */
 export type StatusTone = 'green' | 'amber' | 'neutral';
-export interface StatusInfo { key: string; label: string; tone: StatusTone }
+export interface StatusInfo {
+  key: string;
+  label: string;
+  tone: StatusTone;
+}
 const MAP: Record<string, StatusInfo> = {
   'INTERNET STANDARD': { key: 'internet-standard', label: 'Internet Standard', tone: 'green' },
   'DRAFT STANDARD': { key: 'draft-standard', label: 'Draft Standard', tone: 'green' },
@@ -15,7 +19,7 @@ const MAP: Record<string, StatusInfo> = {
 /** @param {string} raw index current-status, e.g. 'PROPOSED STANDARD'
  *  @returns {{key: string, label: string, tone: 'green'|'amber'|'neutral'}} throws on unknown value */
 export function normalize(raw: string): StatusInfo {
-  const hit = Object.prototype.hasOwnProperty.call(MAP, raw) ? MAP[raw] : null;
+  const hit = Object.hasOwn(MAP, raw) ? MAP[raw] : null;
   if (!hit) throw new Error(`Unknown RFC status: ${JSON.stringify(raw)}`);
   return { ...hit };
 }

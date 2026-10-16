@@ -17,12 +17,22 @@ export const DESCRIPTIONS: Record<string, string> = {
   meta: 'Process, policy and culture of the Internet standards.',
 };
 
-export const strip = (s: unknown) => String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+export const strip = (s: unknown) =>
+  String(s || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 export const byNum = (a: RfcRecord, b: RfcRecord) => a.number - b.number;
 export const byPri = (a: RfcRecord, b: RfcRecord) => b.priority - a.priority || a.number - b.number;
-export const pct = (a: number, b: number) => (b ? ((a / b) * 100).toFixed(1) : '0.0') + '%';
+export const pct = (a: number, b: number) => `${b ? ((a / b) * 100).toFixed(1) : '0.0'}%`;
 
-export interface Tally { total: number; index: number; summary: number; explainer: number; interactive: number }
+export interface Tally {
+  total: number;
+  index: number;
+  summary: number;
+  explainer: number;
+  interactive: number;
+}
 export function tally(list: RfcRecord[]): Tally {
   const t: any = { total: list.length, index: 0, summary: 0, explainer: 0, interactive: 0 };
   for (const r of list) t[r.tier]++;
@@ -31,7 +41,7 @@ export function tally(list: RfcRecord[]): Tally {
 
 export function groups(site: Site): Map<string, RfcRecord[]> {
   const g = new Map<string, RfcRecord[]>(site.categories.map((c) => [c.key, []]));
-  for (const r of site.rfcs.values()) (g.get(r.category) || g.get('meta')!).push(r);
+  for (const r of site.rfcs.values()) (g.get(r.category) ?? (g.get('meta') as RfcRecord[])).push(r);
   return g;
 }
 
@@ -40,8 +50,9 @@ export function indexBlocks(list: RfcRecord[]): { sorted: RfcRecord[]; blocks: [
   const blocks = new Map<number, RfcRecord[]>();
   for (const r of sorted) {
     const k = Math.floor((r.number - 1) / BLOCK);
-    if (!blocks.has(k)) blocks.set(k, []);
-    blocks.get(k)!.push(r);
+    const block = blocks.get(k) ?? [];
+    blocks.set(k, block);
+    block.push(r);
   }
   return { sorted, blocks: [...blocks] };
 }

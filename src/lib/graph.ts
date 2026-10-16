@@ -7,8 +7,10 @@ export function pubDate(r: { year: number; month: number; day: number | null }):
   return new Date(Date.UTC(r.year, r.month - 1, day));
 }
 
-export function byDate(a: any, b: any): number {
-  return (pubDate(a).getTime() - pubDate(b).getTime()) || (a.number - b.number);
+type Dated = { number: number; year: number; month: number; day: number | null };
+
+export function byDate(a: Dated, b: Dated): number {
+  return pubDate(a).getTime() - pubDate(b).getTime() || a.number - b.number;
 }
 
 const RFC_RE = /\bRFC\s?(\d{1,5})\b/g;
@@ -18,13 +20,19 @@ function scan(text: unknown, out: Set<number>) {
   if (typeof text !== 'string') return;
   for (const re of [RFC_RE, HREF_RE]) {
     re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) out.add(Number(m[1]));
+    for (let m = re.exec(text); m; m = re.exec(text)) out.add(Number(m[1]));
   }
 }
 
 /** RFC numbers mentioned by a content object (sections, summary, today, references). */
-export function contentMentions(content: any): Set<number> {
+export interface MentionSource {
+  summary?: unknown;
+  today?: unknown;
+  sections?: Array<{ content?: unknown }>;
+  references?: Array<{ text?: unknown; rfc?: unknown }>;
+}
+
+export function contentMentions(content: MentionSource | null | undefined): Set<number> {
   const out = new Set<number>();
   if (!content) return out;
   scan(content.summary, out);
@@ -32,7 +40,7 @@ export function contentMentions(content: any): Set<number> {
   for (const s of content.sections || []) scan(s.content, out);
   for (const r of content.references || []) {
     scan(r.text, out);
-    if (Number.isInteger(r.rfc)) out.add(r.rfc);
+    if (typeof r.rfc === 'number' && Number.isInteger(r.rfc)) out.add(r.rfc);
   }
   return out;
 }
@@ -43,8 +51,9 @@ export function mentions(site: Site): Site {
   for (const rfc of site.rfcs.values()) {
     for (const n of contentMentions(rfc.content)) {
       if (n === rfc.number || !site.rfcs.has(n)) continue;
-      if (!into.has(n)) into.set(n, new Set());
-      into.get(n)!.add(rfc.number);
+      const set = into.get(n) ?? new Set<number>();
+      into.set(n, set);
+      set.add(rfc.number);
     }
   }
   for (const rfc of site.rfcs.values()) {
@@ -59,17 +68,26 @@ function item(r: RfcRecord, self: RfcRecord) {
 
 const MAX_ITEMS = 5;
 
-export function lineage(rfc: RfcRecord, site: Site): { title: string; items: { number: number; year: number; label: string; current: boolean; url: string }[] } {
-  const curated = rfc.content && rfc.content.lineage;
+export function lineage(
+  rfc: RfcRecord,
+  site: Site,
+): { title: string; items: { number: number; year: number; label: string; current: boolean; url: string }[] } {
+  const curated = rfc.content?.lineage;
   if (curated && Array.isArray(curated.rfcs) && curated.rfcs.length) {
-    const items = curated.rfcs.map((n: number) => site.rfcs.get(n)).filter(Boolean).map((r: RfcRecord) => item(r, rfc));
+    const items = curated.rfcs
+      .map((n: number) => site.rfcs.get(n))
+      .filter(Boolean)
+      .map((r: RfcRecord) => item(r, rfc));
     return { title: curated.title || 'Lineage', items };
   }
   const seen = new Set([rfc.number]);
   const related: RfcRecord[] = [rfc];
   for (const n of [...rfc.obsoletes, ...rfc.updates, ...rfc.obsoletedBy]) {
     const r = site.rfcs.get(n);
-    if (r && !seen.has(n)) { seen.add(n); related.push(r); }
+    if (r && !seen.has(n)) {
+      seen.add(n);
+      related.push(r);
+    }
   }
   related.sort(byDate);
   let list = related;

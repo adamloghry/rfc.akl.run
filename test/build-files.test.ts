@@ -1,13 +1,13 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
-import { parseIndex } from '../src/lib/rfc-index';
-import { buildSite } from '../src/lib/model';
 import os from 'node:os';
+import path from 'node:path';
+import { test } from 'vitest';
 import { finalizeErrorPage, headersContent, redirectsContent } from '../src/integrations/build-files';
+import { buildSite } from '../src/lib/model';
+import { parseIndex } from '../src/lib/rfc-index';
 
-const HERE = process.cwd() + '/test';
+const HERE = `${process.cwd()}/test`;
 const site = buildSite({
   index: parseIndex(fs.readFileSync(path.join(HERE, 'fixtures', 'rfc-index.sample.xml'), 'utf8')),
   contentDir: path.join(HERE, 'fixtures', 'content'),
@@ -23,9 +23,9 @@ test('_redirects has the /rfcN rule and keeps its generated header', () => {
 
 test('_headers sets nosniff, immutable assets and short search cache', () => {
   const h = headersContent();
-  assert.match(h, /\n\/\*\n  X-Content-Type-Options: nosniff\n  Cache-Control: public, max-age=300/);
-  assert.match(h, /\/assets\/\*\n  Cache-Control: public, max-age=31536000, immutable/);
-  assert.match(h, /\/data\/search\/\*\n  Cache-Control: public, max-age=60/);
+  assert.match(h, /\n\/\*\n {2}X-Content-Type-Options: nosniff\n( {2}.*\n)* {2}Cache-Control: public, max-age=300\n/);
+  assert.match(h, /\/assets\/\*\n {2}! Cache-Control\n {2}Cache-Control: public, max-age=31536000, immutable/);
+  assert.match(h, /\/data\/search\/\*\n {2}! Cache-Control\n {2}Cache-Control: public, max-age=60/);
 });
 
 test('finalizeErrorPage moves not-found/ to 404.html and leaves the RFC 404 page alone', () => {

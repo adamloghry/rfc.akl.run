@@ -6,8 +6,8 @@ export const SUGGESTIONS = ['How does email get delivered?', 'Why is the padlock
 export const HASH_FORWARDER = "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/'+(+m[1])+'/');";
 
 export const fmt = (n: number) => Number(n).toLocaleString('en-US');
-export const pct1 = (n: number, d: number) => (d ? ((n / d) * 100).toFixed(1) : '0.0') + '%';
-export const w = (n: number, d: number) => (d ? ((n / d) * 100).toFixed(2) : '0') + '%';
+export const pct1 = (n: number, d: number) => `${d ? ((n / d) * 100).toFixed(1) : '0.0'}%`;
+export const w = (n: number, d: number) => `${d ? ((n / d) * 100).toFixed(2) : '0'}%`;
 const covered = (r: any) => r.tier !== 'index';
 const featured = (r: any) => r.tier === 'explainer' || r.tier === 'interactive';
 
@@ -21,9 +21,14 @@ export function coverageModel(site: Site) {
     { label: 'Interactive', count: c.interactive ? fmt(c.interactive) : '—', hint: 'Simulation or explorable', color: 'var(--ink)' },
   ];
   return {
-    pct: pct1(cov, c.total), total: fmt(c.total), ladder,
-    barDeep: w(c.explainer + c.interactive, c.total), barSummary: w(c.summary, c.total),
-    fresh: site.newest.slice(0, 3).map((r: any) => ({ ...r, meta: `${MONTHS[r.month - 1]} ${r.year} · ${r.statusLabel} · ${r.tier} page` })),
+    pct: pct1(cov, c.total),
+    total: fmt(c.total),
+    ladder,
+    barDeep: w(c.explainer + c.interactive, c.total),
+    barSummary: w(c.summary, c.total),
+    fresh: site.newest
+      .slice(0, 3)
+      .map((r: any) => ({ ...r, meta: `${MONTHS[r.month - 1]} ${r.year} · ${r.statusLabel} · ${r.tier} page` })),
   };
 }
 
@@ -45,11 +50,20 @@ export function areasModel(site: Site) {
   for (const r of site.rfcs.values()) {
     const a = by.get(r.category);
     if (!a || !covered(r)) continue;
-    if (featured(r)) { a.f++; a.ex.push(r.shortTitle || r.title); } else a.s++;
+    if (featured(r)) {
+      a.f++;
+      a.ex.push(r.shortTitle || r.title);
+    } else a.s++;
   }
   const list = [...by.values()];
   const maxCov = Math.max(1, ...list.map((a) => a.f + a.s));
-  return list.map((a) => ({ ...a, count: a.f + a.s, wf: w(a.f, maxCov), ws: w(a.s, maxCov), examples: a.ex.slice(0, 4).join(' · ') || '—' }));
+  return list.map((a) => ({
+    ...a,
+    count: a.f + a.s,
+    wf: w(a.f, maxCov),
+    ws: w(a.s, maxCov),
+    examples: a.ex.slice(0, 4).join(' · ') || '—',
+  }));
 }
 
 export function timelineModel(site: Site) {
@@ -59,7 +73,8 @@ export function timelineModel(site: Site) {
     if (r.year > maxYear) maxYear = r.year;
     if (!covered(r)) continue;
     const y = years.get(r.year) || { f: 0, b: 0, nums: [] };
-    if (featured(r)) y.f++; else y.b++;
+    if (featured(r)) y.f++;
+    else y.b++;
     y.nums.push(r.number);
     years.set(r.year, y);
   }
@@ -68,7 +83,7 @@ export function timelineModel(site: Site) {
   for (let yr = 1969; yr <= maxYear; yr++) {
     const v = years.get(yr) || { f: 0, b: 0, nums: [] };
     const nums = v.nums.sort((a, b) => a - b);
-    const tip = `${yr}: ${v.f + v.b} RFCs` + (nums.length ? ` — ${nums.slice(0, 8).join(', ')}` : '');
+    const tip = `${yr}: ${v.f + v.b} RFCs${nums.length ? ` — ${nums.slice(0, 8).join(', ')}` : ''}`;
     cols.push({ tip, hb: w(v.b, maxY), hf: w(v.f, maxY) });
   }
   return { cols, axis: [1969, 1980, 1990, 2000, 2010, maxYear] };

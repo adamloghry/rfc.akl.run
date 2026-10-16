@@ -1,0 +1,83 @@
+name: PR preview
+# Uploads each pull request as a Worker *version* (not a deployment) so Cloudflare serves it at a
+# preview URL, and comments the URL on the PR. Production is untouched: only nightly.yml deploys.
+# Needs the repo secrets CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID; without them (fork PRs
+# never get secrets) the job skips cleanly. Builds with Nix (the locked RFC index), so the preview
+# is the same site `nix flake check` verified.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write # only for the preview-URL comment
+    steps:
+      # The Cloudflare secrets are exposed only to the gate and upload steps (not job-wide).
+      - name: Check for Cloudflare credentials
+        id: gate
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Cloudflare secrets available (fork PR or not configured); skipping preview."
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.gate.outputs.enabled == 'true'
+      - uses: cachix/install-nix-action@v31
+        if: steps.gate.outputs.enabled == 'true'
+      - uses: nix-community/cache-nix-action@v7
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'package-lock.json') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+
+      - name: Upload version
+        if: steps.gate.outputs.enabled == 'true'
+        id: upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          export WRANGLER_OUTPUT_FILE_PATH="$RUNNER_TEMP/wrangler-output.ndjson"
+          nix run .#preview-deploy -- \
+            --preview-alias "pr-${{ github.event.pull_request.number }}" \
+            --message "PR #${{ github.event.pull_request.number }} ${{ github.event.pull_request.head.sha }}" \
+            | tee "$RUNNER_TEMP/wrangler.log"
+          # Output file: one JSON object per line; the version-upload entry carries the preview URLs.
+          url=$(jq -r 'select(.type=="version-upload") | (.preview_alias_url // .preview_url // empty)' "$WRANGLER_OUTPUT_FILE_PATH" | tail -n1)
+          if [ -z "$url" ]; then
+            url=$(grep -Eo 'https://[A-Za-z0-9.-]+\.workers\.dev' "$RUNNER_TEMP/wrangler.log" | head -n1 || true)
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URL
+        if: steps.gate.outputs.enabled == 'true' && steps.upload.outputs.url != ''
+        uses: actions/github-script@v9
+        env:
+          PREVIEW_URL: ${{ steps.upload.outputs.url }}
+        with:
+          script: |
+            const marker = '<!-- rfc-preview -->';
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const body = `${marker}\nPreview for ${sha}: ${process.env.PREVIEW_URL}\n\nThis is a Worker version, not a deployment; production only changes on the nightly deploy from trunk.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find((c) => c.body && c.body.includes(marker));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });

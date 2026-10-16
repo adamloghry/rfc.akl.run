@@ -1,9 +1,22 @@
-import type { RfcRecord } from './model';
+/** The slice of an RfcRecord the citation formats read. */
+export interface Citable {
+  number: number;
+  title?: string;
+  indexTitle?: string;
+  authors?: string[];
+  indexAuthors?: string[];
+  editors?: string[];
+  year: number;
+  month: number;
+  isAlso?: string[];
+  doi?: string | null;
+  pageCount?: number | null;
+}
+
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const BIB_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 
-/** Splits "J.C. Mogul" / "J.-P. Van Der Berg" into leading initials and surname.
- *  @param {string} name @returns {{initials: string, surname: string}} */
+/** Splits "J.C. Mogul" / "J.-P. Van Der Berg" into leading initials and surname. */
 function splitName(name: string): { initials: string; surname: string } {
   const tokens = String(name).trim().split(/\s+/);
   let i = 0;
@@ -22,10 +35,12 @@ function direct(name: string, isEditor: boolean) {
 }
 
 /** Citations always use the index's initials-form names, not content-overridden full names. */
-function names(rfc: Pick<RfcRecord, 'indexAuthors' | 'authors'>): string[] { return rfc.indexAuthors || rfc.authors || []; }
+function names(rfc: Pick<Citable, 'indexAuthors' | 'authors'>): string[] {
+  return rfc.indexAuthors || rfc.authors || [];
+}
 
 /** RFC Editor style author list: "A, B., C, D., and E. F". Editors are always "Last, I., Ed.". */
-function authorList(rfc: any): string {
+function authorList(rfc: Citable): string {
   const editors = new Set(rfc.editors || []);
   const authors = names(rfc);
   const n = authors.length;
@@ -36,10 +51,12 @@ function authorList(rfc: any): string {
   return `${parts.slice(0, -1).join(', ')}, and ${parts[n - 1]}`;
 }
 
-function url(rfc: { number: number }) { return `https://www.rfc-editor.org/info/rfc${rfc.number}`; }
+function url(rfc: { number: number }) {
+  return `https://www.rfc-editor.org/info/rfc${rfc.number}`;
+}
 
 /** RFC Editor citation string. */
-export function rfcEditor(rfc: any): string {
+export function rfcEditor(rfc: Citable): string {
   const parts: string[] = [];
   const authors = authorList(rfc);
   if (authors) parts.push(authors);
@@ -52,10 +69,10 @@ export function rfcEditor(rfc: any): string {
   if (rfc.doi) parts.push(`DOI ${rfc.doi}`);
   parts.push(`${MONTHS[rfc.month - 1]} ${rfc.year}`);
   parts.push(`<${url(rfc)}>`);
-  return parts.join(', ') + '.';
+  return `${parts.join(', ')}.`;
 }
 
-export function bibtex(rfc: any): string {
+export function bibtex(rfc: Citable): string {
   const lines = [
     `@misc{rfc${rfc.number},`,
     '  series = {Request for Comments},',

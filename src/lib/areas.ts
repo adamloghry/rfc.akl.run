@@ -1,5 +1,8 @@
 /** C6 order and names. */
-export interface Category { key: string; name: string }
+export interface Category {
+  key: string;
+  name: string;
+}
 export const CATEGORIES: Category[] = [
   { key: 'core', name: 'Core Protocols' },
   { key: 'dns', name: 'DNS' },
@@ -36,9 +39,22 @@ const TITLE: [string, RegExp][] = [
 ];
 
 const AREA: Record<string, string> = {
-  rtg: 'routing', ops: 'infrastructure', mgt: 'infrastructure', 'ops-old': 'infrastructure',
-  int: 'core', ipng: 'core', sec: 'security', app: 'applications', art: 'applications', rai: 'applications',
-  tsv: 'transport', wit: 'transport', gen: 'meta', usv: 'meta', sub: 'meta', osi: 'meta',
+  rtg: 'routing',
+  ops: 'infrastructure',
+  mgt: 'infrastructure',
+  'ops-old': 'infrastructure',
+  int: 'core',
+  ipng: 'core',
+  sec: 'security',
+  app: 'applications',
+  art: 'applications',
+  rai: 'applications',
+  tsv: 'transport',
+  wit: 'transport',
+  gen: 'meta',
+  usv: 'meta',
+  sub: 'meta',
+  osi: 'meta',
 };
 
 /** C6: WG map, then title regex, then area map, else 'meta'. */
@@ -48,7 +64,7 @@ export function guessCategory(entry: { wg?: string | null; title?: string; area?
   const title = entry.title || '';
   for (const [cat, re] of TITLE) if (re.test(title)) return cat;
   const area = entry.area ? String(entry.area).toLowerCase() : null;
-  if (area && Object.prototype.hasOwnProperty.call(AREA, area)) return AREA[area];
+  if (area && Object.hasOwn(AREA, area)) return AREA[area];
   return 'meta';
 }
 

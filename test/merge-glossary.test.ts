@@ -1,20 +1,18 @@
-// @ts-nocheck -- ported tests; types to be tightened in follow-up
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { test } from 'vitest';
 import { mergeGlossary } from '../scripts/merge-glossary';
-
-const HERE = process.cwd() + '/test';
 
 test('merge-glossary: new, existing, duplicates, rejects', () => {
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'mg-'));
   const workDir = path.join(root, 'work');
   const outDir = path.join(root, 'out');
-  fs.mkdirSync(workDir); fs.mkdirSync(outDir);
+  fs.mkdirSync(workDir);
+  fs.mkdirSync(outDir);
   fs.writeFileSync(path.join(outDir, 'arp.json'), JSON.stringify({ id: 'arp', term: 'ARP', definition: '<p>keep</p>', rfcs: [826] }));
-  const w = (n, a) => fs.writeFileSync(path.join(workDir, n + '.json'), JSON.stringify(a));
+  const w = (n: number, a: unknown) => fs.writeFileSync(path.join(workDir, `${n}.json`), JSON.stringify(a));
   w(791, [
     { id: 'datagram', term: 'Datagram', definition: '<p>short</p>', eli5: 'a' },
     { id: 'arp', term: 'ARP', definition: '<p>longer replacement</p>', eli5: 'x' },

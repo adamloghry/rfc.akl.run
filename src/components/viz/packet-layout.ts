@@ -38,7 +38,9 @@ export function layout(fields: any[], width: number) {
       left -= take;
       col = (col + take) % width;
     }
-    fragBits.forEach((bits, i) => frags.push({ field: f, bits, part: i, parts: fragBits.length, fragBits }));
+    fragBits.forEach((bits, i) => {
+      frags.push({ field: f, bits, part: i, parts: fragBits.length, fragBits });
+    });
   }
   return frags;
 }

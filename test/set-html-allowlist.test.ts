@@ -1,7 +1,7 @@
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { test } from 'vitest';
 
 /**
  * Every set:html in src/**\/*.astro, as "file :: expression". Only fields listed in HTML_FIELDS
@@ -11,13 +11,13 @@ import path from 'node:path';
  */
 const ALLOWED = [
   // content fields (HTML_FIELDS)
-  'components/rfc/Section.astro :: s.content || \'\'',
+  "components/rfc/Section.astro :: s.content || ''",
   'components/rfc/Section.astro :: s.eli5',
   'components/rfc/RightRail.astro :: c.eli5.summary',
   'components/rfc/RightRail.astro :: c.today',
   'components/rfc/IndexTier.astro :: summary',
   'components/rfc/IndexTier.astro :: eli5',
-  'pages/glossary/index.astro :: t.definition || \'\'',
+  "pages/glossary/index.astro :: t.definition || ''",
   // generated / static / escaped by their builders
   'components/rfc/MetaList.astro :: factValueHtml(f.value, site)',
   'components/rfc/Datasheet.astro :: NOSCRIPT',
@@ -56,6 +56,10 @@ test('every set:html in src/ is on the allowlist', () => {
     .sort();
   const unlisted = found.filter((x) => !ALLOWED.includes(x));
   const stale = ALLOWED.filter((x) => !found.includes(x));
-  assert.deepEqual(unlisted, [], `New set:html site(s). Content fields must be added to HTML_FIELDS in src/lib/sanitize-check.ts (so lint sanitizes them), then to ALLOWED in this test.`);
+  assert.deepEqual(
+    unlisted,
+    [],
+    `New set:html site(s). Content fields must be added to HTML_FIELDS in src/lib/sanitize-check.ts (so lint sanitizes them), then to ALLOWED in this test.`,
+  );
   assert.deepEqual(stale, [], 'ALLOWED lists set:html sites that no longer exist; remove them.');
 });

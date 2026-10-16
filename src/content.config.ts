@@ -1,6 +1,6 @@
 import { defineCollection } from 'astro:content';
 import { glob } from 'astro/loaders';
-import { rfcSchema, journeySchema, glossarySchema } from './lib/schemas';
+import { glossarySchema, journeySchema, rfcSchema } from './lib/schemas';
 
 // Unpadded filenames: content/rfcs/903.json → id "903".
 const stem = ({ entry }: { entry: string }) => entry.replace(/\.json$/, '');

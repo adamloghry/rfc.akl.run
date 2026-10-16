@@ -1,26 +1,50 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import * as status from './status';
 import * as areas from './areas';
 import * as graph from './graph';
 import * as priority from './priority';
-import { checkContent } from './sanitize-check';
 import type { IndexEntry, RfcIndex } from './rfc-index';
+import { checkContent } from './sanitize-check';
+import * as status from './status';
 
 export type Tier = 'index' | 'summary' | 'explainer' | 'interactive';
 
-/** Content JSON (C7). Loosely typed: the Zod schema in content.config.ts is the authority. */
+/** Content JSON (C7). Loosely typed on purpose: the Zod schema in content.config.ts is the authority. */
+// biome-ignore lint/suspicious/noExplicitAny: validated by Zod at the boundary; consumers read optional keys freely
 export type RfcContent = Record<string, any>;
 
 export interface RfcRecord {
-  number: number; slug: string | null; editors: string[]; indexAuthors: string[]; indexTitle: string;
-  title: string; shortTitle: string | null; authors: string[]; organization: string | null;
-  year: number; month: number; day: number | null; dateLabel: string;
-  status: string; statusLabel: string; statusTone: 'green' | 'amber' | 'neutral';
-  stream: string | null; area: string | null; wg: string | null; abstract: string | null;
-  keywords: string[]; pageCount: number | null; doi: string | null; errataUrl: string | null; isAlso: string[];
-  obsoletes: number[]; obsoletedBy: number[]; updates: number[]; updatedBy: number[];
-  category: string; categoryReviewed: boolean;
+  number: number;
+  slug: string | null;
+  editors: string[];
+  indexAuthors: string[];
+  indexTitle: string;
+  title: string;
+  shortTitle: string | null;
+  authors: string[];
+  organization: string | null;
+  year: number;
+  month: number;
+  day: number | null;
+  dateLabel: string;
+  status: string;
+  statusLabel: string;
+  statusTone: 'green' | 'amber' | 'neutral';
+  stream: string | null;
+  area: string | null;
+  wg: string | null;
+  abstract: string | null;
+  keywords: string[];
+  pageCount: number | null;
+  doi: string | null;
+  errataUrl: string | null;
+  isAlso: string[];
+  obsoletes: number[];
+  obsoletedBy: number[];
+  updates: number[];
+  updatedBy: number[];
+  category: string;
+  categoryReviewed: boolean;
   tier: Tier;
   content: RfcContent | null;
   isNew: boolean;
@@ -31,16 +55,41 @@ export interface RfcRecord {
   url: string;
 }
 
-export interface JourneyStep { title: string; subtitle?: string; description?: string; rfcs: { number: number; label?: string }[] }
-export interface Journey { slug: string; title: string; description?: string; questions?: string[]; featured?: boolean; steps: JourneyStep[]; [k: string]: any }
-export interface Term { id: string; term: string; definition: string; eli5?: string; rfcs: number[]; usedBy: number[]; [k: string]: any }
+export interface JourneyStep {
+  title: string;
+  subtitle?: string;
+  description?: string;
+  rfcs: { number: number; label?: string }[];
+}
+export interface Journey {
+  slug: string;
+  title: string;
+  description?: string;
+  questions?: string[];
+  featured?: boolean;
+  steps: JourneyStep[];
+  // biome-ignore lint/suspicious/noExplicitAny: content files are looseObjects; extra keys pass through to the pages
+  [k: string]: any;
+}
+export interface Term {
+  id: string;
+  term: string;
+  definition: string;
+  eli5?: string;
+  rfcs: number[];
+  usedBy: number[];
+  // biome-ignore lint/suspicious/noExplicitAny: content files are looseObjects; extra keys pass through to the pages
+  [k: string]: any;
+}
 
 export interface Site {
-  buildDate: Date; max: number;
+  buildDate: Date;
+  max: number;
   rfcs: Map<number, RfcRecord>;
   notIssued: Set<number>;
   reserved: Set<number>;
-  journeys: Journey[]; glossary: Map<string, Term>;
+  journeys: Journey[];
+  glossary: Map<string, Term>;
   categories: { key: string; name: string }[];
   counts: { total: number; index: number; summary: number; explainer: number; interactive: number };
   newest: RfcRecord[];
@@ -49,18 +98,23 @@ export interface Site {
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-function readJson<T = any>(file: string, fallback?: T): T {
+/** Reads JSON the caller vouches for (content files are validated separately by lint and the Zod schemas). */
+function readJson<T>(file: string, fallback?: T): T {
   if (!fs.existsSync(file)) return fallback as T;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (e: any) {
-    throw new Error(`${file}: ${e.message}`);
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
+  } catch (e) {
+    throw new Error(`${file}: ${(e as Error).message}`);
   }
 }
 
-export function readDir(dir: string): { file: string; data: any }[] {
+export function readDir<T = RfcContent>(dir: string): { file: string; data: T }[] {
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort().map((f) => ({ file: path.join(dir, f), data: readJson(path.join(dir, f)) }));
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.json'))
+    .sort()
+    .map((f) => ({ file: path.join(dir, f), data: readJson<T>(path.join(dir, f)) }));
 }
 
 /** Build-time guard (same validator as lint): throws on the first unsafe HTML field. */
@@ -71,10 +125,20 @@ function assertSafeHtml(kind: 'rfc' | 'glossary', dirName: string, file: string,
 
 export function tierOf(content: RfcContent | null): Tier {
   if (!content) return 'index';
-  if ((content.viz || []).some((v: any) => v.type === 'sequence-sim')) return 'interactive';
+  if ((content.viz || []).some((v: { type?: string }) => v.type === 'sequence-sim')) return 'interactive';
   if (Array.isArray(content.sections) && content.sections.length) return 'explainer';
   if (typeof content.summary === 'string' && content.summary.trim()) return 'summary';
   return 'index';
+}
+
+/** A glossary entry as stored in content/glossary (usedBy is derived, rfcs optional). */
+export interface GlossaryInput {
+  id: string;
+  term: string;
+  definition: string;
+  eli5?: string;
+  rfcs?: number[];
+  [k: string]: unknown;
 }
 
 export interface BuildSiteOptions {
@@ -85,7 +149,7 @@ export interface BuildSiteOptions {
   /** pre-loaded (validated) collection data; when omitted, read from contentDir */
   rfcs?: RfcContent[];
   journeys?: Journey[];
-  glossary?: any[];
+  glossary?: GlossaryInput[];
 }
 
 export function buildSite(opts: BuildSiteOptions): Site {
@@ -118,21 +182,35 @@ export function buildSite(opts: BuildSiteOptions): Site {
     const ageDays = Math.floor((buildDate.getTime() - Date.UTC(e.year, e.month - 1, day)) / 86400000);
     rfcs.set(number, {
       number,
-      slug: (c && c.slug) || null,
-      title: (c && c.title) || e.title,
-      shortTitle: (c && c.shortTitle) || null,
-      authors: c && c.authors && c.authors.length ? c.authors : e.authors,
+      slug: c?.slug || null,
+      title: c?.title || e.title,
+      shortTitle: c?.shortTitle || null,
+      authors: c?.authors?.length ? c.authors : e.authors,
       editors: e.editors || [],
       indexAuthors: e.authors,
       indexTitle: e.title,
-      organization: (c && c.organization) || null,
-      year: e.year, month: e.month, day: e.day || null,
+      organization: c?.organization || null,
+      year: e.year,
+      month: e.month,
+      day: e.day || null,
       dateLabel: `${MONTHS[e.month - 1]} ${e.year}`,
-      status: st.key, statusLabel: st.label, statusTone: st.tone,
-      stream: e.stream, area: e.area, wg: e.wg, abstract: e.abstract,
-      keywords: e.keywords, pageCount: e.pageCount, doi: e.doi, errataUrl: e.errataUrl, isAlso: e.isAlso,
-      obsoletes: e.obsoletes, obsoletedBy: e.obsoletedBy, updates: e.updates, updatedBy: e.updatedBy,
-      category: (c && c.category) || areas.guessCategory(e),
+      status: st.key,
+      statusLabel: st.label,
+      statusTone: st.tone,
+      stream: e.stream,
+      area: e.area,
+      wg: e.wg,
+      abstract: e.abstract,
+      keywords: e.keywords,
+      pageCount: e.pageCount,
+      doi: e.doi,
+      errataUrl: e.errataUrl,
+      isAlso: e.isAlso,
+      obsoletes: e.obsoletes,
+      obsoletedBy: e.obsoletedBy,
+      updates: e.updates,
+      updatedBy: e.updatedBy,
+      category: c?.category || areas.guessCategory(e),
       categoryReviewed: !!((c && c.categoryReviewed === true) || legacy.has(number)),
       tier: tierOf(c),
       content: c,
@@ -147,7 +225,7 @@ export function buildSite(opts: BuildSiteOptions): Site {
 
   const journeys: Journey[] = opts.journeys
     ? [...opts.journeys].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
-    : readDir(path.join(contentDir, 'journeys')).map((x) => x.data);
+    : readDir<Journey>(path.join(contentDir, 'journeys')).map((x) => x.data);
   for (const j of journeys) {
     for (const step of j.steps || []) {
       for (const ref of step.rfcs || []) {
@@ -160,10 +238,13 @@ export function buildSite(opts: BuildSiteOptions): Site {
   const glossary = new Map<string, Term>();
   const terms = opts.glossary
     ? [...opts.glossary].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    : readDir(path.join(contentDir, 'glossary')).map(({ file, data }) => { assertSafeHtml('glossary', 'glossary', file, data); return data; });
-  for (const data of terms) glossary.set(data.id, { ...data, rfcs: data.rfcs || [], usedBy: [] });
+    : readDir<GlossaryInput>(path.join(contentDir, 'glossary')).map(({ file, data }) => {
+        assertSafeHtml('glossary', 'glossary', file, data);
+        return data;
+      });
+  for (const data of terms) glossary.set(data.id, { ...data, rfcs: data.rfcs || [], usedBy: [] as number[] });
   for (const r of rfcs.values()) {
-    for (const id of (r.content && r.content.glossary) || []) {
+    for (const id of r.content?.glossary || []) {
       const t = glossary.get(id);
       if (t && !t.usedBy.includes(r.number)) t.usedBy.push(r.number);
     }
@@ -177,8 +258,16 @@ export function buildSite(opts: BuildSiteOptions): Site {
   for (const r of rfcs.values()) counts[r.tier]++;
 
   const site: Site = {
-    buildDate, max: index.max, rfcs, notIssued: new Set(index.notIssued), reserved,
-    journeys, glossary, categories: areas.CATEGORIES.map((c) => ({ ...c })), counts, newest: [],
+    buildDate,
+    max: index.max,
+    rfcs,
+    notIssued: new Set(index.notIssued),
+    reserved,
+    journeys,
+    glossary,
+    categories: areas.CATEGORIES.map((c) => ({ ...c })),
+    counts,
+    newest: [],
   };
 
   graph.mentions(site);

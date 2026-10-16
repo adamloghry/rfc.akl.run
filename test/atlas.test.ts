@@ -1,11 +1,18 @@
-// @ts-nocheck -- ported tests; types to be tightened in follow-up
-import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { test } from 'vitest';
+import {
+  areasModel,
+  coverageModel,
+  HASH_FORWARDER,
+  journeysModel,
+  rfcPath,
+  SUGGESTIONS,
+  timelineModel,
+} from '../src/components/atlas/atlas-data';
+import { buildSite, type Site } from '../src/lib/model';
 import { parseIndex } from '../src/lib/rfc-index';
-import { buildSite } from '../src/lib/model';
-import { coverageModel, journeysModel, areasModel, timelineModel, rfcPath, HASH_FORWARDER, SUGGESTIONS } from '../src/components/atlas/atlas-data';
 import { decode } from '../src/scripts/atlas';
 
 const FIX = path.join(process.cwd(), 'test', 'fixtures');
@@ -15,7 +22,7 @@ const site = buildSite({
   buildDate: new Date('2026-10-15'),
 });
 site.newest = [...site.rfcs.values()].sort((a, b) => b.year - a.year || b.month - a.month || b.number - a.number).slice(0, 10);
-const withSite = (extra) => Object.assign(Object.create(Object.getPrototypeOf(site)), site, extra);
+const withSite = (extra: Partial<Site>): Site => Object.assign(Object.create(Object.getPrototypeOf(site)), site, extra);
 
 test('hash forwarder and 4 suggestions', () => {
   assert.equal(HASH_FORWARDER, "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/'+(+m[1])+'/');");
@@ -25,7 +32,7 @@ test('hash forwarder and 4 suggestions', () => {
 test('coverage band computed from site.counts', () => {
   const c = site.counts;
   const m = coverageModel(site);
-  assert.equal(m.pct, (((c.summary + c.explainer + c.interactive) / c.total) * 100).toFixed(1) + '%');
+  assert.equal(m.pct, `${(((c.summary + c.explainer + c.interactive) / c.total) * 100).toFixed(1)}%`);
   assert.equal(m.fresh.length, 3);
   assert.match(m.fresh[0].meta, /[A-Z][a-z]{2} \d{4} · [^·]+ · (index|summary|explainer|interactive) page/);
   const big = coverageModel(withSite({ counts: { total: 10065, index: 9800, summary: 200, explainer: 52, interactive: 13 } }));
@@ -41,7 +48,12 @@ test('journeys: feature + up to 4 cards, zero and no-featured cases', () => {
   assert.equal(rfcPath(j.feat).length, 2);
   assert.equal(j.others.length, 0);
   assert.equal(journeysModel(withSite({ journeys: [] })).feat, undefined);
-  const mk = (slug, f) => ({ slug, title: slug, featured: f, steps: [{ title: 's', rfcs: [{ number: 1 }, { number: 2 }] }] });
+  const mk = (slug: string, f: boolean) => ({
+    slug,
+    title: slug,
+    featured: f,
+    steps: [{ title: 's', rfcs: [{ number: 1 }, { number: 2 }] }],
+  });
   const many = journeysModel(withSite({ journeys: ['a', 'b', 'c', 'd', 'e', 'f'].map((s) => mk(s, s === 'c')) }));
   assert.equal(many.feat.slug, 'c');
   assert.equal(many.others.length, 4);
@@ -52,7 +64,9 @@ test('areas: one card per category with covered counts and examples', () => {
   const list = areasModel(site);
   assert.equal(list.length, site.categories.length);
   const r = site.rfcs.get(903);
+  assert.ok(r);
   const a = list.find((x) => x.key === r.category);
+  assert.ok(a);
   assert.ok(a.count >= 1);
   assert.ok(a.examples.includes(r.shortTitle || r.title));
   assert.match(a.wf, /^\d+\.\d\d%$/);
@@ -75,7 +89,7 @@ test('atlas decode: state and category from the packed byte', () => {
 
 // Markup assertions against the built page (skipped when dist/ has not been built).
 const dist = path.join(process.cwd(), 'dist', 'index.html');
-const built = fs.existsSync(dist) ? fs.readFileSync(dist, 'utf8') : null;
+const built = fs.existsSync(dist) ? fs.readFileSync(dist, 'utf8') : '';
 const withDist = built ? test : test.skip;
 
 withDist('built index.html: cool palette, site header, inline forwarder in head, hero search', () => {

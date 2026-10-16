@@ -1,4 +1,3 @@
-// @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 /**
  * Coverage diff between two dist/data/coverage.json objects (contract C12).
  *
@@ -15,72 +14,103 @@
  */
 import fs from 'node:fs';
 
+export interface CoverageJson {
+  max?: number;
+  cells?: string;
+  categories: string[];
+}
+interface Cell {
+  state: number;
+  category: string | null;
+}
+interface DiffResult {
+  added: number[];
+  changed: Array<{ n: number; from: string; to: string }>;
+}
+
 const STATES = ['not issued', 'reserved', 'index', 'summary', 'explainer', 'interactive'];
 
-export function decode(cov) {
+export function decode(cov: CoverageJson): Cell[] {
   const buf = Buffer.from(cov.cells || '', 'base64');
-  const out = [];
+  const out: Cell[] = [];
   for (const byte of buf) {
     const ci = byte >> 4;
-    out.push({ state: byte & 7, category: ci === 15 ? null : (cov.categories[ci] || null) });
+    out.push({ state: byte & 7, category: ci === 15 ? null : cov.categories[ci] || null });
   }
   return out;
 }
 
-function label(c) {
+function label(c: Cell): string {
   const s = STATES[c.state] || `state ${c.state}`;
   return c.category ? `${s} (${c.category})` : s;
 }
 
 /** Pure: → { added: [n], changed: [{n, from, to}] } */
-export function diff(oldCov, newCov) {
+export function diff(oldCov: CoverageJson | null | undefined, newCov: CoverageJson): DiffResult {
   const a = oldCov ? decode(oldCov) : [];
   const b = decode(newCov);
-  const added = [];
-  const changed = [];
-  for (let i = 0; i < b.length; i++) {
+  const added: number[] = [];
+  const changed: DiffResult['changed'] = [];
+  b.forEach((to, i) => {
     const n = i + 1;
-    if (i >= a.length) { added.push(n); continue; }
-    if (a[i].state === b[i].state && a[i].category === b[i].category) continue;
-    const stateChanged = a[i].state !== b[i].state;
+    const from = a[i];
+    if (!from) {
+      added.push(n);
+      return;
+    }
+    if (from.state === to.state && from.category === to.category) return;
+    const stateChanged = from.state !== to.state;
     changed.push({
       n,
-      from: stateChanged ? (STATES[a[i].state] || String(a[i].state)) : label(a[i]),
-      to: stateChanged ? (STATES[b[i].state] || String(b[i].state)) : label(b[i]),
+      from: stateChanged ? STATES[from.state] || String(from.state) : label(from),
+      to: stateChanged ? STATES[to.state] || String(to.state) : label(to),
     });
-  }
+  });
   return { added, changed };
 }
 
-export function render(d, meta = {}) {
+export function render(d: DiffResult, meta: { note?: string } = {}): string {
   const lines = ['## Coverage diff', ''];
   if (meta.note) lines.push(meta.note, '');
   if (!d.added.length && !d.changed.length) {
     lines.push('No coverage changes.');
-    return lines.join('\n') + '\n';
+    return `${lines.join('\n')}\n`;
   }
   if (d.added.length) {
     lines.push(`### New RFC numbers (${d.added.length})`, '');
     const shown = d.added.slice(0, 200);
-    lines.push(shown.map((n) => `RFC ${n}`).join(', ') + (d.added.length > shown.length ? `, and ${d.added.length - shown.length} more` : ''), '');
+    lines.push(
+      shown.map((n) => `RFC ${n}`).join(', ') + (d.added.length > shown.length ? `, and ${d.added.length - shown.length} more` : ''),
+      '',
+    );
   }
   if (d.changed.length) {
     lines.push(`### Status / tier changes (${d.changed.length})`, '', '| RFC | From | To |', '|---|---|---|');
     for (const c of d.changed.slice(0, 500)) lines.push(`| RFC ${c.n} | ${c.from} | ${c.to} |`);
     if (d.changed.length > 500) lines.push(`| … | ${d.changed.length - 500} more | |`);
   }
-  return lines.join('\n') + '\n';
+  return `${lines.join('\n')}\n`;
 }
 
-function readJson(p) {
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+function readJson(p: string): CoverageJson | null {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
-function main(argv) {
+function main(argv: string[]): number {
   const [oldPath, newPath] = argv;
-  if (!oldPath || !newPath) { console.error('usage: coverage-diff.ts <old.json> <new.json>'); return 2; }
+  if (!oldPath || !newPath) {
+    console.error('usage: coverage-diff.ts <old.json> <new.json>');
+    return 2;
+  }
   const newCov = readJson(newPath);
-  if (!newCov) { console.error(`cannot read ${newPath}`); return 1; }
+  if (!newCov) {
+    console.error(`cannot read ${newPath}`);
+    return 1;
+  }
   const oldCov = readJson(oldPath);
   const md = oldCov
     ? render(diff(oldCov, newCov))

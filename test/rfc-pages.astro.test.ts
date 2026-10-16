@@ -1,16 +1,16 @@
-// @ts-nocheck -- .astro imports have no TS module declarations under tsc; vitest (Astro plugins) resolves them
-import { describe, test, expect } from 'vitest';
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { experimental_AstroContainer as AstroContainer } from 'astro/container';
+import { describe, expect, test } from 'vitest';
 import Datasheet from '../src/components/rfc/Datasheet.astro';
 import IndexTier from '../src/components/rfc/IndexTier.astro';
 import NotIssued from '../src/components/rfc/NotIssued.astro';
-import { buildSite } from '../src/lib/model';
-import { parseIndex } from '../src/lib/rfc-index';
-import * as cite from '../src/lib/cite';
-import * as status from '../src/lib/status';
 import { isDupFact } from '../src/components/rfc/util';
+import * as cite from '../src/lib/cite';
+import { buildSite, type RfcRecord, type Site } from '../src/lib/model';
+import { parseIndex } from '../src/lib/rfc-index';
+import * as status from '../src/lib/status';
+import { must } from './helpers';
 
 const site = buildSite({
   index: parseIndex(fs.readFileSync('test/fixtures/rfc-index.sample.xml', 'utf8')),
@@ -18,16 +18,17 @@ const site = buildSite({
   buildDate: new Date('2026-10-15'),
 });
 const container = await AstroContainer.create();
-const ds = (rfc: any, s: any = site) => container.renderToString(Datasheet, { props: { rfc, site: s } });
-const it = (rfc: any, s: any = site) => container.renderToString(IndexTier, { props: { rfc, site: s } });
+const ds = (rfc: unknown, s: Site = site) => container.renderToString(Datasheet, { props: { rfc, site: s } });
+const it = (rfc: unknown, s: Site = site) => container.renderToString(IndexTier, { props: { rfc, site: s } });
 const gz = (s: string) => zlib.gzipSync(s).length;
-const esc = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+const esc = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 
 // The fixture content retitles 903; use the index title so the title string matches the real page.
-const base903 = site.rfcs.get(903)!;
-const r903: any = { ...base903, title: 'A Reverse Address Resolution Protocol' };
-const r5952 = () => site.rfcs.get(5952)!;
-const withContent = (rfc: any, over: any) => ({ ...rfc, content: { ...(rfc.content || {}), ...over } });
+const base903 = must(site.rfcs.get(903));
+const r903: RfcRecord = { ...base903, title: 'A Reverse Address Resolution Protocol' };
+const r5952 = () => must(site.rfcs.get(5952));
+const withContent = (rfc: RfcRecord, over: Record<string, unknown>) => ({ ...rfc, content: { ...(rfc.content || {}), ...over } });
 
 describe('Datasheet', () => {
   test('head: tier meta and title; badges', async () => {
@@ -112,20 +113,25 @@ describe('Datasheet', () => {
     const h = await ds({ ...r903, obsoletedBy: [2131] });
     expect(h).toMatch(/Obsoleted by[\s\S]*RFC 2131[\s\S]*Which version should I read\?/);
     expect(await ds(r903)).not.toContain('Which version should I read?');
-    const b = { ...site.rfcs.get(2131), number: 9990, url: '/9990/' };
-    const s2 = { ...site, rfcs: new Map(site.rfcs).set(9990, b as any) };
+    const b = { ...must(site.rfcs.get(2131)), number: 9990, url: '/9990/' };
+    const s2 = { ...site, rfcs: new Map(site.rfcs).set(9990, b) };
     expect(await ds({ ...r903, obsoletedBy: [9990, 2131] }, s2)).toMatch(/Start with <a href="\/2131\/">/);
   });
 
   test('plain-text fields are HTML-escaped', async () => {
-    const h = await ds({ ...r903, authors: ['A <b>Evil</b> & Co'], organization: '<script>x</script>', content: { ...r903.content, subtitle: 'x <i>y</i>' } });
+    const h = await ds({
+      ...r903,
+      authors: ['A <b>Evil</b> & Co'],
+      organization: '<script>x</script>',
+      content: { ...r903.content, subtitle: 'x <i>y</i>' },
+    });
     expect(h).toContain('A &lt;b&gt;Evil&lt;/b&gt; &amp; Co');
     expect(h).toContain('&lt;script&gt;x&lt;/script&gt;');
     expect(h).toContain('x &lt;i&gt;y&lt;/i&gt;');
   });
 
   test('orphan viz without a matching anchor renders before References', async () => {
-    const spec = r903.content.viz[0];
+    const spec = must(r903.content).viz[0];
     const h = await ds(withContent(r903, { viz: [{ ...spec, anchor: 'nope' }] }));
     const at = h.indexOf('data-viz=');
     expect(at).toBeGreaterThan(0);
@@ -136,26 +142,55 @@ describe('Datasheet', () => {
     const h = await ds({ ...r903, mentionedIn: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] });
     const block = h.slice(h.indexOf('MENTIONED IN'));
     expect((block.slice(0, block.indexOf('</aside>')).match(/class="chip"/g) || []).length).toBe(8);
-    const pk = { type: 'packet', anchor: 'packet-format', data: { title: 't', bytes: 4, width: 32, fields: [{ key: 'hrd', name: 'H', bits: 16, desc: 'd' }, { key: 'pro', name: 'P', bits: 16, desc: 'd' }] } };
+    const pk = {
+      type: 'packet',
+      anchor: 'packet-format',
+      data: {
+        title: 't',
+        bytes: 4,
+        width: 32,
+        fields: [
+          { key: 'hrd', name: 'H', bits: 16, desc: 'd' },
+          { key: 'pro', name: 'P', bits: 16, desc: 'd' },
+        ],
+      },
+    };
     expect(await ds(withContent(r903, { viz: [pk] }))).toContain('rfc.akl.run/903/#field-hrd');
   });
 
   test('facts: RFC n linkified only for known RFCs; long values not mono', async () => {
-    const h = await ds(withContent(r903, { lineage: undefined, facts: [
-      { label: 'Related', value: 'RFC 826 — ARP, RFC 99999 — nope' },
-      { label: 'EtherType', value: '0x8035' },
-    ] }));
+    const h = await ds(
+      withContent(r903, {
+        lineage: undefined,
+        facts: [
+          { label: 'Related', value: 'RFC 826 — ARP, RFC 99999 — nope' },
+          { label: 'EtherType', value: '0x8035' },
+        ],
+      }),
+    );
     expect(h).toMatch(/<dd>[^<]*<a href="\/826\/">RFC 826<\/a> — ARP, RFC 99999 — nope<\/dd>/);
     expect(h).toMatch(/<dd class="mono">0x8035<\/dd>/);
   });
 
   test('facts: duplicates of computed rows hidden, others kept', async () => {
     const facts = [
-      { label: 'Published', value: 'DUPPUB' }, { label: ' Author ', value: 'DUPAUTH' }, { label: 'Status', value: 'DUPSTAT' },
-      { label: 'Obsoleted By', value: 'DUPOBS' }, { label: 'Builds on', value: 'DUPBUILD' }, { label: 'Updates', value: 'DUPUPD' },
-      { label: 'Packet size', value: 'KEEPSIZE' }, { label: 'Port', value: 'KEEPPORT' },
+      { label: 'Published', value: 'DUPPUB' },
+      { label: ' Author ', value: 'DUPAUTH' },
+      { label: 'Status', value: 'DUPSTAT' },
+      { label: 'Obsoleted By', value: 'DUPOBS' },
+      { label: 'Builds on', value: 'DUPBUILD' },
+      { label: 'Updates', value: 'DUPUPD' },
+      { label: 'Packet size', value: 'KEEPSIZE' },
+      { label: 'Port', value: 'KEEPPORT' },
     ];
-    const h = await ds({ ...r903, obsoletes: [826], updates: [], obsoletedBy: [826], updatedBy: [826], content: { ...r903.content, facts } });
+    const h = await ds({
+      ...r903,
+      obsoletes: [826],
+      updates: [],
+      obsoletedBy: [826],
+      updatedBy: [826],
+      content: { ...r903.content, facts },
+    });
     for (const k of ['DUPPUB', 'DUPAUTH', 'DUPSTAT', 'DUPOBS', 'DUPBUILD', 'DUPUPD']) expect(h).not.toContain(k);
     expect(h).toContain('KEEPSIZE');
     expect(h).toContain('KEEPPORT');
@@ -163,7 +198,11 @@ describe('Datasheet', () => {
   });
 
   test('facts: relation facts kept when the computed row is absent, hidden when present', async () => {
-    const facts = [{ label: 'Builds on', value: 'KEEPBUILD' }, { label: 'Updated by', value: 'KEEPUPD' }, { label: 'Status', value: 'DUPSTAT' }];
+    const facts = [
+      { label: 'Builds on', value: 'KEEPBUILD' },
+      { label: 'Updated by', value: 'KEEPUPD' },
+      { label: 'Status', value: 'DUPSTAT' },
+    ];
     const none = { ...r903, obsoletes: [], updates: [], obsoletedBy: [], updatedBy: [], content: { ...r903.content, facts } };
     const h1 = await ds(none);
     expect(h1).toContain('KEEPBUILD');
@@ -194,7 +233,9 @@ describe('IndexTier', () => {
   });
 
   test('eli5 block, draft note', async () => {
-    const out = await it(withContent(r5952(), { eli5: { summary: '<p>Write it one way.</p>' }, provenance: { source: 'llm-draft', reviewedBy: null } }));
+    const out = await it(
+      withContent(r5952(), { eli5: { summary: '<p>Write it one way.</p>' }, provenance: { source: 'llm-draft', reviewedBy: null } }),
+    );
     expect(out).toContain("Like I'm 5");
     expect(out).toContain('Write it one way.');
     expect(out).toContain('Draft · machine-assisted, not yet reviewed');
@@ -205,7 +246,7 @@ describe('IndexTier', () => {
 
   test('dl: facts, guessed area, doi', async () => {
     const out = await it(r5952());
-    for (const k of ['PUBLISHED', 'AUTHORS', 'STREAM', 'UPDATES', 'DOI']) expect(out).toContain('>' + k + '<');
+    for (const k of ['PUBLISHED', 'AUTHORS', 'STREAM', 'UPDATES', 'DOI']) expect(out).toContain(`>${k}<`);
     expect(out).toContain('August 2010');
     expect(out).toContain('S. Kawamura, M. Kawashima');
     expect(out).toContain('AREA (GUESSED)');
@@ -222,7 +263,7 @@ describe('IndexTier', () => {
     expect(out).toContain('UPDATED / OBSOLETED BY');
     expect(out).not.toContain('has explainer');
     const s2 = { ...site, rfcs: new Map(site.rfcs) };
-    s2.rfcs.set(4291, { ...r5952(), number: 4291, tier: 'explainer', title: 'IPv6 Addressing Architecture' } as any);
+    s2.rfcs.set(4291, { ...r5952(), number: 4291, tier: 'explainer', title: 'IPv6 Addressing Architecture' });
     const out2 = await it(r5952(), s2);
     expect(out2).toContain('IPv6 Addressing Architecture');
     expect(out2).toContain('has explainer');
@@ -244,26 +285,30 @@ describe('IndexTier', () => {
     expect((out.match(/class="it-cell/g) || []).length).toBe(4);
     expect((out.match(/class="it-dot it-done">✓</g) || []).length).toBe(2);
     expect((out.match(/it-cell it-next/g) || []).length).toBe(1);
-    expect(out).toMatch(/it-next[^]*?>3</);
+    expect(out).toMatch(/it-next[\s\S]*?>3</);
     expect(out).not.toContain('readers requested');
-    expect(((await it(site.rfcs.get(1)!)).match(/class="it-dot it-done">✓</g) || []).length).toBe(1);
+    expect(((await it(must(site.rfcs.get(1)))).match(/class="it-dot it-done">✓</g) || []).length).toBe(1);
     expect(await it({ ...r5952(), demand: 3 })).toContain('3 readers requested an explainer · counted daily');
   });
 
   test('help cover it links', async () => {
     const out = await it(r5952());
-    const start = out.match(/href="(https:\/\/github.com\/adamloghry\/rfc.org\/new\/trunk\/content\/rfcs\?filename=5952.json&amp;value=[^"]+)"/);
+    const start = out.match(
+      /href="(https:\/\/github.com\/adamloghry\/rfc.org\/new\/trunk\/content\/rfcs\?filename=5952.json&amp;value=[^"]+)"/,
+    );
     expect(start).toBeTruthy();
-    const val = decodeURIComponent(start![1].split('value=')[1]);
+    const val = decodeURIComponent(must(start)[1]?.split('value=')[1] ?? '');
     expect(JSON.parse(val)).toEqual({ number: 5952, category: 'core', summary: '', eli5: { summary: '' }, questions: [] });
-    expect(out).toContain('href="https://github.com/adamloghry/rfc.akl.run/issues/new?template=request.yml&amp;title=Explainer%20request%3A%20RFC%205952"');
+    expect(out).toContain(
+      'href="https://github.com/adamloghry/rfc.akl.run/issues/new?template=request.yml&amp;title=Explainer%20request%3A%20RFC%205952"',
+    );
     expect(out).toContain('href="/contribute/"');
     expect(out).toContain('Start the explainer ↗');
     expect(out).toContain('How explainers work');
   });
 
   test('index tier: abstract is lede, AUTO notice, NEW badge, no-abstract wording', async () => {
-    const rfc = site.rfcs.get(10055)!;
+    const rfc = must(site.rfcs.get(10055));
     expect(rfc.tier).toBe('index');
     const out = await it({ ...rfc, isNew: true });
     expect(out).toContain('<meta name="rfc-tier" content="index">');
@@ -273,8 +318,8 @@ describe('IndexTier', () => {
     expect(out).toContain('AUTO');
     expect(out).toMatch(/badge-new[^>]*>NEW · OCT 2026</);
     expect(out).not.toContain("AUTHORS' ABSTRACT");
-    expect(await it(site.rfcs.get(1)!)).not.toContain('badge-new');
-    const none = await it({ ...site.rfcs.get(1)!, abstract: null });
+    expect(await it(must(site.rfcs.get(1)))).not.toContain('badge-new');
+    const none = await it({ ...must(site.rfcs.get(1)), abstract: null });
     expect(none).toContain('has no abstract for this RFC; read the original for details');
     expect(none).not.toContain("Below is the authors' abstract");
   });
@@ -284,8 +329,8 @@ describe('IndexTier', () => {
     expect(out).toContain('rfc.akl.run/5952/');
     expect(out).toContain('href="/5951/">← RFC 5951');
     expect(out).toContain('href="/5953/">RFC 5953 →');
-    expect(await it(site.rfcs.get(1)!)).not.toContain('href="/0/"');
-    expect(await it(site.rfcs.get(10055)!)).not.toContain('href="/10056/"');
+    expect(await it(must(site.rfcs.get(1)))).not.toContain('href="/0/"');
+    expect(await it(must(site.rfcs.get(10055)))).not.toContain('href="/10056/"');
     const many = Array.from({ length: 40 }, (_, i) => 100 + i);
     const capped = await it({ ...r5952(), updatedBy: many });
     expect(capped).toContain('and 28 more');
@@ -293,7 +338,7 @@ describe('IndexTier', () => {
   });
 
   test('gzip budget < 8192 (fixtures)', async () => {
-    for (const n of [5952, 1, 10055]) expect(gz(await it(site.rfcs.get(n)!))).toBeLessThan(8192);
+    for (const n of [5952, 1, 10055]) expect(gz(await it(must(site.rfcs.get(n))))).toBeLessThan(8192);
   });
 
   test('plain-text fields are escaped', async () => {
