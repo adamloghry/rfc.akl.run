@@ -10,13 +10,549 @@
   "questions": [
     "what is rpl",
     "routing protocol for iot networks",
-    "ipv6 routing for low power lossy networks"
+    "ipv6 routing for low power lossy networks",
+    "what is rpl routing protocol",
+    "what is a dodag",
+    "storing vs non-storing mode in rpl"
+  ],
+  "tags": [
+    "Routing",
+    "IoT",
+    "IPv6"
+  ],
+  "subtitle": "How tiny, battery-powered devices on flaky radio links build routes to a central point and back.",
+  "tldr": {
+    "problem": "Low-power and lossy networks have routers with little processing power, memory and battery, linked by unstable low-rate links, and their traffic mostly flows to or from a central control point rather than between arbitrary pairs.",
+    "mechanism": "RPL organizes the network as a destination-oriented directed acyclic graph (DODAG) rooted at a sink. Nodes learn parents from DIO messages, rank themselves below those parents to avoid loops, and optionally send DAO messages upward to build downward routes.",
+    "outcome": "RPL is a Proposed Standard that leaves the optimization goal to pluggable Objective Functions, and it has since been updated by RFC 9008, RFC 9010, RFC 9685, RFC 9914 and RFC 9926.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "ICMPv6 type",
+      "value": "155"
+    },
+    {
+      "label": "All-RPL-nodes address",
+      "value": "ff02::1a"
+    },
+    {
+      "label": "INFINITE_RANK",
+      "value": "0xFFFF"
+    },
+    {
+      "label": "Default MinHopRankIncrease",
+      "value": "256"
+    },
+    {
+      "label": "Default Trickle Imin",
+      "value": "8 ms (DIOIntervalMin 3)"
+    },
+    {
+      "label": "Global / local instances",
+      "value": "up to 128 global, 64 local per DODAGID"
+    }
+  ],
+  "today": "<p>RFC 6550 is a Proposed Standard and has not been obsoleted, but it has been updated by <a href='/9008/'>RFC 9008</a>, <a href='/9010/'>RFC 9010</a>, <a href='/9685/'>RFC 9685</a>, <a href='/9914/'>RFC 9914</a> and <a href='/9926/'>RFC 9926</a>, so check those for changes to its behavior. The Objective Functions, metrics, data-plane option and source routing header that it relies on are specified in companion documents such as <a href='/6551/'>RFC 6551</a>, <a href='/6552/'>RFC 6552</a>, <a href='/6553/'>RFC 6553</a> and <a href='/6554/'>RFC 6554</a>.</p>",
+  "glossary": [
+    "dodag",
+    "rank",
+    "objective-function",
+    "trickle-timer",
+    "low-power-lossy-network",
+    "distance-vector",
+    "icmpv6",
+    "slaac",
+    "neighbor-unreachability-detection",
+    "replay-protection",
+    "split-horizon",
+    "multicast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem and the Design Principles",
+      "content": "<p>Low-power and Lossy Networks (<strong>LLNs</strong>) consist largely of constrained nodes: limited processing power, memory and sometimes energy. Their links typically support only low data rates and are usually unstable with relatively low packet delivery rates. Traffic is not simply point-to-point; it is often point-to-multipoint or multipoint-to-point, and such networks may contain up to thousands of nodes. RPL, the IPv6 Routing Protocol for LLNs, was written to meet the routing requirements the ROLL working group collected in RFC 5867, RFC 5826, RFC 5673 and RFC 5548, although its use is not limited to those applications.</p><p>Several principles shape the design. A network may run several RPL Instances at once, each serving different goals. RPL separates packet processing and forwarding from the routing optimization objective: companion documents define <strong>Objective Functions</strong> such as minimizing energy or latency. RPL operations require bidirectional links, so a router's reachability must be verified, for example with Neighbor Unreachability Detection, before it is used as a parent. RPL does not rely on any particular link layer, and it uses the Trickle algorithm from <a href='/6206/'>RFC 6206</a> to keep control traffic low.</p>",
+      "eli5": "<p>Some gadgets are tiny, run on small batteries and talk over weak radio. This protocol is a set of simple rules that helps them pass messages along without wasting much energy.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "3",
+      "title": "Instances, DODAGs and Versions",
+      "content": "<p>RPL organizes a network as a Directed Acyclic Graph (DAG) split into one or more <strong>Destination Oriented DAGs</strong> (DODAGs), one per sink. The sink is the <strong>DODAG root</strong>. Four values identify and maintain a topology: the <code>RPLInstanceID</code>, the <code>DODAGID</code>, the <code>DODAGVersionNumber</code> and the Rank. All DODAGs in one RPL Instance share the same Objective Function, and the pair (RPLInstanceID, DODAGID) identifies a single DODAG.</p><p>A DODAG root repairs the whole topology globally by incrementing the DODAGVersionNumber, which starts a new DODAG Version. Nodes in the new Version may choose a position whose Rank is not constrained by their Rank in the old one. RPL also supports local repair within a Version, controlled by parameters the root sets.</p><p>An Instance can be global or local. A global RPLInstanceID is coordinated and the RFC allows up to 128 global instances in the whole network. A local RPLInstanceID is allocated by the single root that owns the DODAGID, with up to 64 local instances per DODAGID. A DODAG is <strong>grounded</strong> when its root can satisfy the application-defined goal, and <strong>floating</strong> otherwise; floating DODAGs can preserve connectivity inside the network during repair.</p><p>RPL supports three traffic flows: multipoint-to-point toward a root, point-to-multipoint away from it, and point-to-point, where a packet climbs toward a root until it reaches an ancestor that knows a route down to the destination.</p>",
+      "eli5": "<p>The network is like an upside-down tree whose trunk is the boss device. Every device remembers which branch is closer to the boss, and when the boss shouts 'new map!', everyone redraws their branches.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3.5",
+      "title": "Rank and Loop Avoidance",
+      "content": "<p><strong>Rank</strong> is a scalar that says where a node sits in a DODAG Version. It strictly increases going Down, away from the root, and strictly decreases going Up. It is not a path cost: it has no physical unit, and the Objective Function decides how it is computed from metrics. Rank is compared using <code>DAGRank(rank) = floor(rank/MinHopRankIncrease)</code>. The rule that makes loops avoidable is simple: the Rank a node advertises MUST be greater than that of any of its parents.</p><p>RPL also forbids greediness. A node that tried to move deeper to gain extra parents, while listening to DIOs from nodes deeper than itself, could start a feedback loop in which nodes keep rejoining deeper and deeper. So nodes stay at a Rank sufficient for their most preferred parent and do not process DIOs from deeper nodes, except in some forms of local repair. A node may not advertise a Rank higher than the lowest it has advertised plus <code>DAGMaxRankIncrease</code> in the same Version; beyond that it advertises <code>INFINITE_RANK</code> (<code>0xFFFF</code>), which also serves to poison routes.</p><p>The RFC is frank that RPL guarantees neither loop-free path selection nor tight convergence times. Instead it detects and repairs a loop as soon as it is used, using Rank information carried in data packets. Missed DIOs or lost poison advertisements can cause DODAG loops, and a missed No-Path DAO can cause a DAO loop.</p>",
+      "eli5": "<p>Everyone gets a number showing how far they are from the boss, and you may only pass notes to someone with a smaller number. Since you always move to smaller numbers, notes cannot go in circles.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "ICMPv6 Control Messages",
+      "content": "<p>RPL control messages are a new ICMPv6 message with Type <code>155</code>. The Code field selects the message: <code>0x00</code> DODAG Information Solicitation (<strong>DIS</strong>), <code>0x01</code> DODAG Information Object (<strong>DIO</strong>), <code>0x02</code> Destination Advertisement Object (<strong>DAO</strong>), <code>0x03</code> DAO acknowledgement (<strong>DAO-ACK</strong>) and <code>0x8A</code> Consistency Check. The high-order bit of the Code (<code>0x80</code>) marks a secure variant, giving <code>0x80</code> to <code>0x83</code> for the secured forms of the first four. A message with an unknown Code MUST be discarded without any response.</p><p>Most control messages have link scope: the source is a link-local address and the destination is either the new all-RPL-nodes multicast address <code>ff02::1a</code> or a link-local unicast address. The exception is DAO and DAO-ACK in Non-Storing mode, which travel over multiple hops between global or unique-local addresses.</p><p>The DIS probes for nearby DODAGs, like an IPv6 Router Solicitation. The DIO carries everything needed to discover an Instance, learn its configuration, select parents and maintain the DODAG: the RPLInstanceID, Version Number, the sender's Rank, the Grounded flag, the Mode of Operation, the DODAGPreference, the DTSN and the DODAGID. The DAO propagates destination information Upward and carries a <code>DAOSequence</code> and flags <code>K</code> (please acknowledge) and <code>D</code> (DODAGID present). A DAO-ACK echoes the DAOSequence with a Status where 0 means unqualified acceptance. The Consistency Check is used with secure messages to check counters and run challenge-responses.</p>",
+      "eli5": "<p>The devices have a few kinds of notes: 'is anyone out there?', 'here is where I am on the map', 'tell me who is behind you', and 'got it'. Each note type has its own label so everyone knows how to read it.</p>"
+    },
+    {
+      "id": "options",
+      "number": "6.7",
+      "title": "Control Message Options",
+      "content": "<p>Options follow the base object in a type-length-value format, where the length counts octets (unlike IPv6 Neighbor Discovery, which counts units of 8 octets). A receiver MUST silently ignore an option type it does not recognize and carry on with the next one.</p><p>The options defined here are <code>0x00</code> Pad1, <code>0x01</code> PadN, <code>0x02</code> DAG Metric Container (metrics as chosen in <a href='/6551/'>RFC 6551</a>), <code>0x03</code> Route Information, <code>0x04</code> DODAG Configuration, <code>0x05</code> RPL Target, <code>0x06</code> Transit Information, <code>0x07</code> Solicited Information, <code>0x08</code> Prefix Information and <code>0x09</code> RPL Target Descriptor.</p><p>The <strong>DODAG Configuration</strong> option is set by the root and must not be changed by other nodes. It carries the Trickle parameters, <code>MaxRankIncrease</code>, <code>MinHopRankIncrease</code>, the Objective Code Point, the default route lifetime and unit, the Path Control Size, and an <code>A</code> flag for authenticated security mode. <strong>Route Information</strong> and <strong>Prefix Information</strong> reuse the Neighbor Discovery options from <a href='/4191/'>RFC 4191</a> and <a href='/4861/'>RFC 4861</a>, so nodes can autoconfigure addresses from a parent's prefix. In a Prefix Information option the <code>R</code> flag says the prefix field holds the sender's full address, which children can use as the parent address in Transit Information.</p><p><strong>RPL Target</strong> names an address, prefix or multicast group reachable along the DODAG, and <strong>Transit Information</strong> describes the path to it, with a Path Sequence, a Path Lifetime and, in Non-Storing mode, the parent address. A Path Lifetime of 0 means reachability was lost, and a DAO that says so is called a No-Path. <strong>Solicited Information</strong> lets a DIS ask only matching nodes, by version, instance or DODAGID, to respond.</p>",
+      "eli5": "<p>Notes can have little stickers attached, like 'here is my address book', 'here are the rules of this game' or 'only answer me if you are in team 3'. If you do not know a sticker, you just ignore it.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "8",
+      "title": "Building and Maintaining Upward Routes",
+      "content": "<p>Nodes advertise themselves by multicasting DIOs on the link. Every non-root node picks a <strong>parent set</strong> from its candidate neighbors, one of which is the preferred parent used for the default Upward route. A root has an empty parent set, and every parent must have a lower Rank than the node. A non-root node MUST advertise the same Grounded flag, Mode of Operation, DODAGPreference, Version, RPLInstanceID and DODAGID as its preferred parent, so these values flow Down unchanged, while Rank and DTSN may change at each hop. When Neighbor Unreachability Detection or an equivalent mechanism finds a neighbor unreachable, routes through it MUST be removed. RPL defines no keepalives of its own, because periodic keepalives would be too expensive in bandwidth and energy.</p><p>DIOs are sent using a <strong>Trickle timer</strong> (<a href='/6206/'>RFC 6206</a>), so a stable network sends them rarely and an unsettled one sends them often. A node resets the timer when it detects a forwarding inconsistency, hears a multicast DIS that matches, or joins a new DODAG Version. A unicast DIS is answered with a unicast DIO that includes the DODAG Configuration option.</p><p>A node joins by choosing parents under its Objective Function, which turns metrics and constraints into Rank and selects parents. It should verify bidirectional connectivity and adequate link quality before using a candidate. A node that cannot honor the Instance's Objective Function or metrics, or that wants to save energy, can join as a <strong>leaf</strong>: it advertises <code>INFINITE_RANK</code> and does not extend the DODAG. If a node loses all parents it may detach and become the root of its own floating DODAG.</p>",
+      "eli5": "<p>Each device shouts 'here I am and how close I am to the boss' and listens for the same from neighbors. It then picks a neighbor that is closer as its parent, and it shouts less often once everyone has settled down.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "9",
+      "title": "Downward Routes: Storing and Non-Storing Modes",
+      "content": "<p>Downward routes are optional. The root's <strong>Mode of Operation</strong> (MOP) in the DIO says which kind a DODAG offers, and nodes that cannot honor it can only join as leaves. MOP <code>0</code> means no Downward routes, <code>1</code> Non-Storing, <code>2</code> Storing without multicast and <code>3</code> Storing with multicast. With MOP 0, nodes MUST NOT send DAOs. The RFC notes that no implementation is expected to support both Storing and Non-Storing, and mixed-mode operation is not supported.</p><p>Nodes send DAO messages Up to their <strong>DAO parents</strong>, a subset of their DODAG parents. In <strong>Non-Storing</strong> mode, each DAO goes straight to the root, listing the sender's parents in Transit Information options. The root pieces together a source route hop by hop and packets going Down use a source-routing header (<a href='/6554/'>RFC 6554</a>), so intermediate nodes keep no Downward tables. In <strong>Storing</strong> mode, DAOs go to link-local parents, every non-root, non-leaf node stores routes for its sub-DODAG, and packets are routed Down by destination address.</p><p>DAO senders can set the <code>K</code> flag to request a DAO-ACK. A node delays its own DAO with a timer (<code>DelayDAO</code>) so it can aggregate information from its children. A parent can trigger DAOs from its sub-DODAG by incrementing its DTSN. The Path Control field in Transit Information lets a node spread a target's preferred number of routes among its DAO parents, with four two-bit preference subfields, PC1 as the most preferred. A node that drops a DAO parent SHOULD send a No-Path DAO to it in Storing mode. A node may also multicast a DAO to all-RPL-nodes, but only to advertise its own information to one-hop neighbors, which enables direct peer-to-peer communication without the DODAG relaying packets.</p>",
+      "eli5": "<p>Going up is easy because everyone knows their parent. For going down, either every helper remembers who sits below it, or the boss keeps one big map and writes the whole route on the note.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "11",
+      "title": "Forwarding and Loop Detection in Data Packets",
+      "content": "<p>RPL detects loops reactively, using data packets themselves. Packets carry <strong>RPL Packet Information</strong> in an external mechanism such as the IPv6 option of <a href='/6553/'>RFC 6553</a>. It has a Down flag <code>O</code>, a Rank-Error flag <code>R</code>, a Forwarding-Error flag <code>F</code>, the RPLInstanceID and the 16-bit SenderRank. This mechanism is required for all packets except those source-routed Down in Non-Storing mode, which cannot loop.</p><p>A receiver sees an inconsistency when a packet marked Down arrives from a node of higher Rank, or a packet marked Up arrives from a node of lower Rank. One inconsistency is tolerated: the node sets the Rank-Error bit. A second detection on the same packet means the packet MUST be dropped and the Trickle timer reset, which spreads the news that the DODAG needs repair.</p><p>The RFC also gives non-normative advice on picking a next hop, in order: source route, multicast-learned routes, unicast-learned Downward routes with Path Control preferences, then DODAG parents, and finally dropping the packet. It adds a split-horizon rule that a successor MUST NOT be the predecessor, except when a packet switches from Up to Down. In Storing mode, a node that finds its Downward route is stale can return the packet to the parent with the Forwarding-Error bit set so the stale state is cleaned up along the sub-DODAG. In Non-Storing mode an ICMPv6 'Error in Source Routing Header' (Code 7 of Type 1) is sent back to the root instead.</p>",
+      "eli5": "<p>Every note says which way it is going, up or down, and the sender's number. If a note shows up going the wrong way, the helper knows something is wrong, fixes the map and tells the others.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Modes and Mechanisms",
+      "content": "<p>RPL's security is OPTIONAL to implement, because many LLN devices cannot afford sophisticated security and many deployments rely on link-layer security instead. An implementation may support any subset of it. The RFC describes three modes: <strong>unsecured</strong> (plain messages, which may still be protected by other means), <strong>preinstalled</strong> (nodes with a preinstalled key can join as host or router) and <strong>authenticated</strong> (a preinstalled key lets a node join only as a host, and it needs a second key from a key authority to be a router). The RFC states that authenticated mode cannot be supported by symmetric algorithms, that RPL supports only symmetric algorithms so far, and that how to obtain keys is left to future specifications.</p><p>Secured messages add a Security section between the ICMPv6 checksum and the base. It carries a Counter, a Key Identifier Mode, a Security Level and an Algorithm. Algorithm 0 is CCM with AES-128 for encryption and MAC, and RSA with SHA-256 for signatures. Levels cover a 4-byte or 8-byte MAC, with or without encryption, or a 2048-bit or 3072-bit signature. Receivers MUST discard packets that fail integrity checks, and the Counter provides replay protection. Consistency Check messages let nodes resynchronize counters and challenge each other with a nonce. Optionally, the counter can be a timestamp for delay protection.</p><p>The Security Considerations section adds that RPL networks are vulnerable to eavesdropping and active tampering like others, and that constrained, low-cost devices may lack a trusted computing base or a good random number generator. The mechanisms assume keys come from higher-layer processes. A group key used for peer-to-peer communication protects only against outsiders, not against malicious members of the key-sharing group.</p>",
+      "eli5": "<p>You can put a lock on your notes so only friends can read them. Locks cost energy, so using them is a choice, and a note with a lock can carry a number so nobody can replay an old note.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "17",
+      "title": "Constants, Defaults and Registries",
+      "content": "<p>The RFC defines a small set of constants. <code>ROOT_RANK</code> is the Rank of a DODAG root and equals <code>MinHopRankIncrease</code>, so its DAGRank is 1; <code>BASE_RANK</code> is 0; <code>INFINITE_RANK</code> is <code>0xFFFF</code>; and <code>RPL_DEFAULT_INSTANCE</code> is 0. The default <code>MinHopRankIncrease</code> is 256, giving an 8-bit integer part of Rank. Default Trickle values are a DIO minimum interval exponent of 3 (an Imin of 8 ms), 20 doublings (a maximum interval of 2.3 hours) and a redundancy constant of 10. The default DAO delay is 1 second, and the default Path Control Size of 0 limits a node to sending a DAO to only one parent.</p><p>Sequence counters for the DODAGVersionNumber, DAOSequence and Path Sequence use a 'lollipop' scheme: values from 128 up are a linear region used after a restart, and values up to 127 form a circular space. A comparison window of 16 is used, and a recommended initial value is 240.</p><p>IANA created registries for the RPL control codes, the Mode of Operation, the control message options, Objective Code Points (none are defined here), the security algorithm, flags and levels, and the flags of each message and option. It also allocated ICMPv6 Type 155, the ICMPv6 Destination Unreachable code 7 and the multicast address <code>ff02::1a</code>. Implementations that route need at least the metric-less Objective Function 0 of <a href='/6552/'>RFC 6552</a> unless other guidance applies, and all RPL routers will need Trickle.</p>",
+      "eli5": "<p>The rule book has a page of default settings, like how often to shout and what number the boss gets, so devices start out with the same choices unless the boss changes them.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "DIO BASE OBJECT (RFC 6550, FIGURE 14)",
+      "data": {
+        "title": "DIO base",
+        "width": 32,
+        "fields": [
+          {
+            "key": "instance-id",
+            "name": "RPLInstanceID",
+            "bits": 8,
+            "desc": "Which RPL Instance the DODAG belongs to."
+          },
+          {
+            "key": "version",
+            "name": "Version Number",
+            "bits": 8,
+            "desc": "The DODAGVersionNumber set by the root."
+          },
+          {
+            "key": "rank",
+            "name": "Rank",
+            "bits": 16,
+            "desc": "Rank of the node sending the DIO."
+          },
+          {
+            "key": "grounded",
+            "name": "G",
+            "bits": 1,
+            "desc": "Grounded: the DODAG can satisfy the goal."
+          },
+          {
+            "key": "zero",
+            "name": "0",
+            "bits": 1,
+            "desc": "Unused bit."
+          },
+          {
+            "key": "mop",
+            "name": "MOP",
+            "bits": 3,
+            "desc": "Mode of Operation for Downward routes."
+          },
+          {
+            "key": "prf",
+            "name": "Prf",
+            "bits": 3,
+            "desc": "DODAGPreference, 0 (least) to 7 (most preferred)."
+          },
+          {
+            "key": "dtsn",
+            "name": "DTSN",
+            "bits": 8,
+            "desc": "Destination Advertisement Trigger Sequence Number."
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 8,
+            "desc": "Reserved; zero on send, ignored on receipt."
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 8,
+            "desc": "Reserved; zero on send, ignored on receipt."
+          },
+          {
+            "key": "dodagid",
+            "name": "DODAGID",
+            "bits": 128,
+            "desc": "IPv6 address of the DODAG root, unique in the Instance."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "RPL CONTROL MESSAGE CODES (ICMPV6 TYPE 155)",
+      "data": {
+        "items": [
+          {
+            "code": "0x00",
+            "label": "DIS",
+            "desc": "DODAG Information Solicitation: probe for nearby DODAGs."
+          },
+          {
+            "code": "0x01",
+            "label": "DIO",
+            "desc": "DODAG Information Object: advertise a DODAG and its Rank.",
+            "highlight": true
+          },
+          {
+            "code": "0x02",
+            "label": "DAO",
+            "desc": "Destination Advertisement Object: advertise targets Upward."
+          },
+          {
+            "code": "0x03",
+            "label": "DAO-ACK",
+            "desc": "Acknowledges a unicast DAO."
+          },
+          {
+            "code": "0x80",
+            "label": "Secure DIS",
+            "desc": "DIS with a Security section."
+          },
+          {
+            "code": "0x81",
+            "label": "Secure DIO",
+            "desc": "DIO with a Security section."
+          },
+          {
+            "code": "0x82",
+            "label": "Secure DAO",
+            "desc": "DAO with a Security section."
+          },
+          {
+            "code": "0x83",
+            "label": "Secure DAO-ACK",
+            "desc": "DAO-ACK with a Security section."
+          },
+          {
+            "code": "0x8A",
+            "label": "Consistency Check",
+            "desc": "Checks secure counters and runs challenge-responses."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "options",
+      "position": "after",
+      "caption": "RPL CONTROL MESSAGE OPTION TYPES",
+      "data": {
+        "items": [
+          {
+            "code": "0x00",
+            "label": "Pad1",
+            "desc": "A single octet of padding."
+          },
+          {
+            "code": "0x01",
+            "label": "PadN",
+            "desc": "Two or more octets of padding."
+          },
+          {
+            "code": "0x02",
+            "label": "DAG Metric Container",
+            "desc": "Metrics and constraints along the DODAG."
+          },
+          {
+            "code": "0x03",
+            "label": "Route Information",
+            "desc": "Destination prefix reachable via the root."
+          },
+          {
+            "code": "0x04",
+            "label": "DODAG Configuration",
+            "desc": "Root-set parameters for the whole DODAG.",
+            "highlight": true
+          },
+          {
+            "code": "0x05",
+            "label": "RPL Target",
+            "desc": "Address, prefix or multicast group being advertised."
+          },
+          {
+            "code": "0x06",
+            "label": "Transit Information",
+            "desc": "Path attributes for the preceding Targets."
+          },
+          {
+            "code": "0x07",
+            "label": "Solicited Information",
+            "desc": "Predicates that limit which nodes answer a DIS."
+          },
+          {
+            "code": "0x08",
+            "label": "Prefix Information",
+            "desc": "Prefix for address autoconfiguration."
+          },
+          {
+            "code": "0x09",
+            "label": "RPL Target Descriptor",
+            "desc": "Opaque 32-bit tag for a Target."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "JOINING A DODAG AND ADVERTISING A TARGET IN STORING MODE (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "node",
+            "label": "New node"
+          },
+          {
+            "key": "parent",
+            "label": "Parent"
+          },
+          {
+            "key": "root",
+            "label": "DODAG root"
+          }
+        ],
+        "messages": [
+          {
+            "from": "node",
+            "to": "parent",
+            "label": "DIS",
+            "color": "neutral",
+            "note": "Probes the neighborhood for nearby DODAGs."
+          },
+          {
+            "from": "parent",
+            "to": "node",
+            "label": "DIO",
+            "color": "blue",
+            "note": "Carries Instance, Rank, MOP and, if unicast, the DODAG Configuration."
+          },
+          {
+            "from": "node",
+            "to": "parent",
+            "label": "DAO (K set)",
+            "color": "green",
+            "note": "Advertises a Target so Downward routes are installed."
+          },
+          {
+            "from": "parent",
+            "to": "node",
+            "label": "DAO-ACK",
+            "color": "green",
+            "note": "Confirms the DAO; Status 0 is unqualified acceptance."
+          },
+          {
+            "from": "parent",
+            "to": "root",
+            "label": "DAO",
+            "color": "green",
+            "note": "Sent after a delay so information can be aggregated."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "DOWNWARD ROUTING MODES",
+      "data": {
+        "columns": [
+          "Mode",
+          "MOP value",
+          "Where DAOs go",
+          "How packets go Down"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "No Downward routes",
+              "0",
+              "Nowhere; nodes MUST NOT send DAOs",
+              "Not supported by RPL"
+            ]
+          },
+          {
+            "cells": [
+              "Non-Storing",
+              "1",
+              "Unicast to the DODAG root",
+              "Source route built by the root"
+            ]
+          },
+          {
+            "cells": [
+              "Storing, no multicast",
+              "2",
+              "Unicast to link-local DAO parents",
+              "Routing tables in each node, by destination"
+            ]
+          },
+          {
+            "cells": [
+              "Storing, with multicast",
+              "3",
+              "Unicast to link-local DAO parents",
+              "Routing tables, plus multicast group state"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "RPL PACKET INFORMATION CARRIED IN DATA PACKETS",
+      "data": {
+        "items": [
+          {
+            "title": "O (Down)",
+            "text": "Set when the packet is expected to progress Down; cleared when going toward the root."
+          },
+          {
+            "title": "R (Rank-Error)",
+            "text": "Set on the first detected mismatch between Rank and direction; a second one means drop."
+          },
+          {
+            "title": "F (Forwarding-Error)",
+            "text": "Set when a node cannot forward further, to clean up stale Downward state."
+          },
+          {
+            "title": "RPLInstanceID",
+            "text": "Which Instance's DODAG the packet is using."
+          },
+          {
+            "title": "SenderRank",
+            "text": "16-bit field: zero from the source, DAGRank(rank) from a forwarding router."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6551]",
+      "text": "Vasseur, JP., Ed., Kim, M., Ed., Pister, K., Dejean, N., and D. Barthel, \"Routing Metrics Used for Path Calculation in Low-Power and Lossy Networks\", RFC 6551, March 2012.",
+      "rfc": 6551
+    },
+    {
+      "number": "[RFC6552]",
+      "text": "Thubert, P., Ed., \"Objective Function Zero for the Routing Protocol for Low-Power and Lossy Networks (RPL)\", RFC 6552, March 2012.",
+      "rfc": 6552
+    },
+    {
+      "number": "[RFC6553]",
+      "text": "Hui, J. and JP. Vasseur, \"The Routing Protocol for Low-Power and Lossy Networks (RPL) Option for Carrying RPL Information in Data-Plane Datagrams\", RFC 6553, March 2012.",
+      "rfc": 6553
+    },
+    {
+      "number": "[RFC6554]",
+      "text": "Hui, J., Vasseur, JP., Culler, D., and V. Manral, \"An IPv6 Routing Header for Source Routes with the Routing Protocol for Low-Power and Lossy Networks (RPL)\", RFC 6554, March 2012.",
+      "rfc": 6554
+    },
+    {
+      "number": "[RFC6206]",
+      "text": "Levis, P., Clausen, T., Hui, J., Gnawali, O., and J. Ko, \"The Trickle Algorithm\", RFC 6206, March 2011.",
+      "rfc": 6206
+    },
+    {
+      "number": "[RFC4861]",
+      "text": "Narten, T., Nordmark, E., Simpson, W., and H. Soliman, \"Neighbor Discovery for IP version 6 (IPv6)\", RFC 4861, September 2007.",
+      "rfc": 4861
+    },
+    {
+      "number": "[RFC4191]",
+      "text": "Draves, R. and D. Thaler, \"Default Router Preferences and More-Specific Routes\", RFC 4191, November 2005.",
+      "rfc": 4191
+    },
+    {
+      "number": "[RFC4862]",
+      "text": "Thomson, S., Narten, T., and T. Jinmei, \"IPv6 Stateless Address Autoconfiguration\", RFC 4862, September 2007.",
+      "rfc": 4862
+    },
+    {
+      "number": "[RFC4443]",
+      "text": "Conta, A., Deering, S., and M. Gupta, \"Internet Control Message Protocol (ICMPv6) for the Internet Protocol Version 6 (IPv6) Specification\", RFC 4443, March 2006.",
+      "rfc": 4443
+    },
+    {
+      "number": "[RFC3610]",
+      "text": "Whiting, D., Housley, R., and N. Ferguson, \"Counter with CBC-MAC (CCM)\", RFC 3610, September 2003.",
+      "rfc": 3610
+    },
+    {
+      "number": "[RFC5867]",
+      "text": "Martocci, J., De Mil, P., Riou, N., and W. Vermeylen, \"Building Automation Routing Requirements in Low-Power and Lossy Networks\", RFC 5867, June 2010.",
+      "rfc": 5867
+    },
+    {
+      "number": "[RFC5826]",
+      "text": "Brandt, A., Buron, J., and G. Porcu, \"Home Automation Routing Requirements in Low-Power and Lossy Networks\", RFC 5826, April 2010.",
+      "rfc": 5826
+    },
+    {
+      "number": "[RFC5673]",
+      "text": "Pister, K., Thubert, P., Dwars, S., and T. Phinney, \"Industrial Routing Requirements in Low-Power and Lossy Networks\", RFC 5673, October 2009.",
+      "rfc": 5673
+    },
+    {
+      "number": "[RFC5548]",
+      "text": "Dohler, M., Watteyne, T., Winter, T., and D. Barthel, \"Routing Requirements for Urban Low-Power and Lossy Networks\", RFC 5548, May 2009.",
+      "rfc": 5548
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

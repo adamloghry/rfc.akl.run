@@ -69,6 +69,17 @@ test('unknown glossary id is an error', () => {
   assert.ok(has(lint(dir, index, {}).errors, /no-such-term/));
 });
 
+test('unknown glossary id on an llm-draft file is a warning until glossary-finalize runs', () => {
+  const dir = baseline();
+  edit(dir, 903, (j: Doc) => {
+    j.glossary = ['mac-address', 'no-such-term'];
+    j.provenance = { source: 'llm-draft', model: 'claude-sonnet-5-5', drafted: '2026-10-16', reviewedBy: null };
+  });
+  const r = lint(dir, index, {});
+  assert.ok(!has(r.errors, /no-such-term/));
+  assert.ok(has(r.warnings, /no-such-term/));
+});
+
 test('removed locked section id is a permalink break', () => {
   const dir = baseline();
   edit(dir, 903, (j: Doc) => {

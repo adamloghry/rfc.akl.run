@@ -216,8 +216,12 @@ function lintRfc(
     }
   }
 
+  // Machine-drafted explainers reference glossary terms whose definitions are merged in one pass at the
+  // end of a generation run (scripts/explain/glossary-finalize.ts); until then the page hides unknown chips,
+  // so for llm-draft files an unknown id is a warning rather than an error.
+  const draft = data.provenance?.source === 'llm-draft';
   for (const id of data.glossary || []) {
-    if (!glossaryIds.has(id)) errors.push(`${label}: unknown glossary id '${id}'`);
+    if (!glossaryIds.has(id)) (draft ? warnings : errors).push(`${label}: unknown glossary id '${id}'`);
   }
   if (data.lineage) {
     for (const r of data.lineage.rfcs) if (!idx.issued.has(r)) warnings.push(`${label}: lineage RFC ${r} is not issued`);
