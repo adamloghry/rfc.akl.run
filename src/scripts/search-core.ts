@@ -1,6 +1,8 @@
 // Pure search functions shared by the header/hero search (search.ts) and tests.
 // Keep tokenize/shardOf in sync with src/lib/search-index.ts (test/search-index.test.ts checks parity).
 
+import { displayTitle } from '../lib/display-title';
+
 export type Posting = [number, number];
 export type Postings = Record<string, Posting[]>;
 export type Cand = { term: string; w: number };
@@ -116,7 +118,7 @@ export function docRow(d: DocRowIn): Row {
   const tier = d[4] || '';
   return {
     label: d[1] ? `RFC ${d[1]}` : tier === 'journey' ? 'JOURNEY' : 'PAGE',
-    title: d[3] ? `${d[3]}: ${d[2]}` : d[2],
+    title: displayTitle(d[3], d[2]),
     tag: tier === 'journey' ? 'JOURNEY' : tier.toUpperCase(),
     tier: tier === 'journey' ? '' : tier,
     href: d[0],

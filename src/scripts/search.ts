@@ -1,5 +1,6 @@
 /* rfc.akl.run shared search: number jump, curated questions, static full-text index (/data/search/).
    Included on every page via the header search box; a no-op without .search-input. Data loads lazily on first focus. */
+import { displayTitle } from '../lib/display-title';
 import { disposer, listen, nav, ownerDoc, qs, qsa } from './dom';
 import {
   type DocRowIn,
@@ -114,7 +115,7 @@ function createLoader() {
       const shard = await getJSON<TitlesShard>(`/data/titles/${Math.floor((n - 1) / 1000)}.json`);
       const t = shard[String(n)];
       if (t) {
-        row.title = t[0] ? `${t[0]}: ${t[1]}` : t[1];
+        row.title = displayTitle(t[0], t[1]);
         if (t[4]) {
           row.tier = t[4] === 'interactive' ? 'explainer' : t[4];
           row.tag = row.tier.toUpperCase();

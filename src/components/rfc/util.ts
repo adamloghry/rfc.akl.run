@@ -1,11 +1,9 @@
+import { displayTitle as joinTitle } from '../../lib/display-title';
 import type { RfcRecord, Site } from '../../lib/model';
 
 export const MAX_REL = 10;
 
-export const displayTitle = (r: RfcRecord): string => {
-  if (r.shortTitle && r.shortTitle !== r.title && !r.title.startsWith(r.shortTitle)) return `${r.shortTitle}: ${r.title}`;
-  return r.title;
-};
+export const displayTitle = (r: RfcRecord): string => joinTitle(r.shortTitle, r.title);
 export const shortLabel = (r: RfcRecord): string => r.shortTitle || r.title;
 export const plain = (s: unknown): string =>
   String(s || '')
