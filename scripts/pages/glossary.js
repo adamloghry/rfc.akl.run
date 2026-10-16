@@ -26,7 +26,7 @@ ${body}
 </div>`;
     return [{
       path: 'glossary/index.html', sitemap: true,
-      html: layout({ title: 'Glossary · rfc.akl.run', description: 'Networking terms from the RFCs, explained in plain language.', path: '/glossary/', palette: 'warm', header: 'reader', breadcrumb: [{ label: 'Glossary' }], main, searchable: true, pagefindMeta: { tier: 'glossary', title: 'Glossary' } }),
+      html: layout({ title: 'Glossary · rfc.akl.run', description: 'Networking terms from the RFCs, explained in plain language.', path: '/glossary/', palette: 'warm', header: 'reader', breadcrumb: [{ label: 'Glossary' }], main }),
     }];
   },
 };

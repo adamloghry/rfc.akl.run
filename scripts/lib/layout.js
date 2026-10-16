@@ -72,17 +72,6 @@ function layout(o) {
   const header = o.header === 'site' ? siteHeader(o.active, cont) : readerHeader(o.breadcrumb, cont);
   const containerCls = 'container-' + cont;
 
-  let mainAttrs = ' id="main"';
-  if (o.searchable) mainAttrs += ' data-pagefind-body';
-  if (o.pagefindMeta) {
-    const m = o.pagefindMeta;
-    const parts = [];
-    if (m.number != null) parts.push(`number:${m.number}`);
-    parts.push(`tier:${m.tier}`);
-    parts.push(`title:${m.title}`); // title last: commas in it are fine for Pagefind
-    mainAttrs += ` data-pagefind-meta="${esc(parts.join(', '))}"`;
-  }
-
   const fontPreloads = ['ibm-plex-sans-latin-400-normal.woff2', 'ibm-plex-sans-latin-600-normal.woff2']
     .map((f) => `<link rel="preload" as="font" type="font/woff2" crossorigin href="${esc(assets.url(f))}">`).join('\n');
 
@@ -122,7 +111,7 @@ ${o.head}
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 ${header}
-<main${raw(mainAttrs)}>
+<main id="main">
 ${o.main}
 </main>
 <footer class="site-footer">

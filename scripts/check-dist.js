@@ -12,11 +12,21 @@ const KB = 1024;
 const BUDGET = { index: 8 * KB, summary: 8 * KB, 'not-issued': 8 * KB, explainer: 60 * KB, interactive: 60 * KB, default: 60 * KB, areas: 200 * KB, glossary: 200 * KB };
 const JS_BUDGET = 25 * KB;
 const COVERAGE_BUDGET = 25 * KB;
+const FILE_LIMIT = 20000; // Cloudflare Workers static assets, Free plan, files per version
+const FILE_WARN = 18000;
+const MAX_STATIC_REDIRECTS = 2000;
+const MAX_DYNAMIC_REDIRECTS = 100;
 
 const ATTR_RE = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const ID_RE = /\bid\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const NAME_RE = /<a\b[^>]*\bname\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
 const TIER_RE = /<meta\s+name="rfc-tier"\s+content="([^"]*)"/i;
+
+function countFiles(dir) {
+  let n = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) n += e.isDirectory() ? countFiles(path.join(dir, e.name)) : 1;
+  return n;
+}
 
 function walk(dir, rel, out) {
   for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
@@ -35,7 +45,8 @@ function checkDist(dir) {
   const htmlFiles = files.filter((f) => f.endsWith('.html'));
   const errors = [];
   const warnings = [];
-  const stats = { pages: htmlFiles.length, files: files.length, links: 0, broken: 0, badAnchors: 0, overBudget: 0, byTier: {}, maxGz: { path: '', bytes: 0 } };
+  const totalFiles = countFiles(dir); // every file, including the unscanned search/ dir
+  const stats = { pages: htmlFiles.length, files: totalFiles, links: 0, broken: 0, badAnchors: 0, overBudget: 0, byTier: {}, maxGz: { path: '', bytes: 0 } };
 
   const idCache = new Map(); // target html path -> Set of ids (lazy)
   const idsFor = (rel) => {
@@ -107,8 +118,6 @@ function checkDist(dir) {
     }
     for (const [msg, n] of broken) errors.push(`${rel}: ${msg}${n > 1 ? ` (x${n})` : ''}`);
 
-    // budgets (skip rfc<n>/ redirect stubs)
-    if (/^rfc\d+\/index\.html$/.test(rel)) continue;
     const tm = TIER_RE.exec(html);
     const tier = tm ? tm[1] : null;
     let budget = tier && BUDGET[tier] ? BUDGET[tier] : BUDGET.default;
@@ -124,6 +133,21 @@ function checkDist(dir) {
       for (const f of jsRefs) js += gzSize(f);
       if (js > JS_BUDGET) { stats.overBudget++; errors.push(`${rel}: JS ${(js / KB).toFixed(1)} KB gz exceeds ${JS_BUDGET / KB} KB`); }
     }
+  }
+
+  if (totalFiles >= FILE_LIMIT) errors.push(`dist/ has ${totalFiles} files, at or over the Cloudflare Free limit of ${FILE_LIMIT} files per version`);
+  else if (totalFiles >= FILE_WARN) warnings.push(`dist/ has ${totalFiles} files, approaching the Cloudflare Free limit of ${FILE_LIMIT}`);
+
+  if (fileSet.has('_redirects')) {
+    let st = 0, dyn = 0;
+    for (const line of fs.readFileSync(path.join(dir, '_redirects'), 'utf8').split('\n')) {
+      const l = line.trim();
+      if (!l || l.startsWith('#')) continue;
+      if (/[:*]/.test(l.split(/\s+/)[0])) dyn++; else st++;
+    }
+    stats.redirects = { static: st, dynamic: dyn };
+    if (st > MAX_STATIC_REDIRECTS) errors.push(`_redirects: ${st} static rules exceeds the limit of ${MAX_STATIC_REDIRECTS}`);
+    if (dyn > MAX_DYNAMIC_REDIRECTS) errors.push(`_redirects: ${dyn} dynamic rules exceeds the limit of ${MAX_DYNAMIC_REDIRECTS}`);
   }
 
   // Every sitemap URL must resolve to a file in dist/.

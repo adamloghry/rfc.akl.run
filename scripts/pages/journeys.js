@@ -29,7 +29,6 @@ function page(site, j) {
 <p class="eyebrow"><a href="/journeys/">Journeys</a></p>
 <h1 class="page-title">${j.title}</h1>
 ${j.description ? html`<p class="page-lede serif">${j.description}</p>` : ''}
-${(j.questions || []).length ? html`<div class="visually-hidden" data-pagefind-weight="10">${(j.questions || []).map((q) => html`<p>${q}</p>`)}</div>` : ''}
 <ol class="journey-steps">${(j.steps || []).map((s, i) => html`<li class="journey-step" id="step-${i + 1}">
 <span class="step-num mono">${String(i + 1).padStart(2, '0')}</span>
 <div class="step-body"><h2 class="step-title">${s.title}${s.subtitle ? html` <span class="step-sub">${s.subtitle}</span>` : ''}</h2>
@@ -39,7 +38,7 @@ ${s.description ? html`<p>${s.description}</p>` : ''}
   return layout({
     title: `${j.title} · Journeys · rfc.akl.run`, description: (j.description || j.title).slice(0, 200), path: `/journeys/${j.slug}/`,
     palette: 'warm', header: 'reader', breadcrumb: [{ label: 'Journeys', href: '/journeys/' }, { label: j.title }],
-    main, searchable: true, pagefindMeta: { tier: 'journey', title: j.title },
+    main,
   });
 }
 

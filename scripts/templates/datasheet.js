@@ -247,7 +247,6 @@ ${rfc.isNew ? html`<span class="badge badge-new">NEW</span>` : ''}
 </div>`;
 
   const subtitle = c.subtitle || (c.hero && c.hero.subtitle) || '';
-  const questions = (c.questions || []).length ? html`<div class="visually-hidden" data-pagefind-weight="8">${c.questions.join('. ')}</div>` : '';
 
   const band = html`<section class="band">
 <div class="container container-reader band-grid">
@@ -275,7 +274,6 @@ ${tocDetails}
 ${rail(rfc, hasLevels, toc, permalink)}
 <div class="main-col">
 ${obsoletedBanner(rfc, site)}
-${questions}
 ${tldr(c)}
 ${sections.map((s, i) => renderSection(s, i, hasLevels, vizBySection))}
 ${orphans}
@@ -301,8 +299,6 @@ ${rightRail(rfc, site)}
     main, footer, head,
     scripts: ['reader.js', ...vizScripts(c.viz)],
     ogType: 'article',
-    searchable: true,
-    pagefindMeta: { number: n, tier: rfc.tier, title },
   });
 }
 

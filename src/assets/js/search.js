@@ -1,5 +1,6 @@
-/* rfc.akl.run shared search: number jump, curated questions, Pagefind. Safe no-op without .search-input. */
-(function () {
+/* rfc.akl.run shared search: number jump, curated questions, static full-text index (/data/search/).
+   The pure functions below are also exported for node tests; the DOM part is a safe no-op without .search-input. */
+var RarpSearchCore = (function () {
   'use strict';
 
   function parseNumber(q, max) {
@@ -17,6 +18,109 @@
     });
   }
 
+  /* Keep tokenize/shardOf in sync with scripts/lib/search-index.js (test/search-index.test.js checks parity). */
+  var STOP = {};
+  'a an and are as at be by do does for from how in is it of on or rfc that the this to was what when where which who why with'
+    .split(' ').forEach(function (w) { STOP[w] = 1; });
+
+  function tokenize(text) {
+    var s = String(text == null ? '' : text);
+    if (s.normalize) s = s.normalize('NFKD').replace(/[̀-ͯ]/g, '');
+    var out = [], parts = s.toLowerCase().split(/[^a-z0-9]+/);
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].length >= 2 && !STOP[parts[i]]) out.push(parts[i]);
+    }
+    return out;
+  }
+
+  function shardOf(term, n) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < term.length; i++) {
+      h ^= term.charCodeAt(i) & 0xff;
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return (h >>> 0) % n;
+  }
+
+  /* Query -> {slots: [[{term, w}, ...], ...]}; one slot per distinct token, the last one also
+     expands through the 3-char prefix table (weight 0.6) so partially typed words match. */
+  function plan(q, prefixMap) {
+    var toks = [], seen = {};
+    tokenize(q).forEach(function (t) { if (!seen[t]) { seen[t] = 1; toks.push(t); } });
+    var slots = toks.map(function (t) { return [{ term: t, w: 1 }]; });
+    // Expand the last token as typed (not the last de-duplicated one) only when the query does not end in a space.
+    var raw = String(q), endsOpen = !/\s$/.test(raw);
+    var all = tokenize(q), last = all.length ? all[all.length - 1] : null;
+    if (endsOpen && last && last.length >= 3 && prefixMap) {
+      var slot = slots[toks.indexOf(last)];
+      (prefixMap[last.slice(0, 3)] || []).forEach(function (t) {
+        if (t !== last && t.indexOf(last) === 0) slot.push({ term: t, w: 0.6 });
+      });
+    }
+    return { slots: slots };
+  }
+
+  function termsOf(p) {
+    var out = [];
+    p.slots.forEach(function (slot) { slot.forEach(function (c) { if (out.indexOf(c.term) < 0) out.push(c.term); }); });
+    return out;
+  }
+
+  function shardsOf(p, n) {
+    var out = [];
+    termsOf(p).forEach(function (t) { var k = shardOf(t, n); if (out.indexOf(k) < 0) out.push(k); });
+    return out;
+  }
+
+  /* postings: {term: [[docId, score], ...]}. Docs matching every slot come first; if none do, only the
+     docs matching the most slots are returned. Returns [{id, score, hits}] best first. */
+  function rank(p, postings, limit) {
+    var n = p.slots.length;
+    if (!n) return [];
+    var acc = {};
+    p.slots.forEach(function (slot) {
+      var best = {};
+      slot.forEach(function (c) {
+        (postings[c.term] || []).forEach(function (e) {
+          var v = e[1] * c.w;
+          if (!(best[e[0]] >= v)) best[e[0]] = v;
+        });
+      });
+      Object.keys(best).forEach(function (id) {
+        var a = acc[id] || (acc[id] = { id: +id, score: 0, hits: 0 });
+        a.score += best[id];
+        a.hits++;
+      });
+    });
+    var list = Object.keys(acc).map(function (id) { return acc[id]; });
+    var top = 0;
+    list.forEach(function (a) { if (a.hits > top) top = a.hits; });
+    list = list.filter(function (a) { return a.hits === top; });
+    list.sort(function (a, b) { return b.score - a.score || a.id - b.id; });
+    return limit ? list.slice(0, limit) : list;
+  }
+
+  /* doc row [url, number|null, title, shortTitle|null, tier] -> result row */
+  function docRow(d) {
+    var tier = d[4] || '';
+    return {
+      label: d[1] ? 'RFC ' + d[1] : tier === 'journey' ? 'JOURNEY' : 'PAGE',
+      title: d[3] ? d[3] + ': ' + d[2] : d[2],
+      tag: tier === 'journey' ? 'JOURNEY' : tier.toUpperCase(),
+      tier: tier === 'journey' ? '' : tier,
+      href: d[0],
+    };
+  }
+
+  return { parseNumber: parseNumber, matchQuestions: matchQuestions, tokenize: tokenize, shardOf: shardOf, plan: plan, termsOf: termsOf, shardsOf: shardsOf, rank: rank, docRow: docRow };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = RarpSearchCore;
+
+(function () {
+  'use strict';
+  if (typeof document === 'undefined') return;
+  var parseNumber = RarpSearchCore.parseNumber, matchQuestions = RarpSearchCore.matchQuestions;
   window.RarpSearch = { parseNumber: parseNumber, matchQuestions: matchQuestions };
 
   var inputs = document.querySelectorAll('.search-input');
@@ -50,16 +154,30 @@
     }
     return coveragePromise;
   }
-  var pagefind = null;
-  function getPagefind() {
-    if (!pagefind) {
-      pagefind = import('/search/pagefind.js').then(function (m) {
-        if (m.init) { try { m.init(); } catch (e) { /* ignore */ } }
-        return m;
-      });
-      pagefind.catch(function () { /* degrade: numbers + questions only */ });
+  /* full-text index: meta + docs + prefix table up front (on first focus), term shards on demand */
+  var ftPromise = null;
+  function getFullText() {
+    if (!ftPromise) {
+      ftPromise = Promise.all([
+        getJSON('/data/search/meta.json'), getJSON('/data/search/docs.json'),
+        getJSON('/data/search/prefix.json').catch(function () { return {}; }),
+      ]).then(function (r) { return { shards: r[0].shards, docs: r[1], prefix: r[2] }; });
+      ftPromise.catch(function () { ftPromise = null; }); // degrade: numbers + questions only
     }
-    return pagefind;
+    return ftPromise;
+  }
+  function fullTextSearch(q, limit) {
+    return getFullText().then(function (ft) {
+      var p = RarpSearchCore.plan(q, ft.prefix);
+      var ks = RarpSearchCore.shardsOf(p, ft.shards);
+      return Promise.all(ks.map(function (k) {
+        return getJSON('/data/search/t-' + (k < 10 ? '0' : '') + k + '.json').catch(function () { return {}; });
+      })).then(function (shards) {
+        var postings = {};
+        shards.forEach(function (sh) { Object.keys(sh).forEach(function (t) { postings[t] = sh[t]; }); });
+        return RarpSearchCore.rank(p, postings, limit).map(function (r) { return RarpSearchCore.docRow(ft.docs[r.id]); });
+      });
+    });
   }
 
   var TIERS = ['NOT ISSUED', 'RESERVED', 'INDEX', 'SUMMARY', 'EXPLAINER', 'EXPLAINER'];
@@ -178,27 +296,12 @@
           matchQuestions(q, qs).forEach(function (m) {
             add({ label: m.label || 'JOURNEY', title: m.title || m.q, tag: 'QUESTION', tier: '', href: m.href });
           });
-          var needsPf = items.length < 6;
-          render(items.slice(), q, !needsPf);
-          if (!needsPf) return;
-          return getPagefind().then(function (pf) {
-            return pf.search(q);
-          }).then(function (r) {
+          var needsFt = items.length < 6;
+          render(items.slice(), q, !needsFt);
+          if (!needsFt) return;
+          return fullTextSearch(q, 6).then(function (rs) {
             if (my !== token) return;
-            return Promise.all(r.results.slice(0, 5).map(function (x) { return x.data(); }));
-          }).then(function (datas) {
-            if (my !== token || !datas) return;
-            datas.forEach(function (d) {
-              var m = d.meta || {};
-              var tier = m.tier || '';
-              add({
-                label: m.number ? 'RFC ' + m.number : tier === 'journey' ? 'JOURNEY' : 'PAGE',
-                title: m.title || d.url,
-                tag: tier === 'journey' ? 'JOURNEY' : tier.toUpperCase(),
-                tier: tier,
-                href: d.url,
-              });
-            });
+            rs.forEach(add);
             render(items.slice(), q, true);
           }).catch(function () {
             if (my === token) render(items.slice(), q, true);
@@ -207,7 +310,7 @@
       }).catch(function () { if (my === token) render(items.slice(), q, true); });
     }
 
-    input.addEventListener('focus', function () { getPagefind().catch(function () {}); getJSON('/data/questions.json').catch(function () {}); });
+    input.addEventListener('focus', function () { getFullText().catch(function () {}); getJSON('/data/questions.json').catch(function () {}); });
     input.addEventListener('input', function () {
       clearTimeout(timer);
       flushEnter = false;

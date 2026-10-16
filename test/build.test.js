@@ -11,7 +11,7 @@ const ROOT = path.join(__dirname, '..');
 const opts = (outDir, extra = {}) => ({
   indexFile: path.join(ROOT, 'test/fixtures/rfc-index.sample.xml'),
   contentDir: path.join(ROOT, 'test/fixtures/content'),
-  outDir, buildDate: new Date('2026-10-15'), pagefind: false, quiet: true, ...extra,
+  outDir, buildDate: new Date('2026-10-15'), quiet: true, ...extra,
 });
 const tmp = () => fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'rfc-build-'));
 const read = (d, p) => fs.readFileSync(path.join(d, p), 'utf8');
@@ -28,9 +28,9 @@ test('full build over fixtures', async () => {
   assert.match(read(out, '14/index.html'), /never issued/i);
   // a reserved number: 15..10055 not in index and not not-issued, e.g. 2
   assert.match(read(out, '2/index.html'), /not yet published/i);
-  const redirect = read(out, 'rfc903/index.html');
-  assert.ok(redirect.includes('<meta http-equiv="refresh" content="0; url=/903/">'));
-  assert.ok(redirect.includes('<link rel="canonical" href="https://rfc.akl.run/903/">'));
+  assert.ok(!has(out, 'rfc903/index.html'));
+  assert.match(read(out, '_redirects'), /^\/rfc:num \/:num\/ 301$/m);
+  assert.match(read(out, '_headers'), /\/assets\/\*\n  Cache-Control: public, max-age=31536000, immutable/);
   assert.ok(!has(out, '0903/index.html'));
   for (const f of ['404.html', 'sitemap.xml', 'robots.txt', 'feed.xml', 'data/coverage.json', 'data/graph.json', 'data/questions.json', 'data/titles/0.json']) assert.ok(has(out, f), f);
 

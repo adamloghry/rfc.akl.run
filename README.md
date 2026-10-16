@@ -2,7 +2,7 @@
 
 A statically generated explainer site for the Internet's RFCs. Every RFC number from 1 to the latest gets a permanent page at `rfc.akl.run/<n>/`; the ones that have been written up get plain-language summaries, diagrams and interactive packet and sequence viewers. Everything is pre-rendered HTML: no server code, no runtime services, no third-party requests.
 
-The nightly build reads the RFC Editor index, merges it with the hand-written JSON in `content/`, and renders about 20,000 pages into `dist/` in a few seconds, plus a Pagefind search index.
+The nightly build reads the RFC Editor index, merges it with the hand-written JSON in `content/`, and renders about 10,000 RFC pages (plus a static search index) into `dist/` in a few seconds.
 
 ## The coverage ladder
 
@@ -31,11 +31,10 @@ Useful build flags (`node scripts/build.js ...`):
 
 - `--offline` uses the cached `.cache/rfc-index.xml` and never touches the network (`npm run build:offline`).
 - `--only 903,826` renders only those RFC pages, for quick iteration.
-- `--no-pagefind` skips the search index.
 
-Other commands: `npm test`, `npm run lint` (content lint), `npm run check` (verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, and size budgets).
+Other commands: `npm test`, `npm run lint` (content lint), `npm run check` (verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets, the Cloudflare file-count limit and `_redirects` rule limits).
 
-With Nix: `nix develop` gives a shell with Node 22, Python 3 and the gcloud CLI; `nix run` runs `npm ci && npm run build && npm run serve` in the working tree.
+With Nix: `nix develop` gives a shell with Node 22 and Python 3; `nix run` runs `npm ci && npm run build && npm run serve` in the working tree.
 
 ## Content authoring
 
@@ -58,7 +57,6 @@ scripts/
   lib/ pages/ templates/   Model, page modules, HTML templates
   fetch-demand.js   GitHub issues -> content/signals/demand.json
   coverage-diff.js  Compares two coverage.json files (nightly summary)
-  deploy-gcs.sh     Upload dist/ to GCS and purge Cloudflare
 test/               node:test suites and fixtures
 docs/design-handoff/  Design and build spec
 .github/workflows/  ci.yml (PRs and trunk), nightly.yml (build + deploy)
@@ -66,30 +64,27 @@ docs/design-handoff/  Design and build spec
 
 ## Deploy
 
-Hosting is a GCS bucket behind Cloudflare. `.github/workflows/nightly.yml` builds daily at 06:17 UTC (and on demand) and, on `trunk` only, runs `scripts/deploy-gcs.sh`. The script uploads content-hashed files first, (`assets/`, `search/index/`, `search/fragment/`, and the content-hashed `search/pagefind.*.pf_meta`) first, then HTML with a short TTL, then prunes stale hashed files, then purges Cloudflare. Every `gcloud storage rsync` runs with `--checksums-only`: the build recreates `dist/`, so mtimes always change and the default comparison would re-upload everything. `bash scripts/deploy-gcs.sh --dry-run` prints the commands without running anything; `--init` sets the bucket's website config once. `--fix-headers` re-stamps Cache-Control on objects rsync skipped as unchanged: the first deploy into a non-empty bucket, or any change to the header policy, needs it (rsync only applies `--cache-control` to objects it uploads).
+Hosting is Cloudflare Workers static assets (free plan), configured by `wrangler.jsonc` (assets-only Worker `rfc-akl-run` serving `dist/`, custom 404 page, `auto-trailing-slash`). `.github/workflows/nightly.yml` builds daily at 06:17 UTC (and on demand) and, on `trunk` only, runs `npx wrangler@4 deploy`. Static asset requests are free and unlimited.
 
-| Piece | Setting |
-|---|---|
-| Bucket name | `rfc.akl.run` (must equal the hostname; requires domain verification) |
-| Website config | `MainPageSuffix=index.html`, `NotFoundPage=404.html` |
-| Access | `allUsers: roles/storage.objectViewer` |
-| DNS (Cloudflare) | `CNAME rfc.akl.run -> c.storage.googleapis.com`, proxied. Optional `www` CNAME plus redirect rule to the apex. |
-| SSL/TLS mode | Flexible (GCS website endpoints are HTTP-only for custom domains) |
-| Cloudflare | Always Use HTTPS, HSTS on, Brotli on |
-| Cache rule | Cache Everything for `rfc.akl.run/*`, edge TTL respects origin |
-| Cache-Control | HTML and `data/coverage.json`: `public, max-age=300, s-maxage=86400`. `assets/`, `search/index/`, `search/fragment/`, `search/pagefind.*.pf_meta`: `public, max-age=31536000, immutable` |
+### Why file count matters
+
+The free plan allows 20,000 files per deployed version (100,000 on Paid) and 25 MiB per file. Every RFC is one `<n>/index.html`, so `dist/` is about 10.2k files today. To stay well under the limit, the build emits no per-RFC redirect stubs and no sharded search chunks; redirects live in a generated `_redirects` file and caching in a generated `_headers` file (both written by `scripts/pages/special.js`). RFCs grow by about 300 per year, so the headroom is decades. `scripts/check-dist.js` fails the build at 20,000 files, warns at 18,000, and checks `_redirects` against the 2,000 static / 100 dynamic rule caps.
+
+### Redirects and caching
+
+- `/rfc903` -> `/903/` comes from `_redirects` (`/rfc:num /:num/ 301`). This placeholder-in-segment form should be verified on a preview deploy (`npx wrangler@4 versions upload`); if it does not match, delete the rule. It is optional, since the old site never had `/rfcN` URLs.
+- Legacy `/#rfcNNN` links are forwarded to `/NNN/` by the Atlas page's inline script.
+- Slug aliases for explainers (`/<slug>` -> `/<n>/`) are also in `_redirects`.
+- `_headers`: `/assets/*` is `public, max-age=31536000, immutable`; everything else (HTML, `data/`) is `public, max-age=300`; the static search index under `data/search/` is `max-age=60` since its file names are not hashed. Cloudflare handles edge caching for static assets itself.
+- `www` -> apex is a Cloudflare dashboard setting (Redirect Rule), not part of this repo.
 
 ### One-time owner setup
 
-Nothing here has been provisioned. The deploy fails until all of it is done.
-
-1. Verify the `rfc.akl.run` domain for your Google account in Search Console (required to name a bucket after the domain).
-2. Create the bucket `rfc.akl.run` (single region is fine behind a CDN) and grant `allUsers` the `roles/storage.objectViewer` role.
-3. Create a deploy service account with `roles/storage.admin` on that bucket (or object admin plus bucket update for `--init`).
-4. Set up Workload Identity Federation for `adamloghry/rfc.akl.run` and allow it to impersonate the service account.
-5. In Cloudflare: add the proxied CNAME above, set SSL/TLS to Flexible, turn on Always Use HTTPS, HSTS and Brotli, and add a Cache Everything rule for `rfc.akl.run/*`. Optionally add redirect rules for `/rfc903` -> `/903/` and `www` -> apex.
-6. Add GitHub repository secrets: `GCP_WIF_PROVIDER`, `GCP_SA_EMAIL`, `CF_ZONE_ID`, `CF_API_TOKEN` (token scoped to Cache Purge for the zone).
-7. Run `BUCKET=rfc.akl.run bash scripts/deploy-gcs.sh --init` once from an authenticated shell, or run the Nightly workflow manually with the `init` input ticked, to set the website config.
-8. Create the GitHub label `explainer-request` so `fetch-demand.js` has something to read.
+1. Create the Worker `rfc-akl-run` (the first `npx wrangler@4 deploy` creates it) or reuse the existing one under the same name.
+2. Add GitHub repository secrets `CLOUDFLARE_API_TOKEN` (token with the "Edit Cloudflare Workers" template) and `CLOUDFLARE_ACCOUNT_ID`.
+3. In the Cloudflare dashboard, Workers & Pages > `rfc-akl-run` > Settings > Domains & Routes: add the custom domain `rfc.akl.run` (and `www` if wanted, redirecting to the apex).
+4. **Disable any existing Cloudflare Git-integration build** for this repo that runs the old `wrangler deploy --assets=./site`; `site/` no longer exists and it will fail or deploy stale content. (Alternative: set its build command to `npm ci && node scripts/build.js` and its deploy command to `npx wrangler deploy`. The recommended path is GitHub Actions only.)
+5. The Worker name `rfc-akl-run` matches the one the old site deployed to, so `wrangler deploy` updates it in place and an existing `rfc.akl.run` custom domain keeps working; nothing to migrate.
+6. Create the GitHub label `explainer-request` so `fetch-demand.js` has something to read.
 
 RFC text is (c) IETF Trust; explanations are on rfc.akl.run.

@@ -19,7 +19,7 @@ const withContent = (rfc, over) => ({ ...rfc, content: { ...(rfc.content || {}),
 test('summary tier (5952): head, badges, lede, buttons', () => {
   const out = renderIndexTier(r5952(), site);
   assert.match(out, /<meta name="rfc-tier" content="summary">/);
-  assert.match(out, /data-pagefind-meta="number:5952, tier:summary, title:A Recommendation/);
+  assert.doesNotMatch(out, /pagefind/);
   assert.match(out, /<link rel="canonical" href="https:\/\/rfc.akl.run\/5952\/">/);
   assert.match(out, /badge-green[^>]*>PROPOSED STANDARD</);
   assert.match(out, /badge-dashed[^>]*>SUMMARY</);
@@ -123,9 +123,9 @@ test('index tier: abstract is lede, AUTO notice, NEW badge', () => {
   assert.match(old, /AUTO/);
 });
 
-test('hidden questions block for pagefind', () => {
+test('no hidden questions block (questions live in the search index)', () => {
   const out = renderIndexTier(withContent(r5952(), { questions: ['how to write ipv6'] }), site);
-  assert.match(out, /<div class="visually-hidden" data-pagefind-weight="8">[^]*how to write ipv6/);
+  assert.doesNotMatch(out, /how to write ipv6|visually-hidden/);
 });
 
 test('prev/next footer', () => {

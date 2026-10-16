@@ -114,12 +114,11 @@ test('obsoleted banner', () => {
   assert.ok(!page().includes('Which version should I read?'));
 });
 
-test('search markup', () => {
+test('no search-engine markup', () => {
   const withQ = { ...r903, content: { ...r903.content, questions: ['how does a diskless computer get an ip address'] } };
   const h = renderDatasheet(withQ, site);
-  assert.ok(h.includes('data-pagefind-body'));
-  assert.match(h, /data-pagefind-meta="number:903/);
-  assert.ok(h.includes('<div class="visually-hidden" data-pagefind-weight="8">how does a diskless computer get an ip address</div>'));
+  assert.ok(!h.includes('pagefind'));
+  assert.ok(!h.includes('visually-hidden'));
 });
 
 test('plain-text fields are HTML-escaped', () => {

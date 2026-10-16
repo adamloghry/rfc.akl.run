@@ -55,14 +55,11 @@ test('journeys: index cards and warm prose page', () => {
   const o = out('journeys');
   const idx = o.get('journeys/index.html');
   assert.ok(idx.includes('class="pal-cool"') && idx.includes('/journeys/diskless-boot/'));
-  assert.ok(!idx.includes('data-pagefind-body'));
   const h = o.get('journeys/diskless-boot/index.html');
   assert.ok(h.includes('class="pal-warm"'));
   assert.ok(h.includes('Booting a diskless machine'));
   assert.ok(h.includes('href="/826/"') && h.includes('href="/903/"'));
-  assert.ok(h.includes('data-pagefind-body'));
-  assert.ok(h.includes('tier:journey, title:Booting a diskless machine'));
-  assert.match(h, /data-pagefind-weight="10"[^>]*>[\s\S]*how does a diskless computer get an ip address/);
+  assert.ok(!h.includes('pagefind'));
   assert.ok(h.indexOf('Find the neighbour') < h.indexOf('Learn your address'));
 });
 
@@ -73,7 +70,7 @@ test('glossary: dl with ids, eli5, used-in, jump bar', () => {
   assert.ok(h.includes('A name tag for your network card.'));
   assert.ok(h.includes('href="/826/"') && h.includes('href="/903/"'));
   assert.ok(h.includes('href="#letter-M"'));
-  assert.ok(h.includes('data-pagefind-body'));
+  assert.ok(!h.includes('pagefind'));
 });
 
 test('coverage: ladder, tables, top 50 uncovered', () => {

@@ -45,7 +45,7 @@ function lineage(rfc, site) {
   const left = uniq([...rfc.obsoletes, ...rfc.updates]);
   const right = uniq([...rfc.obsoletedBy, ...rfc.updatedBy]);
   const lLabel = rfc.obsoletes.length && rfc.updates.length ? 'OBSOLETES / UPDATES' : rfc.obsoletes.length ? 'OBSOLETES' : 'UPDATES';
-  return html`<section class="it-sec" data-pagefind-ignore>
+  return html`<section class="it-sec">
 <div class="it-row"><span class="it-eye">LINEAGE · GENERATED FROM RFC-INDEX.XML</span><a class="it-sm" href="/graph/#${rfc.number}">Open full graph →</a></div>
 <div class="it-lin">
 <div class="it-c"><span class="it-eye">${lLabel}</span>${left.length ? cellItems(left, rfc, site) : html`<span class="it-none">None</span>`}</div>
@@ -81,7 +81,7 @@ function ladder(rfc) {
     const done = i < reached, next = i === reached;
     return html`<div class="${next ? 'it-cell it-next' : 'it-cell'}"><div class="it-ch"><span class="${done ? 'it-dot it-done' : next ? 'it-dot it-nx' : 'it-dot'}">${done ? '✓' : String(i + 1)}</span><b>${label}</b></div><span>${hint}</span></div>`;
   });
-  return html`<section class="it-sec" data-pagefind-ignore>
+  return html`<section class="it-sec">
 <div class="it-row"><span class="it-eye">COVERAGE FOR THIS RFC</span>${rfc.demand > 0 ? html`<span class="it-sm">${rfc.demand} ${rfc.demand === 1 ? 'reader' : 'readers'} requested an explainer · counted daily</span>` : ''}</div>
 <div class="it-lad">${cells}</div>
 </section>`;
@@ -133,10 +133,8 @@ function renderIndexTier(rfc, site) {
         ? "This page was generated automatically when the RFC was published. Below is the authors' abstract. A plain-language summary hasn't been written yet."
         : "This page was generated automatically from the RFC Editor index. Below is the authors' abstract. A plain-language summary hasn't been written yet.")
     : '';
-  const questions = (rfc.content && rfc.content.questions) || [];
   const ob = rfc.obsoletedBy;
   const title = rfc.title;
-  const metaTitle = rfc.shortTitle ? `${rfc.shortTitle}: ${title}` : title;
   const desc = plain(summary || rfc.abstract || title).slice(0, 200);
 
   const mainHtml = html`<div class="it container container-index">
@@ -155,9 +153,8 @@ ${summary && absParas.length ? html`<div class="it-abs"><span class="it-eye">AUT
 ${facts(rfc, site)}
 </section>
 ${lineage(rfc, site)}
-<section class="it-two" data-pagefind-ignore>${mentioned(rfc, site)}${help(rfc)}</section>
+<section class="it-two">${mentioned(rfc, site)}${help(rfc)}</section>
 ${ladder(rfc)}
-${questions.length ? html`<div class="visually-hidden" data-pagefind-weight="8">${questions.map((q) => html`<p>${q}</p>`)}</div>` : ''}
 </div>`;
 
   const pn = html`<span>rfc.akl.run/${n}/</span><span class="it-pn">${n > 1 ? html`<a href="/${n - 1}/">← RFC ${n - 1}</a>` : ''}${n < site.max ? html`<a href="/${n + 1}/">RFC ${n + 1} →</a>` : ''}</span>`;
@@ -174,8 +171,6 @@ ${questions.length ? html`<div class="visually-hidden" data-pagefind-weight="8">
     footer: pn,
     head: raw(`<meta name="rfc-tier" content="${esc(rfc.tier)}">`),
     ogType: 'article',
-    searchable: true,
-    pagefindMeta: { number: n, tier: rfc.tier, title: metaTitle },
   });
 }
 

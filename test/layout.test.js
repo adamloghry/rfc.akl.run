@@ -41,11 +41,10 @@ test('breadcrumb: links, last bold without href', () => {
   assert.match(h, /<span class="crumb-current"[^>]*>RFC 903<\/span>/);
 });
 
-test('data-pagefind-body only when searchable; meta escaped', () => {
-  assert.ok(!layout(base).includes('data-pagefind-body'));
-  const h = layout({ ...base, searchable: true, pagefindMeta: { number: 903, tier: 'interactive', title: 'RARP: A "Reverse"' } });
-  assert.ok(h.includes('data-pagefind-body'));
-  assert.ok(h.includes('data-pagefind-meta="number:903, tier:interactive, title:RARP: A &quot;Reverse&quot;"'));
+test('no Pagefind markup; main is a plain landmark', () => {
+  const h = layout({ ...base, searchable: true, pagefindMeta: { number: 903, tier: 'interactive', title: 'x' } });
+  assert.ok(!h.includes('pagefind'));
+  assert.ok(h.includes('<main id="main">'));
 });
 
 test('site header with active nav and cool palette', () => {

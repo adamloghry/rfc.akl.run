@@ -4,8 +4,8 @@
  * Static site build orchestrator.
  *
  * CLI: node scripts/build.js [--offline] [--index <file>] [--content <dir>] [--out <dir>]
- *                            [--no-pagefind] [--only <n,n>]
- * API: build({ indexFile, contentDir, outDir, buildDate, pagefind, offline, only, pages, quiet })
+ *                            [--only <n,n>]
+ * API: build({ indexFile, contentDir, outDir, buildDate, offline, only, pages, quiet })
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -30,6 +30,8 @@ function sitemapUrl(p) {
 function xmlEsc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+const { buildSearchIndex } = require('./lib/search-index');
 
 // ---- data files (C12) ----------------------------------------------------
 
@@ -77,6 +79,8 @@ function dataFiles(site) {
     graph[r.number] = { o: r.obsoletes, ob: r.obsoletedBy, u: r.updates, ub: r.updatedBy, t: r.shortTitle || r.title, y: r.year };
   }
   files['data/graph.json'] = JSON.stringify(graph);
+
+  for (const f of buildSearchIndex(site).files) files[f.path] = f.json;
   return files;
 }
 
@@ -154,33 +158,19 @@ async function build(opts = {}) {
     sitemap.map((u) => `<url><loc>${xmlEsc(ORIGIN + u)}</loc></url>`).join('\n')}\n</urlset>\n`);
   lap('sitemap');
 
-  let pagefindInfo = null;
-  if (opts.pagefind !== false) {
-    const pagefind = await import('pagefind');
-    const { index: pfIndex, errors: e1 } = await pagefind.createIndex({});
-    if (!pfIndex) throw new Error('pagefind createIndex failed: ' + (e1 || []).join('; '));
-    const added = await pfIndex.addDirectory({ path: outDir });
-    if (added.errors && added.errors.length) throw new Error('pagefind addDirectory: ' + added.errors.join('; '));
-    const wrote = await pfIndex.writeFiles({ outputPath: path.join(outDir, 'search') });
-    if (wrote.errors && wrote.errors.length) throw new Error('pagefind writeFiles: ' + wrote.errors.join('; '));
-    await pagefind.close();
-    pagefindInfo = { pages: added.page_count };
-    lap('pagefind');
-  }
-
   timings.total = performance.now() - t0;
-  const counts = { pages: pageCount, sitemap: sitemap.length, max: site.max, tiers: site.counts, pagefind: pagefindInfo };
+  const counts = { pages: pageCount, sitemap: sitemap.length, max: site.max, tiers: site.counts };
   log('Build complete: ' + Object.entries(timings).map(([k, v]) => `${k} ${(v / 1000).toFixed(1)}s`).join(', '));
   log(`  ${pageCount} files, ${sitemap.length} sitemap URLs, tiers ${JSON.stringify(site.counts)}`);
   return { outDir, site, counts, timings };
 }
 
 function parseArgs(argv) {
-  const o = { pagefind: true };
+  const o = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--offline') o.offline = true;
-    else if (a === '--no-pagefind') o.pagefind = false;
+    else if (a === '--no-pagefind') { /* accepted and ignored: Pagefind was replaced by the static index in data/search/ */ }
     else if (a === '--index') o.indexFile = argv[++i];
     else if (a === '--content') o.contentDir = argv[++i];
     else if (a === '--out') o.outDir = argv[++i];
