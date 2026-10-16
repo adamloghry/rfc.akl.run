@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const ROOT = path.join(__dirname, '..', '..');
-const CSS_DIR = path.join(ROOT, 'src', 'assets', 'css');
+const CSS_DIR = path.join(ROOT, 'src', 'styles');
 const JS_DIR = path.join(ROOT, 'src', 'assets', 'js');
 const FONT_ROOT = path.join(ROOT, 'node_modules', '@fontsource');
 
