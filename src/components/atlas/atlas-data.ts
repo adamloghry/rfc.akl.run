@@ -64,7 +64,7 @@ export function timelineModel(site: Site) {
     years.set(r.year, y);
   }
   const maxY = Math.max(1, ...[...years.values()].map((y) => y.f + y.b));
-  const cols = [];
+  const cols: { tip: string; hb: string; hf: string }[] = [];
   for (let yr = 1969; yr <= maxYear; yr++) {
     const v = years.get(yr) || { f: 0, b: 0, nums: [] };
     const nums = v.nums.sort((a, b) => a - b);

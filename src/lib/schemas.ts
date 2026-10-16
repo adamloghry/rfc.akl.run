@@ -1,5 +1,5 @@
 /**
- * Zod schemas for content files. They mirror content/schema/*.json (the C7 contract) and are the
+ * Zod schemas for content files. They define the content contract and are the
  * single source for the content collections (src/content.config.ts) and scripts/lint-content.ts.
  * Fields that templates insert with set:html are checked with sanitize-check in superRefine.
  */

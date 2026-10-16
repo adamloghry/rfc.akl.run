@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import { experimental_AstroContainer as AstroContainer } from 'astro/container';
-import NotFound from '../src/pages/404.astro';
+import NotFound from '../src/pages/not-found.astro';
 import Graph from '../src/pages/graph/index.astro';
 import Question from '../src/pages/contribute/question/index.astro';
 import AreaCard from '../src/components/pages/AreaCard.astro';

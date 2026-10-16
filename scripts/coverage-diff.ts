@@ -1,9 +1,8 @@
-#!/usr/bin/env tsx
 // @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 /**
  * Coverage diff between two dist/data/coverage.json objects (contract C12).
  *
- *   node scripts/coverage-diff.js <old.json> <new.json>
+ *   node scripts/coverage-diff.ts <old.json> <new.json>
  *
  * Writes Markdown to $GITHUB_STEP_SUMMARY when set, else stdout. A missing or
  * unreadable <old.json> (first deploy, site unreachable) is treated as "no
@@ -79,7 +78,7 @@ function readJson(p) {
 
 function main(argv) {
   const [oldPath, newPath] = argv;
-  if (!oldPath || !newPath) { console.error('usage: coverage-diff.js <old.json> <new.json>'); return 2; }
+  if (!oldPath || !newPath) { console.error('usage: coverage-diff.ts <old.json> <new.json>'); return 2; }
   const newCov = readJson(newPath);
   if (!newCov) { console.error(`cannot read ${newPath}`); return 1; }
   const oldCov = readJson(oldPath);

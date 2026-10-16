@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 // @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 /**
  * Reader demand signal: open issues labeled `explainer-request` in

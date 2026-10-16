@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 // @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 // Split every index-tier RFC into .work/summaries/in/batch-NNN.json (sorted by number) for drafting agents.
 // Also writes .work/explainer-targets.json (top 60 by priority, tier index|summary, not obsoleted).

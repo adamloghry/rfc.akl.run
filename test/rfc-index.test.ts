@@ -1,4 +1,4 @@
-// @ts-nocheck -- ported from node:test; vitest does not type-check
+// @ts-nocheck -- ported tests; types to be tightened in follow-up
 import { test } from 'vitest';
 import assert from 'node:assert';
 import fs from 'node:fs';

@@ -1,11 +1,10 @@
-#!/usr/bin/env tsx
 /**
  * Parity report: compares the golden output of the legacy generator (.work/golden/<path>) with the
  * Astro build (dist/<path>) after normalizing whitespace, hashed asset URLs, attribute order and
  * Astro-specific attributes/wrappers. Prints a compact unified diff of the page structure
  * (tags + classes + ids + key attributes + text) and a similarity score per page.
  *
- *   tsx scripts/parity.ts [paths...] [--golden dir] [--dist dir] [--context n] [--limit n] [--full]
+ *   node --import tsx scripts/parity.ts [paths...] [--golden dir] [--dist dir] [--context n] [--limit n] [--full]
  *
  * Paths are site paths (/, /903/, /404.html). Always exits 0: this is a report tool.
  */

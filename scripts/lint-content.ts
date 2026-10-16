@@ -1,6 +1,5 @@
-#!/usr/bin/env tsx
 /**
- * Content linter. CLI: tsx scripts/lint-content.ts [--update-lock] [--offline] [--only <file>...]
+ * Content linter. CLI: node --import tsx scripts/lint-content.ts [--update-lock] [--offline] [--only <file>...]
  * Structural checks use the same Zod schemas as the content collections (src/lib/schemas.ts).
  */
 import fs from 'node:fs';

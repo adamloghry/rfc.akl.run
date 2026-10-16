@@ -1,5 +1,5 @@
 // @ts-nocheck
-// Ported verbatim from the legacy src/assets/js/sim.js; self-initializes on all matching figures.
+// Sequence simulator client script; self-initializes on all matching figures.
 (function () {
   'use strict';
 

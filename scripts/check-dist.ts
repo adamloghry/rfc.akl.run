@@ -1,7 +1,6 @@
-#!/usr/bin/env tsx
 // @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 /**
- * Link / anchor / budget checker for dist/.  CLI: node scripts/check-dist.js [dir]
+ * Link / anchor / budget checker for dist/.  CLI: node --import tsx scripts/check-dist.ts [dir]
  * checkDist(dir) -> { errors: string[], warnings: string[], stats }
  */
 import fs from 'node:fs';
@@ -46,7 +45,7 @@ export function checkDist(dir: string) {
   const errors = [];
   const warnings = [];
   const totalFiles = countFiles(dir); // every file, including the unscanned search/ dir
-  const stats: any = { pages: htmlFiles.length, files: totalFiles, links: 0, broken: 0, badAnchors: 0, overBudget: 0, byTier: {}, maxGz: { path: '', bytes: 0 } };
+  const stats: any = { pages: htmlFiles.length, files: totalFiles, links: 0, broken: 0, badAnchors: 0, overBudget: 0, byTier: {}, maxGz: { path: '', bytes: 0 }, maxJsGz: { path: '', bytes: 0 } };
 
   const idCache = new Map(); // target html path -> Set of ids (lazy)
   const idsFor = (rel) => {
@@ -72,6 +71,35 @@ export function checkDist(dir: string) {
     let v = gzCache.get(rel);
     if (v === undefined) { v = zlib.gzipSync(fs.readFileSync(path.join(dir, rel)), { level: 6 }).length; gzCache.set(rel, v); }
     return v;
+  };
+
+  // static imports inside a JS file: import"./x.js", import "./x.js", from"./x.js", import{a}from"./x.js"
+  const importCache = new Map();
+  const importsOf = (rel) => {
+    let v = importCache.get(rel);
+    if (!v) {
+      v = [];
+      const src = fs.readFileSync(path.join(dir, rel), 'utf8');
+      for (const m of src.matchAll(/(?:\bimport|\bfrom)\s*["']([^"']+\.js)["']/g)) {
+        const spec = m[1];
+        const target = spec.startsWith('/') ? spec.slice(1) : path.posix.join(path.posix.dirname(rel), spec);
+        if (fileSet.has(target)) v.push(target);
+      }
+      importCache.set(rel, v);
+    }
+    return v;
+  };
+  // entry scripts plus every statically imported chunk, recursively, deduped per page
+  const jsClosure = (entries) => {
+    const seen = new Set();
+    const stack = [...entries];
+    while (stack.length) {
+      const f = stack.pop();
+      if (seen.has(f)) continue;
+      seen.add(f);
+      if (f.endsWith('.js')) stack.push(...importsOf(f));
+    }
+    return seen;
   };
 
   // resolve a site-absolute path (no query/hash) to a file, or null
@@ -130,13 +158,19 @@ export function checkDist(dir: string) {
     if (gz > budget) { stats.overBudget++; errors.push(`${rel}: gzip ${(gz / KB).toFixed(1)} KB exceeds ${tier || key} budget ${(budget / KB)} KB`); }
     if (jsRefs.size) {
       let js = 0;
-      for (const f of jsRefs) js += gzSize(f);
+      for (const f of jsClosure(jsRefs)) js += gzSize(f);
+      if (js > stats.maxJsGz.bytes) stats.maxJsGz = { path: rel, bytes: js };
       if (js > JS_BUDGET) { stats.overBudget++; errors.push(`${rel}: JS ${(js / KB).toFixed(1)} KB gz exceeds ${JS_BUDGET / KB} KB`); }
     }
   }
 
   if (totalFiles >= FILE_LIMIT) errors.push(`dist/ has ${totalFiles} files, at or over the Cloudflare Free limit of ${FILE_LIMIT} files per version`);
   else if (totalFiles >= FILE_WARN) warnings.push(`dist/ has ${totalFiles} files, approaching the Cloudflare Free limit of ${FILE_LIMIT}`);
+
+  for (const req of ['404.html', '404/index.html', '_redirects', '_headers']) {
+    if (!fileSet.has(req)) errors.push(`${req} is missing from dist/`);
+  }
+  if (fs.existsSync(path.join(dir, 'not-found'))) errors.push('not-found/ must not exist in dist/ (the error page belongs at 404.html)');
 
   if (fileSet.has('_redirects')) {
     let st = 0, dyn = 0;
@@ -178,7 +212,7 @@ export function main() {
   console.log(`check-dist: ${stats.pages} pages, ${stats.files} files, ${stats.links} internal links in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   console.log(`  broken links ${stats.broken}, missing anchors ${stats.badAnchors}, budget violations ${stats.overBudget}`);
   console.log('  pages by tier: ' + Object.entries(stats.byTier).map(([k, v]) => `${k}=${v}`).join(' '));
-  console.log(`  largest page gz: ${stats.maxGz.path} ${(stats.maxGz.bytes / KB).toFixed(1)} KB` + (stats.coverageGz ? `; coverage.json gz ${(stats.coverageGz / KB).toFixed(1)} KB` : ''));
+  console.log(`  largest page gz: ${stats.maxGz.path} ${(stats.maxGz.bytes / KB).toFixed(1)} KB` + `; max JS per page gz (with chunks): ${stats.maxJsGz.path || '-'} ${(stats.maxJsGz.bytes / KB).toFixed(1)} KB` + (stats.coverageGz ? `; coverage.json gz ${(stats.coverageGz / KB).toFixed(1)} KB` : ''));
   for (const w of warnings) console.log('WARN ' + w);
   for (const e of errors.slice(0, 200)) console.log('ERROR ' + e);
   if (errors.length > 200) console.log(`... and ${errors.length - 200} more errors`);

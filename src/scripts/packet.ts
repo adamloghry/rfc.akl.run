@@ -1,5 +1,5 @@
 // @ts-nocheck
-// Ported verbatim from the legacy src/assets/js/packet.js; self-initializes on all matching figures.
+// Packet viewer client script; self-initializes on all matching figures.
 (function () {
   'use strict';
 

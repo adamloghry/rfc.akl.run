@@ -1,6 +1,6 @@
 /**
  * Allowlist validator for the HTML fragments that content JSON is allowed to
- * carry (rendered with raw() by the templates). Used by lint-content.js and,
+ * carry (rendered with set:html). Used by lint-content.ts and,
  * independently, by the build (model.js) so skipping lint cannot ship unsafe
  * markup. checkHtml(str) -> string[] of problems (empty = safe).
  *
@@ -133,11 +133,12 @@ export function walkStrings(v: any, fn: (s: string, ptr: string) => void, ptr = 
 }
 
 /**
- * JSON pointers whose strings the templates insert with raw(). Everything else is
+ * JSON pointers whose strings are inserted with set:html. Everything else is
  * escaped on render (plain text may legitimately contain "<qname>" etc.), so it is
- * not checked here. KEEP IN SYNC with raw() call sites: datasheet.js (sections
- * content/eli5, eli5.summary, today), index-tier.js (summary, eli5.summary),
- * pages/glossary.js (definition).
+ * not checked here. KEEP IN SYNC with the set:html content sites, enforced by
+ * test/set-html-allowlist.test.ts: components/rfc/Section.astro (section content/eli5),
+ * RightRail.astro (eli5.summary, today), IndexTier.astro (summary, eli5.summary),
+ * pages/glossary/index.astro (definition).
  */
 export const HTML_FIELDS: Record<string, RegExp> = {
   rfc: /^\/(summary|today|eli5\/summary|sections\/\d+\/(content|eli5))$/,

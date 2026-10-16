@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 // @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 // Validate LLM-drafted RFC summaries (.work/summaries/out/batch-NNN.part-K.json) against the
 // batch inputs and merge them into content/rfcs/*.json. See Task 13/14 in the redesign plan.

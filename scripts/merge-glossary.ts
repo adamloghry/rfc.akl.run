@@ -1,4 +1,3 @@
-#!/usr/bin/env tsx
 // @ts-nocheck -- ported from CommonJS; loosely typed on purpose
 /**
  * Merges LLM-drafted glossary entries (.work/glossary/<n>.json (zero-padded <n> also accepted), each an

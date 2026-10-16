@@ -1,14 +1,20 @@
-// @ts-nocheck -- ported from node:test; vitest does not type-check
+// @ts-nocheck -- ported tests; types to be tightened in follow-up
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { checkDist } from '../scripts/check-dist';
 
+const zlibGz = (str) => zlib.gzipSync(str, { level: 6 }).length;
 const HERE = process.cwd() + '/test';
 
-function dist(files) {
+const REQUIRED = { '404.html': '<!doctype html>err', '404/index.html': '<!doctype html>rfc 404', '_redirects': '', '_headers': '' };
+
+/** A dist/ with the required files present (so tests exercise one thing at a time). */
+function dist(files, { bare = false } = {}) {
+  files = bare ? files : { ...REQUIRED, ...files };
   const d = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'rfc-dist-'));
   for (const [p, c] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(d, p)), { recursive: true });
@@ -35,7 +41,7 @@ test('clean dist has 0 errors', () => {
   });
   const r = checkDist(d);
   assert.deepEqual(r.errors, []);
-  assert.equal(r.stats.pages, 2);
+  assert.equal(r.stats.pages, 4); // 2 pages + the two 404 pages
 });
 
 test('budgets: index-tier page over 8 KB gz is an error', () => {
@@ -85,4 +91,42 @@ test('_redirects rule limits: 2000 static, 100 dynamic', () => {
   assert.deepEqual(ok.stats.redirects, { static: 2000, dynamic: 100 });
   const bad = checkDist(dist({ '_redirects': rules(2001, (i) => `/a${i} /1/ 301`) + '\n' + rules(101, (i) => `/b${i}/* /1/ 301`) }));
   assert.equal(bad.errors.length, 2);
+});
+
+test('missing 404.html, 404/index.html, _redirects or _headers is an error', () => {
+  const ok = dist({ '1/index.html': page('x') });
+  assert.deepEqual(checkDist(ok).errors, []);
+  for (const f of Object.keys(REQUIRED)) {
+    const d = dist({ '1/index.html': page('x'), ...REQUIRED }, { bare: true });
+    fs.rmSync(path.join(d, f));
+    const r = checkDist(d);
+    assert.ok(r.errors.some((e) => e.startsWith(f + ' is missing')), `${f}: ${JSON.stringify(r.errors)}`);
+  }
+});
+
+test('a not-found/ directory in dist is an error', () => {
+  const d = dist({ '1/index.html': page('x'), 'not-found/index.html': page('x') });
+  const r = checkDist(d);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0], /not-found\//);
+});
+
+test('JS budget follows static imports recursively, deduped per page', () => {
+  const noise = Array.from({ length: 6000 }, () => Math.random().toString(36).slice(2)).join(',');
+  const big = `export const x="${noise}";`;
+  const d = dist({
+    '1/index.html': page('<script type="module" src="/assets/entry.js"></script>'),
+    'assets/entry.js': 'import"./mid.js";console.log(1)',
+    'assets/mid.js': 'import { a } from "./big.js";import"./entry2.js";export{a}',
+    'assets/entry2.js': 'import{b}from"./big.js";export const c=b',
+    'assets/big.js': big,
+  });
+  const r = checkDist(d);
+  assert.equal(r.errors.length, 1, JSON.stringify(r.errors));
+  assert.match(r.errors[0], /^1\/index\.html: JS .* exceeds 25 KB/);
+  const small = zlibGz(big);
+  assert.ok(r.stats.maxJsGz.bytes >= small && r.stats.maxJsGz.bytes < small * 1.5, 'big chunk counted once');
+  // the entry alone is tiny: without following imports this page would pass
+  const d2 = dist({ '1/index.html': page('<script src="/assets/e.js"></script>'), 'assets/e.js': 'console.log(1)' });
+  assert.deepEqual(checkDist(d2).errors, []);
 });

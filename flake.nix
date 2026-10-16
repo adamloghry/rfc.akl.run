@@ -2,7 +2,7 @@
   description = "rfc.akl.run - static RFC explainer site";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -19,12 +19,10 @@
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             nodejs_22
-            python3
-            google-cloud-sdk
           ];
 
           shellHook = ''
-            echo "rfc.akl.run dev shell: npm ci && npm run build && npm run serve"
+            echo "rfc.akl.run dev shell (Astro 7, Node >= 22.22): npm ci && npm run dev"
           '';
         };
 
@@ -32,10 +30,10 @@
           type = "app";
           program = toString (pkgs.writeShellScript "serve-rfc" ''
             set -euo pipefail
-            export PATH=${pkgs.lib.makeBinPath [ pkgs.nodejs_22 pkgs.python3 ]}:$PATH
+            export PATH=${pkgs.lib.makeBinPath [ pkgs.nodejs_22 ]}:$PATH
             npm ci
             npm run build
-            npm run serve
+            npm run preview
           '');
         };
       }
