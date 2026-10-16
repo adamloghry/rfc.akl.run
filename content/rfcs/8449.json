@@ -9,13 +9,196 @@
   },
   "questions": [
     "tls record size limit",
-    "tls maximum fragment length replacement"
+    "tls maximum fragment length replacement",
+    "what is the tls record_size_limit extension",
+    "what replaces max_fragment_length in tls",
+    "what is the minimum tls record size limit",
+    "why limit tls record size on constrained devices"
+  ],
+  "tags": [
+    "TLS",
+    "Extensions",
+    "Constrained Devices"
+  ],
+  "subtitle": "A TLS extension that lets each side tell the other the largest protected record it is willing to receive.",
+  "tldr": {
+    "problem": "Constrained devices may not have the memory to hold a full-size protected TLS record, but the older max_fragment_length extension is awkward to use: its biggest value is much smaller than the protocol maximum, the server must echo the client's value, and it cannot be extended safely.",
+    "mechanism": "The record_size_limit extension carries a 16-bit value, the maximum record size in octets that the sender is willing to receive. The peer MUST NOT send a protected record whose plaintext is larger than that value.",
+    "outcome": "record_size_limit replaces max_fragment_length, which the RFC deprecates. It works in all versions of TLS and each direction has its own limit.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Extension data",
+      "value": "uint16 RecordSizeLimit"
+    },
+    {
+      "label": "Smallest allowed value",
+      "value": "64"
+    },
+    {
+      "label": "Protocol maximum (TLS 1.2 and earlier)",
+      "value": "2^14 octets"
+    },
+    {
+      "label": "Protocol maximum (TLS 1.3)",
+      "value": "2^14+1 octets"
+    },
+    {
+      "label": "IANA code point",
+      "value": "28"
+    },
+    {
+      "label": "max_fragment_length maximum",
+      "value": "2^12"
+    }
+  ],
+  "today": "<p>RFC 8449 is a Proposed Standard and the unit metadata shows no RFC that obsoletes or updates it. It updates <a href='/6066/'>RFC 6066</a> by replacing and deprecating the maximum fragment length extension defined there.</p>",
+  "glossary": [
+    "tls",
+    "tls-extension",
+    "tls-handshake",
+    "aead",
+    "padding",
+    "path-mtu",
+    "fragmentation"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Record Size Matters",
+      "content": "<p>Running TLS or DTLS on constrained devices can be challenging, and receiving large protected records is hard for a device with little operating memory. TLS 1.2 and earlier let senders create records of 16384 octets, plus up to 2048 octets of expansion from compression and protection (typically only 16). TLS 1.3 cuts the expansion allowance to 256 octets. Setting aside up to 18K of memory for ciphertext is beyond some implementations.</p><p>The reason a device cannot simply process a record piece by piece is that an AEAD cipher interface needs the whole record present to decrypt and authenticate it. Handling a record incrementally exposes an endpoint to the risk of forged data.</p><p>The RFC defines <code>record_size_limit</code> to replace <code>max_fragment_length</code> from <a href='/6066/'>RFC 6066</a>. It addresses only the memory allocation problem, not code size, processing capability or bandwidth.</p>",
+      "eli5": "<p>A small backpack cannot hold a giant parcel. The device has to be told to send smaller parcels, and it has to receive each parcel whole before it can open it safely.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "3",
+      "title": "Problems With max_fragment_length",
+      "content": "<p>The RFC lists why the older extension is unsuitable. Its maximum value is 2^12, much smaller than the 2^14 maximum record size the protocol permits, so a client with no constraints risks shrinking records if it offers it. Small records cost performance on large transfers because every record adds header octets, encryption expansion and processing overhead.</p><p>It cannot be extended safely either: RFC 6066 requires a server to abort the handshake with an <code>illegal_parameter</code> alert if it sees a value it does not understand, so new values risk failed connections. A server must also echo the client's chosen value, so it cannot ask for a lower limit than the client offered, which is a problem when the server is the more constrained side.</p><p>Finally, record size constraints are often receiver constraints, and the extension suits asymmetric endpoints poorly. An endpoint might be able to send larger records than it can receive, because encryption can proceed progressively.</p>",
+      "eli5": "<p>The old rule only allowed small boxes, made the server copy whatever the client said, and could not be improved without breaking things.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "The record_size_limit Extension",
+      "content": "<p>The extension data is a single <code>uint16 RecordSizeLimit</code>: the maximum size of record in octets that the endpoint is willing to receive. Once the extension is negotiated, an endpoint MUST NOT generate a protected record with plaintext larger than the value it received from its peer. Unprotected messages are not subject to the limit.</p><p>The value counts the whole plaintext of a protected record. In TLS 1.3 that includes the content type and padding (the full <code>TLSInnerPlaintext</code>). In TLS 1.2 and earlier it covers all input to compression and encryption. Padding added by a block cipher is not counted.</p><p>The limit applies only to records sent toward the endpoint that advertises it, so an endpoint can send records larger than the limit it advertises for itself. A TLS endpoint receiving a record larger than its advertised limit MUST send a fatal <code>record_overflow</code> alert; a DTLS endpoint MAY instead discard the record.</p><div class='callout callout-info'><p>Endpoints SHOULD advertise the extension even if they have no need to limit record size. That lets servers state a limit at their discretion and lets clients know theirs will be respected.</p></div>",
+      "eli5": "<p>Each side says how big a box it can receive. You may send your own big boxes if the other side allows it, but a box bigger than what someone said they can take is an error.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Allowed Values and Handshake Behaviour",
+      "content": "<p>For TLS 1.2 and earlier the protocol maximum is 2^14 octets, and TLS 1.3 uses 2^14+1. Higher values are reserved for future versions. An endpoint MUST NOT send a value above the protocol maximum unless a future version or extension allows it, and MUST NOT send records larger than the protocol limit regardless. A server MUST NOT enforce this check on the client's value, since the client may be using an extension the server does not understand, but a client MAY abort with <code>illegal_parameter</code> if the server sends too large a value.</p><p>Endpoints MUST NOT send a value smaller than 64, and receipt of a smaller value is a fatal error with an <code>illegal_parameter</code> alert.</p><p>In TLS 1.3 the server sends the extension in the <code>EncryptedExtensions</code> message. On renegotiation or resumption the limit is negotiated again, and records follow the limits of the handshake that produced their keys, so the extension might not be negotiated the second time.</p><p>In DTLS, path MTU also limits record size, but the record size limit does not affect PMTU discovery and SHOULD be set independently. It is fixed at the handshake and reflects endpoint constraints, while the PMTU changes with the network.</p>",
+      "eli5": "<p>The number can never be tiny (not under 64) or bigger than the rules allow. It is picked at the start and depends on the device, not on the road.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "4.1",
+      "title": "Padding and Record Expansion",
+      "content": "<p>The advertised limit does not account for expansion from compression or record protection. The RFC expects constrained devices to disable compression. Stream ciphers and existing AEAD ciphers do not allow variable expansion, but block ciphers do: in TLS 1.2 they permit 1 to 256 octets of padding.</p><p>When a limit lower than the protocol maximum is advertised, a second limit applies to block cipher records. An endpoint MUST NOT add padding that makes the protected record exceed the size of a protected record containing the maximum plaintext and the minimum permitted padding. The RFC's example uses <code>TLS_RSA_WITH_AES_128_CBC_SHA</code> with 16-octet blocks and a 20-octet MAC. With a limit of 256, a full record needs at least 11 octets of padding, or 15 with <code>encrypt_then_mac</code>. A record with 250 octets of plaintext may then carry at most 17 octets of padding, or 21 with <code>encrypt_then_mac</code>. An implementation that always adds the minimum padding complies automatically.</p>",
+      "eli5": "<p>Even with a size limit, extra packing material is added around a box. The rule keeps that packing from making the box bigger than a full-size box would have been.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "5",
+      "title": "Deprecating max_fragment_length",
+      "content": "<p>The new extension replaces <code>max_fragment_length</code>. A server that supports <code>record_size_limit</code> MUST ignore a <code>max_fragment_length</code> in a ClientHello if both are present. A client MUST treat receiving both as a fatal error and SHOULD send an <code>illegal_parameter</code> alert. Clients that depend on a small record size MAY keep advertising <code>max_fragment_length</code>.</p>",
+      "eli5": "<p>The new rule takes over from the old one. If a message shows both, the server follows the new one and a client treats it as a mistake.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security and IANA Considerations",
+      "content": "<p>The only security note is that very small record sizes may create extra work for senders and receivers, limiting throughput and increasing exposure to denial of service.</p><p>The RFC registers <code>record_size_limit</code> in the TLS ExtensionType Values registry with code point 28, listed as Recommended and allowed in ClientHello or EncryptedExtensions in TLS 1.3. In the same registry, <code>max_fragment_length</code> is changed to not recommended.</p>",
+      "eli5": "<p>Tiny boxes mean lots of extra work, which a bad actor could take advantage of. The new rule gets its own number in the official list.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "compatibility",
+      "position": "after",
+      "caption": "THE TWO EXTENSIONS COMPARED, FROM RFC 8449",
+      "data": {
+        "columns": [
+          "Aspect",
+          "max_fragment_length",
+          "record_size_limit"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Largest value",
+              "2^12",
+              "Up to the protocol maximum (2^14, or 2^14+1 in TLS 1.3)"
+            ]
+          },
+          {
+            "cells": [
+              "Server reply",
+              "Must echo the client's value",
+              "Each side states its own limit"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Unknown value",
+              "Server aborts with illegal_parameter",
+              "Server does not enforce the upper bound"
+            ]
+          },
+          {
+            "cells": [
+              "IANA status",
+              "Not recommended (N)",
+              "Recommended (Y), code point 28"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6066]",
+      "text": "Eastlake 3rd, D., \"Transport Layer Security (TLS) Extensions: Extension Definitions\", RFC 6066, January 2011.",
+      "rfc": 6066
+    },
+    {
+      "number": "[RFC5246]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.2\", RFC 5246, August 2008.",
+      "rfc": 5246
+    },
+    {
+      "number": "[TLS]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[DTLS]",
+      "text": "Rescorla, E. and N. Modadugu, \"Datagram Transport Layer Security Version 1.2\", RFC 6347, January 2012.",
+      "rfc": 6347
+    },
+    {
+      "number": "[RFC5116]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[RFC7366]",
+      "text": "Gutmann, P., \"Encrypt-then-MAC for Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)\", RFC 7366, September 2014.",
+      "rfc": 7366
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

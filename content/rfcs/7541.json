@@ -20,13 +20,224 @@
   "questions": [
     "what is hpack",
     "http/2 header compression",
-    "hpack dynamic table"
+    "hpack dynamic table",
+    "how does http/2 header compression work",
+    "what is the hpack dynamic table",
+    "what is a never indexed literal in hpack"
+  ],
+  "tags": [
+    "HTTP/2",
+    "Compression",
+    "Headers"
+  ],
+  "subtitle": "How HTTP/2 shrinks repeated request and response headers without opening the door to CRIME-style attacks.",
+  "tldr": {
+    "problem": "HTTP/1.1 does not compress header fields, so the repeated headers of dozens to hundreds of requests per page waste bandwidth and add latency. SPDY compressed them with DEFLATE, but that was exposed by the CRIME attack.",
+    "mechanism": "HPACK encodes each header field either as an index into a static table or a per-connection dynamic table, or as a literal, optionally Huffman coded. Compression is matched against whole header fields, and sensitive values can be marked never-indexed.",
+    "outcome": "It cuts redundancy, limits exposure to known attacks and bounds decoder memory. It mitigates but does not eliminate CRIME-style guessing, and it has no extension mechanism.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Static table size",
+      "value": "61 entries"
+    },
+    {
+      "label": "Entry overhead",
+      "value": "32 octets"
+    },
+    {
+      "label": "Table size setting in HTTP/2",
+      "value": "SETTINGS_HEADER_TABLE_SIZE"
+    },
+    {
+      "label": "Integer prefix size",
+      "value": "1 to 8 bits"
+    },
+    {
+      "label": "Max Huffman padding",
+      "value": "7 bits"
+    },
+    {
+      "label": "Index 0",
+      "value": "Not used; a decoding error"
+    }
+  ],
+  "today": "<p>RFC 7541 is a Proposed Standard from May 2015, and the metadata lists no RFC that obsoletes or updates it. It is the header compression format referenced by <a href='/7540/'>RFC 7540</a> (HTTP/2).</p>",
+  "glossary": [
+    "hpack",
+    "http-2",
+    "header-field",
+    "huffman-coding",
+    "pseudo-header-field",
+    "lossless-compression",
+    "dynamic-table",
+    "crime-attack",
+    "http"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why HTTP/2 Needed HPACK",
+      "content": "<p>In HTTP/1.1 header fields are not compressed. As web pages came to need dozens to hundreds of requests, the redundant headers consumed bandwidth and measurably increased latency.</p><p>SPDY first compressed headers with the DEFLATE format, which worked well but exposed a security risk shown by the <strong>CRIME</strong> attack. <strong>HPACK</strong> was designed to eliminate redundant header fields, limit vulnerability to known attacks, and have a bounded memory requirement for constrained environments.</p><p>The format is intentionally simple and inflexible, to reduce the risk of interoperability or security problems from implementation errors. It defines no extensibility mechanism: changes are only possible by defining a complete replacement.</p>",
+      "eli5": "<p>Every time you ask for something, you repeat lots of the same details. HPACK is a shorthand so you do not keep repeating them, built so a sneaky listener cannot learn your secrets from the shorthand.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "How Compression Works",
+      "content": "<p>A <strong>header list</strong> is an ordered collection of name-value pairs, and duplicates are allowed. Names and values are opaque octet sequences, and order is preserved. The encoded form is a <strong>header block</strong>: a list of header field representations, each either a literal or a reference to a table entry.</p><p>The RFC does not describe a specific encoder algorithm. It defines precisely what a decoder does, so encoders may produce any encoding the definition permits. The encoder decides which fields to add to the tables, and the decoder just carries out those instructions.</p><p>Each direction has its own decoding context, so the request and response dynamic tables are completely independent. A decoder needs only the dynamic table as state.</p>",
+      "eli5": "<p>The sender decides which phrases to put on the shared cheat sheet. The receiver only has to follow the instructions and fill in the blanks.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "The Static and Dynamic Tables",
+      "content": "<p>HPACK uses two tables, combined into a single index address space. The <strong>static table</strong> is predefined, read-only and lists common header fields, most with an empty value. Appendix A defines 61 entries, such as index 2 for <code>:method: GET</code> and index 8 for <code>:status: 200</code>.</p><p>The <strong>dynamic table</strong> is a first-in, first-out list that starts empty. The newest entry has the lowest index. Indices from 1 up to the static table length refer to the static table, larger indices refer to the dynamic table, and an index beyond both is a decoding error.</p><p>The dynamic table size is the sum of entry sizes, where an entry is its name length plus its value length plus 32 octets of overhead, counted without Huffman coding. The protocol using HPACK sets the maximum size; in HTTP/2 that is the <code>SETTINGS_HEADER_TABLE_SIZE</code> setting. When adding an entry, old entries are evicted from the end until it fits. An entry larger than the maximum is not an error: it just empties the table.</p>",
+      "eli5": "<p>There is a printed list of common phrases that everyone has, plus a notebook you both fill in as you chat. When the notebook is full, the oldest lines get erased to make room.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "5",
+      "title": "Integers and Strings",
+      "content": "<p>Two primitive types are used. An <strong>integer</strong> has an N-bit prefix, where N is between 1 and 8. A value smaller than 2^N-1 fits in the prefix. Otherwise the prefix is all ones and the remainder is sent in following octets of 7 bits each, with the top bit set on every octet except the last. For example, 10 with a 5-bit prefix is stored directly, while 1337 needs the full prefix plus two more octets.</p><p>A <strong>string literal</strong> has a one-bit flag H, a length as a 7-bit-prefix integer, and the data. If H is 1 the data is Huffman coded using the static code in Appendix B, built from statistics of a large sample of HTTP headers. Padding up to the octet boundary uses the most significant bits of the EOS symbol. Padding longer than 7 bits, padding that is not EOS bits, or an EOS symbol inside the string MUST be treated as a decoding error. Integers that exceed implementation limits are also decoding errors.</p>",
+      "eli5": "<p>Small numbers fit in a little box. Big numbers spill into extra boxes with a note saying \"more coming\". Words can be written plainly or in a shorter secret spelling.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "Header Field Representations",
+      "content": "<p>The first bits of each representation say which kind it is.</p><ul><li><strong>Indexed</strong> (pattern <code>1</code>): a 7-bit-prefix index. Index 0 is not used and MUST be treated as a decoding error.</li><li><strong>Literal with incremental indexing</strong> (<code>01</code>): the field is added to the decoded list and inserted at the start of the dynamic table. The name is a 6-bit-prefix index, or 0 followed by a literal name.</li><li><strong>Literal without indexing</strong> (<code>0000</code>): added to the list only, with a 4-bit-prefix name index.</li><li><strong>Literal never indexed</strong> (<code>0001</code>): encoded like the previous one, but every intermediary MUST keep this exact representation when forwarding.</li><li><strong>Dynamic table size update</strong> (<code>001</code>): a 5-bit-prefix new maximum size. It must be at or below the protocol limit, and it MUST come at the start of the first header block after the change.</li></ul><p>The RFC's examples show that <code>:method: GET</code> is the single octet <code>82</code>, and that <code>password: secret</code> is sent as a never-indexed literal so it stays out of the table.</p>",
+      "eli5": "<p>Each little message starts with a tag that tells the reader how to read the rest: use a number from the list, write this new phrase and remember it, write it but forget it, or never remember it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The main risk is using compressed length as an oracle. An attacker who can choose header fields and also see their encoded length can test guesses about secrets in the shared compression state, even over TLS, because TLS gives only limited protection to length. CRIME did this against DEFLATE one character at a time.</p><p>HPACK mitigates this but does not prevent it, by forcing a guess to match an entire header field value. Low-entropy values stay vulnerable, high-entropy ones are unlikely to be recovered. The risk exists whenever mutually distrustful parties share one HTTP/2 connection, such as through an intermediary, or different web origins in a browser.</p><p>Encoders can segregate table access by who built each field, or penalize fields with many guessed values. They can also encode sensitive fields such as <code>Cookie</code> or <code>Authorization</code> as never-indexed literals. The RFC notes no currently known attack against the static Huffman code, and that HPACK limits memory by capping the dynamic table. Implementations must also set limits on integer values and string lengths.</p>",
+      "eli5": "<p>If a spy can see how long your messages are, they can guess a secret word by checking whether a message gets shorter. So the really secret words are never put in the shorthand book at all.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "8",
+      "title": "Worked Examples",
+      "content": "<p>Appendix C gives byte-level examples. They cover integer encoding, single header field representations, and multi-request and multi-response sequences, each shown with and without Huffman coding. In the first example, the field <code>custom-key: custom-header</code> sent as a literal with indexing becomes a dynamic table entry of size 55.</p><p>The consecutive-request examples show how later requests on the same connection become shorter, because fields already in the dynamic table can be sent as small indexes.</p>",
+      "eli5": "<p>The back of the document works through real messages one at a time, so you can watch the notebook fill up and the messages shrink.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "HOW EACH HEADER REPRESENTATION BEGINS (RFC 7541, SECTION 6)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "Indexed header field",
+            "desc": "Refers to a static or dynamic table entry with a 7-bit-prefix index."
+          },
+          {
+            "code": "01",
+            "label": "Literal with incremental indexing",
+            "desc": "Adds the field to the dynamic table; 6-bit-prefix name index."
+          },
+          {
+            "code": "0000",
+            "label": "Literal without indexing",
+            "desc": "Does not touch the dynamic table; 4-bit-prefix name index."
+          },
+          {
+            "code": "0001",
+            "label": "Literal never indexed",
+            "desc": "Not indexed, and intermediaries MUST keep this form.",
+            "highlight": true
+          },
+          {
+            "code": "001",
+            "label": "Dynamic table size update",
+            "desc": "Sets a new maximum table size with a 5-bit-prefix integer."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "STRING LITERAL REPRESENTATION (RFC 7541, FIGURE 4)",
+      "data": {
+        "title": "String literal (first octet)",
+        "width": 8,
+        "fields": [
+          {
+            "key": "h",
+            "name": "H",
+            "bits": 1,
+            "desc": "1 if the string data is Huffman encoded, 0 if raw octets."
+          },
+          {
+            "key": "string-length",
+            "name": "String Length (7+)",
+            "bits": 7,
+            "desc": "Octets used for the string data, as an integer with a 7-bit prefix."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "HEX DUMP FROM RFC 7541, APPENDIX C.2.1",
+      "data": {
+        "title": "custom-key: custom-header as a literal with indexing",
+        "lang": "text",
+        "code": "400a 6375 7374 6f6d 2d6b 6579 0d63 7573 | @.custom-key.cus\n746f 6d2d 6865 6164 6572                | tom-header"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[HTTP2]",
+      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol Version 2 (HTTP/2)\", RFC 7540, May 2015.",
+      "rfc": 7540
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC7230]",
+      "text": "Fielding, R., Ed. and J. Reschke, Ed., \"Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing\", RFC 7230, June 2014.",
+      "rfc": 7230
+    },
+    {
+      "number": "[DEFLATE]",
+      "text": "Deutsch, P., \"DEFLATE Compressed Data Format Specification version 1.3\", RFC 1951, May 1996.",
+      "rfc": 1951
+    },
+    {
+      "number": "[TLS12]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.2\", RFC 5246, August 2008.",
+      "rfc": 5246
+    },
+    {
+      "number": "[ORIGIN]",
+      "text": "Barth, A., \"The Web Origin Concept\", RFC 6454, December 2011.",
+      "rfc": 6454
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

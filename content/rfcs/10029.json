@@ -10,13 +10,208 @@
   "questions": [
     "dns multiple qtypes",
     "query several dns record types at once",
-    "dns qtype extension"
+    "dns qtype extension",
+    "what is mqtype-query",
+    "how to query multiple dns record types at once",
+    "dns edns option code 20"
+  ],
+  "tags": [
+    "DNS",
+    "EDNS",
+    "Queries"
+  ],
+  "subtitle": "An EDNS option that lets a DNS client ask for several record types in one query and get them in one response.",
+  "tldr": {
+    "problem": "Clients often want several record types for one name, such as A, AAAA and HTTPS, but a DNS query may carry only one question and QTYPE=ANY does not guarantee all RRsets come back.",
+    "mechanism": "The client adds an MQTYPE-Query EDNS option (code 20) listing extra QTYPEs. The server answers with an MQTYPE-Response option (code 21) naming the types it fully included.",
+    "outcome": "Types left out of the response list must be fetched with separate queries. Operators are urged to limit the number of QTYPEs and response size because of amplification risk.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "MQTYPE-Query option code",
+      "value": "20"
+    },
+    {
+      "label": "MQTYPE-Response option code",
+      "value": "21"
+    },
+    {
+      "label": "Size of each QTx",
+      "value": "2 octets"
+    },
+    {
+      "label": "Expected public DNS limit",
+      "value": "four QTx values"
+    },
+    {
+      "label": "Applies to",
+      "value": "OpCode QUERY (0)"
+    }
+  ],
+  "today": "<p>RFC 10029 is a Proposed Standard published in July 2026. It has not been obsoleted or updated.</p>",
+  "glossary": [
+    "dns",
+    "edns0",
+    "rrset",
+    "rcode",
+    "stub-resolver",
+    "recursive-resolver",
+    "dnssec",
+    "zone-cut"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem with One Question",
+      "content": "<p>A commonly requested DNS feature is receiving several related records in a single response. For example, a client may want the A, AAAA and HTTPS records for a name together rather than issuing multiple queries.</p><p>The DNS wire protocol could in theory carry several questions in one packet, but in practice this does not work. <a href='/9619/'>RFC 9619</a> updates RFC 1035 to permit only a single question in a QUERY (OpCode=0). Sending QTYPE=ANY does not help either, because <a href='/8482/'>RFC 8482</a> lets responders return a single RRset of their choosing.</p><p>This RFC covers the case where only the QTYPE varies. It defines a new option for the Extension Mechanisms for DNS (EDNS, <a href='/6891/'>RFC 6891</a>) that lists additional QTYPEs beside the one in the Question section. It applies to stub-to-recursive and recursive-to-authoritative queries. It does not apply to Multicast DNS, but it is applicable to DNS-SD.</p>",
+      "eli5": "<p>A DNS question is like a form with room for one question. This RFC adds a sticky note to the form that says what else you would like to know.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3.1",
+      "title": "The MQTYPE Options",
+      "content": "<p>Two EDNS options are defined. <code>MQTYPE-Query</code> (option code 20) goes in queries and <code>MQTYPE-Response</code> (option code 21) goes in responses. Using a different option in responses protects against DNS middleboxes that echo EDNS options back verbatim.</p><p>The option data is a list of 2-octet values in network order. Each is a DNS RRTYPE that must be a data RRTYPE as described in Section 3.1 of <a href='/6895/'>RFC 6895</a>. Individual entries are called QTx.</p>",
+      "eli5": "<p>The sticky note is just a list of the extra kinds of answers you want. The reply carries a second note listing which ones came back.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3.2",
+      "title": "Client and Server Parsing Rules",
+      "content": "<p>A client must generate queries that follow the server parsing rules. When to combine queries is implementation specific, but the RFC advises care when coalescing queries for an application that did not ask for it.</p><p>A server MUST return <code>FORMERR</code> if it receives:</p><ul><li>an MQTYPE-Query in a message whose OpCode is not QUERY (0);</li><li>any MQTYPE-Response in an inbound message;</li><li>more than one MQTYPE-Query in a query;</li><li>an MQTYPE-Query with no primary question (QDCOUNT=0), or where the primary question is a non-data RRTYPE such as ANY or AXFR;</li><li>an empty QT list, an invalid QTx such as a Meta RRTYPE, or a duplicate QTx (including one repeating the primary QTYPE).</li></ul>",
+      "eli5": "<p>The server is strict about the sticky note. If it is empty, repeated, or asks for something silly, the server says the form is wrong.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.4",
+      "title": "How the Server Builds the Response",
+      "content": "<p>A server that gets a valid MQTYPE-Query MUST return an MQTYPE-Response, even when the response is truncated (TC=1). This tells the client the extension is supported. The server first builds the response for the primary question, which fixes the RCODE and flags such as AA and AD. If that response is truncated, the additional queries MUST NOT be processed.</p><p>Otherwise the server tries to merge in the results for each (QNAME, QCLASS, QTx). A recursive server may make outbound queries to fill its cache first. Each extra result must have the same RCODE and flags as the primary one. A mismatch, such as NOERROR for the primary but SERVFAIL for a QTx, or AA=0 versus AA=1, means that answer MUST NOT be included and its QTx MUST NOT be listed.</p><p>Records go in the sections they would occupy in a standalone query, and duplicates within a section are kept once. The option itself MUST NOT cause truncation. If the complete RRsets for a QTx do not fit, that QTx is left off the list and the server MAY stop. A QTx whose records all fit MUST be listed. The list may be empty, but the option must still be returned.</p>",
+      "eli5": "<p>The server answers your main question first. Then it adds each extra answer only if it fits whole and matches the first answer. It writes down which extras made it in.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "3.5",
+      "title": "What the Client Does with the Reply",
+      "content": "<p>If the response has no MQTYPE-Response, or wrongly contains an MQTYPE-Query, the client MUST treat the extension as unsupported and process the primary response normally. It must then send standalone queries for any types it still needs. The same applies after a <code>FORMERR</code>. If the MQTYPE-Response appears more than once, or a QTx is duplicated, the answer is invalid.</p><p>The Question section plus the types in the MQTYPE-Response list show which combinations are completely answered. They share the same RCODE and flags. Clients MUST NOT rely on any record order, and MUST rank authoritative answers the same as the primary answer for Section 5.4.1 of <a href='/2181/'>RFC 2181</a>. Records may come from different zones, and nonexistence proofs may come from different signers.</p><p>A requested type missing from the list can mean a recursive server had nothing cached, the answers could not be merged because of RCODE or flag mismatches, the server was unwilling (for example a limit was exceeded), or the size limit would be exceeded. The client MUST then query separately for any type it still needs.</p>",
+      "eli5": "<p>Read the reply's note to see which extras arrived. Anything missing from the note, you ask for again the normal way.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "4",
+      "title": "Security and Limits",
+      "content": "<p>The method does not change the security properties of DNS itself. However, it raises the potential amplification factor when DNS is used in denial-of-service attacks, and a malicious client could make recursive servers do large amounts of extra work.</p><p>Implementors SHOULD let operators configure limits on the number of QTx values and the response size. For public DNS the RFC expects a limit of four QTx values to be appropriate. With DNS-SD or private networks, higher limits would be acceptable.</p>",
+      "eli5": "<p>If anyone could ask for a huge list, a server could be tricked into doing tons of work. So servers should cap how many extras they will fetch.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "7",
+      "title": "Worked Examples",
+      "content": "<p>The appendix shows output in the style of ISC Dig. In the first, a stub resolver asks for A with an MQTYPE-Query for AAAA and HTTPS, with the DO bit set. The response lists <code>AAAA HTTPS</code>, but HTTPS has no data in the Answer section. That combination of listing and absence, backed by NSEC3 and SOA records, is a proof that the HTTPS type does not exist.</p><p>In the second, the question is DS with DNSKEY requested, and both come back with their RRSIG records. In the third, a recursive resolver asks a parent-zone authoritative server for DS and NS. The DS answer has AA=1 but the parent-side NS data is not authoritative (AA=0), so the responses cannot be merged and the response list is empty.</p>",
+      "eli5": "<p>In the examples, some extras arrive with the main answer, and in one case none can be added, so the asker has to ask again.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "MQTYPE EXCHANGE (ILLUSTRATIVE, BASED ON APPENDIX A.1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "stub",
+            "label": "Stub resolver"
+          },
+          {
+            "key": "recursive",
+            "label": "Recursive server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "stub",
+            "to": "recursive",
+            "label": "A query + MQTYPE-Query (AAAA, HTTPS)",
+            "color": "blue",
+            "note": "One question plus a list of extra QTYPEs."
+          },
+          {
+            "from": "recursive",
+            "to": "stub",
+            "label": "Answer + MQTYPE-Response (AAAA, HTTPS)",
+            "color": "green",
+            "note": "Lists the types fully handled; others need separate queries."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "EDNS OPTION CODES ASSIGNED BY IANA (RFC 10029)",
+      "data": {
+        "items": [
+          {
+            "code": "20",
+            "label": "MQTYPE-Query",
+            "desc": "Used in queries; lists additional QTYPEs. Status: Optional.",
+            "highlight": true
+          },
+          {
+            "code": "21",
+            "label": "MQTYPE-Response",
+            "desc": "Used in responses; lists QTYPEs fully included. Status: Optional."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC9619]",
+      "text": "Bellis, R. and J. Abley, \"In the DNS, QDCOUNT Is (Usually) One\", RFC 9619, July 2024.",
+      "rfc": 9619
+    },
+    {
+      "number": "[RFC8482]",
+      "text": "Abley, J., et al., \"Providing Minimal-Sized Responses to DNS Queries That Have QTYPE=ANY\", RFC 8482, January 2019.",
+      "rfc": 8482
+    },
+    {
+      "number": "[RFC6895]",
+      "text": "Eastlake 3rd, D., \"Domain Name System (DNS) IANA Considerations\", BCP 42, RFC 6895, April 2013.",
+      "rfc": 6895
+    },
+    {
+      "number": "[RFC2181]",
+      "text": "Elz, R. and R. Bush, \"Clarifications to the DNS Specification\", RFC 2181, July 1997.",
+      "rfc": 2181
+    },
+    {
+      "number": "[RFC6763]",
+      "text": "Cheshire, S. and M. Krochmal, \"DNS-Based Service Discovery\", RFC 6763, February 2013.",
+      "rfc": 6763
+    },
+    {
+      "number": "[RFC6762]",
+      "text": "Cheshire, S. and M. Krochmal, \"Multicast DNS\", RFC 6762, February 2013.",
+      "rfc": 6762
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

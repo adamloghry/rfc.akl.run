@@ -9,13 +9,254 @@
   },
   "questions": [
     "how does alto send incremental updates",
-    "what is alto server-sent events"
+    "what is alto server-sent events",
+    "what is the difference between json patch and json merge patch",
+    "what is an alto update stream",
+    "what is a substream id in alto"
+  ],
+  "tags": [
+    "ALTO",
+    "Server Push",
+    "JSON"
+  ],
+  "subtitle": "How an ALTO server pushes just the changes in its network information to clients over Server-Sent Events.",
+  "tldr": {
+    "problem": "The ALTO protocol is pull-only, so a client can learn about changes to a large network or cost map only by periodically re-fetching the whole thing.",
+    "mechanism": "An update stream service keeps an HTTP connection open and sends Server-Sent Events, each carrying either a full replacement or an incremental change (JSON merge patch or JSON patch) for one resource. A separate stream control service lets the client add or remove resources.",
+    "outcome": "Clients get updates that are small, because only changes are sent, and immediate, because the server pushes them as soon as they are available.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Stream media type",
+      "value": "text/event-stream"
+    },
+    {
+      "label": "HTTP method",
+      "value": "POST"
+    },
+    {
+      "label": "Recommended keep-alive",
+      "value": "every 15 seconds"
+    },
+    {
+      "label": "New media types",
+      "value": "2"
+    },
+    {
+      "label": "Success codes for stream control",
+      "value": "202 or 204"
+    }
+  ],
+  "today": "<p>RFC 8895 is a Proposed Standard published in November 2020. The unit metadata shows it has not been obsoleted or updated.</p>",
+  "glossary": [
+    "json",
+    "http",
+    "http-2",
+    "server-push",
+    "media-type",
+    "uri",
+    "persistent-connection",
+    "head-of-line-blocking",
+    "multiplexing",
+    "server-sent-events",
+    "json-merge-patch",
+    "json-patch"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why ALTO Needs Updates",
+      "content": "<p>The ALTO protocol (<a href='/7285/'>RFC 7285</a>) gives applications network information resources. Two examples are a <strong>network map</strong>, which groups endpoints into sets each named by a Provider-Defined Identifier (PID), and a <strong>cost map</strong>, which gives directed costs between PIDs. A client looks up the PID of each endpoint, then the cost between those PIDs, and uses it to pick communicating endpoints with low network costs.</p><p>ALTO defines only a client pull model. A client can learn about changes only by periodically re-fetching, which is inefficient when a resource is large but only parts of it, such as some cost map entries, change often.</p><p>RFC 8895 adds server push with incremental encoding. This gives two benefits: updates can be <strong>small</strong>, because only the changed section is sent, and <strong>immediate</strong>, because the server sends them as soon as they are available. It is aimed mainly at GET-mode network and cost maps, but also works for POST-mode services such as endpoint property and endpoint cost, and for future services that meet the requirements the RFC lists.</p>",
+      "eli5": "<p>Instead of asking \"anything new?\" over and over, you tell the advisor once to tell you when something changes, and it sends only the part that changed.</p>"
+    },
+    {
+      "id": "background",
+      "number": "2",
+      "title": "Building Blocks: Patches and Server-Sent Events",
+      "content": "<p>The design combines two existing techniques. For incremental changes it uses both <strong>JSON merge patch</strong> (<a href='/7396/'>RFC 7396</a>) and <strong>JSON patch</strong> (<a href='/6902/'>RFC 6902</a>). Only the merge patch object encoding is adopted, not the HTTP PATCH method, because updates travel server to client as events.</p><p>A merge patch mirrors the structure of the data and contains only what changed. A <code>null</code> value deletes the named element. Its weakness is arrays, which are replaced in their entirety, and that it cannot set a value to null. JSON patch is a list of operations such as <code>add</code>, <code>replace</code> and <code>remove</code> on paths, which handles array edits and null values but encodes cost map updates less compactly.</p><p>For push, the RFC chooses <strong>Server-Sent Events</strong> (SSE) over HTTP/2 server push. The client opens an HTTP connection and keeps it open while the server sends messages made of lines such as <code>event:</code>, <code>id:</code> and <code>data:</code>, with a blank line ending each message. The RFC prefers a design compatible with HTTP/1.x for simplicity, notes that HTTP/2 client libraries may not tell the application about pushed resources, and that any proxy may disable server push. HTTP/2 is left as future work.</p>",
+      "eli5": "<p>A patch is a sticky note saying \"change this one line\" instead of a whole new page. Server-Sent Events is a phone line that stays open so the advisor can speak whenever it likes.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "3",
+      "title": "Architecture and Message Flow",
+      "content": "<p>There are two services. The <strong>update stream service</strong> is a POST-mode service. The client sends an initial request naming the resources it wants and receives a long-lived stream of update messages. The <strong>stream control service</strong> lets the client later add or remove resources, or gracefully close the stream.</p><p>The flow goes like this:</p><ul><li>The client creates an update stream and assigns a unique <strong>substream-id</strong> to each resource it wants, so one stream can carry updates for many requests, including the same POST-mode resource with different inputs.</li><li>The server's first message is a control update with the URI of the stream control service.</li><li>The server then pushes <strong>data update messages</strong>, each for exactly one request, as a full replacement or an incremental change. The server decides when to send and which form to use.</li><li>The server may also send <strong>control update messages</strong>, for example when it must stop updating a resource.</li></ul><p>Delivery is reliable and in order, so the server knows the exact state of the client and can compute correct incremental updates. The server's IRD (Information Resource Directory) announces which resources each update stream covers. It is recommended that a resource's dependencies are in the same stream, so a cost map's stream also covers its network map. Because each stream uses server resources, a server may require authorization, limit open streams, close inactive ones or redirect clients.</p>",
+      "eli5": "<p>There is one line where the advisor sends news and a second doorbell the client can ring to say \"also tell me about this\" or \"stop telling me about that\".</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "Data and Control Update Messages",
+      "content": "<p>Every update message is an SSE message. The <code>event</code> field has the form <code>media-type [ ',' data-id ]</code>, and the <code>data</code> field holds the content, typically a JSON object. The SSE <code>id</code> field is not used.</p><p>A <strong>data update message</strong> uses the media type of the full ALTO resource for a full replacement, <code>application/merge-patch+json</code> for a merge patch, or <code>application/json-patch+json</code> for a JSON patch. The <code>data-id</code> is the client's substream-id. For a multipart resource using <code>multipart/related</code>, the data-id is the substream-id, a <code>.</code> and the part's Content-ID.</p><p>A <strong>control update message</strong> has media type <code>application/alto-updatestreamcontrol+json</code> and these optional fields:</p><ul><li><code>control-uri</code>: the stream control URI. It is sent once and MUST be the first event. A null value means stream control is not supported for this stream.</li><li><code>started</code>: substream-ids for which data updates will begin.</li><li><code>stopped</code>: substream-ids for which updates will stop, whether the client asked or the server decided.</li><li><code>description</code>: human-readable text for diagnosis. It is RECOMMENDED when updates stop.</li></ul>",
+      "eli5": "<p>Each message has a label saying what kind of news it is and which topic it belongs to, then the news itself. Special messages tell you when a topic starts or stops.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "The Update Stream Service",
+      "content": "<p>An IRD entry for an update stream service has media type <code>text/event-stream</code> and uses HTTP POST. Its capabilities list, per resource, the incremental media types it can send in <code>incremental-change-media-types</code>, plus <code>support-stream-control</code>. Its <code>uses</code> array lists every resource it can update, and each MUST support full replacement.</p><p>The client's request body (<code>application/alto-updatestreamparams+json</code>) has an <code>add</code> map from substream-id to a request with <code>resource-id</code>, and optionally <code>tag</code>, <code>incremental-changes</code> and <code>input</code>. If the client gives the <code>tag</code> of a version it already holds and it is still current, the server MAY skip the initial full replacement. Otherwise it MUST send one first. With <code>incremental-changes</code> set to <code>false</code> the server MUST send full replacements only. The default is true. A bad request gets <code>400 Bad Request</code> with an ALTO error such as <code>E_MISSING_FIELD</code> or <code>E_INVALID_FIELD_VALUE</code> and no stream is created.</p><p>Ordering rules matter. The first event MUST be the control update. If resource R1 depends on R0, the update for R0 MUST be sent before the related update for R1. Clients with the same request parameters MUST get the same updates, though the server MAY pack them into different patch events. Where JSON merge patch would wrongly turn a null into a removal, the server MUST choose JSON patch, or send a full replacement. The server SHOULD send a comment line or event every 15 seconds as a keep-alive, and a client MUST NOT assume an update represents an actual change.</p>",
+      "eli5": "<p>You tell the advisor which topics you want, and it first gives you the whole story unless you already have the latest. After that you just get the changes, always in the right order.</p>"
+    },
+    {
+      "id": "management",
+      "number": "6",
+      "title": "The Stream Control Service",
+      "content": "<p>Stream control is not in the IRD. The client learns its URI from the first event. The URI alone MUST identify the stream it controls, MUST NOT depend on cookies or client IP address, and MUST NOT be reused after the stream closes. A relative URI is resolved against the URI used to create the stream, and the control host MAY differ from the stream host.</p><p>Requests use HTTP POST with the same input as the stream request plus a <code>remove</code> array of substream-ids. The server processes <code>add</code> before <code>remove</code>. Substream-ids MUST stay unique for the life of the stream and cannot be reused after removal. An empty <code>remove</code> array means all active resources, which closes the stream, and a stream cannot have zero resources. Errors return <code>400 Bad Request</code>, a closed stream returns <code>404 Not Found</code>, and success returns <code>202 Accepted</code> or <code>204 No Content</code>. Final confirmation arrives as control update messages on the stream.</p><p>Because the control URI is a capability, servers SHOULD use https and URIs random enough that guessing is hard, and SHOULD detect repeated guesses.</p>",
+      "eli5": "<p>The doorbell address is secret and unique to your line. Only someone who knows it can add or drop topics, so it should be hard to guess.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "7",
+      "title": "Operating Considerations for Servers and Clients",
+      "content": "<p>For cost maps, endpoint costs and endpoint properties, the RFC says JSON merge patch is clearly superior: more space efficient and simpler to apply. For network maps the case is mixed. JSON patch can move one prefix cheaply but forces clients to remember array indexes they otherwise do not need. So each server decides for itself.</p><p>Dependent resources need care. A client MUST NOT use a dependent resource, such as a cost map, if the resource it depends on has changed. It can buffer the network map update and apply everything atomically, or apply it at once and mark dependent cost maps temporarily invalid until updates based on the new version tag arrive. If expected updates never come, the simple recovery is to close the stream, discard dependent data and reconnect, optionally presenting saved version tags.</p><p>Other points:</p><ul><li>Filtered cost maps with constraint tests need a null update when a cost stops satisfying the test. A server can avoid this by offering streams only for filtered cost maps without constraint tests.</li><li>Ordinal mode costs can make one change ripple through many costs. A server can offer only full replacements for them.</li><li>A full cost map may be megabytes of text in one event. Clients SHOULD use an SSE library that delivers data in chunks, servers are RECOMMENDED to limit data line length, and servers MUST NOT introduce line breaks that change semantics.</li></ul><p>The appendix explains why stream restart with SSE event ids was not adopted: it adds complexity to avoid a rare case, and version tags already let a client avoid refetching unchanged resources.</p>",
+      "eli5": "<p>If a recipe changes, you should not cook with an old sauce and a new dish at the same time, so clients wait until all the matching pieces have arrived.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The security considerations of <a href='/7285/'>RFC 7285</a> fully apply. This extension adds new attack surface.</p><ul><li><strong>Denial of service on the server.</strong> Persistent streams enable new attacks. Servers SHOULD limit active streams and active or lifetime substream-ids and SHOULD return <code>503 Service Unavailable</code> when limits are hit. They MAY restrict streams to authorized clients, or redirect with <code>307 Temporary Redirect</code>.</li><li><strong>Overload on the client.</strong> The design has no flow control for reducing update rates. Under overload a client MAY drop high-rate resources and should be careful using information it can no longer tell is fresh.</li><li><strong>Spoofed control requests.</strong> Someone who sees the control URI could send a fraudulent <code>remove</code>. Encrypting the stream and control requests avoids this, and the server echoes <code>remove</code> requests on the stream so the real client can notice. If the update stream and stream control servers are separate, the path between them needs confidentiality, authenticity and integrity.</li></ul>",
+      "eli5": "<p>Too many people could hog the open line, and a stranger who learns your secret doorbell address could cancel your news. So keep the line private and limit how many can use it.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "UPDATE STREAM MESSAGE FLOW (SIMPLIFIED FROM FIGURE 2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "ALTO client"
+          },
+          {
+            "key": "update",
+            "label": "Update stream server"
+          },
+          {
+            "key": "control",
+            "label": "Stream control server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "update",
+            "label": "Initial update-stream request",
+            "color": "blue",
+            "note": "Adds resources, each with a substream-id."
+          },
+          {
+            "from": "update",
+            "to": "client",
+            "label": "Control update with control-uri",
+            "color": "green",
+            "note": "MUST be the first event."
+          },
+          {
+            "from": "update",
+            "to": "client",
+            "label": "Data update messages",
+            "color": "green",
+            "note": "Full replacements or incremental changes."
+          },
+          {
+            "from": "client",
+            "to": "control",
+            "label": "Add/remove resources",
+            "color": "blue"
+          },
+          {
+            "from": "update",
+            "to": "client",
+            "label": "Control update (started/stopped)",
+            "color": "neutral"
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "EXAMPLE DATA UPDATE EVENTS (FIGURE 3 OF RFC 8895)",
+      "data": {
+        "title": "Data update messages",
+        "lang": "text",
+        "code": "event: application/alto-networkmap+json,1\ndata: { ... full network map message ... }\n\nevent: application/alto-costmap+json,2\ndata: { ... full cost map message ... }\n\nevent: application/merge-patch+json,2\ndata: { ... JSON merge patch update for the cost map ... }"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "background",
+      "position": "after",
+      "caption": "TWO INCREMENTAL ENCODINGS (RFC 8895 SECTION 3)",
+      "data": {
+        "columns": [
+          "Encoding",
+          "Media type",
+          "Strength",
+          "Weakness"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "JSON merge patch",
+              "application/merge-patch+json",
+              "Compact for scalar leaf values such as cost maps",
+              "Replaces arrays whole; null means delete"
+            ]
+          },
+          {
+            "cells": [
+              "JSON patch",
+              "application/json-patch+json",
+              "Edits array entries; can set a value to null",
+              "Less efficient for cost map updates"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7285]",
+      "text": "Alimi, R., Ed., Penno, R., Ed., Yang, Y., Ed., Kiesel, S., Previdi, S., Roome, W., Shalunov, S., and R. Woundy, \"Application-Layer Traffic Optimization (ALTO) Protocol\", RFC 7285, September 2014.",
+      "rfc": 7285
+    },
+    {
+      "number": "[RFC7396]",
+      "text": "Hoffman, P. and J. Snell, \"JSON Merge Patch\", RFC 7396, October 2014.",
+      "rfc": 7396
+    },
+    {
+      "number": "[RFC6902]",
+      "text": "Bryan, P., Ed. and M. Nottingham, Ed., \"JavaScript Object Notation (JSON) Patch\", RFC 6902, April 2013.",
+      "rfc": 6902
+    },
+    {
+      "number": "[RFC7540]",
+      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol Version 2 (HTTP/2)\", RFC 7540, May 2015.",
+      "rfc": 7540
+    },
+    {
+      "number": "[RFC2387]",
+      "text": "Levinson, E., \"The MIME Multipart/Related Content-type\", RFC 2387, August 1998.",
+      "rfc": 2387
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

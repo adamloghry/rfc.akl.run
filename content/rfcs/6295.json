@@ -10,13 +10,384 @@
   "questions": [
     "how to send midi over rtp",
     "network musical performance protocol",
-    "rtp payload format for midi"
+    "rtp payload format for midi",
+    "what is the rtp midi recovery journal",
+    "what is rtp midi comex timestamp",
+    "how does rtp midi handle packet loss"
+  ],
+  "tags": [
+    "Audio",
+    "RTP",
+    "Music",
+    "Resilience"
+  ],
+  "subtitle": "How to carry MIDI music commands in RTP packets, with a built-in way to repair damage when packets are lost.",
+  "tldr": {
+    "problem": "MIDI was designed for a slow serial cable, where a lost command is unthinkable. Sent as packets over an IP network, one lost NoteOff or volume change can leave a note stuck or a whole channel too loud or too quiet.",
+    "mechanism": "Each RTP packet carries a list of timestamped MIDI commands. Packets sent over unreliable transport such as UDP also carry a recovery journal, a compact summary of recent stream history that lets the receiver repair the damage from a loss without any retransmission.",
+    "outcome": "The format covers everything that may legally appear on a MIDI 1.0 DIN cable, and session parameters customize how streams behave. The RFC says that five years after RFC 4695 the target applications had not yet reached the mainstream. This document obsoletes RFC 4695 and fixes errors in it.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Short header max list",
+      "value": "15 octets (B = 0)"
+    },
+    {
+      "label": "Long header max list",
+      "value": "4095 octets (B = 1)"
+    },
+    {
+      "label": "Recovery journal header",
+      "value": "3 octets"
+    },
+    {
+      "label": "Recommended audio clock rate",
+      "value": "32 KHz or higher"
+    },
+    {
+      "label": "Default packet media time",
+      "value": "0 to 200 ms"
+    },
+    {
+      "label": "mpeg4-generic streamtype",
+      "value": "5"
+    }
+  ],
+  "today": "<p>RFC 6295 is a Proposed Standard published in June 2011. It obsoletes <a href='/4695/'>RFC 4695</a>, and the metadata for this RFC lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "rtp",
+    "rtcp",
+    "sdp",
+    "sip",
+    "ssrc",
+    "udp",
+    "sequence-number",
+    "midi",
+    "recovery-journal",
+    "delta-time",
+    "running-status",
+    "checkpoint-packet"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why MIDI Over RTP",
+      "content": "<p>RFC 6295 defines an <strong>RTP payload format</strong> for <strong>MIDI</strong> (Musical Instrument Digital Interface), the command language used to remote-control musical instruments on stage and in the studio. The format encodes all commands that may legally appear on a MIDI 1.0 DIN cable. It works over unicast and multicast UDP and over TCP.</p><p>The RFC names two target uses. One is interactive <strong>network musical performance</strong>, where musicians in different places play together as if in one room. The other is content delivery, such as streaming Standard MIDI Files rendered with General MIDI as a low-bandwidth substitute for audio streaming.</p><p>The document is a payload format, not a full system. It defines the syntax and meaning of the packets but not algorithms for sending and receiving them. Informative guidance on those lives in <a href='/4696/'>RFC 4696</a>. RTP itself, defined in <a href='/3550/'>RFC 3550</a>, gives no service guarantees, so applications that need a certain latency or loss level must arrange that with lower-layer tools.</p>",
+      "eli5": "<p>Musicians' keyboards and synthesizers talk to each other in a language called MIDI. This RFC teaches that language how to travel in packages across the internet so friends far apart can jam together.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "2",
+      "title": "RTP Header and Stream Rules",
+      "content": "<p>Each packet is an ordinary RTP header followed by the MIDI payload. The payload starts with the <strong>MIDI command section</strong> and may be followed by a <strong>journal section</strong>. All fields use network byte order.</p><p>For native streams, the <code>M</code> bit is 1 when the command section has a non-zero <code>LEN</code> and 0 otherwise. The 16-bit sequence number starts at a random value and goes up by one per packet. The 32-bit timestamp is the base time for the commands in the packet, in units set by the clock rate that session setup announces; the clock rate is not carried in each packet. For streams that will be rendered into audio, the clock rate SHOULD be an audio sample rate of 32 KHz or higher.</p><p>Timestamps do not have to advance at a fixed rate, because packets are not sent at a fixed rate: an interactive stream can follow the pace of a human player. An RTP MIDI stream encodes one MIDI command name space, meaning 16 voice channels plus system commands. Each party may send at most one stream per payload type in an RTP session. If several streams share one name space, they MUST be sent in different RTP sessions, with the same SSRC and the same random starting timestamp.</p><div class='callout callout-info'><p>For UDP, a sender SHOULD NOT create packets larger than the network MTU. Ethernet's MTU is 1500 octets.</p></div>",
+      "eli5": "<p>Every package has a shipping label with a number so the receiver knows the order, and a clock reading so it knows when the notes should play. One package can hold a whole bunch of note messages.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The MIDI Command Section",
+      "content": "<p>The command section starts with a header of one or two octets. Four flags come first: <code>B</code>, <code>J</code>, <code>Z</code> and <code>P</code>. They are followed by the <code>LEN</code> field, which counts the octets in the MIDI list that follows.</p><ul><li>If <code>B</code> is 0, the header is one octet and <code>LEN</code> has 4 bits, so the list is at most 15 octets.</li><li>If <code>B</code> is 1, the header is two octets and <code>LEN</code> has 12 bits, so the list is at most 4095 octets.</li><li>If <code>J</code> is 1, a journal section MUST follow the command section. If <code>J</code> is 0, there MUST NOT be one.</li><li>If <code>Z</code> is 1, the first command is preceded by a delta time. If <code>Z</code> is 0, that first command has an implicit delta time of 0.</li></ul><p>A <code>LEN</code> of 0 is legal and means an empty list. After the optional first delta time and command, the list holds further pairs of a delta time and a command. The last command field may be empty, and a list may consist of a single delta time with no command. That lets a packet say that a stretch of time contains no commands.</p>",
+      "eli5": "<p>The top of the message says how long the list of notes is and whether a cheat sheet is attached. Then comes the list: each note message is paired with how long to wait before playing it.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "3.1",
+      "title": "Delta Times and Timestamps",
+      "content": "<p>Each command gets its own timestamp, written as a <strong>delta time</strong> from the one before it. Delta times use a variable-length form of 1 to 4 octets that carries a 32-bit unsigned integer. A value can legally be written in several lengths; zero can be written four ways (<code>0x00</code>, <code>0x8000</code>, <code>0x808000</code> and <code>0x80808000</code>). The timestamp of command K is the sum, modulo 2^32, of the RTP timestamp and delta times 0 through K.</p><p>All command timestamps in a packet MUST be less than or equal to the RTP timestamp of the next packet in the stream. This makes each packet responsible for a distinct slice of time.</p><p>By default timestamps follow <strong>comex</strong> (command execution) semantics: a timestamp is when the command should execute, and two commands may have the same one. Comex fits Standard MIDI Files and new controllers that read sensors directly. It is a poor fit for transcoding a MIDI DIN cable, where timing is inferred from the arrival of bytes at 320 microseconds per byte. Two other modes, <code>async</code> and <code>buffer</code>, are chosen with the <code>tsmode</code> parameter to model those time-of-arrival sources.</p>",
+      "eli5": "<p>Instead of writing the exact time for every note, each note says how long after the last one it should play. It is like saying 'play this, wait a bit, play that'.</p>"
+    },
+    {
+      "id": "syntax",
+      "number": "3.2",
+      "title": "Coding Commands, Running Status and SysEx",
+      "content": "<p>Each command field normally holds one complete command in the MIDI 1.0 binary format. Standard MIDI File meta-events MUST NOT appear. The first channel command in a list MUST carry its status octet, and later channel commands MAY use <strong>running status</strong>, where the status octet is left out when it repeats. All system commands MUST include a status octet. The <code>P</code> (phantom) bit is set to 1 when the first channel command's status octet was missing in the original source stream, though the list still MUST include it.</p><p>A System Real-Time command embedded inside another command on a DIN cable MUST be pulled out and coded as a separate command. A System Exclusive (SysEx) command can be sent verbatim, from <code>0xF0</code> to <code>0xF7</code>, or split into two or more segments. Segmentation lets each data octet have its own delta time and lets a large command span several packets. A sender can also cancel a segmented command that is in progress.</p><p>An unpaired <code>0xF7</code> octet MUST NOT appear in the MIDI list. The <code>0xF5</code> octet is used to signal the 'dropped 0xF7' construction. Undefined commands (<code>0xF4</code>, <code>0xF5</code>, <code>0xF9</code>, <code>0xFD</code>) MUST NOT appear by default, with narrow exceptions for these two uses.</p>",
+      "eli5": "<p>Most messages are written out in full, but long messages can be cut into pieces and sent in several packages. Each piece wears a special tag so the receiver knows where it begins, continues or stops.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "4",
+      "title": "The Recovery Journal",
+      "content": "<p>MIDI is fragile. The RFC splits the damage from a lost command into two kinds. <strong>Transient artifacts</strong> are short glitches, such as a lost NoteOn that makes one note fail to play. <strong>Indefinite artifacts</strong> last, such as a lost NoteOff that lets a note sustain indefinitely or a lost Channel Volume change that leaves every later note too soft or too loud.</p><p>The <strong>recovery journal mandate</strong> says that a performance rendered from a stream over unreliable transport MUST NOT contain indefinite artifacts. The system does not retransmit packets. Instead every packet carries a journal that codes the stream history back to a <strong>checkpoint packet</strong>. When a receiver sees a gap in sequence numbers, it compares what it knows with what the journal says and runs MIDI commands to repair the stream, turning indefinite artifacts into transient ones.</p><p>The sender picks the checkpoint using a sending policy, set by the <code>j_update</code> parameter. The default is <code>closed-loop</code>, which uses the receiver's reports of the highest sequence number seen (RTCP Receiver Reports) to keep the checkpoint history as small as possible. The <code>anchor</code> policy always uses the first packet of the stream, needs no feedback, but gives larger journals. The <code>open-loop</code> policy is the third. Streams on unreliable transport such as UDP use the recovery journal by default, and streams on reliable transport such as TCP use no journal by default; <code>j_sec</code> can override this.</p>",
+      "eli5": "<p>Imagine that every package also holds a short note saying 'here is what the instrument should be doing right now'. If a package goes missing, the receiver reads the note and fixes anything that went wrong, like a stuck note.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "5",
+      "title": "Recovery Journal Format",
+      "content": "<p>The journal has three levels: a top-level header, channel and system journals, and chapters. The top-level header is 3 octets. It holds the <code>S</code>, <code>Y</code>, <code>A</code> and <code>H</code> flags, a 4-bit <code>TOTCHAN</code> field and a 16-bit Checkpoint Packet Seqnum. If <code>Y</code> is 1, a system journal follows. If <code>A</code> is 1, a list of (<code>TOTCHAN</code> + 1) channel journals follows, in ascending channel order. If both are 0, the journal is empty.</p><p>A channel journal has a 3-octet header and then chapters named by letter, each covering one class of command: <code>P</code> (Program Change), <code>C</code> (Control Change), <code>M</code> (parameter system), <code>W</code> (Pitch Wheel), <code>N</code> (NoteOff and NoteOn), <code>E</code> (note extras), <code>T</code> (Channel Aftertouch) and <code>A</code> (Poly Aftertouch). The system journal has chapters <code>D</code>, <code>V</code>, <code>Q</code>, <code>F</code> and <code>X</code> for simple system commands, Active Sense, sequencer state, MIDI Time Code position and SysEx.</p><p>Most elements start with an <code>S</code> (single-packet loss) bit, which helps a receiver skip through the journal quickly when only one packet was lost. A <code>LENGTH</code> field gives the size of a structure, and a receiver MUST use it to step past the structure. Appendices A and B define each chapter's bits and when it must be present.</p>",
+      "eli5": "<p>The cheat sheet is organized like a filing cabinet: one drawer per instrument channel, and in each drawer a folder for each kind of message, such as notes or volume.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "6",
+      "title": "Session Setup and Configuration",
+      "content": "<p>RTP does not set up sessions. Tools such as SIP (<a href='/3261/'>RFC 3261</a>) and RTSP (<a href='/2326/'>RFC 2326</a>) do, using the Session Description Protocol (<a href='/4566/'>RFC 4566</a>). The RFC registers the media type <code>audio/rtp-midi</code> for native streams. The clock rate is carried on the <code>rtpmap</code> line and has no default value.</p><p>A minimal native stream has a few fixed characteristics: the journal follows the transport default, timestamps are comex, packets cover 0 to 200 ms of media time, and the rendering method is not specified. A second stream type uses <code>mpeg4-generic</code> in mode <code>rtp-midi</code> so that MPEG 4 Audio Object Types for General MIDI (ID 15), Downloadable Sounds Level 2 (ID 14) and Structured Audio (ID 13) can render the MIDI. For that type, <code>streamtype</code> MUST be 5.</p><p>Appendix C adds parameters on the <code>fmtp</code> line. They cover subsetting the commands in a stream (<code>cm_unused</code>, <code>cm_used</code>), the journal (<code>j_sec</code>, <code>j_update</code>, <code>ch_default</code>, <code>ch_never</code>, <code>ch_anchor</code>), timestamp mode (<code>tsmode</code>), packet duration (<code>rtp_ptime</code>, <code>rtp_maxptime</code>, <code>guardtime</code>), naming of MIDI name spaces (<code>musicport</code>) and the renderer (<code>render</code>, <code>subrender</code>, <code>rinit</code> and others). The RFC also gives interoperability rules for RTSP content streaming and for SIP network musical performance. Parameters describe heavy configuration, so parties SHOULD NOT expect changes during a session to be accepted.</p>",
+      "eli5": "<p>Before playing, the two sides agree on settings, like how fast the clock ticks and what to do with the notes. The agreement is written as a short text form that both sides read.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Congestion Control and Security",
+      "content": "<p>RTP congestion control rules from <a href='/3550/'>RFC 3550</a> and <a href='/3551/'>RFC 3551</a> apply. There is an extra concern: in network musical performance the packet rate follows the gestures of a human player. Senders MUST watch the MIDI source for patterns that cause excessive packet rates and reduce the rate while transcoding.</p><p>Authentication of incoming RTP and RTCP packets is RECOMMENDED, through SRTP (<a href='/3711/'>RFC 3711</a>) or other means. Without it, attackers could forge MIDI commands into a stream, damaging speakers and eardrums, or exploit client bugs. Session descriptions SHOULD be authenticated too, since they can carry initialization data, and URLs in the <code>url</code> and <code>smf_url</code> parameters SHOULD use HTTP over TLS (<a href='/2818/'>RFC 2818</a>).</p><p>The rule that several streams of one name space share an SSRC and a starting timestamp weakens, to a small extent, the usual random choice of those values.</p>",
+      "eli5": "<p>If anyone could slip fake notes into the stream, they could blast loud sounds out of your speakers. So the RFC says to check that messages really come from who they claim to.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "12",
+      "title": "Changes from RFC 4695",
+      "content": "<p>RFC 6295 obsoletes <a href='/4695/'>RFC 4695</a>. It fixes errors found by reviewers. The authors say they know of no interoperability issues caused by those errors.</p><p>The main-text fix is in Figure 3 of Section 3, where the old figure disagreed with the normative text about how the first delta time depends on the <code>Z</code> bit. The rest are in Appendices C and D, which cover session parameters and their ABNF syntax. Examples include the rule that the <code>url</code> parameter MUST specify HTTP or HTTP over TLS, a defined <code>.acn</code> file extension for AudioSpecificConfig, a missing semicolon in an example, a corrected form of the <code>rinit</code> assignment, and several corrected grammar rules.</p>",
+      "eli5": "<p>This is a corrected edition of an earlier rule book. A few typos and mistakes were fixed so the book says what it was meant to say.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "FIRST OCTET OF THE MIDI COMMAND SECTION HEADER (B = 0)",
+      "data": {
+        "title": "Command section header, short form",
+        "bytes": 1,
+        "width": 8,
+        "fields": [
+          {
+            "key": "b",
+            "name": "B",
+            "bits": 1,
+            "desc": "0 means a one-octet header."
+          },
+          {
+            "key": "j",
+            "name": "J",
+            "bits": 1,
+            "desc": "1 means a journal section follows."
+          },
+          {
+            "key": "z",
+            "name": "Z",
+            "bits": 1,
+            "desc": "1 means the first command has a delta time."
+          },
+          {
+            "key": "p",
+            "name": "P",
+            "bits": 1,
+            "desc": "Phantom: the first status octet was missing in the source."
+          },
+          {
+            "key": "len",
+            "name": "LEN",
+            "bits": 4,
+            "desc": "Octets in the MIDI list, up to 15."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "syntax",
+      "position": "after",
+      "caption": "SYSEX SEGMENT STATUS OCTETS (HEAD / TAIL)",
+      "data": {
+        "items": [
+          {
+            "code": "F0 / F0",
+            "label": "first",
+            "desc": "Starts a segmented SysEx command."
+          },
+          {
+            "code": "F7 / F0",
+            "label": "middle",
+            "desc": "A segment between first and last."
+          },
+          {
+            "code": "F7 / F7",
+            "label": "last",
+            "desc": "Ends the command."
+          },
+          {
+            "code": "F7 / F4",
+            "label": "cancel",
+            "desc": "Empty sublist that cancels a command in progress.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "THE THREE JOURNAL SENDING POLICIES",
+      "data": {
+        "items": [
+          {
+            "title": "closed-loop (default)",
+            "text": "Uses receiver feedback to keep the checkpoint history as small as possible."
+          },
+          {
+            "title": "anchor",
+            "text": "Always uses the first packet as checkpoint. No feedback needed, larger journals."
+          },
+          {
+            "title": "open-loop",
+            "text": "The third policy, defined in Appendix C.2.2.3."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "RECOVERY JOURNAL HEADER (3 OCTETS)",
+      "data": {
+        "title": "Recovery journal header",
+        "bytes": 3,
+        "width": 24,
+        "fields": [
+          {
+            "key": "s",
+            "name": "S",
+            "bits": 1,
+            "desc": "Single-packet loss bit."
+          },
+          {
+            "key": "y",
+            "name": "Y",
+            "bits": 1,
+            "desc": "1 means a system journal follows."
+          },
+          {
+            "key": "a",
+            "name": "A",
+            "bits": 1,
+            "desc": "1 means channel journals follow."
+          },
+          {
+            "key": "h",
+            "name": "H",
+            "bits": 1,
+            "desc": "Enhanced Chapter C encoding in use."
+          },
+          {
+            "key": "totchan",
+            "name": "TOTCHAN",
+            "bits": 4,
+            "desc": "Channel journal count minus one."
+          },
+          {
+            "key": "seqnum",
+            "name": "Checkpoint Packet Seqnum",
+            "bits": 16,
+            "desc": "Sequence number of the checkpoint packet."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "TIMESTAMP MODES SET BY TSMODE",
+      "data": {
+        "columns": [
+          "tsmode",
+          "Timestamp means",
+          "Good for"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "comex",
+              "When the command executes (default)",
+              "Standard MIDI Files, new controllers"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "async",
+              "Arrival time of each octet, per octpos",
+              "MIDI DIN cable sources"
+            ]
+          },
+          {
+            "cells": [
+              "buffer",
+              "Moment a holding buffer is examined",
+              "Polled time-of-arrival sources"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4695]",
+      "text": "Lazzaro, J. and J. Wawrzynek, \"RTP Payload Format for MIDI\", RFC 4695, November 2006.",
+      "rfc": 4695
+    },
+    {
+      "number": "[RFC4696]",
+      "text": "Lazzaro, J. and J. Wawrzynek, \"An Implementation Guide for RTP MIDI\", RFC 4696.",
+      "rfc": 4696
+    },
+    {
+      "number": "[RFC3550]",
+      "text": "Schulzrinne, H., et al., \"RTP: A Transport Protocol for Real-Time Applications\", RFC 3550.",
+      "rfc": 3550
+    },
+    {
+      "number": "[RFC3551]",
+      "text": "Schulzrinne, H. and S. Casner, \"RTP Profile for Audio and Video Conferences with Minimal Control\", RFC 3551.",
+      "rfc": 3551
+    },
+    {
+      "number": "[RFC4566]",
+      "text": "Handley, M., et al., \"SDP: Session Description Protocol\", RFC 4566.",
+      "rfc": 4566
+    },
+    {
+      "number": "[RFC3264]",
+      "text": "Rosenberg, J. and H. Schulzrinne, \"An Offer/Answer Model with the Session Description Protocol (SDP)\", RFC 3264.",
+      "rfc": 3264
+    },
+    {
+      "number": "[RFC3261]",
+      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261.",
+      "rfc": 3261
+    },
+    {
+      "number": "[RFC2326]",
+      "text": "Schulzrinne, H., et al., \"Real Time Streaming Protocol (RTSP)\", RFC 2326.",
+      "rfc": 2326
+    },
+    {
+      "number": "[RFC3640]",
+      "text": "van der Meer, J., et al., \"RTP Payload Format for Transport of MPEG-4 Elementary Streams\", RFC 3640.",
+      "rfc": 3640
+    },
+    {
+      "number": "[RFC3711]",
+      "text": "Baugher, M., et al., \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711.",
+      "rfc": 3711
+    },
+    {
+      "number": "[MIDI]",
+      "text": "MIDI Manufacturers Association, \"MIDI 1.0 specification and Standard MIDI Files\"."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

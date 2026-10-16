@@ -1,6 +1,6 @@
 {
   "number": 8584,
-  "shortTitle": null,
+  "shortTitle": "EVPN DF Election",
   "category": "routing",
   "categoryReviewed": false,
   "summary": "<p>Defines a framework for extending Designated Forwarder election in Ethernet VPN. The DF is the provider edge router that sends broadcast, unknown unicast, and multicast traffic to a multihomed customer device. It defines an alternative to the default algorithm and a way to influence the result using attachment circuit state. It is on the standards track.</p>",
@@ -10,13 +10,247 @@
   "questions": [
     "evpn designated forwarder election",
     "evpn df algorithm",
-    "multihomed ethernet segment bum traffic"
+    "multihomed ethernet segment bum traffic",
+    "what is a designated forwarder in evpn",
+    "what is hrw df election",
+    "what is ac-df in evpn"
+  ],
+  "tags": [
+    "Routing",
+    "EVPN",
+    "Multihoming"
+  ],
+  "subtitle": "A framework for choosing which multihomed edge router forwards broadcast traffic in an Ethernet VPN, with a fairer algorithm and failure awareness.",
+  "tldr": {
+    "problem": "The default Designated Forwarder election in EVPN uses a modulus (V mod N). It can load-balance badly, reshuffles many VLANs when one PE comes or goes, and ignores logical failures of an attachment circuit, which black-holes traffic.",
+    "mechanism": "A new DF Election Extended Community lets the PEs on an Ethernet Segment agree on an algorithm and capabilities. It adds the Highest Random Weight (HRW) algorithm and the AC-Influenced DF (AC-DF) capability, and it formalises the DF election state machine.",
+    "outcome": "If all PEs on the segment agree, they use the new procedures. If even one disagrees, everyone falls back to the default algorithm of RFC 7432. The RFC updates RFC 7432 and is itself updated by RFC 9722 and RFC 9785.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Extended Community Type",
+      "value": "0x06"
+    },
+    {
+      "label": "Extended Community Sub-Type",
+      "value": "0x06"
+    },
+    {
+      "label": "DF Alg field",
+      "value": "5 bits (values 0 to 31)"
+    },
+    {
+      "label": "Bitmap field",
+      "value": "2 octets; bit 1 is AC-DF"
+    },
+    {
+      "label": "HRW input stream",
+      "value": "14 octets (4-octet Ethernet Tag + 10-octet ESI)"
+    },
+    {
+      "label": "Updates",
+      "value": "RFC 7432"
+    }
+  ],
+  "today": "<p>RFC 8584 is a Proposed Standard that updates <a href='/7432/'>RFC 7432</a>, and it is itself updated by <a href='/9722/'>RFC 9722</a> and <a href='/9785/'>RFC 9785</a>. It has not been obsoleted.</p>",
+  "glossary": [
+    "designated-forwarder",
+    "highest-random-weight",
+    "bgp",
+    "multihoming",
+    "finite-state-machine",
+    "load-balancing",
+    "iana",
+    "mpls",
+    "ethernet"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Designated Forwarders in EVPN",
+      "content": "<p>In an Ethernet VPN (EVPN), a customer device (CE) can be connected to several provider edge routers (PEs) on the same <strong>Ethernet Segment</strong> (ES). The <strong>Designated Forwarder</strong> (DF) is the PE responsible for sending Broadcast, Unknown Unicast and Multicast (BUM) traffic to that CE on a given VLAN. For single-active multihoming it also sends unicast traffic.</p><p>Only one PE may do this, because forwarding loops are especially severe in Layer 2 networks: Ethernet traffic is broadcast in nature and has no TTL. So all the PEs on the segment must independently and unambiguously pick the same DF.</p><p>The default algorithm from <a href='/7432/'>RFC 7432</a> is called <strong>service carving</strong>. PEs are ordered by ascending IP address, and for N PEs, PEx is the DF for VLAN V when x equals (V mod N). <a href='/8584/'>RFC 8584</a> keeps this as the fallback, adds two optional improvements, and defines a signalling method so PEs can agree. The procedures apply to the EVPN services of RFC 7432 and <a href='/8214/'>RFC 8214</a>.</p>",
+      "eli5": "<p>If a kid has two parents who could both pick them up, the parents need a rule so that exactly one shows up. This RFC is about making that rule fair and reliable.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "1.3",
+      "title": "What Goes Wrong with the Default Election",
+      "content": "<p>The RFC lists three problems with the modulus approach.</p><ul><li><strong>Uneven load.</strong> If Ethernet Tags are not evenly spread, for example all even or all odd with two PEs, one PE can be elected DF for every VLAN and the other never. With tags of the form (3x+1) and three PEs, one PE is always selected.</li><li><strong>Poor behaviour with changing N.</strong> The modulus should ideally be a prime, but the number of PEs is not.</li><li><strong>Disruption.</strong> When a PE leaves or joins, N changes and most VLANs are remapped. In the RFC's example, VLANs with tags 999, 1000 and 1001 have DFs PE1, PE2 and PE3. When PE3 goes down, PE2 becomes DF for the first and PE1 for the second, even though neither of those PEs failed. This needless churn means reprogramming ports.</li></ul><p>A fourth problem is <strong>black-holing</strong>. The default procedure considers only the PE's address and locally provisioned tags. If an individual attachment circuit (AC) is accidentally shut down or not yet provisioned while the ES route is still active, or a whole MAC-VRF is shut down, the other PEs do not re-run the election. BUM traffic is then discarded in the all-active case, and all traffic in the single-active case.</p>",
+      "eli5": "<p>The old rule is like dividing kids into teams by counting off. If you add or remove one kid, almost everyone changes team. And if one door is blocked, nobody notices and the kids walk into a wall.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "2.1",
+      "title": "The DF Election State Machine",
+      "content": "<p>RFC 7432 left several questions open about exactly how DF election behaves, so this RFC defines a finite state machine, and EVPN implementations MUST conform to it. There are four states: <code>INIT</code>, <code>DF_WAIT</code>, <code>DF_CALC</code> and <code>DF_DONE</code>, plus <code>ANY_STATE</code> as shorthand.</p><p>The events are <code>ES_UP</code>, <code>ES_DOWN</code>, <code>VLAN_CHANGE</code> (needed for VLAN Bundles only), <code>DF_TIMER</code> (the Wait timer expired), <code>RCVD_ES</code> (a new or changed ES route arrived), <code>LOST_ES</code> (an ES route was withdrawn) and <code>CALCULATED</code>.</p><p>In short: when the ES comes up, a PE enters <code>DF_WAIT</code>, starts the Wait timer and assumes it is a non-DF. When the timer fires it enters <code>DF_CALC</code>, rebuilds the candidate list, hashes and elects, then moves to <code>DF_DONE</code>. Any new, changed or lost ES route sends it from <code>DF_DONE</code> back to <code>DF_CALC</code>. <code>ES_DOWN</code> from any state returns to <code>INIT</code>, stops the timer and makes the local PE a non-DF.</p><p>The FSM does not protect against inconsistent configuration between the PEs, such as different VLAN sets for the same EVI.</p>",
+      "eli5": "<p>Each router follows the same checklist: wait a bit to hear from the others, work out who is in charge, then stay with that answer until someone joins or leaves.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "2.2",
+      "title": "The DF Election Extended Community",
+      "content": "<p>All PEs on a segment must use the same algorithm and capabilities. A PE signals its preference with a new BGP transitive <strong>DF Election Extended Community</strong>, attached to its ES route (Route Type 4). It has Type <code>0x06</code> and Sub-Type <code>0x06</code>, a 5-bit <code>DF Alg</code> field and a 2-octet <code>Bitmap</code> of capabilities.</p><p>DF Alg 0 is the default modulus algorithm, 1 is HRW, 2 to 30 are unassigned, and 31 is reserved for experimental use. In the Bitmap, bit 1 is the AC-DF capability. A PE SHOULD attach the community to any ES route, and MUST send it if it wants anything other than the default.</p><p>On receipt, a PE checks whether all ES routes carry the same DF Alg and Bitmap. If so, it MUST follow them. If even one differs, the default algorithm of RFC 7432 MUST be used. A missing community, or more than one in a route, means DF Alg 0 and no capabilities. Old RFC 7432 implementations do not send it and ignore it when received, so a mixed segment simply falls back to the default.</p>",
+      "eli5": "<p>Each router holds up a card saying which rule it would like to use. If every card matches, they use that rule. If any card is different or missing, everyone goes back to the old rule.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "The Highest Random Weight Algorithm",
+      "content": "<p><strong>Highest Random Weight</strong> (HRW) was originally proposed for caching and proxy-server load balancing. Instead of using a modulus, it computes a pseudorandom weight for each candidate server from the object and server identifiers, and the highest wins. The next-highest is the backup.</p><p>For EVPN, the weight is a function of the Ethernet Tag V, the ESI and the PE's IP address. The DF is the PE with the highest weight, ties going to the numerically least IP address. The Backup DF (BDF) is the PE with the next highest weight. Including the ESI adds entropy, so the same PEs are less likely to be DF for the same set of BDs across several segments, so the ESI value SHOULD be set to that of the ES.</p><p>The RFC takes as a candidate the first of two preferred functions from the HRW paper, using the 31-bit digest of a 14-octet stream (the 4-octet Ethernet Tag followed by the 10-octet ESI, in network byte order). Because only the low 31 bits of the address matter, it works with IPv4 and IPv6 PE addresses alike, which the default algorithm cannot do.</p><p>Benefits: DF duty is spread roughly evenly even with two PEs, and when a PE that is neither DF nor BDF for a VLAN goes away, nothing is reassigned. The algorithm also supplies a BDF.</p>",
+      "eli5": "<p>Instead of counting off, each router rolls a repeatable pretend dice for each VLAN, and the highest roll wins. If someone who did not win leaves, the winners stay the same.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "4",
+      "title": "The AC-Influenced DF Capability",
+      "content": "<p>The <strong>AC-DF</strong> capability removes from consideration any PE that cannot forward traffic on the attachment circuit for the broadcast domain. A PE is only a candidate for a given <code>&lt;ES, Ethernet Tag&gt;</code> once its Ethernet A-D per EVI route has been received, and it is removed if that route or its Ethernet A-D per ES route is withdrawn. In other words, the attachment circuit status must be UP.</p><p>Local AC going down or up, and receipt of new Ethernet A-D per EVI or per ES route updates or withdrawals, MUST trigger a move from <code>DF_DONE</code> to <code>DF_CALC</code>. This fixes the black-holing cases above without changing the EVPN control plane beyond the new community and the pruned candidate list.</p><p>For VLAN-aware bundle services, RFC 7432 advertises one route per Ethernet Tag but elects per VLAN bundle. When all PEs advertise AC-DF, the election is done per <code>&lt;ES, VLAN&gt;</code> instead, so withdrawing the route for one VLAN removes the PE only for that VLAN. AC-DF can be used with either DF Alg 0 or 1.</p>",
+      "eli5": "<p>Before choosing the door that hands out invitations, check that the door actually opens. A blocked door is taken off the list.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and IANA Considerations",
+      "content": "<p>The RFC argues that the new procedures reduce unfair load balancing, disruption and black-holing, which a malicious user with access to one PE's configuration could otherwise create. The catch is unanimity: an attacker who changes the configuration of one PE can make every PE on the segment fall back to the default election and so lose those protections. The security considerations of RFC 7432 also apply.</p><p>IANA allocated Sub-Type <code>0x06</code> for the DF Election Extended Community and set up registries for DF Alg and for the DF Election Capabilities bitmap.</p>",
+      "eli5": "<p>The new rules only work if everybody agrees. A troublemaker who confuses just one router can push everyone back to the old, weaker rule.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "DF ELECTION FINITE STATE MACHINE (RFC 8584, FIGURE 3)",
+      "data": {
+        "states": [
+          {
+            "key": "init",
+            "label": "INIT",
+            "initial": true
+          },
+          {
+            "key": "df-wait",
+            "label": "DF_WAIT"
+          },
+          {
+            "key": "df-calc",
+            "label": "DF_CALC"
+          },
+          {
+            "key": "df-done",
+            "label": "DF_DONE"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "init",
+            "to": "df-wait",
+            "label": "ES_UP"
+          },
+          {
+            "from": "df-wait",
+            "to": "df-calc",
+            "label": "DF_TIMER"
+          },
+          {
+            "from": "df-calc",
+            "to": "df-done",
+            "label": "CALCULATED"
+          },
+          {
+            "from": "df-done",
+            "to": "df-calc",
+            "label": "VLAN_CHANGE / RCVD_ES / LOST_ES"
+          },
+          {
+            "from": "df-wait",
+            "to": "init",
+            "label": "ES_DOWN"
+          },
+          {
+            "from": "df-calc",
+            "to": "init",
+            "label": "ES_DOWN"
+          },
+          {
+            "from": "df-done",
+            "to": "init",
+            "label": "ES_DOWN"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "DF ALG VALUES IN THE DF ELECTION EXTENDED COMMUNITY",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Default",
+            "desc": "Modulus-based algorithm from RFC 7432."
+          },
+          {
+            "code": "1",
+            "label": "HRW",
+            "desc": "Highest Random Weight algorithm.",
+            "highlight": true
+          },
+          {
+            "code": "2-30",
+            "label": "Unassigned",
+            "desc": "Not yet allocated."
+          },
+          {
+            "code": "31",
+            "label": "Experimental",
+            "desc": "Reserved for experimental use."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7432]",
+      "text": "Sajassi, A., Ed., et al., \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
+      "rfc": 7432
+    },
+    {
+      "number": "[RFC8214]",
+      "text": "Boutros, S., et al., \"Virtual Private Wire Service Support in Ethernet VPN\", RFC 8214, August 2017.",
+      "rfc": 8214
+    },
+    {
+      "number": "[RFC4360]",
+      "text": "Sangli, S., Tappan, D., and Y. Rekhter, \"BGP Extended Communities Attribute\", RFC 4360, February 2006.",
+      "rfc": 4360
+    },
+    {
+      "number": "[RFC4456]",
+      "text": "Bates, T., Chen, E., and R. Chandra, \"BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP)\", RFC 4456, April 2006.",
+      "rfc": 4456
+    },
+    {
+      "number": "[RFC7153]",
+      "text": "Rosen, E. and Y. Rekhter, \"IANA Registries for BGP Extended Communities\", RFC 7153, March 2014.",
+      "rfc": 7153
+    },
+    {
+      "number": "[HRW1999]",
+      "text": "Thaler, D. and C. Ravishankar, \"Using Name-Based Mappings to Increase Hit Rates\", IEEE/ACM Transactions on Networking, Volume 6, No. 1, February 1998."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

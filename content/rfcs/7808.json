@@ -9,13 +9,326 @@
   },
   "questions": [
     "time zone data distribution service",
-    "how do clients get tz updates"
+    "how do clients get tz updates",
+    "what is tzdist",
+    "how do clients get time zone updates",
+    "how does tzdist synchronization work",
+    "what is the tzuntil property"
+  ],
+  "tags": [
+    "Time",
+    "Calendaring",
+    "HTTP"
+  ],
+  "subtitle": "A simple HTTP and JSON service that keeps clocks, calendars and operating systems supplied with current time zone rules.",
+  "tldr": {
+    "problem": "Daylight saving rules can change often and sometimes with very little notice, yet clients usually get time zone data only through slow updates such as operating system patches.",
+    "mechanism": "TZDIST is an HTTP service with six actions (capabilities, list, get, expand, find, leapseconds) that return JSON metadata or time zone data. Clients sync cheaply using a synchronization token and ETags.",
+    "outcome": "Clients and caching servers can discover a service by SRV, TXT or a well-known URI, pull only the zones that changed, and also fetch leap-second data. The RFC does not define where the data comes from.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Actions",
+      "value": "6: capabilities, list, get, expand, find, leapseconds"
+    },
+    {
+      "label": "Protocol version",
+      "value": "1"
+    },
+    {
+      "label": "Client polling",
+      "value": "At least once a day (SHOULD)"
+    },
+    {
+      "label": "Secondary provider polling",
+      "value": "Once per hour (SHOULD)"
+    },
+    {
+      "label": "Default zone media type",
+      "value": "text/calendar"
+    },
+    {
+      "label": "Typical list response",
+      "value": "About 50-100 KB of pretty-printed JSON"
+    }
+  ],
+  "today": "<p>RFC 7808 is a Proposed Standard published in March 2016. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "icalendar",
+    "vtimezone",
+    "observance",
+    "leap-second",
+    "utc",
+    "etag",
+    "conditional-request",
+    "well-known-uri",
+    "srv-record",
+    "dns-txt-record",
+    "uri-template",
+    "json"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Time Zone Data Needs a Service",
+      "content": "<p>Time zone data typically combines a <strong>UTC offset</strong> with daylight saving time (DST) rules. The offset for a region changes infrequently, but DST rules can change often and sometimes with very little notice, maybe hours before a change takes effect.</p><p>Calendaring systems (for example those using iCalendar, <a href='/5545/'>RFC 5545</a>) and operating systems rely on this data. The RFC says there had been no fast and easy way to keep it current: data often ships as files that must be compiled, and operating system changes may reach machines only with an infrequent update. Old, unsupported systems may need manual patching.</p><p>The service also covers <strong>leap seconds</strong>, which map International Atomic Time (TAI) to UTC. The protocol is based on HTTP (<a href='/7230/'>RFC 7230</a>) with a simple JSON API (<a href='/7159/'>RFC 7159</a>). The RFC does not define the source of the data; it assumes a reliable one exists, such as the IANA-hosted time zone database (<a href='/6557/'>RFC 6557</a>).</p>",
+      "eli5": "<p>Governments sometimes change when the clocks jump forward or back, and they do not always warn us early. Devices need a quick way to hear about the change instead of waiting for a big update.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Providers and Clients",
+      "content": "<p>The service is described as layers. <strong>Contributors</strong> give information about time zones to <strong>publishers</strong>, who aggregate it, judge its reliability and generate time zone data. <strong>Root providers</strong> obtain data from one or more publishers and make it available. <strong>Secondary providers</strong> are typically simple caches of a root server, located closer to clients, that cache and periodically refresh the data and reduce the load on roots. <strong>Clients</strong> (applications, operating systems and so on) fetch from either kind of provider.</p><p>Layers may be merged: a vendor could implement everything as one monolithic virtual server. The RFC is concerned only with the protocol between providers and from provider to client. It does not define how contributors pass information to publishers, how publishers vet it, or the format publishers produce.</p>",
+      "eli5": "<p>It works like a news chain. People report changes, an editor decides what is true, a main office keeps the official copy, and local branches hand out copies so the main office is not swamped.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "3",
+      "title": "Zones, Aliases, Truncation and Versions",
+      "content": "<p>A <strong>time zone</strong> here is a description of the past and predicted future timekeeping of a collection of clocks that are meant to agree. It is not simply a region at one UTC offset: \"Central European Time\" may correspond to several zones such as <code>Europe/Berlin</code> and <code>Europe/Paris</code>. Each period with a constant UTC offset is an <strong>observance</strong>.</p><p>Zones have unique <strong>identifiers</strong> set by publishers. The RFC does not define an identifier format or a global naming scheme. <strong>Aliases</strong> map a name onto an identifier (for example <code>US/Eastern</code> to <code>America/New_York</code>), and a server must keep alias mappings and let clients query with them. <strong>Localized names</strong> (for example \"Nueva York\") may also be kept.</p><p>Servers may <strong>truncate</strong> data to a range, because clients may not need the distant past or far future. The start point is inclusive and the end point exclusive, both in UTC. A server that truncates MUST advertise its ranges in the <code>capabilities</code> response. When truncating the start of a <code>VTIMEZONE</code>, it MUST include exactly one <code>STANDARD</code> or <code>DAYLIGHT</code> subcomponent whose <code>DTSTART</code> matches the start point. When truncating the end, it MUST include a <code>TZUNTIL</code> property.</p><p>For versions, publishers follow a <strong>monolithic</strong> model (one version for the whole data set, such as \"2015a\") or an <strong>incremental</strong> model (each zone has its own version). The service must expose publisher and version per time zone, so clients can fetch only what changed.</p>",
+      "eli5": "<p>A time zone is a rule book for one set of clocks. An alias is a nickname for the same rule book. Sometimes you only need the rules for a few years, so the service can send a shorter version.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "The Six Actions",
+      "content": "<p>Each <strong>action</strong> is an HTTP GET on a resource built from a URI template, and servers MUST support all of them. A <code>service-prefix</code> (the context path) is discovered by the client; a <code>data-prefix</code> may be added to partition data, but the RFC defines no partitions. Zone identifiers appear percent-encoded, so <code>America/New_York</code> becomes <code>America%2FNew_York</code>.</p><ul><li><code>capabilities</code>: tells the client what the server supports, including version, source, formats, truncation and the available actions.</li><li><code>list</code>: lists all zone identifiers in summary form with publisher, version, aliases and optional localized names, plus an opaque <code>synctoken</code>. The optional <code>changedsince</code> parameter returns only zones changed since a previous token.</li><li><code>get</code>: returns one zone as time zone data with a strong ETag. The default media type is <code>text/calendar</code>; iCalendar-in-XML and iCalendar-in-JSON are also available. Optional <code>start</code> and <code>end</code> truncate the data.</li><li><code>expand</code>: expands a zone into observances between a required <code>start</code> (inclusive) and <code>end</code> (exclusive), so thin clients can find offsets without doing full expansion.</li><li><code>find</code>: matches identifiers, aliases or localized names with a simple glob pattern where an asterisk is the wildcard. Underscores are mapped to spaces and ASCII letters to lowercase before comparing.</li><li><code>leapseconds</code>: returns leap-second data with <code>expires</code>, <code>publisher</code>, <code>version</code> and a list of <code>utc-offset</code> and <code>onset</code> pairs.</li></ul><p>Errors use a JSON problem details object (<a href='/7807/'>RFC 7807</a>) whose <code>type</code> is a URN such as <code>urn:ietf:params:tzdist:error:tzid-not-found</code>. Responses MUST be UTF-8.</p>",
+      "eli5": "<p>The service is like a help desk with six windows. One says what it can do, one lists all the zones, one hands over a zone, one works out the clock changes for a year, one searches by name, and one tells about leap seconds.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Finding the Service and Staying in Sync",
+      "content": "<p>A client needs a host name, port and request path. The RFC offers two discovery methods. <strong>SRV records</strong> use two new service labels: <code>timezone</code> (HTTP without TLS) and <code>timezones</code> (HTTP with TLS). Clients MUST honor TTL, Priority and Weight. A <strong>TXT record</strong> with a <code>path</code> key can give the context path; when present, clients MUST use it. Otherwise they use the <strong>well-known URI</strong> <code>/.well-known/timezone</code>, which the server MUST redirect to the real context path and MUST NOT use as the endpoint itself. Other mechanisms, such as a DHCP option, could also be used.</p><p>To sync everything, a client calls <code>list</code>, stores the <code>synctoken</code> and each zone's metadata, then fetches the zone data. Later it calls <code>list</code> with <code>changedsince</code> set to the saved token, compares each returned <code>etag</code> with its cached ETag and uses <code>get</code> only for zones that differ. A client that needs one or a few zones can use a conditional <code>get</code> with <code>If-None-Match</code>; an unchanged zone gives <code>304 Not Modified</code>.</p><p>Clients SHOULD poll for changes at least once a day, and a secondary provider SHOULD poll once per hour. A client with pre-provisioned data can list the metadata and fetch only zones whose publisher and version do not match.</p>",
+      "eli5": "<p>First you find the help desk's address. After that you keep a receipt number from your last visit. Next time you show the receipt and only ask about what changed since then.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "JSON Responses and New iCalendar Properties",
+      "content": "<p>Section 6 defines the JSON for each action. The <code>capabilities</code> response has <code>version</code> (which MUST be 1), <code>info</code> and <code>actions</code>. Inside <code>info</code>, exactly one of <code>primary-source</code> or <code>secondary-source</code> is present, along with <code>formats</code> and optionally <code>truncated</code>, <code>provider-details</code> and <code>contacts</code>. Clients MUST ignore unexpected JSON members.</p><p>The <code>list</code> and <code>find</code> responses carry <code>synctoken</code> and a <code>timezones</code> array whose entries have <code>tzid</code>, <code>etag</code>, <code>last-modified</code>, <code>publisher</code>, <code>version</code> and optionally <code>aliases</code> and <code>local-names</code>. The <code>expand</code> response lists observances with a <code>name</code>, an <code>onset</code>, and <code>utc-offset-from</code> and <code>utc-offset-to</code> in seconds.</p><p>The RFC adds two iCalendar properties. <code>TZUNTIL</code> is an exclusive UTC upper bound on the validity of data in a <code>VTIMEZONE</code>, allowed zero or one time. <code>TZID-ALIAS-OF</code> names another zone identifier for which the main identifier is an alias, allowed zero or more times.</p>",
+      "eli5": "<p>The answers come in a tidy form with named boxes, so any program can read them. Two new labels were also added to calendar files: one says how long the rules are good for, and one says what other names the zone has.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and Privacy",
+      "content": "<p>Wrong time zone data breaks local time, so servers MUST support HTTP over TLS and MAY also offer plain HTTP. Secondary servers MUST use TLS to fetch from a primary. Clients SHOULD use TLS, MUST NOT fall back to non-TLS if the TLS service is unavailable, and MUST NOT follow a redirect from a TLS service to a non-TLS one. Clients MUST verify the server's identity.</p><p>Against DNS attacks, clients SHOULD check that the SRV target is the queried domain or a sub-domain, and treat any mismatch as a failure. Servers SHOULD throttle high request rates, and MAY require authentication.</p><p>On <strong>privacy</strong>, request patterns can fingerprint clients. Suggested precautions include always using TLS, avoiding TLS session resumption, syncing the entire set of zones, randomizing fetch order, avoiding conditional requests, cookies and authenticated requests, and randomizing the poll offset. A server could insert a fake zone to track clients, which a client can detect by comparing two independent providers. The RFC notes that some of these steps make the protocol less efficient.</p>",
+      "eli5": "<p>Because wrong clock rules cause missed meetings, the connection must be locked and you must check you are talking to the right server. Also, asking for just one odd zone can tell the server things about you, so careful clients ask for everything.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "IANA Registrations",
+      "content": "<p>IANA created a \"TZDIST Service Actions\" registry, seeded with the six actions, under the policy Specification Required with a designated expert. It added the <code>timezone</code> well-known URI and the service names <code>timezone</code> and <code>timezones</code>, both for TCP. It also created the \"TZDIST Identifiers\" registry under the URN prefix <code>urn:ietf:params:tzdist</code>, with an IETF Review policy, holding seven error URNs: <code>invalid-action</code>, <code>invalid-changedsince</code>, <code>tzid-not-found</code>, <code>invalid-format</code>, <code>invalid-start</code>, <code>invalid-end</code> and <code>invalid-pattern</code>. The two new iCalendar properties are registered too.</p>",
+      "eli5": "<p>Official lists were made so every action name, error code and service label has one agreed meaning.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "layers",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "TZDIST ARCHITECTURE (RFC 7808, FIGURE 1)",
+      "data": {
+        "layers": [
+          {
+            "label": "Contributors",
+            "detail": "Individuals, governments or organizations that supply time zone information"
+          },
+          {
+            "label": "Publishers",
+            "detail": "Aggregate input and generate time zone data"
+          },
+          {
+            "label": "Root providers",
+            "detail": "Obtain data from publishers and serve it",
+            "highlight": true
+          },
+          {
+            "label": "Secondary providers",
+            "detail": "Caches of roots that handle the bulk of requests",
+            "highlight": true
+          },
+          {
+            "label": "Clients",
+            "detail": "Applications and operating systems that use the data"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE SIX TZDIST ACTIONS",
+      "data": {
+        "items": [
+          {
+            "code": "capabilities",
+            "label": "{/service-prefix}/capabilities",
+            "desc": "What the server supports."
+          },
+          {
+            "code": "list",
+            "label": "zones{?changedsince}",
+            "desc": "All zone identifiers with metadata and a synchronization token.",
+            "highlight": true
+          },
+          {
+            "code": "get",
+            "label": "zones{/tzid}{?start,end}",
+            "desc": "One time zone, optionally truncated."
+          },
+          {
+            "code": "expand",
+            "label": "zones{/tzid}/observances{?start,end}",
+            "desc": "A zone expanded into observances."
+          },
+          {
+            "code": "find",
+            "label": "zones{?pattern}",
+            "desc": "Match identifiers, aliases or localized names."
+          },
+          {
+            "code": "leapseconds",
+            "label": "{/service-prefix}/leapseconds",
+            "desc": "Leap-second information."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "INCREMENTAL SYNC (SECTION 4.1.4; ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "TZDIST server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "list (first time)",
+            "color": "blue",
+            "note": "Returns all zones, a synctoken and an etag per zone."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "synctoken + zone metadata",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "list?changedsince=token",
+            "color": "blue",
+            "note": "Later poll with the saved token."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "only changed zones + new token",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "get (if etag differs)",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "time zone data + ETag",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "EXPANDED OBSERVANCES (RFC 7808, SECTION 5.4.1)",
+      "data": {
+        "title": "expand response excerpt",
+        "lang": "json",
+        "code": "{\n  \"tzid\": \"America/New_York\",\n  \"observances\": [\n    {\n      \"name\": \"Daylight\",\n      \"onset\": \"2008-03-09T07:00:00Z\",\n      \"utc-offset-from\": -18000,\n      \"utc-offset-to\": -14400\n    }\n  ]\n}"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5545]",
+      "text": "Desruisseaux, B., Ed., \"Internet Calendaring and Scheduling Core Object Specification (iCalendar)\", RFC 5545, September 2009.",
+      "rfc": 5545
+    },
+    {
+      "number": "[RFC6557]",
+      "text": "Lear, E., Ed. and Eggert, P., Ed., \"Procedures for Maintaining the Time Zone Database\", BCP 175, RFC 6557, February 2012.",
+      "rfc": 6557
+    },
+    {
+      "number": "[RFC7159]",
+      "text": "Bray, T., Ed., \"The JavaScript Object Notation (JSON) Data Interchange Format\", RFC 7159, March 2014.",
+      "rfc": 7159
+    },
+    {
+      "number": "[RFC7230]",
+      "text": "Fielding, R., Ed. and J. Reschke, Ed., \"Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing\", RFC 7230, June 2014.",
+      "rfc": 7230
+    },
+    {
+      "number": "[RFC7232]",
+      "text": "Fielding, R., Ed. and J. Reschke, Ed., \"Hypertext Transfer Protocol (HTTP/1.1): Conditional Requests\", RFC 7232, June 2014.",
+      "rfc": 7232
+    },
+    {
+      "number": "[RFC6570]",
+      "text": "Gregorio, J., Fielding, R., Hadley, M., Nottingham, M., and D. Orchard, \"URI Template\", RFC 6570, March 2012.",
+      "rfc": 6570
+    },
+    {
+      "number": "[RFC2782]",
+      "text": "Gulbrandsen, A., Vixie, P., and L. Esibov, \"A DNS RR for specifying the location of services (DNS SRV)\", RFC 2782, February 2000.",
+      "rfc": 2782
+    },
+    {
+      "number": "[RFC6763]",
+      "text": "Cheshire, S. and M. Krochmal, \"DNS-Based Service Discovery\", RFC 6763, February 2013.",
+      "rfc": 6763
+    },
+    {
+      "number": "[RFC5785]",
+      "text": "Nottingham, M. and E. Hammer-Lahav, \"Defining Well-Known Uniform Resource Identifiers (URIs)\", RFC 5785, April 2010.",
+      "rfc": 5785
+    },
+    {
+      "number": "[RFC7807]",
+      "text": "Nottingham, M. and E. Wilde, \"Problem Details for HTTP APIs\", RFC 7807, March 2016.",
+      "rfc": 7807
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

@@ -30,6 +30,17 @@ describe('validate', () => {
     expect(validateOutput(768, validOutput(), env)).toEqual([]);
   });
 
+  test('naming GitHub anywhere is rejected (site policy)', () => {
+    has(
+      errorsFor((o) => (o.sections[0].content = '<p>Test vectors live in a GitHub repository.</p>')),
+      'names GitHub',
+    );
+    has(
+      errorsFor((o) => (o.today = '<p>Mirrored on github.com.</p>')),
+      'names GitHub',
+    );
+  });
+
   test('extra and missing top-level keys', () => {
     const e = errorsFor((o) => {
       o.provenance = { source: 'human' };

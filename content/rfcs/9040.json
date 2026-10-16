@@ -9,13 +9,159 @@
   },
   "questions": [
     "tcp control block interdependence",
-    "can tcp connections share state"
+    "can tcp connections share state",
+    "what is a tcp control block",
+    "what is temporal sharing in tcp",
+    "what is ensemble sharing in tcp"
+  ],
+  "tags": [
+    "TCP",
+    "Transport",
+    "Performance"
+  ],
+  "subtitle": "How TCP connections to the same host can reuse what earlier or parallel connections learned.",
+  "tldr": {
+    "problem": "Each TCP connection normally learns about its network path from scratch, which slows down the many short-lived connections used by the Web.",
+    "mechanism": "Implementations can keep a cache of TCP Control Block values per host pair and use it to initialize new connections, either from past ones (temporal sharing) or from concurrent ones (ensemble sharing).",
+    "outcome": "Sharing affects only how a connection starts, so it does not change TCP's long-term behavior or interoperability. This memo replaces RFC 2140.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Obsoletes",
+      "value": "RFC 2140"
+    },
+    {
+      "label": "Sharing kinds",
+      "value": "Temporal and ensemble"
+    },
+    {
+      "label": "Standard initial window",
+      "value": "4 segments (10 experimentally)"
+    },
+    {
+      "label": "Ensemble sharing in implementations",
+      "value": "Not yet implemented"
+    }
+  ],
+  "today": "<p>RFC 9040 is an Informational RFC that obsoletes <a href='/2140/'>RFC 2140</a>, and it has not been obsoleted or updated. Its implementation survey describes the state of Windows, Apple, Linux 5.10.3 and FreeBSD 12 as of the dates given in the RFC.</p>",
+  "glossary": [
+    "tcp",
+    "congestion-control",
+    "mss",
+    "path-mtu",
+    "mtu",
+    "path-mtu-discovery"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>Each TCP connection keeps state in a data structure usually called the <strong>TCP Control Block</strong> (TCB). As originally specified, most TCB information is kept per connection. Some implementations share certain TCB information across connections to the same host, as described in RFC 2140. The aim is better transient performance, especially for numerous short-lived and simultaneous connections such as those used on the Web.</p><p>This RFC is a complete replacement for <a href='/2140/'>RFC 2140</a>. It says sharing affects only TCB initialization, so it has no effect on TCP's long-term behavior once a connection is established or on interoperability. The core of the document describes behavior already permitted by TCP standards, so it is informative and uses no normative language outside quotations and Appendix C.</p>",
+      "eli5": "<p>Instead of every new phone call starting by figuring out how noisy the line is, the phone remembers what it learned on earlier calls to the same person.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "2",
+      "title": "What Lives in a TCB",
+      "content": "<p>The TCB holds local process state (buffers and queues) and per-connection state. The per-connection state is split into <strong>macro-state</strong> (connection state, timers, flags, endpoint numbers and TCP option state) and <strong>micro-state</strong> (window state, the congestion window <code>sendcwnd</code>, <code>ssthresh</code>, <code>sendMSS</code>, <code>MMS_S</code>, <code>MMS_R</code>, <code>PMTU</code>, and round-trip time and its variation).</p><p>Some micro-state is clearly tied to the host pair: <code>sendMSS</code>, <code>MMS_R</code>, <code>MMS_S</code>, <code>PMTU</code> and RTT. Other values, such as congestion window information, are host-pair dependent in aggregate because they depend on the total capacity between the two endpoints. Not all state can be shared: some TCP options are negotiated only on request of the application or set connection-specific parameters. The receive window <code>rwnd</code> is excluded because it depends on the send window.</p>",
+      "eli5": "<p>Some things a connection knows are about the two computers talking, like how long messages take. Those can be reused. Other things are only about one chat, and those cannot.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Temporal and Ensemble Sharing",
+      "content": "<p>There are two cases. <strong>Temporal sharing</strong> uses the TCB of an earlier, now CLOSED connection to a host to initialize a new connection to the same host. <strong>Ensemble sharing</strong> uses a currently active connection to initialize another concurrent connection.</p><p>With temporal sharing, a new TCB can start from the cached <code>sendMSS</code>, <code>PMTU</code>, RTT, RTTVAR, <code>ssthresh</code> and <code>sendcwnd</code>. Most cached values are updated when a connection closes, using a <code>merge</code> function. The RFC does not specify it; examples are a windowed average or exponential decay. The exceptions are MMS_R, MMS_S, PMTU and <code>sendMSS</code>, which update when reported by IP or when an MSS option arrives.</p><p>With ensemble sharing, values like MSS and RTT can be copied, but the congestion window and <code>ssthresh</code> act in aggregate, so a new value is a function of the cumulative values and the number of connections. Information should be cached as early as possible, because otherwise concurrent connections may share nothing if none closes before the others open. TCP Fast Open cookie and failure state can also be shared, and client SYN options should not be added to shared values until the three-way handshake completes.</p>",
+      "eli5": "<p>Temporal sharing is remembering what happened the last time you went to the same park. Ensemble sharing is asking the friend already on the swings how it is going before you join.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "4",
+      "title": "Problems with Sharing",
+      "content": "<p>Shared congestion values may not match the long-term behavior of a group of connections. For example, if one connection's window has converged to 40 segments, two newly joining connections start with initial windows of 10 segments and the first window does not shrink, so the three can interfere. Some studies suggest that sharing <code>ssthresh</code> between short flows can hurt individual connections.</p><p>Sharing assumes the same host pair means the same path. That may fail with multipath routing that depends on transport headers, such as ECMP and LAG, or with some tunnels and encrypted headers. Sharing by IP address can also be wrong if an address is reassigned to a new host, or when NAT or NAPT is in use. Connections that are in Fast Recovery may need special consideration.</p>",
+      "eli5": "<p>If you assume the new road is as empty as the old one, you may all arrive at the same crossing at once and bump into each other.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Implications and Implementations",
+      "content": "<p>TCB interdependence can reduce the need for application-layer multiplexing such as HTTP/2 for performance, giving the same \"slow-start restart avoidance\" without a multiplexing mechanism. It moves part of TCP state toward the network layer, but RTT is still computed in the TCP layer. The same ideas could apply to protocols with congestion state, such as SCTP and DCCP, and to subflows of Multipath TCP.</p><p>The RFC reports the status of temporal sharing in Windows (as of December 2020), Apple operating systems (January 2021), Linux 5.10.3 and FreeBSD 12. RTT is cached and shared in all four, and <code>sendcwnd</code>, MMS_S and MMS_R are not shared. It states that ensemble sharing is not yet implemented. Appendix C proposes using sharing over long timescales to adapt TCP's initial window automatically.</p>",
+      "eli5": "<p>It is a bit like many people keeping a shared note about the roads, instead of each one driving every road to find out.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Sharing adds no new risk for direct attacks on individual connections. However, polluting the cached information could allow denial-of-service attacks on other connections that use the cache. For example, a false small window size would degrade later connections until their window grows. PMTU, which is cached at the IP layer, is already open to this.</p><p>Options in client SYNs are easier to forge, so they should not be added to shared values until after the three-way handshake completes. The RFC says reuse could in principle allow fingerprinting of hosts, but mixing reduces that potential, there has been no evidence of it, and performance information has not been considered private.</p>",
+      "eli5": "<p>If someone writes a wrong note in the shared notebook, later readers get misled, so only trust notes that were checked.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "TEMPORAL VERSUS ENSEMBLE SHARING",
+      "data": {
+        "columns": [
+          "Kind",
+          "Source of the cached state",
+          "Congestion window and ssthresh"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Temporal sharing",
+              "An earlier connection, now CLOSED",
+              "Reused, merged on close"
+            ]
+          },
+          {
+            "cells": [
+              "Ensemble sharing",
+              "Currently active concurrent connections",
+              "A function of the sums and the number of connections"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC0793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2140]",
+      "text": "Touch, J., \"TCP Control Block Interdependence\", RFC 2140, April 1997.",
+      "rfc": 2140
+    },
+    {
+      "number": "[RFC1191]",
+      "text": "Mogul, J. and S. Deering, \"Path MTU discovery\", RFC 1191, November 1990.",
+      "rfc": 1191
+    },
+    {
+      "number": "[RFC7413]",
+      "text": "Cheng, Y., et al., \"TCP Fast Open\", RFC 7413, December 2014.",
+      "rfc": 7413
+    },
+    {
+      "number": "[RFC6928]",
+      "text": "Chu, J., et al., \"Increasing TCP's Initial Window\", RFC 6928, April 2013.",
+      "rfc": 6928
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

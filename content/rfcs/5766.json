@@ -20,13 +20,272 @@
   },
   "questions": [
     "what is turn",
-    "how does a turn relay work with nat"
+    "how does a turn relay work with nat",
+    "how does turn relay traffic",
+    "turn vs stun",
+    "what is a turn allocation",
+    "what is a channelbind in turn"
+  ],
+  "tags": [
+    "NAT Traversal",
+    "Relays",
+    "STUN"
+  ],
+  "subtitle": "How a host stuck behind a NAT asks a public server to relay its packets to peers it cannot reach directly.",
+  "tldr": {
+    "problem": "Two hosts behind badly behaved NATs often cannot reach each other even with hole punching, so there is no direct path between them.",
+    "mechanism": "TURN extends STUN so a client can ask a server for a relayed transport address, then send data to peers through the server and receive their replies the same way.",
+    "outcome": "RFC 5766 is a Proposed Standard that has been obsoleted by RFC 8656, which is the current TURN specification.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Default allocation lifetime",
+      "value": "10 minutes"
+    },
+    {
+      "label": "Permission lifetime",
+      "value": "5 minutes"
+    },
+    {
+      "label": "Channel binding lifetime",
+      "value": "10 minutes"
+    },
+    {
+      "label": "Channel numbers",
+      "value": "0x4000 through 0x7FFF"
+    },
+    {
+      "label": "ChannelData header",
+      "value": "4 bytes"
+    },
+    {
+      "label": "Server to peer transport",
+      "value": "UDP only"
+    }
+  ],
+  "today": "<p>RFC 5766 is a Proposed Standard that has been obsoleted by <a href='/8656/'>RFC 8656</a>, and it was updated by <a href='/8155/'>RFC 8155</a> and <a href='/8553/'>RFC 8553</a>. Use RFC 8656 for the current TURN specification.</p>",
+  "glossary": [
+    "nat",
+    "nat-traversal",
+    "udp",
+    "tls",
+    "nonce",
+    "realm",
+    "fragmentation",
+    "stun",
+    "five-tuple",
+    "hole-punching",
+    "port-number",
+    "mtu"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a Relay Is Needed",
+      "content": "<p>Hosts behind NATs normally try <strong>hole punching</strong> to find a direct path to each other. The RFC says this generally fails when both hosts are behind NATs with an \"address-dependent mapping\" or \"address- and port-dependent mapping\" behavior. When no direct path exists, an intermediate host has to relay the packets.</p><p><strong>TURN</strong> (Traversal Using Relays around NAT) lets a host behind a NAT, the TURN client, ask another host, the TURN server, to act as that relay. The server hands out an IP address and port on itself, called the relayed transport address. Packets that peers send there are passed to the client, and packets the client sends are passed to the peer with the relayed address as the source.</p><p>Relaying is costly because the server needs a high-bandwidth connection, so the RFC says a TURN server is best used only when no direct path can be found. TURN was designed as one piece of the ICE approach to NAT traversal, which tries direct paths first, but it can be used without ICE. How the client tells its peers about the relayed address is outside the protocol.</p>",
+      "eli5": "<p>Sometimes two computers cannot talk straight to each other because of the walls around their networks. TURN lets them both talk to a helper outside the walls, and the helper passes the messages along.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Clients, Servers, Peers and Allocations",
+      "content": "<p>TURN is an extension of STUN, and most TURN messages are STUN-formatted. The client talks to the server from its <strong>host transport address</strong> (an IP address and port). Because a NAT sits in between, the server sees the client at its <strong>server-reflexive transport address</strong>. A peer behind a NAT must likewise be named by its server-reflexive address, not its host address.</p><p>The client creates an <strong>allocation</strong> on the server, a data structure that holds the relayed transport address plus related state such as permissions and timers. An allocation belongs to one client and is identified by its relayed address. Client and server both track the <strong>5-tuple</strong>: client address and port, server address and port, and the transport protocol. A second allocation needs a different 5-tuple.</p><p>Between client and server, TURN messages can travel over UDP, TCP or TLS over TCP. TCP is supported because some firewalls block UDP entirely, and TLS because it lets the client check it is talking to the right server and keeps control messages confidential. Between server and peer this specification uses only UDP, and it supports only IPv4.</p>",
+      "eli5": "<p>The helper gives you your own mailbox number on its street. Anyone who drops a letter in that mailbox gets it passed to you, and the helper remembers which mailbox is yours by how you contacted it.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Allocating, Refreshing and Permissions",
+      "content": "<p>The client sends an <code>Allocate</code> request. The server requires authentication, normally STUN's long-term credential mechanism, so the first request is typically answered with a 401 (Unauthorized) and the client retries with credentials. The success response carries the relayed transport address. The default lifetime of an allocation is 10 minutes, so the client sends periodic <code>Refresh</code> requests, and a Refresh with a requested lifetime of 0 deletes the allocation.</p><p>To ease enterprise concerns that TURN could bypass firewalls, an allocation has <strong>permissions</strong> that mimic the address-restricted filtering of a compliant NAT. A permission is an IP address and a lifetime. A UDP datagram arriving at the relayed address is relayed only if its source IP matches a permission; otherwise it is silently discarded. A permission expires after 5 minutes unless refreshed, and cannot be explicitly deleted. The client installs or refreshes permissions with <code>CreatePermission</code> (several at once) or <code>ChannelBind</code>.</p><p>Requests after the first Allocate must use the same username that created the allocation, or the server rejects them with a 441 (Wrong Credentials) error.</p>",
+      "eli5": "<p>You have to show your ticket to get a mailbox, and you must check in every so often or the helper gives it away. You also give the helper a list of people allowed to send you mail, and everyone else's letters get thrown out.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Sending Data: Indications and Channels",
+      "content": "<p>There are two ways to move application data. The first uses <code>Send</code> and <code>Data</code> indications. The client puts the peer's address in an <code>XOR-PEER-ADDRESS</code> attribute and the payload in a <code>DATA</code> attribute; the server unwraps it and sends a UDP datagram to the peer. In the other direction the server wraps each datagram from a peer in a Data indication. This adds 36 bytes of overhead, which can matter for applications such as Voice over IP. Indications cannot be authenticated, so the client must install a permission for a peer before sending to it.</p><p>The second way is <strong>channels</strong>. The client sends a <code>ChannelBind</code> request tying a channel number to a peer address. After that, data travels in <code>ChannelData</code> messages, which have a 4-byte header with a 16-bit channel number and a 16-bit length instead of the STUN header. Allowed channel numbers run from 0x4000 through 0x7FFF. Bindings last 10 minutes unless refreshed and, like permissions, cannot be deleted.</p><p>A client may mix both methods, but once a channel is bound the server always uses ChannelData for that peer. Because the first two bits of a ChannelData message are <code>01</code> and a STUN message always starts with <code>00</code>, the two can be told apart.</p>",
+      "eli5": "<p>You can write the full address on every letter, which is slow and bulky, or you can agree on a short code number for a friend and just write the code. The helper understands both.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Limits of an Unprivileged Relay",
+      "content": "<p>The server is meant to run as an ordinary user-space application, which makes it easy to deploy, even inside a peer-to-peer program. The consequences listed by the RFC are that the Diffserv value may not be preserved, the TTL may be reset rather than decremented, the ECN field may be reset, ICMP messages are not relayed, and there is no end-to-end fragmentation because the packet is reassembled at the server.</p><p>Since UDP is used, applications must avoid IP fragmentation themselves. As a guideline, sending at most 500 bytes of application data per TURN message or peer datagram generally avoids it, and ChannelData has less overhead than indications. Classic path MTU discovery does not work because ICMP is not relayed, so the RFC points to a method that needs no ICMP and defines a <code>DONT-FRAGMENT</code> attribute that asks the server to set the DF bit.</p><p>For older RTP that wanted an even port, the client can use <code>EVEN-PORT</code> to ask for an even relayed port and optionally reserve the next one, and a <code>RESERVATION-TOKEN</code> later claims it.</p>",
+      "eli5": "<p>The helper does not have special powers, so some details of your letters can get changed on the way. Keep letters small so they do not have to be torn into pieces.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Most attacks are blocked by requiring authentication; the mandatory-to-implement mechanism is STUN's long-term credential mechanism, and equally strong alternatives are allowed. This stops outsiders from obtaining allocations or sending forged Refresh and CreatePermission requests. The mechanism is open to offline dictionary attacks against weak passwords, which strong passwords or TLS transport between client and server can mitigate.</p><p>Send and Data indications are unauthenticated, so an attacker could inject fake data, and the RFC advises applications that want proper security to encrypt the data between client and peer. Against insiders, the server should limit the bandwidth per username and the number of active allocations per username. Because a TURN server hides the client's IP address, logging the client's real source address and its permissions is suggested for tracing abuse.</p><p>Relayed addresses will not work with IPsec Authentication Header, but tunnel-mode ESP should still work.</p>",
+      "eli5": "<p>The helper checks your ticket before doing anything, because otherwise strangers could use it to send nasty mail or to cancel your mailbox.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "SEND AND DATA INDICATIONS (BASED ON FIGURE 3 OF RFC 5766)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "TURN client"
+          },
+          {
+            "key": "server",
+            "label": "TURN server"
+          },
+          {
+            "key": "peer-a",
+            "label": "Peer A"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "CreatePermission request (Peer A)",
+            "color": "blue",
+            "note": "Installs a permission for Peer A."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "CreatePermission success response",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Send indication (Peer A)",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "peer-a",
+            "label": "UDP datagram",
+            "color": "neutral",
+            "note": "Source is the relayed transport address."
+          },
+          {
+            "from": "peer-a",
+            "to": "server",
+            "label": "UDP datagram",
+            "color": "neutral"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Data indication (Peer A)",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "CHANNELDATA MESSAGE HEADER (RFC 5766)",
+      "data": {
+        "title": "ChannelData header",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "channel-number",
+            "name": "Channel Number",
+            "bits": 16,
+            "desc": "Identifies the channel, and so the peer. Valid values are 0x4000 through 0x7FFF."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Length in bytes of the application data that follows; 0 is valid."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "NEW STUN ERROR CODES DEFINED BY RFC 5766",
+      "data": {
+        "items": [
+          {
+            "code": "403",
+            "label": "Forbidden",
+            "desc": "Valid request refused because of administrative or similar restrictions."
+          },
+          {
+            "code": "437",
+            "label": "Allocation Mismatch",
+            "desc": "The request needs an allocation that does not exist, or needs none and one exists."
+          },
+          {
+            "code": "441",
+            "label": "Wrong Credentials",
+            "desc": "Credentials differ from those used to create the allocation."
+          },
+          {
+            "code": "442",
+            "label": "Unsupported Transport Protocol",
+            "desc": "The server does not support the requested protocol between server and peer."
+          },
+          {
+            "code": "486",
+            "label": "Allocation Quota Reached",
+            "desc": "No more allocations for this username can be created now."
+          },
+          {
+            "code": "508",
+            "label": "Insufficient Capacity",
+            "desc": "The server hit a capacity limit, for example no relayed addresses left."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5389]",
+      "text": "Rosenberg, J., Mahy, R., Matthews, P., and D. Wing, \"Session Traversal Utilities for NAT (STUN)\", RFC 5389, October 2008.",
+      "rfc": 5389
+    },
+    {
+      "number": "[RFC5245]",
+      "text": "Rosenberg, J., \"Interactive Connectivity Establishment (ICE): A Protocol for Network Address Translator (NAT) Traversal for Offer/Answer Protocols\", RFC 5245, April 2010.",
+      "rfc": 5245
+    },
+    {
+      "number": "[RFC4787]",
+      "text": "Audet, F. and C. Jennings, \"Network Address Translation (NAT) Behavioral Requirements for Unicast UDP\", BCP 127, RFC 4787, January 2007.",
+      "rfc": 4787
+    },
+    {
+      "number": "[RFC3424]",
+      "text": "Daigle, L. and IAB, \"IAB Considerations for UNilateral Self-Address Fixing (UNSAF) Across Network Address Translation\", RFC 3424, November 2002.",
+      "rfc": 3424
+    },
+    {
+      "number": "[RFC1191]",
+      "text": "Mogul, J. and S. Deering, \"Path MTU discovery\", RFC 1191, November 1990.",
+      "rfc": 1191
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

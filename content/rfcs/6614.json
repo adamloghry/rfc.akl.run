@@ -9,13 +9,199 @@
   },
   "questions": [
     "how to secure radius with tls",
-    "what is radsec"
+    "what is radsec",
+    "what port does radius over tls use",
+    "why is the radius shared secret radsec",
+    "how does radius over tls authenticate peers"
+  ],
+  "tags": [
+    "Security",
+    "AAA",
+    "TLS"
+  ],
+  "subtitle": "How to wrap RADIUS in a TLS session over TCP so that logins and accounting travel encrypted and peers can verify each other with certificates.",
+  "tldr": {
+    "problem": "Classic RADIUS runs over UDP and protects only parts of each packet with a shared secret built on MD5, which is known to be weak. Static trust based on IP address and shared secret also does not scale across organisations.",
+    "mechanism": "RADIUS/TLS opens a TCP connection to port 2083, runs a TLS session with mutual authentication, and sends ordinary RADIUS packets inside it. The old shared secret is fixed to the string radsec.",
+    "outcome": "The whole RADIUS payload is encrypted and peers can be authenticated with X.509 certificates, fingerprints or pre-shared keys. The RFC is only Experimental, and the authors say it is not yet decided whether it should go to the Standards Track.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Default port",
+      "value": "TCP/2083"
+    },
+    {
+      "label": "Fixed shared secret",
+      "value": "radsec"
+    },
+    {
+      "label": "Minimum TLS version",
+      "value": "TLS 1.1 or later"
+    },
+    {
+      "label": "Mandatory cipher suite",
+      "value": "TLS_RSA_WITH_3DES_EDE_CBC_SHA"
+    },
+    {
+      "label": "Fingerprint hash",
+      "value": "SHA-1 required, SHA-256 recommended"
+    },
+    {
+      "label": "Error-Cause for unwanted packets",
+      "value": "406 (Unsupported Extension)"
+    }
+  ],
+  "today": "<p>RFC 6614 is an Experimental RFC, and it has been updated by <a href='/8996/'>RFC 8996</a> and <a href='/9765/'>RFC 9765</a>, so read those alongside it. The RFC itself says it was published for examination, experimental implementation and evaluation, and that it was undecided whether the approach would be chosen for the Standards Track.</p>",
+  "glossary": [
+    "radius",
+    "tls",
+    "tcp",
+    "cipher-suite",
+    "pre-shared-key",
+    "shared-secret",
+    "x509-certificate",
+    "certificate-authority",
+    "subject-alternative-name",
+    "md5-hash",
+    "head-of-line-blocking",
+    "eap"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why RADIUS Needs TLS",
+      "content": "<p><strong>RADIUS</strong> is a widely deployed authentication and authorization protocol, and RADIUS Accounting adds accounting on top of it. The RFC lists its shortcomings: it depends on unreliable UDP, and large parts of its packet payload have no security. Its security rests on the MD5 algorithm, which the RFC says has been proven insecure.</p><p>RADIUS over TLS wraps the entire RADIUS packet payload in a TLS stream, so attacks on MD5 matter much less. The most important use is in roaming environments, where packets cross different administrative domains and untrusted, potentially hostile networks. The RFC names eduroam as a worldwide roaming environment that uses it.</p><p>The second motivation is trust. Plain RADIUS peers trust each other by IP address and shared secret, so large deployments need chains of proxies. That adds failure points, delay and middleboxes that may learn privacy-relevant data. With TLS, peers can instead be identified by checking a certificate, for example its issuer and other properties.</p>",
+      "eli5": "<p>Old RADIUS sent its messages in see-through envelopes with a flimsy seal. This new way puts them in a strong locked box, and the two sides check each other's ID before talking.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "2.3",
+      "title": "Setting Up the Connection",
+      "content": "<p>The default destination port for RADIUS over TLS is <code>TCP/2083</code>. There are no separate ports for authentication, accounting and dynamic authorization changes, and the source port is arbitrary. TLS is never negotiated inside an existing connection: servers and clients must be preconfigured to use RADIUS/TLS for a given endpoint.</p><p>A node first establishes a TCP connection as described in <a href='/6613/'>RFC 6613</a>. If it fails to connect, it keeps retrying with exponentially growing intervals, and it MAY try other configured servers in parallel for quick failover. Immediately after the TCP handshake it negotiates TLS. Support for TLS 1.1 or later (for example TLS 1.2) is REQUIRED, and implementations MUST NOT negotiate versions prior to 1.1.</p><p>Several TLS features are required: certificate-based mutual authentication, negotiated mutual authentication, and a cipher suite that provides both confidentiality and integrity. Compression and TLS-PSK are OPTIONAL. At a minimum, implementations MUST support <code>TLS_RSA_WITH_3DES_EDE_CBC_SHA</code> and SHOULD support <code>TLS_RSA_WITH_RC4_128_SHA</code> and <code>TLS_RSA_WITH_AES_128_CBC_SHA</code>.</p>",
+      "eli5": "<p>Before talking, both sides agree to use a secret code. They must use the new, safer rules and a code that hides the message and also shows if someone changed it.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "2.4",
+      "title": "Authenticating Peers and Identifying Clients",
+      "content": "<p>The RFC defines three ways to authenticate a peer. TLS with X.509 certificates under a PKIX trust model is mandatory to implement. Implementations MUST allow a list of trusted Certification Authorities to be configured, and certificate validation MUST follow <a href='/5280/'>RFC 5280</a>. Peer validation always checks that the configured DNS name or IP address of the contacted server matches the presented certificate, with <code>subjectAltName</code> taking precedence over the Common Name.</p><p>The other two models are optional. Certificate fingerprints identify trusted certificates by a hash of the DER encoded certificate octets. Implementations MUST support SHA-1 for this and SHOULD offer something stronger such as SHA-256 (RECOMMENDED). TLS-PSK uses pre-shared keys.</p><p>In plain RADIUS a client is identified by its IP address, so several clients on one address must share one secret, which the RFC calls inherently insecure. Under RADIUS/TLS a client is identified by its TLS identifier (PSK), by its certificate fingerprint, or by the tuple of certificate serial number and issuer (PKIX). Being identified does not mean being trusted: a server may still decline to talk to a client whose issuer is not trusted.</p>",
+      "eli5": "<p>Each side shows an ID card. There are three kinds of ID: one signed by a trusted office, one matched against a list of known cards, or a secret handshake you agreed on earlier.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "2.5",
+      "title": "Carrying RADIUS Packets Inside TLS",
+      "content": "<p>Once TLS is up, the nodes exchange ordinary RADIUS datagrams. Clients send the same packet types a RADIUS/UDP client would, such as <code>Access-Request</code> and <code>Accounting-Request</code>, and servers send the same types a RADIUS/UDP server would, such as <code>Access-Accept</code> and <code>Access-Challenge</code>.</p><p>Because TCP is a stream, packet boundaries are found by reading each packet's <code>Length</code> field, not by the size of a datagram. Senders must therefore get the Length right, since a wrong value can no longer be caught by a differing datagram boundary.</p><p>The old shared secret, still used for the obsolete MD5 integrity checks and attribute encryption, MUST be the fixed string <code>radsec</code>. TLS already provides integrity and encryption, and a fixed string removes a source of misconfiguration.</p><p>A single port carries all packet types, so a server must signal what it does not support. For an unwanted <code>CoA-Request</code> or <code>Disconnect-Request</code> it answers with a NAK that SHOULD carry an <code>Error-Cause</code> attribute with value 406 (Unsupported Extension). For an unwanted <code>Accounting-Request</code> it SHOULD reply with an Accounting-Response carrying the same Error-Cause, and the accounting client SHOULD log the error and stop sending.</p>",
+      "eli5": "<p>Inside the locked box, the messages look just like old RADIUS messages. A fixed word, radsec, is used where a secret word used to go, and a server that does not want a certain kind of message sends back a polite no.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations and Limits",
+      "content": "<p>Setting up a TLS tunnel costs far more computing than sending mostly unencrypted UDP datagrams, so a malicious client can create high load, and a denial-of-service attack becomes easier. Cipher suites that give integrity but no encryption are forbidden: with the secret fixed to <code>radsec</code>, using one would expose the whole payload, including <code>User-Password</code>, to intermediate IP nodes.</p><p>The RFC also describes a bidding-down attack. If a pair of devices is configured for both RADIUS/TLS and RADIUS/UDP, with UDP as failover, an attacker who blocks the TCP connection can push traffic down to the weaker MD5 protection. The advice is to disable the UDP transport as soon as the TLS connection is established and tested.</p><p>TLS protects each hop, not the path. Proxies in between can still inspect packets, so end-to-end encryption is not provided. One common way to protect passwords from untrusted proxies is EAP with TLS-based methods. Finally, since fingerprints identify peers, a hash collision would make two certificates the same client, which is why the RFC says a later revision will likely demand stronger hash functions than SHA-1.</p>",
+      "eli5": "<p>The locked box protects a message while it travels from one stop to the next, but each stop can open it. Also, building a locked box takes effort, so a troublemaker could keep asking for new ones to slow a server down.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "THREE PEER AUTHENTICATION MODELS (RFC 6614)",
+      "data": {
+        "columns": [
+          "Model",
+          "Client identified by",
+          "Implementation"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "TLS with X.509, PKIX trust",
+              "Certificate serial number and issuer",
+              "Mandatory"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "TLS with X.509, fingerprints",
+              "Fingerprint of the client certificate",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "TLS-PSK",
+              "TLS identifier",
+              "Optional"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2865]",
+      "text": "Rigney, C., Willens, S., Rubens, A., and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "rfc": 2865
+    },
+    {
+      "number": "[RFC2866]",
+      "text": "Rigney, C., \"RADIUS Accounting\", RFC 2866, June 2000.",
+      "rfc": 2866
+    },
+    {
+      "number": "[RFC6613]",
+      "text": "DeKok, A., \"RADIUS over TCP\", RFC 6613, May 2012.",
+      "rfc": 6613
+    },
+    {
+      "number": "[RFC5246]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.2\", RFC 5246, August 2008.",
+      "rfc": 5246
+    },
+    {
+      "number": "[RFC4346]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.1\", RFC 4346, April 2006.",
+      "rfc": 4346
+    },
+    {
+      "number": "[RFC4279]",
+      "text": "Eronen, P. and H. Tschofenig, \"Pre-Shared Key Ciphersuites for Transport Layer Security (TLS)\", RFC 4279, December 2005.",
+      "rfc": 4279
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC5176]",
+      "text": "Chiba, M., et al., \"Dynamic Authorization Extensions to Remote Authentication Dial In User Service (RADIUS)\", RFC 5176, January 2008.",
+      "rfc": 5176
+    },
+    {
+      "number": "[RFC6421]",
+      "text": "Nelson, D., \"Crypto-Agility Requirements for Remote Authentication Dial-In User Service (RADIUS)\", RFC 6421, November 2011.",
+      "rfc": 6421
+    },
+    {
+      "number": "[RFC3539]",
+      "text": "Aboba, B. and J. Wood, \"Authentication, Authorization and Accounting (AAA) Transport Profile\", RFC 3539, June 2003.",
+      "rfc": 3539
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

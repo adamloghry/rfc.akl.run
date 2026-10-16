@@ -22,13 +22,252 @@
   "questions": [
     "what is tcp sack",
     "what is selective acknowledgment",
-    "how does tcp know which packets were lost"
+    "how does tcp know which packets were lost",
+    "how many sack blocks fit in a tcp option",
+    "what is sack permitted"
+  ],
+  "tags": [
+    "TCP",
+    "Loss Recovery",
+    "Options"
+  ],
+  "subtitle": "How a TCP receiver can tell the sender exactly which out-of-order blocks it already holds, so only the gaps are resent.",
+  "tldr": {
+    "problem": "TCP acknowledgments are cumulative, so when several packets are lost from one window the sender can learn about only one loss per round trip time, or must resend segments that may already have arrived.",
+    "mechanism": "A SACK-permitted option on the SYN enables the feature, and a SACK option on later ACKs lists blocks of contiguous data the receiver holds, as pairs of 32-bit left and right edges.",
+    "outcome": "The sender retransmits only the missing segments. RFC 2018 is a Proposed Standard and obsoletes RFC 1072.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "SACK-permitted option",
+      "value": "Kind 4, Length 2"
+    },
+    {
+      "label": "SACK option",
+      "value": "Kind 5, Length 8*n+2 bytes"
+    },
+    {
+      "label": "Sequence numbers",
+      "value": "32-bit unsigned, network byte order"
+    },
+    {
+      "label": "Maximum blocks",
+      "value": "4 (3 with the Timestamp option)"
+    },
+    {
+      "label": "TCP option space",
+      "value": "40 bytes"
+    }
+  ],
+  "today": "<p>RFC 2018 is a Proposed Standard that obsoletes <a href='/1072/'>RFC 1072</a>, and the metadata lists no later RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "tcp",
+    "tcp-segment",
+    "sequence-number",
+    "retransmission",
+    "sliding-window",
+    "congestion-control",
+    "selective-acknowledgment",
+    "cumulative-acknowledgment"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "The Problem with Cumulative Acknowledgments",
+      "content": "<p>TCP uses a <strong>cumulative acknowledgment</strong> scheme: segments that are not at the left edge of the receive window are not acknowledged. When several segments from one window are lost, the sender must either wait a round trip time to find out about each loss, or needlessly resend segments that were received. Multiple drops generally make TCP lose its ACK-based clock, reducing throughput.</p><p><strong>Selective acknowledgment</strong> (SACK) fixes this by letting the data receiver report all segments that arrived, so the sender retransmits only those actually lost. The RFC notes that several transport protocols (NETBLT, XTP, RDP, NADIR and VMTP) already used selective acknowledgment.</p><p>RFC 1072 described an earlier SACK option for TCP, but it was never deployed in the Internet because of disagreement over how it interacted with the window shift option. RFC 2018 keeps that design with two changes: the most recently received data is reported first, which reduces the need for long options, and the option carries full 32-bit sequence numbers.</p>",
+      "eli5": "<p>If a teacher only says the last page you handed in, a missing page in the middle looks like the whole rest is missing. SACK lets the teacher list every page that did arrive.</p>"
+    },
+    {
+      "id": "options",
+      "number": "2",
+      "title": "The Two Options",
+      "content": "<p>SACK uses two TCP options. <strong>SACK-permitted</strong> is Kind 4 and Length 2. It may be sent only in a SYN segment, by a TCP that can receive and process SACK options once the connection opens, and it MUST NOT be sent on non-SYN segments.</p><p>The <strong>SACK option</strong> is Kind 5 with a variable length. It is sent by the data receiver to the data sender over an established connection. It lists blocks of contiguous data that have been received and queued, each as a Left Edge (the first sequence number of the block) and a Right Edge (the sequence number immediately after the last one), both 32-bit unsigned integers in network byte order. The bytes just below and just above each block have not been received.</p><p>The option does not change the meaning of the Acknowledgment Number field. When the missing segments arrive, the receiver acknowledges normally by advancing the left window edge.</p>",
+      "eli5": "<p>First both sides say they can speak SACK. After that, the receiver can add little notes saying which stretches of data it already has.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "Option Size and Block Limits",
+      "content": "<p>A SACK option that names n blocks has a length of 8*n+2 bytes. TCP options have 40 bytes of room, so at most 4 blocks fit. SACK is expected to be used often with the Timestamp option, which takes another 10 bytes plus two bytes of padding, and then a maximum of 3 blocks is allowed.</p><p>The option is advisory. It tells the sender that the receiver has the indicated segments, but the receiver is permitted to discard that data later, which the RFC calls reneging.</p>",
+      "eli5": "<p>There is only a small space on the note, so you can list at most four stretches of pages, or three if the note also carries a timestamp.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Receiver and Sender Behavior",
+      "content": "<p>If the receiver saw SACK-permitted on the SYN, it MAY generate SACK options; if it did not, it MUST NOT. If it generates them at all, it SHOULD generate them under all permitted circumstances. SACK options SHOULD be included in all ACKs that do not acknowledge the highest sequence number in the receiver's queue, and every valid segment bringing new data should get an ACK bearing a SACK option.</p><p>The first block MUST describe the contiguous block containing the segment that triggered the ACK, unless that segment advanced the Acknowledgment Number. The receiver SHOULD include as many distinct blocks as possible, filling the rest by repeating the most recently reported blocks, so each non-contiguous block is generally reported in at least three successive SACK options.</p><p>The sender SHOULD record SACK information. One possible implementation is a SACKed flag on each segment in the retransmission queue: segments wholly inside a reported block get the flag and are skipped during retransmission, while unflagged segments below the highest SACKed segment are available to resend. After a retransmit timeout the sender SHOULD clear all SACKed flags and MUST retransmit the segment at the left window edge, and it MUST ignore prior SACK information when deciding what to retransmit. A segment is freed only when the left window edge moves past it.</p>",
+      "eli5": "<p>The receiver always puts the newest news first on its note. The sender keeps a checklist of what has been confirmed and only resends the unchecked items.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "5",
+      "title": "Worked Examples",
+      "content": "<p>The RFC assumes a left window edge of 5000 and a burst of 8 segments of 500 bytes each. In case 1, the first 4 are received and the last 4 are dropped, and the receiver sends a normal ACK for 7000 with no SACK option.</p><p>In case 2, the first segment is lost and the other 7 arrive. Each of the seven ACKs acknowledges 5000 and carries a SACK block with left edge 5500 and a right edge that grows from 6000 up to 9000.</p><p>In case 3, the 2nd, 4th, 6th and 8th segments are dropped. The ACKs for the third, fifth and seventh segments carry one, two and then three blocks, with the newest block first. When the 4th segment later arrives, the receiver has only two blocks to report: 6000 to 7500 and 8000 to 8500. When the 2nd segment arrives, the ACK number advances to 7500 and one block, 8000 to 8500, remains.</p>",
+      "eli5": "<p>Say eight pages are sent and some are lost. Each time a page arrives the receiver says what it has so far, and the sender can see exactly which pages are still missing.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "6",
+      "title": "Congestion Control, Efficiency and Reneging",
+      "content": "<p>The RFC does not specify congestion control for SACK in detail, but the congestion control algorithms in de facto standard TCP MUST be preserved. For example, recovery is not triggered by a single ACK reporting out-of-order packets, and during recovery the sender limits how many segments it sends per ACK. Timeouts remain the fall-back for detecting drops.</p><p>If the ACK path were lossless, one block per option would be enough. Since it is not, the redundant blocks make delivery of SACK information robust against lost ACKs. If all ACKs reporting a block are dropped, the sender might needlessly retransmit that data, but the RFC argues this exposure is strictly less than in current TCP implementations. It also says older TCPs without SACK are not unfairly disadvantaged when competing with SACK-capable ones.</p><p>Because a receiver may discard SACKed data, the sender MUST NOT discard data until it is acknowledged by the Acknowledgment Number field. A receiver that does not keep reported data must still make the first block cover the newest segment and MUST NOT report old data it no longer holds.</p>",
+      "eli5": "<p>The sender keeps its copies of the pages until the receiver says it has everything up to that point, because the receiver is allowed to change its mind and throw some pages away.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The RFC says that it neither strengthens nor weakens TCP's current security properties, and it says nothing more on the subject.</p>",
+      "eli5": "<p>Adding these notes does not make the connection any safer or any less safe than it was.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "options",
+      "position": "after",
+      "caption": "TCP SACK OPTION WITH ONE BLOCK (RFC 2018)",
+      "data": {
+        "title": "SACK option (Kind 5), first block shown",
+        "bytes": 10,
+        "width": 32,
+        "fields": [
+          {
+            "key": "kind",
+            "name": "Kind",
+            "bits": 8,
+            "desc": "Option kind.",
+            "value": "5"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 8,
+            "desc": "8*n+2 bytes for n blocks."
+          },
+          {
+            "key": "left-edge",
+            "name": "Left Edge of 1st Block",
+            "bits": 32,
+            "desc": "First sequence number of the block."
+          },
+          {
+            "key": "right-edge",
+            "name": "Right Edge of 1st Block",
+            "bits": 32,
+            "desc": "Sequence number immediately following the block."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "CASE 2 FROM THE RFC: FIRST SEGMENT LOST",
+      "data": {
+        "columns": [
+          "Triggering segment",
+          "ACK",
+          "Left Edge",
+          "Right Edge"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "5500",
+              "5000",
+              "5500",
+              "6000"
+            ]
+          },
+          {
+            "cells": [
+              "6000",
+              "5000",
+              "5500",
+              "6500"
+            ]
+          },
+          {
+            "cells": [
+              "6500",
+              "5000",
+              "5500",
+              "7000"
+            ]
+          },
+          {
+            "cells": [
+              "7000",
+              "5000",
+              "5500",
+              "7500"
+            ]
+          },
+          {
+            "cells": [
+              "7500",
+              "5000",
+              "5500",
+              "8000"
+            ]
+          },
+          {
+            "cells": [
+              "8000",
+              "5000",
+              "5500",
+              "8500"
+            ]
+          },
+          {
+            "cells": [
+              "8500",
+              "5000",
+              "5500",
+              "9000"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[Postel81]",
+      "text": "Postel, J., \"Transmission Control Protocol - DARPA Internet Program Protocol Specification\", RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[VJ88]",
+      "text": "Jacobson, V. and R. Braden, \"TCP Extensions for Long-Delay Paths\", RFC 1072, October 1988.",
+      "rfc": 1072
+    },
+    {
+      "number": "[Jacobson92]",
+      "text": "Jacobson, V., Braden, R., and D. Borman, \"TCP Extensions for High Performance\", RFC 1323, May 1992.",
+      "rfc": 1323
+    },
+    {
+      "number": "[Clark87]",
+      "text": "Clark, D., Lambert, M., and L. Zhang, \"NETBLT: A Bulk Data Transfer Protocol\", RFC 998, March 1987.",
+      "rfc": 998
+    },
+    {
+      "number": "[Velten84]",
+      "text": "Velten, D., Hinden, R., and J. Sax, \"Reliable Data Protocol\", RFC 908, July 1984.",
+      "rfc": 908
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

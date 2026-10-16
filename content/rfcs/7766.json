@@ -23,13 +23,235 @@
   "questions": [
     "does dns use tcp",
     "dns tcp requirement",
-    "when is dns over tcp needed"
+    "when is dns over tcp needed",
+    "is tcp required for dns",
+    "when does dns fall back to tcp",
+    "what is dns query pipelining"
+  ],
+  "tags": [
+    "DNS",
+    "Transport",
+    "TCP"
+  ],
+  "subtitle": "Why every general-purpose DNS implementation must speak TCP, and how to make DNS over TCP nearly as quick as UDP.",
+  "tldr": {
+    "problem": "Some implementors read the old rule that DNS implementations SHOULD support TCP as making TCP optional, which limits interoperability as responses grow with DNSSEC and IPv6.",
+    "mechanism": "The RFC makes support for both UDP and TCP a MUST for all general-purpose DNS implementations, treats TCP as a valid alternative to UDP, and gives guidance on connection reuse, pipelining, idle timeouts and out-of-order responses.",
+    "outcome": "It obsoletes RFC 5966 and updates RFC 1035 and RFC 1123, and has itself been updated by RFC 8490 and RFC 9103. TCP is now a required part of a full DNS implementation.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Original UDP limit",
+      "value": "512 bytes"
+    },
+    {
+      "label": "Length field",
+      "value": "2 octets"
+    },
+    {
+      "label": "TCP connection setup cost",
+      "value": "About one RTT"
+    },
+    {
+      "label": "Recommended concurrent connections",
+      "value": "One for regular queries, one for zone transfers, one per layered protocol"
+    },
+    {
+      "label": "Server idle period",
+      "value": "On the order of seconds"
+    }
+  ],
+  "today": "<p>RFC 7766 is a Proposed Standard that obsoletes <a href='/5966/'>RFC 5966</a> and updates <a href='/1035/'>RFC 1035</a> and <a href='/1123/'>RFC 1123</a>. It has since been updated by <a href='/8490/'>RFC 8490</a> and <a href='/9103/'>RFC 9103</a>.</p>",
+  "glossary": [
+    "dns",
+    "tcp",
+    "udp",
+    "edns0",
+    "pipelining",
+    "persistent-connection",
+    "dns-over-tls",
+    "dnssec",
+    "dns-message"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why TCP Support Became Mandatory",
+      "content": "<p>Most DNS transactions use UDP. TCP is always used for full zone transfers (AXFR) and is often used for messages above the original 512-byte limit. Growing use of DNSSEC and IPv6 has made responses bigger, and TCP also protects against address spoofing, which helps against reflection and amplification attacks.</p><p>RFC 1123 said resolvers and recursive servers MUST support UDP and SHOULD support TCP for non-zone-transfer queries. Some implementors took that to mean TCP was optional. This RFC updates the core DNS specifications so that TCP support is <strong>REQUIRED</strong> for a full DNS implementation. It extends <a href='/5966/'>RFC 5966</a> with lessons learned since.</p><p>The RFC makes no specific requirements of server operators, but warns that failing to support TCP, or blocking DNS over TCP in the network, will probably cause resolution failures or application timeouts.</p>",
+      "eli5": "<p>Some people thought the phone call option for DNS was optional. This rule says no: everyone has to be able to pick up the phone, because some answers are too big for a postcard.</p>"
+    },
+    {
+      "id": "background",
+      "number": "4",
+      "title": "Why UDP Alone Is Not Enough",
+      "content": "<p>Without EDNS0, a server whose UDP response would exceed 512 bytes truncates it and sets the TC flag. The client sees the flag and retries over TCP. DNSSEC has made truncation at the 512-byte boundary commonplace. For example, an NXDOMAIN (RCODE 3) response from a zone signed with NSEC3 is almost invariably larger than 512 bytes.</p><p>EDNS0 lets a client announce that it can take larger UDP responses. But UDP packets larger than the path MTU are fragmented, and fragmentation is unreliable in many circumstances. Many firewalls block fragments, some cannot reassemble them, and some network devices refuse packets with EDNS0 options. The MTU most commonly found in the core of the Internet is around 1500 bytes, and even that is routinely exceeded by DNSSEC-signed responses.</p><p>The RFC concludes that the future RFC 1123 anticipated has arrived, and that the only standardised UDP-based mechanism that might have solved the size problem has been found inadequate.</p>",
+      "eli5": "<p>A postcard only holds so much. When an answer is too long it gets cut off and torn up on the way, so for long answers it is better to use a method that handles big messages.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "5",
+      "title": "Which Implementations Must Support TCP",
+      "content": "<p>RFC 7766 updates RFC 1123: all general-purpose DNS implementations MUST support both UDP and TCP. Each role has its own reason. Authoritative servers MUST support TCP so they do not limit responses to a single UDP packet. Recursive servers and forwarders MUST support it so that large responses from TCP-capable servers can reach TCP-capable clients. Stub resolvers, such as an operating system's DNS library, MUST support it so they stay interoperable with their upstream servers.</p><p>The RFC also relaxes the old rule that a non-zone-transfer query MUST be sent over UDP first. Stub and recursive resolvers MAY now choose TCP or UDP for local operational reasons, and TCP MAY be used before any UDP query. If a TCP connection to the server is already open, the resolver SHOULD reuse it. TCP is a valid alternative transport, not just a retry option.</p><p>All recursive and authoritative servers MUST reply on the same transport the query arrived on, and for TCP, on the same connection.</p>",
+      "eli5": "<p>Whoever answers questions, whoever passes them along, and whoever asks them must all know how to use both the postcard and the phone call. You may start with the phone if you like, and you answer the way you were asked.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "6",
+      "title": "Connection Handling",
+      "content": "<p>RFC 1035 expects servers to treat connections as persistent and to wait about two minutes of idleness before closing a dormant one, but gives little guidance for clients. In practice clients often close after one request, and many servers use a long fixed idle timeout with a small connection limit. The RFC notes that long timeouts can cause resource exhaustion under load, and that opening many idle connections is a trivial TCP denial of service. This hurts every client that falls back to TCP after seeing TC=1, not just those that choose TCP.</p><p>To spread the cost of connection setup, which is generally one round trip, clients and servers SHOULD support <strong>connection reuse</strong>. Clients MUST NOT reuse the Message ID of an in-flight query on the same connection. To get performance on par with UDP, clients SHOULD <strong>pipeline</strong> queries without waiting for earlier replies. Servers MUST expect pipelined queries, SHOULD process them concurrently and SHOULD answer all of them.</p><p>Clients MUST minimise the number of concurrent TCP connections to a server. The recommendation is at most one connection for regular queries, one for zone transfers, and one for each protocol layered on TCP, such as TLS. Servers MAY limit connections per client address, but those limits SHOULD be much looser, since one address may hide many clients behind NAT.</p><p>Clients MUST also minimise idle time and SHOULD close an idle session unless a timeout was agreed by another signalling mechanism. Servers are RECOMMENDED to use an idle period on the order of seconds with no particular value specified, and MAY use zero timeouts under heavy load or attack. Servers SHOULD reset the idle timer on receiving a full DNS message, not a partial one, to resist slow-read attacks. On teardown, clients SHOULD retry unanswered queries, and a server MUST NOT send responses to a client that has already closed the connection.</p>",
+      "eli5": "<p>Hanging up and redialing for every question is slow, so keep the call going and ask several things in a row without waiting. But do not leave the line open forever, because the other end only has so many phone lines.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "7",
+      "title": "Out-of-Order Responses and the Length Field",
+      "content": "<p>RFC 1035 said responses over UDP could be reordered but was ambiguous for TCP. The RFC clarifies that authoritative servers and recursive resolvers are RECOMMENDED to prepare responses in parallel and send them out of order, whatever the transport. Stub and recursive resolvers MUST be able to handle responses arriving in a different order from the requests.</p><p>Because of this, clients MUST match each response to an outstanding query on the same connection by Message ID, and if the response has a question section they MUST also match QNAME, QCLASS and QTYPE. Failure to match properly can have serious interoperability consequences.</p><p>Each DNS message over TCP is preceded by a two-octet length field. Clients and servers SHOULD pass the length field and the message to the TCP layer together, for example in one write call, so they are likely to go in a single segment. Servers MUST NOT close a connection just because the first read did not contain the whole message.</p>",
+      "eli5": "<p>If you ask a friend three questions and they answer the quickest one first, you need to know which answer goes with which question. So every question has a number, and the answer repeats it.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "9",
+      "title": "TCP Fast Open",
+      "content": "<p>This section is non-normative. <strong>TCP Fast Open</strong> (RFC 7413) allows data in the SYN packet, which reduces the cost of reopening TCP connections and saves up to one round trip compared to standard TCP. It uses a server-supplied cookie to limit the security risk of sending data in the SYN, which matters for DNS because amplification attacks are possible. The client asks for a cookie in its initial SYN, the server returns one in its SYN-ACK, and the client caches it for later connections to that server.</p><p>Anycast DNS services may need extra steps, such as servers behind load balancers using the same key so they generate identical cookies for a client address. When DNS over TCP carries private exchanges, as with DNS over TLS, implementors must make sure data needing protection is not accidentally sent in the clear.</p>",
+      "eli5": "<p>Fast Open is like a regular customer who shows a stamped card and gets served straight away, instead of going through the whole welcome routine every visit.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>Some DNS operators worry that promoting DNS over TCP exposes them to a higher risk of TCP denial of service attacks, both accidental and deliberate. The RFC accepts some specific attacks are more likely against TCP-enabled servers but says network-level DoS mitigation has improved substantially since DNS was designed.</p><p>Servers are advised to manage TCP connections, which could include keeping state on existing connections, reusing them, and controlling request queues for fair use. Suggested configurable options are the total number of TCP connections, the maximum per source address or subnet, the idle timeout, the maximum DNS transactions per connection and the maximum connection duration. No specific values are recommended.</p><p>Operators of recursive servers are advised to accept connections only from expected clients, for example through an access control list. For UDP this helps against reflection attacks, and for TCP it stops unknown clients from exhausting the connection limits.</p>",
+      "eli5": "<p>Phone lines are limited, so a busy DNS server should decide how many callers it takes, how long each may stay on the line, and only pick up for people it expects.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "background",
+      "position": "after",
+      "caption": "TRUNCATION AND TCP RETRY (ILLUSTRATIVE, SIMPLIFIED FROM THE TEXT)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Query over UDP",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Truncated response, TC flag set",
+            "color": "neutral",
+            "note": "The response would exceed the 512-byte limit."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Query again over TCP",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Full response over TCP",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "requirements",
+      "position": "after",
+      "caption": "WHY EACH ROLE MUST SUPPORT TCP",
+      "data": {
+        "columns": [
+          "Implementation",
+          "Requirement",
+          "Reason given"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Authoritative server",
+              "MUST support TCP",
+              "Do not limit responses to one UDP packet"
+            ]
+          },
+          {
+            "cells": [
+              "Recursive server or forwarder",
+              "MUST support TCP",
+              "Let large responses reach TCP-capable clients"
+            ]
+          },
+          {
+            "cells": [
+              "Stub resolver",
+              "MUST support TCP",
+              "Stay interoperable with upstream servers"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC1123]",
+      "text": "Braden, R., Ed., \"Requirements for Internet Hosts - Application and Support\", STD 3, RFC 1123, October 1989.",
+      "rfc": 1123
+    },
+    {
+      "number": "[RFC5966]",
+      "text": "Bellis, R., \"DNS Transport over TCP - Implementation Requirements\", RFC 5966, August 2010.",
+      "rfc": 5966
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC7413]",
+      "text": "Cheng, Y., Chu, J., Radhakrishnan, S., and A. Jain, \"TCP Fast Open\", RFC 7413, December 2014.",
+      "rfc": 7413
+    },
+    {
+      "number": "[RFC5625]",
+      "text": "Bellis, R., \"DNS Proxy Implementation Guidelines\", BCP 152, RFC 5625, August 2009.",
+      "rfc": 5625
+    },
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

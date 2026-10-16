@@ -10,13 +10,192 @@
   "questions": [
     "what is mupdate",
     "distributed mailbox database imap",
-    "how to scale imap servers"
+    "how to scale imap servers",
+    "what port does mupdate use",
+    "how does mupdate reserve a mailbox",
+    "what is the difference between a mupdate master and slave"
+  ],
+  "tags": [
+    "Email",
+    "IMAP",
+    "Directory"
+  ],
+  "subtitle": "A small text protocol that lets many mail servers share one authoritative list of which mailbox lives where.",
+  "tldr": {
+    "problem": "A single machine handling mail delivery is limited in capacity, and its failure stops delivery for every user. Spreading mailboxes over many IMAP or POP3 servers needs them to agree, atomically, on one mailbox namespace.",
+    "mechanism": "One master server keeps the authoritative mailbox database. Slave servers and other clients connect to it over TCP, and a slave issues UPDATE to receive a stream of every change. New mailboxes are claimed with RESERVE and then made live with ACTIVATE.",
+    "outcome": "MUPDATE is an Experimental protocol, not an Internet standard. It trusts every authenticated user completely, and it is updated by RFC 8996.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "TCP port",
+      "value": "3905 (mupdate)"
+    },
+    {
+      "label": "Minimum line length",
+      "value": "1024 octets"
+    },
+    {
+      "label": "Minimum literal size",
+      "value": "4096 octets"
+    },
+    {
+      "label": "Update stream delay",
+      "value": "within 30 seconds"
+    },
+    {
+      "label": "Minimum inactivity timeout",
+      "value": "15 minutes"
+    },
+    {
+      "label": "Required SASL mechanism",
+      "value": "GSSAPI"
+    }
+  ],
+  "today": "<p>RFC 3656 is an Experimental protocol specification, not an Internet standard, and it is updated by <a href='/8996/'>RFC 8996</a>.</p>",
+  "glossary": [
+    "imap",
+    "pop3",
+    "mailbox",
+    "sasl",
+    "starttls",
+    "tls",
+    "pipelining",
+    "man-in-the-middle",
+    "abnf"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a Shared Mailbox Database",
+      "content": "<p>As demand for high-performance mail delivery grows, the RFC argues that single-machine solutions are inadequate. They hit capacity limits, and if the one machine fails, mail delivery stops for all users. It is preferable to let many machines share the work.</p><p>The <strong>Mailbox Update (MUPDATE)</strong> protocol lets a group of IMAP or POP3 servers act with a unified mailbox namespace. To do that, the servers need atomic mailbox operations and enough guarantees about database consistency. The primary goal of the protocol is to be simple to implement while still giving consistency between participants.</p>",
+      "eli5": "<p>If one mail room breaks, nobody gets mail. With many mail rooms sharing one list of who lives where, the others can keep working.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Master, Slaves and Clients",
+      "content": "<p>MUPDATE assumes a reliable data stream such as TCP, and IANA has registered port <code>3905</code> with the short name <code>mupdate</code>. There are three kinds of participants: a single <strong>master</strong> server, <strong>slave</strong> (replica) servers, and clients. The master holds the authoritative copy of the mailbox database.</p><p>Slaves connect to the master as ordinary clients and act as replicas. End clients may connect to the master or to any slave and search the database. Operations that change the database can only be performed against the master.</p><p>Every command carries a unique alphanumeric tag. Commands MAY be pipelined, but the server MUST execute them in the order received. If a server has an inactivity timeout, it MUST be at least 15 minutes.</p>",
+      "eli5": "<p>One mail room keeps the real list and is the only one allowed to change it. The other rooms keep copies and can answer questions about it.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "Atoms, Strings and Responses",
+      "content": "<p>Data uses formats similar to ACAP: atoms and strings. Commands and tags are atoms, which are alphanumeric and MUST be less than 15 octets long. Everything else is a string, either quoted or a literal given as an octet count in braces. Both sides MUST support lines of at least 1024 octets, and servers MUST support literals of at least 4096 octets.</p><p>Each tagged response starts with the tag of the command it answers. <code>OK</code> means success, <code>NO</code> means the request was denied or failed, <code>BAD</code> means the command could not be understood, and <code>BYE</code> means the server is closing the connection. Each of these carries a human-readable string.</p><p>Two responses describe database records. <code>RESERVE</code> carries a mailbox name and a location string, and says the name is no longer available in the namespace without saying the mailbox is ready. <code>MAILBOX</code> carries the name, a location and an IMAP ACL string, and says the mailbox is ready for clients. A <code>DELETE</code> response, valid only during an update stream, tells a slave to remove a mailbox.</p>",
+      "eli5": "<p>Messages are short lines with a tag, like a ticket number, so you can match each answer to your question. Some answers say a name is held for someone, and others say the mailbox is ready to use.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Commands and Mailbox Creation",
+      "content": "<p>The client commands are AUTHENTICATE, ACTIVATE, DEACTIVATE, DELETE, FIND, LIST, LOGOUT, NOOP, RESERVE, STARTTLS and UPDATE. Before a successful AUTHENTICATE, the server MUST NOT accept anything except AUTHENTICATE, STARTTLS and LOGOUT. AUTHENTICATE starts a SASL negotiation with the service name <code>mupdate</code>, and implementations are REQUIRED to implement the GSSAPI mechanism.</p><p><code>FIND</code> returns the record for one mailbox, and <code>LIST</code> acts like FIND across the whole database, optionally filtered by a location prefix. The commands that change data, RESERVE, ACTIVATE, DEACTIVATE and DELETE, MUST NOT be issued to a slave.</p><p>Creating a mailbox is a two-step process. The client sends <code>RESERVE</code> with the name and location. If the server answers OK, the name is held; if NO, another server may already have reserved it. The client then does its local mailbox creation and sends <code>ACTIVATE</code> with the name, location and ACL. DEACTIVATE moves an active mailbox back to the reserved state.</p><p>A slave uses <code>UPDATE</code> to stay current. The server first returns every record, as LIST would, then an OK, and from then on the master MUST stream each change to the slave within 30 seconds. After UPDATE, the client may only send NOOP and LOGOUT. A slave can send NOOP and wait for the OK to know its copy is current as of that moment.</p>",
+      "eli5": "<p>To make a new mailbox you first put a sign saying 'this name is mine', then set it up, then announce it is ready. A copy-keeping room asks once for the whole list and after that gets a message for every change.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "TLS, SASL and Trust",
+      "content": "<p>Unauthenticated users cannot search or change the database. The server may support <code>STARTTLS</code>, which begins a TLS negotiation right after the OK response. After TLS is up, the server MUST send its capability banner again, which protects against a man-in-the-middle altering the list before STARTTLS. The client MUST discard its cached capabilities and use the new ones.</p><p>The RFC is frank about the limits. The specification assumes no protection of any kind for authenticated users: all of them have complete access to the database, so accounts using it must be well secured. A more secure deployment might send read-only access through slaves and keep write access to the master, at the cost of a marginally longer time for updates to reach clients.</p><p>The protocol also assumes authenticated users cooperate to keep operations atomic. New mailboxes SHOULD be RESERVEd before ACTIVATE, even though the protocol does not require it, so participants that ignore the locking could create an inconsistent database. The RFC also defines a <code>mupdate://</code> URL scheme, with a server-only form and a form that names a mailbox to FIND.</p>",
+      "eli5": "<p>Once you are let in, you can change anything on the list, so the key to the door must be guarded. Everyone is also trusted to follow the rule of reserving a name before using it.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "CREATING A MAILBOX (FROM THE RFC EXAMPLE)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "master",
+            "label": "Master"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "master",
+            "label": "RESERVE name location",
+            "color": "blue",
+            "note": "Claim the mailbox name."
+          },
+          {
+            "from": "master",
+            "to": "client",
+            "label": "OK \"Mailbox Reserved.\"",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "client",
+            "label": "Local mailbox create",
+            "color": "neutral",
+            "note": "Done on the server that stores the mailbox."
+          },
+          {
+            "from": "client",
+            "to": "master",
+            "label": "ACTIVATE name location acl",
+            "color": "blue",
+            "note": "Make the mailbox live."
+          },
+          {
+            "from": "master",
+            "to": "client",
+            "label": "OK \"Mailbox Activated.\"",
+            "color": "green"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[IMAP]",
+      "text": "Crispin, M., \"Internet Message Access Protocol - Version 4\", RFC 3501, March 2003.",
+      "rfc": 3501
+    },
+    {
+      "number": "[SASL]",
+      "text": "Myers, J., \"Simple Authentication and Security Layer (SASL)\", RFC 2222, October 1997.",
+      "rfc": 2222
+    },
+    {
+      "number": "[ACAP]",
+      "text": "Newman, C. and J. Myers, \"ACAP -- Application Configuration Access Protocol\", RFC 2244, November 1997.",
+      "rfc": 2244
+    },
+    {
+      "number": "[TLS]",
+      "text": "Dierks, T. and C. Allen, \"The TLS Protocol Version 1.0\", RFC 2246, January 1999.",
+      "rfc": 2246
+    },
+    {
+      "number": "[IMAP-ACL]",
+      "text": "Myers, J., \"IMAP4 ACL extension\", RFC 2086, January 1997.",
+      "rfc": 2086
+    },
+    {
+      "number": "[POP3]",
+      "text": "Myers, J. and M. Rose, \"Post Office Protocol - Version 3\", STD 53, RFC 1939, May 1996.",
+      "rfc": 1939
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

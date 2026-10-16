@@ -9,13 +9,253 @@
   },
   "questions": [
     "how is jpeg video sent over rtp",
-    "what is the rtp payload format for jpeg"
+    "what is the rtp payload format for jpeg",
+    "what is motion-jpeg",
+    "what does the q field mean in rtp jpeg",
+    "what are rtp jpeg type values"
+  ],
+  "tags": [
+    "Video",
+    "RTP",
+    "Payload Format"
+  ],
+  "subtitle": "How to cut Motion-JPEG video frames into RTP packets so they can be streamed and put back together.",
+  "tldr": {
+    "problem": "JPEG frames are usually bigger than a network packet, and a JPEG stream carries tables and parameters that a real-time video receiver needs but that rarely change from frame to frame.",
+    "mechanism": "Each packet gets a small RTP/JPEG header with fragment offset, type, quantization (Q), width and height. Tables are left out where possible, and frames are fragmented at the RTP level with a shared timestamp and a marker bit on the last packet.",
+    "outcome": "It obsoletes RFC 2035 and adds interlace support, in-band quantization tables and a cleaner restart marker header.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RTP timestamp clock",
+      "value": "90000 Hz"
+    },
+    {
+      "label": "Main JPEG header",
+      "value": "8 bytes"
+    },
+    {
+      "label": "Fragment offset",
+      "value": "24 bits"
+    },
+    {
+      "label": "Maximum width or height",
+      "value": "2040 pixels"
+    },
+    {
+      "label": "Dynamic types",
+      "value": "128-255"
+    },
+    {
+      "label": "Reassemble-first restart count",
+      "value": "0x3FFF"
+    }
+  ],
+  "today": "<p>RFC 2435 is a Proposed Standard that obsoletes <a href='/2035/'>RFC 2035</a>, and the unit metadata lists no later RFC that replaces or updates it.</p>",
+  "glossary": [
+    "rtp",
+    "fragmentation",
+    "fragment-offset",
+    "timestamp",
+    "huffman-coding",
+    "sequence-number",
+    "mtu",
+    "restart-marker"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "JPEG Video and Motion-JPEG",
+      "content": "<p>The JPEG standard compresses continuous-tone still images. Compressing each video frame as an independent still image and sending them in series is called <strong>Motion-JPEG</strong>. The RFC defines how that is carried in RTP.</p><p>JPEG has four modes: sequential DCT, progressive DCT, lossless and hierarchical. Hardware JPEG video codecs mostly implement only a subset of the sequential DCT mode, with a single interleaved scan in the YUV color space. A scan is a sequence of <strong>Minimum Coded Units</strong> (MCUs), the smallest groups of image data in the stream. JPEG does not define things like color space, frame rate or interlacing, so those must be set out-of-band.</p>",
+      "eli5": "<p>A JPEG is one squished picture. Video is lots of squished pictures one after another, and the sender and receiver have to agree on details the pictures do not say.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "JPEG Over RTP",
+      "content": "<p>To keep hardware codecs interoperable, the RFC assumes the sequential DCT mode and limits the predefined type codes to single-scan, interleaved images. Most table data rarely changes within a stream, so data is sent in <strong>abbreviated format</strong> with tables omitted where possible. Each frame starts directly with the entropy-coded scan, and the frame and scan header information lives in the RTP/JPEG header between the RTP header and the payload.</p><p>Parameters that may change, notably the quantization tables and image size, get explicit fields so a sender can adapt rate or let a user change quality or resolution. Frames are often larger than the network's maximum packet size. Leaving fragmentation to IP would prevent rate-controlling the packet stream and partial delivery under loss, so RTP/JPEG defines its own fragmentation and reassembly.</p>",
+      "eli5": "<p>Since most settings stay the same, they are only told once. The few things that can change, like picture size, go in a small label on every piece.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "3",
+      "title": "The RTP/JPEG Header",
+      "content": "<p>The RTP timestamp uses a 90000 Hz clock. Every fragment of one frame MUST carry the same timestamp, and the RTP marker bit MUST be set on the last packet of a frame.</p><p>Right after the RTP header comes an 8-byte <strong>main JPEG header</strong>: Type-specific (8 bits), Fragment Offset (24 bits, network byte order), Type (8 bits), Q (8 bits), Width (8 bits) and Height (8 bits). All fields except Fragment Offset MUST be the same in every packet of a frame. The offset plus the payload length MUST NOT exceed 2^24 bytes.</p><p>Width and Height are in 8-pixel multiples, so a width of 40 is 320 pixels, and each has a maximum of 2040 pixels. For interlaced video, Height is the height of one field. Type-specific MUST be zeroed on transmission and ignored on reception when no interpretation is defined.</p><p>The payload is an entropy-coded segment with a single scan. The scan header is absent and inferred from the RTP/JPEG header. Any true 0xFF byte from the entropy coder MUST be followed by a stuffed 0x00 byte.</p>",
+      "eli5": "<p>Every piece carries a short label saying where it belongs in the picture, how big the picture is and what kind it is. The last piece also waves a flag.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Type, Q and Optional Headers",
+      "content": "<p>The <strong>Type</strong> field stands in for the table specification and JFIF-style parameters that are not in the data. Types 0 to 63 are fixed mappings defined by the RFC, types 64 to 127 are the same but with restart markers (and a Restart Marker header), and types 128 to 255 are defined dynamically by a session setup protocol. Types 0 and 1 (and 64 and 65) are defined: Baseline DCT sequential, 8-bit samples, three YUV components, standard Huffman tables and one interleaved scan. Type 0 downsamples chrominance horizontally by 2 (4:2:2); type 1 downsamples both horizontally and vertically by 2 (4:2:0). Types 2 to 5 are reserved and SHOULD NOT be used.</p><p>For types 0 and 1 the Type-specific field marks scanning: 0 progressive, 1 odd field, 2 even field, 3 a single field to be shown as a full frame.</p><p>The <strong>Q</strong> field selects quantization tables. Values 0 to 127 are computed from a formula; for 1 to 99, a scale factor S is 5000 / Q for Q up to 50 and 200 - 2 * Q for 51 to 99, applied to JPEG tables K.1 and K.2. Values 128 to 255 mean a Quantization Table header follows in the first packet of a frame. Q values 128 to 254 map to fixed tables, while 255 means the tables may change every frame, and a packet MUST NOT have Q = 255 with Length = 0. Table data are 64 values in zig-zag order, 8 or 16 bits each depending on the Precision bit.</p>",
+      "eli5": "<p>Type says which kind of video recipe is used. Q is a quality dial, and for custom recipes the sender includes the details itself.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Fragmentation and Restart Markers",
+      "content": "<p>Frames SHOULD be fragmented so that the network layer below does not need to. Packets of one frame share a timestamp, carry the byte offset of their data in the frame, SHOULD be sent in order, and MUST NOT overlap. A frame begins with a packet at offset zero and ends with the packet carrying the marker bit. Gaps can be spotted using RTP sequence numbers or offsets and lengths, and the offset field also allows efficient single-copy reassembly with misordered packets.</p><p><strong>Restart markers</strong> let a decoder reset and begin decoding mid-frame. For types 64 to 127 a Restart Marker header follows the main header. It has a 16-bit Restart Interval (MUST NOT be zero), the F and L bits and a 14-bit Restart Count. If restart intervals are not aligned with packet boundaries, F and L MUST both be 1 and the count MUST be 0x3FFF, meaning the whole frame must be reassembled first.</p><p>Otherwise the interval SHOULD be chosen so an integral number of intervals fits in a packet, making packets independently decodable. The first MCU position is the Restart Count times the Restart Interval.</p>",
+      "eli5": "<p>Pieces are numbered by where they go. Special bookmarks in the picture let you start reading from the middle if a piece got lost.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>The payload format inherits the security considerations of the RTP specification and its profile. Confidentiality comes from encryption, and since compression is end-to-end, encryption can be applied after compression.</p><p>The RFC says this encoding has no significant non-uniform decoding load, so the denial-of-service risk from crafted hard-to-decode packets does not apply. Receivers should limit the data held while assembling frames to avoid resource exhaustion. A receiver may also be overloaded by too many packets. The security review found no additional considerations beyond those in RTP.</p>",
+      "eli5": "<p>Keep the secret box locked after packing it, and do not let strangers fill your desk with half-finished puzzles.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "6",
+      "title": "Changes from RFC 2035",
+      "content": "<p>Appendix D lists three changes, made to keep interoperability problems low. Many old conventions can still be decoded, but using them in new implementations is strongly discouraged.</p><ul><li>Types 0 and 1 can carry interlaced video, using 2 bits of the type-specific field.</li><li>An optional Quantization Table header allows explicit table coefficients.</li><li>Restart marker indication moved into the Type field (types 64 and up) with an optional header, freeing the type-specific field and making partial frame decoding more robust to loss.</li></ul>",
+      "eli5": "<p>The update added room for interlaced video, custom quality tables and better recovery from lost pieces.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "MAIN JPEG HEADER (RFC 2435)",
+      "data": {
+        "title": "Main JPEG header",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type-specific",
+            "name": "Type-specific",
+            "bits": 8,
+            "desc": "Meaning depends on Type; zero if undefined."
+          },
+          {
+            "key": "fragment-offset",
+            "name": "Fragment Offset",
+            "bits": 24,
+            "desc": "Byte offset of this packet's data within the frame."
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "Selects the fixed or dynamic table and parameter mapping."
+          },
+          {
+            "key": "q",
+            "name": "Q",
+            "bits": 8,
+            "desc": "Quantization table selector."
+          },
+          {
+            "key": "width",
+            "name": "Width",
+            "bits": 8,
+            "desc": "Image width in 8-pixel multiples."
+          },
+          {
+            "key": "height",
+            "name": "Height",
+            "bits": 8,
+            "desc": "Image height in 8-pixel multiples."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "TYPE-SPECIFIC VALUES FOR TYPES 0 AND 1",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Progressive",
+            "desc": "Image can be displayed as is at the given width and height."
+          },
+          {
+            "code": "1",
+            "label": "Odd field",
+            "desc": "Odd field of an interlaced signal; height is half the full image."
+          },
+          {
+            "code": "2",
+            "label": "Even field",
+            "desc": "Even field of an interlaced signal."
+          },
+          {
+            "code": "3",
+            "label": "Single field, full frame",
+            "desc": "A single field displayed as a whole frame, each line shown twice."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "RTP/JPEG TYPE RANGES",
+      "data": {
+        "columns": [
+          "Types",
+          "Meaning"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0-63",
+              "Fixed, well-known mappings defined by the RFC"
+            ]
+          },
+          {
+            "cells": [
+              "64-127",
+              "Same as 0-63 but with restart markers and a Restart Marker header"
+            ]
+          },
+          {
+            "cells": [
+              "128-255",
+              "Defined dynamically by a session setup protocol"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[6]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R. and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", RFC 1889, January 1996.",
+      "rfc": 1889
+    },
+    {
+      "number": "[7]",
+      "text": "Schulzrinne, H., \"RTP Profile for Audio and Video Conferences with Minimal Control\", RFC 1890, January 1996.",
+      "rfc": 1890
+    },
+    {
+      "number": "[8]",
+      "text": "Fenner, W., \"Internet Group Management Protocol Version 2\", RFC 2236, November 1997.",
+      "rfc": 2236
+    },
+    {
+      "number": "[9]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

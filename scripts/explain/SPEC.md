@@ -20,6 +20,8 @@ Your work unit looks like `{id, tier, rfcs: [{number, title, pages, textPath, co
 
 Never edit anything under `content/`, `src/` or `scripts/`. Write only to `.work/explain/out/`.
 
+Site policy: never name GitHub anywhere in your output, even when the RFC does. Write "a public code repository" (or "shared code repositories") instead. The validator rejects it.
+
 ## 2. Reading the RFC
 
 - `textPath` ends in `.txt` (plain text, with page headers and footers every 56 lines or so) for almost every RFC. Use the Read tool. `pdf` paths (RFCs 8, 9, 51, 418, 500, 530, 598) are PDFs: use Read with the `pages` parameter (at most 20 pages per request).

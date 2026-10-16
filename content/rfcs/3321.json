@@ -9,13 +9,203 @@
   },
   "questions": [
     "how to improve sigcomp compression",
-    "what are sigcomp extended operations"
+    "what are sigcomp extended operations",
+    "what is shared compression in sigcomp",
+    "what is a sigcomp checkpoint state"
+  ],
+  "tags": [
+    "Compression",
+    "Signaling",
+    "State"
+  ],
+  "subtitle": "Optional SigComp techniques that let later messages reuse earlier ones, using only instructions the UDVM already has.",
+  "tldr": {
+    "problem": "Compressing each SigComp message on its own wastes bandwidth, but reusing earlier messages is only safe if the sender knows the receiver actually has the saved state, which is hard over an unreliable transport.",
+    "mechanism": "The RFC describes how to build explicit acknowledgements, shared compression and a few related tricks on top of SigComp's existing feedback mechanism and the UDVM instructions from RFC 3320.",
+    "outcome": "It is an Informational document, not a standard. It was later updated by RFC 4896.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Shared state retention priority",
+      "value": "65535"
+    },
+    {
+      "label": "Shared state address and instruction",
+      "value": "Both set to zero"
+    },
+    {
+      "label": "Minimum acknowledgement identifier",
+      "value": "1 octet"
+    }
+  ],
+  "today": "<p>RFC 3321 is an Informational document, so it does not specify an Internet standard, and it was later updated by <a href='/4896/'>RFC 4896</a>. It builds on <a href='/3320/'>RFC 3320</a>.</p>",
+  "glossary": [
+    "sip",
+    "lossless-compression",
+    "stateless-protocol"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Beyond Per-Message Compression",
+      "content": "<p>This document describes how to implement mechanisms on top of SigComp (<a href='/3320/'>RFC 3320</a>) that significantly improve compression efficiency compared with compressing every message alone. Everything it describes can be built using the UDVM instructions that RFC 3320 already defines, so no new instructions are needed.</p><p>The first mechanism is <strong>dynamic compression</strong>: using messages sent earlier in the compression of the current one. For that, a compressor must know that its earlier messages arrived. On a reliable transport such as TCP that is guaranteed. On an unreliable transport, SigComp can provide the knowledge itself through <strong>explicit acknowledgement</strong>.</p><p>The second is <strong>shared compression</strong>, which uses messages the local endpoint has received. It helps most with request/response protocols, and especially for the first few messages of an exchange.</p>",
+      "eli5": "<p>Instead of sending the whole story every time, you build on what your friend already knows. But first you must be sure they heard the earlier part.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "4",
+      "title": "The State Reference Model",
+      "content": "<p>A UDVM may save the status of its memory, which is called a <strong>state</strong>. The application may or may not grant a request to save it. A later message points to the saved state with a <strong>state identifier</strong>.</p><p>The RFC distinguishes <strong>saved states</strong>, which are expected to be used for later messages, from <strong>acked states</strong>, which are saved states the compressor has received an acknowledgement for. Only acked states may be used for compression, because otherwise a decompression failure occurs. That is why acknowledgements are needed, at least for unreliable transport.</p><p>The worked example shows compressor 1 sending message m1 compressed against state s0. The new state s1 is s0 plus m1, and compressor 1 can use s1 only after ack(s1) arrives. If a later message m2 compressed against s1 is lost, the compressor simply keeps compressing against states that are acked, so s3 is built from s1 and m3 and used once it is acknowledged.</p><div class='callout callout-note'><p>Acknowledgements are piggybacked on SigComp messages going the other way, so that no extra security risks are created.</p></div>",
+      "eli5": "<p>You only use a shortcut once your friend tells you they know it. If your note gets lost on the way, you keep using the shortcuts they confirmed.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5.1",
+      "title": "Explicit Acknowledgement",
+      "content": "<p>When messages can be lost or misordered, an acknowledgement scheme must tell the remote compressor that a state has been established. There are two ways to start one.</p><p>In <strong>remote compressor initiated</strong> acknowledgement, compressor 1 uploads UDVM bytecode that uses the requested feedback field. Compressor 1 may pick an arbitrary identifier to be returned to indicate the state exists. It needs enough bits to avoid acknowledging the wrong state, and a minimum of 1 octet should be used. The data is called requested feedback on the way out and returned feedback once the other side places it into a SigComp message.</p><p>In <strong>local endpoint initiated</strong> acknowledgement, the endpoint where the state was created decides to acknowledge it. It puts the state's identifier, the <code>acked_state_id</code>, in the location of the returned SigComp parameters. The RFC adds a note that this variant should not be used when the requested feedback length is non-zero, because it can waste bandwidth, and that every SigComp implementation supports the first approach anyway.</p>",
+      "eli5": "<p>There are two ways to confirm a delivery. Either the sender puts a tag in the package for you to send back, or you decide on your own to say \"got it\".</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5.2",
+      "title": "Shared Compression",
+      "content": "<p>For shared compression, a compressing endpoint saves the uncompressed version of the message it is about to send as a state, called a <strong>shared state</strong>. A shared state consists only of the uncompressed message, which makes it independent of the compression algorithm, since different algorithms may be used in each direction.</p><p>The rules for a shared state are specific. Its <code>state_address</code> and <code>state_instruction</code> must be zero, and its <code>state_retention_priority</code> must be 65535. It lives in the same per-compartment state memory as the states made by the remote compressor. New shared states must not be created unless the compressor has made enough state memory available, because a shared state could push existing state out and cause a decompression failure.</p><p>The endpoint that receives the message uses the SHA-1 instruction to compute the shared state identifier (<code>shared_state_id</code>) of the decompressed message and reports it back among the returned SigComp parameters. If it matches what the original sender computed, the sender can use the shared state, together with the state it would use anyway, to compress the next message.</p><p>An optimization is possible. If the compressor sets bit <code>r</code> to say a shared state exists, the explicit <code>acked_state_id</code> may be unnecessary, because the reply asking for the shared state implicitly shows the new state was saved. Endpoint 1's state handler must keep a mapping between the two states, and the endpoint must still watch <code>state_memory_size</code> in case the state was dropped for lack of memory.</p>",
+      "eli5": "<p>You keep a copy of the message you just sent, and your friend keeps a copy too. Next time you can say \"same as before, but with this change\".</p>"
+    },
+    {
+      "id": "options",
+      "number": "5.3",
+      "title": "Other Efficiency Mechanisms",
+      "content": "<p>The remaining mechanisms in the RFC are shorter ideas for keeping compression high without extra signaling.</p><ul><li><strong>State across sessions (5.3).</strong> Messages from one source repeat content beyond a single application session, so a compartment can be kept alive longer than one session. This applies to per-compartment state, not to locally available state.</li><li><strong>User-specific dictionary (5.4).</strong> For a protocol such as SIP, a user and device tend to send the same capabilities and details like the user's URL, name and e-mail address. A compressor can send such a dictionary in early messages before time-critical signaling begins.</li><li><strong>Checkpoint state (5.5).</strong> To avoid failures from references to a missing state (lost message, not enough memory, or later deletion), the compressor sets the state's retention priority to the highest value it has sent and requires an explicit acknowledgement.</li><li><strong>Implicit deletion (5.6).</strong> Both ends apply the same well-defined algorithm, which can be part of agreed bytecode, to decide which parts of a dictionary to delete. That avoids per-message signaling and is more robust against loss.</li></ul>",
+      "eli5": "<p>Keep your notebook for the whole friendship, not just one chat. Write down your usual details early. Mark the most important page so it is erased last. Agree on a rule for which old pages to toss.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "Effects on SigComp Messages",
+      "content": "<p>The extended features need SigComp messages to carry extra information, namely the <code>acked_state_id</code> and the <code>shared_state_id</code>. Except for the mandatory bytes defined in RFC 3320, the final message formats are implementation issues. The part of a message after the header is chosen by whichever compressor supplies the bytecode, so no format needs to be standardized.</p><p>As an example only, the RFC sketches a layout with flags <code>s</code>, <code>a</code> and <code>r</code>. The <code>s</code> and <code>a</code> flags say whether a shared state identifier and an acked state identifier are present. These identifiers are the same length as the partial state identifier.</p><p>The returned SigComp parameters carry partial state identifiers that either acknowledge established states or announce global state that belongs to no compartment. An implementation decides which kind each refers to. A basic SigComp implementation that receives these identifiers just ignores them, and one that does not use the extended features is not affected. The I-bit of the requested feedback must not be 1 for an endpoint that wants to receive <code>shared_state_id</code> values.</p>",
+      "eli5": "<p>The extra notes you attach to a message are up to you. Plain readers just skip them, and those who understand them get the benefit.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The RFC says the features it describes are believed not to add any security risks to the ones already described in RFC 3320. It asks for no IANA action. It also notes that the IETF had been notified of intellectual property rights claimed for some or all of the specification, and points readers to the online list of claimed rights.</p>",
+      "eli5": "<p>These extras are not supposed to make anything less safe than basic SigComp already was.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "DYNAMIC COMPRESSION EXAMPLE (SIMPLIFIED FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "compressor-1",
+            "label": "Compressor 1"
+          },
+          {
+            "key": "decompressor-2",
+            "label": "Decompressor 2"
+          }
+        ],
+        "messages": [
+          {
+            "from": "compressor-1",
+            "to": "decompressor-2",
+            "label": "m1(s0)",
+            "color": "blue",
+            "note": "Compressed using acked state s0; s1 = s0 + m1."
+          },
+          {
+            "from": "decompressor-2",
+            "to": "compressor-1",
+            "label": "ack(s1)",
+            "color": "green",
+            "note": "Now s1 can be used."
+          },
+          {
+            "from": "compressor-1",
+            "to": "decompressor-2",
+            "label": "m2(s1) lost",
+            "color": "neutral",
+            "note": "Never arrives, so s2 is not acked."
+          },
+          {
+            "from": "compressor-1",
+            "to": "decompressor-2",
+            "label": "m3(s1)",
+            "color": "blue",
+            "note": "s3 = s1 + m3."
+          },
+          {
+            "from": "decompressor-2",
+            "to": "compressor-1",
+            "label": "ack(s3)",
+            "color": "green",
+            "note": "Now s0, s1 and s3 are acked."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "options",
+      "position": "after",
+      "caption": "MECHANISMS IN SECTION 5",
+      "data": {
+        "items": [
+          {
+            "title": "Explicit acknowledgement",
+            "text": "Tells the compressor which states exist at the remote decompressor."
+          },
+          {
+            "title": "Shared compression",
+            "text": "Compress against messages the local endpoint received."
+          },
+          {
+            "title": "Cross-session state",
+            "text": "Keep a compartment longer than one application session."
+          },
+          {
+            "title": "User-specific dictionary",
+            "text": "Send stable per-user details early."
+          },
+          {
+            "title": "Checkpoint state",
+            "text": "Highest-priority, acknowledged state to guard against missing references."
+          },
+          {
+            "title": "Implicit deletion",
+            "text": "Both ends delete dictionary parts by the same algorithm."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[SIGCOMP]",
+      "text": "Price R., Bormann, C., Christoffersson, J., Hannu, H., Liu, Z. and J. Rosenberg, \"Signaling Compression (SigComp)\", RFC 3320, January 2003.",
+      "rfc": 3320
+    },
+    {
+      "number": "[SIP]",
+      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
+      "rfc": 3261
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

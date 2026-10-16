@@ -9,13 +9,193 @@
   },
   "questions": [
     "what is csync record",
-    "how does child zone sync with parent in dns"
+    "how does child zone sync with parent in dns",
+    "what is a csync record",
+    "how does csync update ns records in the parent zone",
+    "what are the csync immediate and soaminimum flags",
+    "does csync need dnssec"
+  ],
+  "tags": [
+    "DNS",
+    "Delegation",
+    "Automation"
+  ],
+  "subtitle": "A DNS record that lets a child zone tell its parent to copy updated NS and glue records.",
+  "tldr": {
+    "problem": "Child zone operators struggle to keep the delegation records in the parent zone (NS records and glue A and AAAA records) in sync with their own zone, in a timely way.",
+    "mechanism": "The child publishes a CSYNC record at its apex with an SOA serial, flags and a bit map of record types. A parental agent can poll for it, fetch the listed child records over DNSSEC-validated queries and update the parent.",
+    "outcome": "Delegation updates can be automated, which eases the child operator's maintenance burden. RFC 7477 has been updated by RFC 9975.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RR type",
+      "value": "CSYNC, value 62"
+    },
+    {
+      "label": "SOA Serial field",
+      "value": "32 bits"
+    },
+    {
+      "label": "Flags field",
+      "value": "16 bits"
+    },
+    {
+      "label": "Defined flags",
+      "value": "immediate (0x0001), soaminimum (0x0002)"
+    },
+    {
+      "label": "Max serial increase with soaminimum",
+      "value": "2^16 between parental polls"
+    }
+  ],
+  "today": "<p>RFC 7477 is a Proposed Standard and is updated by <a href='/9975/'>RFC 9975</a>. It has not been obsoleted.</p>",
+  "glossary": [
+    "csync-record",
+    "glue-record",
+    "parental-agent",
+    "dns",
+    "dns-zone",
+    "name-server",
+    "resource-record",
+    "dnssec",
+    "nsec",
+    "soa-record",
+    "zone-cut"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Delegation Sync Problem",
+      "content": "<p>Some records in a parent zone should match the child's own zone. The most common are the nameserver (<code>NS</code>) records and the address records (<code>A</code> and <code>AAAA</code>) known as glue. The RFC calls these <strong>delegation records</strong>.</p><p>Updating them in the parent promptly has been hard for child operators, and an automated signaling mechanism would ease their burden and improve the robustness of the DNS. This document adds the <strong>CSYNC</strong> record type to say which child records a parental agent should process.</p><p>Four roles are defined: the <em>child</em> (holder of the delegation), the <em>parent</em> (the domain where the child is registered), the <em>child DNS operator</em> (who publishes the child's zone) and the <em>parental agent</em> (the entity the child deals with to change its delegation).</p><p>The scope is limited. CSYNC does not synchronize DNSSEC records such as DS (see <a href='/7344/'>RFC 7344</a> for that) and does not cover bootstrapping the initial DNSSEC setup.</p>",
+      "eli5": "<p>Your zone has a list of helpers, and the zone above you keeps a copy. Keeping the copy current by hand is a chore, so this RFC adds a way to automate it.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "The CSYNC Record Format",
+      "content": "<p>A child that wants synchronization MUST publish a CSYNC record at the apex of the child zone. Parental agents MAY query for it. The RDATA has three parts: a 32-bit <strong>SOA Serial</strong>, 16 bits of <strong>Flags</strong> and a <strong>Type Bit Map</strong> that is encoded like the NSEC type bit map.</p><p>Two flags are defined: <code>immediate</code> (<code>0x00 0x01</code>) and <code>soaminimum</code> (<code>0x00 0x02</code>). Undefined flags MUST be 0 when published, and a parental agent MUST NOT process a CSYNC record that sets a flag it does not know. Likewise, if the Type Bit Map has a bit the agent does not understand, it MUST NOT act on the record.</p><p>If <code>soaminimum</code> is set, agents MUST NOT act on data from a zone whose SOA serial is less than the serial in the record, using serial arithmetic from <a href='/1982/'>RFC 1982</a>. If it is not set, the SOA Serial field is ignored. A child using <code>soaminimum</code> must not raise its serial by more than 2^16 between parental polls.</p><p>Only one CSYNC record should exist. If several are found, parental agents MUST ignore the set.</p>",
+      "eli5": "<p>The note has three parts: a version number so old notes are not mistaken for new ones, a couple of switches, and a checklist of which kinds of details changed.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "How a Parental Agent Processes It",
+      "content": "<p>CSYNC processing is all or nothing. The agent must process the full set of data named by the Type Bit Map, or make no changes at all. If any required query fails, the whole operation MUST be aborted, though a proven \"no records exist\" answer (via NSEC or NSEC3) counts as success.</p><p>If <code>immediate</code> is set, the agent MAY process the record right away. If it is not set, the agent MUST wait for the zone administrator to approve out of band. Even with <code>immediate</code> set, an agent MAY still require approval.</p><p>The recommended procedure uses a single authoritative name server for the child, ideally over TCP to avoid hitting different nodes behind an anycast address:</p><ul><li>Query the child's SOA record.</li><li>Query the child's CSYNC record.</li><li>Query the data records the Type Bit Map asks for.</li><li>Query the SOA records again, deepest first, ending with the child's.</li></ul><p>If the SOA serials seen at the start, middle and end differ, the CSYNC record SHOULD NOT be processed and the operation MAY be retried later.</p>",
+      "eli5": "<p>The office checks the note carefully, copies every item you listed or none of them, and makes sure nothing changed while it was reading.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "4",
+      "title": "What Gets Copied: NS, A and AAAA",
+      "content": "<p>The <code>NS</code> bit means the child's NS records are copied verbatim into the parent's delegation, except that the parent MAY pick a different TTL. Added NS records are added, and removed ones are removed. Agents MAY refuse updates that break parent policy, such as requiring at least two NS records, and MUST NOT update NS records if none were returned, as verified by DNSSEC denial of existence.</p><p>The <code>A</code> and <code>AAAA</code> bits mean glue addresses for in-bailiwick NS records are copied the same way. Only the types whose bits are set are queried. If a requested type has no data in the child, the parent's set for it becomes empty, unless that would leave no glue at all for the in-bailiwick NS records, in which case the parent MUST NOT update the glue.</p><p>Address processing MUST come after NS processing, so that the freshly copied NS set is used. Without the NS bit, the parent's existing NS records decide which addresses to update.</p>",
+      "eli5": "<p>You can ask the office to copy your list of helpers, their street addresses, or both. It only touches the parts you ticked.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "5",
+      "title": "Operational Considerations",
+      "content": "<p>There is no inline way for a parental agent to report errors, so reporting must happen out of band, for example a web console or email. Agents should at least log errors.</p><p>Agents MAY query all of a child's name servers to find the one with the newest SOA and CSYNC, or let the child name a preferred (possibly hidden master) server. Large parental agents may offer a programmatic way for children to signal new data instead of polling. A child retiring a nameserver must publish CSYNC to remove it, then wait for the parent to process it before shutting the server down.</p><p>For out-of-bailiwick NS records the parent cannot safely update glue, so only glue below the child's delegation point is updated. Children pointing NS records into grandchild zones SHOULD make sure the grandchild glue is correct first.</p><p>Parental agents SHOULD publicly document items such as which type bits they support, how often they poll and whether they honor <code>immediate</code>. A child MAY remove its CSYNC record once the parent has the right data, which cuts query load on both sides.</p>",
+      "eli5": "<p>Because the office cannot send you a reply, you have to look at its logs if nothing changes. And do not switch off the old helper until the office has updated its list.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The specification depends on DNSSEC. Parental agents MUST validate the CSYNC data and everything copied from the child, and MUST NOT process anything unless validation results are \"Secure\". Child zones using CSYNC MUST be signed, current and linked to the parent by a DS record.</p><p>CSYNC MUST NOT be used to synchronize DS, DNSKEY, CDS, CDNSKEY or CSYNC records, and future extensions MUST NOT allow it either.</p><p>To stop replay of an old CSYNC record that uses <code>soaminimum</code>, the SOA serial MUST NOT rise by more than 2^16 during the signature window of the RRSIGs covering the SOA and CSYNC records, whether or not the 32-bit serial wraps.</p>",
+      "eli5": "<p>The office only believes a note if it has a trusted signature on it, and it never uses the note to change the signature keys themselves.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "7",
+      "title": "IANA Registrations",
+      "content": "<p>IANA assigned the <code>CSYNC</code> resource record type value 62. It also created a \"Child Synchronization (CSYNC) Flags\" registry. Assigning a new flag requires a Standards Action, and because the field is 16 bits, at most 16 flags can be defined.</p><p>The initial entries are Bit 0 <code>immediate</code> (process this CSYNC record immediately) and Bit 1 <code>soaminimum</code> (require a SOA serial number greater than the one specified).</p>",
+      "eli5": "<p>The official list of record types got a new entry with its own number, plus a list of the switches.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "CSYNC RDATA WIRE FORMAT (RFC 7477, SECTION 2.1.1)",
+      "data": {
+        "title": "CSYNC RDATA",
+        "width": 32,
+        "fields": [
+          {
+            "key": "soa-serial",
+            "name": "SOA Serial",
+            "bits": 32,
+            "desc": "Copy of the 32-bit SOA serial; used only when soaminimum is set."
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 16,
+            "desc": "Boolean flags: immediate and soaminimum are defined."
+          },
+          {
+            "key": "type-bit-map",
+            "name": "Type Bit Map",
+            "bits": 16,
+            "desc": "Variable length; record types to process, encoded like the NSEC type bit map."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "EXAMPLE CSYNC RECORD AND WIRE ENCODING (RFC 7477, SECTION 2.1.3)",
+      "data": {
+        "title": "CSYNC for example.com",
+        "lang": "text",
+        "code": "example.com. 3600 IN CSYNC 66 3 A NS AAAA\n\n0x00 0x00 0x00 0x42             (SOA Serial)\n0x00 0x03                       (Flags = immediate | soaminimum)\n0x00 0x04 0x60 0x00 0x00 0x08   (Type Bit Map)"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7344]",
+      "text": "Kumari, W., Gudmundsson, O., and G. Barwood, \"Automating DNSSEC Delegation Trust Maintenance\", RFC 7344, September 2014.",
+      "rfc": 7344
+    },
+    {
+      "number": "[RFC1982]",
+      "text": "Elz, R. and R. Bush, \"Serial Number Arithmetic\", RFC 1982, August 1996.",
+      "rfc": 1982
+    },
+    {
+      "number": "[RFC4034]",
+      "text": "Arends, R., Austein, R., Larson, M., Massey, D., and S. Rose, \"Resource Records for the DNS Security Extensions\", RFC 4034, March 2005.",
+      "rfc": 4034
+    },
+    {
+      "number": "[RFC3597]",
+      "text": "Gustafsson, A., \"Handling of Unknown DNS Resource Record (RR) Types\", RFC 3597, September 2003.",
+      "rfc": 3597
+    },
+    {
+      "number": "[RFC1034]",
+      "text": "Mockapetris, P., \"Domain names - concepts and facilities\", STD 13, RFC 1034, November 1987.",
+      "rfc": 1034
+    },
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

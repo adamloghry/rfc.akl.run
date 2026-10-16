@@ -9,13 +9,354 @@
   },
   "questions": [
     "what is iser",
-    "iscsi over rdma"
+    "iscsi over rdma",
+    "how does iser transfer scsi data",
+    "what is an stag in iser",
+    "what is the iser hello message"
+  ],
+  "tags": [
+    "Storage",
+    "RDMA",
+    "Transport"
+  ],
+  "subtitle": "How iSCSI hands bulk data to RDMA hardware so storage traffic lands straight in the right buffer.",
+  "tldr": {
+    "problem": "Traditional iSCSI over TCP has to store and reassemble out-of-order segments before it can place data in its buffers, which wastes memory bandwidth, CPU cycles and time at high network speeds.",
+    "mechanism": "iSER layers iSCSI on an RDMA-Capable Protocol. Control PDUs travel in RDMA Send messages, and the target moves the actual SCSI data with RDMA Write (reads) and RDMA Read (writes) straight into buffers the initiator advertised.",
+    "outcome": "It is a Proposed Standard that obsoletes RFC 5046 and records changes made to match existing implementations, including two new 64-bit offset fields that make it incompatible with a pure RFC 5046 implementation.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "iSER header size",
+      "value": "First 28 bytes of a Send payload"
+    },
+    {
+      "label": "Opcodes",
+      "value": "0001b control PDU, 0010b Hello, 0011b HelloReply"
+    },
+    {
+      "label": "Protocol version field",
+      "value": "10"
+    },
+    {
+      "label": "Default receive data segment length",
+      "value": "8192 bytes"
+    },
+    {
+      "label": "Default MaxAHSLength",
+      "value": "256"
+    },
+    {
+      "label": "Digests in iSER mode",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 7145 is a Proposed Standard published in April 2014. It obsoletes <a href='/5046/'>RFC 5046</a>, and the unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "rdma",
+    "iscsi",
+    "steering-tag",
+    "flow-control",
+    "tcp",
+    "ipsec"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why iSCSI Needs RDMA",
+      "content": "<p><strong>iSCSI</strong> maps the SCSI architecture onto TCP. In that traditional model, out-of-order TCP segments have to be stored and reassembled before the iSCSI layer can place their data in its buffers. Not every segment carries an iSCSI header, and TCP has no built-in way to mark upper-layer message boundaries.</p><p>At high speeds that reassembly is counterproductive. The RFC lists wasted memory bandwidth and CPU cycles on copying, the need for reassembly memory, and store-and-forward latency.</p><p><strong>iSCSI Extensions for RDMA</strong> (iSER) lets iSCSI use the direct data placement of a generic RDMA-Capable Controller instead. The RFC uses <strong>RCaP</strong> (RDMA-Capable Protocol) as a generic term for stacks such as iWARP and InfiniBand, and <strong>Traditional iSCSI</strong> for iSCSI without iSER.</p>",
+      "eli5": "<p>Imagine a delivery truck that unloads boxes on the sidewalk, and someone must sort and carry them inside. iSER lets the boxes go straight to the right room.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Where iSER Sits in the Stack",
+      "content": "<p>iSER is layered between the iSCSI layer and the RCaP layer. For TCP, the RCaP is iWARP. For InfiniBand, it is the Reliable Connected Transport Service. The RFC also describes iSER as a <strong>Datamover</strong> layer, with the iSCSI layer calling it through abstract <strong>Operational Primitives</strong> such as <code>Send_Control</code>, <code>Put_Data</code> and <code>Get_Data</code>.</p><p>The design goals include direct data placement without major changes to the SCSI architecture, reuse of the existing iSCSI ecosystem (MIB, naming, discovery, security), a fallback to Traditional iSCSI when either side lacks iSER, and a lightweight protocol with minimal state. iSER does not know about iSCSI sessions.</p><p>Two kinds of iSCSI PDU are handled differently. <strong>Control-type PDUs</strong> travel in RCaP Send messages. <strong>Data-type PDUs</strong> (SCSI Data-In and R2T) are never delivered as-is; the data movement is turned into RDMA operations run by the RDMA-Capable Controller. Because RCaP guarantees data integrity, header and data digests are negotiated to <code>None</code>.</p>",
+      "eli5": "<p>iSER is a middle helper between the storage program above and the fast delivery system below. It sends short notes by one route and heavy parcels by another.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "3",
+      "title": "Turning iSER On During Login",
+      "content": "<p>iSER-assisted mode is negotiated on the leading connection of a session with the <code>RDMAExtensions</code> key. Both sides must exchange <code>RDMAExtensions=Yes</code>, the key must go in the first available Login PDU of the operational negotiation stage, and it must not be negotiated for a Discovery session. The mode is session-wide: all later connections of the session use it too.</p><p>Once it is on, several other keys change. <code>HeaderDigest</code> and <code>DataDigest</code> become <code>None</code>, <code>OFMarker</code> and <code>IFMarker</code> become <code>No</code>, and <code>MaxRecvDataSegmentLength</code> is replaced by <code>InitiatorRecvDataSegmentLength</code> and <code>TargetRecvDataSegmentLength</code> (both default to 8192 bytes). The RFC adds <code>MaxOutstandingUnexpectedPDUs</code>, <code>MaxAHSLength</code> (default 256), <code>TaggedBufferForSolicitedDataOnly</code> and <code>iSERHelloRequired</code>.</p><p>If <code>iSERHelloRequired</code> is <code>Yes</code>, the first iSER message from the initiator is an <strong>iSER Hello</strong> declaring its inbound RDMA Read queue depth (iSER-IRD), and the target answers with a <strong>HelloReply</strong> declaring its outbound depth (iSER-ORD). The target sets its iSER-ORD to the smaller of the two values. Negotiation fails if the initiator declares an IRD above 0 while the target's ORD is 0, or if the supported protocol versions do not overlap.</p><div class='callout callout-warning'><p>A target must not allocate RDMA connection resources until the peer is reasonably certain not to be an attacker. If login includes a security negotiation stage, allocation waits until it is done.</p></div>",
+      "eli5": "<p>Before using the express lane, both sides must say yes at the front desk. After that they agree on smaller rules, such as how many parcels can be on the road at once.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "4",
+      "title": "The iSER Header",
+      "content": "<p>Every RCaP Send message carries an iSER header in the first 28 bytes of its payload. The first 4 bits are an opcode: <code>0001b</code> for an iSCSI control-type PDU, <code>0010b</code> for an iSER Hello, <code>0011b</code> for a HelloReply. Other opcodes are unassigned.</p><p>For a control-type PDU the header holds a Write STag Valid flag (<code>WSV</code>), a Read STag Valid flag (<code>RSV</code>), a Write STag with a 64-bit Write Base Offset, and a Read STag with a 64-bit Read Base Offset. This is how an initiator <strong>advertises</strong> its buffers. When a flag is zero, the matching STag and offset must be zero and are ignored on receive.</p><p>The Hello and HelloReply headers carry only the opcode, version fields and a 16-bit queue depth. For both, <code>MaxVer</code> and the other version field MUST be 10. The HelloReply also has a Reject flag the target sets when it refuses the connection.</p>",
+      "eli5": "<p>The header is the label on a parcel. It says what kind of parcel it is and where the sender left empty shelves for the answer.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5",
+      "title": "Reads and Writes with RDMA",
+      "content": "<p>The <strong>target drives all data transfer</strong>, except for unsolicited write data. The initiator sends the SCSI Command in a Send message and advertises a buffer through an <strong>STag</strong>, an identifier of an I/O buffer. The initiator never issues RDMA Writes or RDMA Reads itself.</p><p>For a SCSI Read, the target answers with one or more RDMA Writes into the advertised read buffer, then sends the SCSI Response in a Send message. For a SCSI Write with solicited data, the target turns each R2T PDU into an RDMA Read Request, using the R2T's Desired Data Transfer Length as the read size, and the initiator's RCaP layer answers with an RDMA Read Response. Unsolicited write data still travels in Send messages. The number of outstanding RDMA Read Requests may not exceed iSER-ORD.</p><p>SCSI status is always returned in a separate SCSI Response PDU, never collapsed into Data-In. SNACK requests MUST NOT be sent. Control information that rode in the skipped PDUs, such as <code>ExpCmdSN</code>, can be refreshed with NOP-Out and NOP-In if timing matters.</p><p>Send messages have no explicit flow control, so the receiver must provision enough untagged buffers. <code>MaxOutstandingUnexpectedPDUs</code> bounds how many unexpected control PDUs a side may have outstanding.</p>",
+      "eli5": "<p>When you want a package, you leave a bin open. The warehouse drops the package in or comes to pick one up. You just get a short note when it is done.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "Errors and Recovery",
+      "content": "<p>RCaP delivers messages reliably and in order, and it has no error recovery of its own: on an error it terminates the stream and the connection. Digest and sequence errors therefore cannot occur in iSER-assisted mode, and PDU-level recovery is not useful. The initiator SHOULD disable iSCSI timeout-driven PDU retransmissions.</p><p>iSER format errors (illegal or inconsistent header contents, wrong Hello length) and protocol errors make the iSER layer terminate the RCaP stream and tell the iSCSI layer through <code>Connection_Terminate_Notify</code>. If a target cannot allocate resources during login, it sends a Login Response with Status-Class 0x03 (Target Error) and Status-Code 0x02 (Out of Resources).</p><p>All three iSCSI ErrorRecoveryLevels remain supported. For connection recovery, the initiator can reassign tasks with a Task Management Function Request using TASK REASSIGN, which makes the target re-send unacknowledged read data or issue recovery R2Ts for missing write data.</p>",
+      "eli5": "<p>If something goes wrong on the express lane, the lane just closes and you start a new one, instead of trying to fix a single lost parcel.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>iSER inherits the security of the underlying RCaP layer, and all iSCSI security requirements still apply. If iSER runs over a non-IP protocol, the IPsec mechanism from the iSCSI specification MUST be implemented wherever traffic enters the IP network.</p><p>A valid STag exposes an I/O buffer to the network. Invalidating it after the task completes limits that exposure, and this matters most for implementations that cache STags for reuse. Because Send with Invalidate is optional, the iSER layer MUST NOT rely on the peer to invalidate for it; it MUST check and invalidate the STag itself if needed.</p><p>The RFC also requires delaying RCaP resource allocation at a target until the peer is unlikely to be part of a resource-exhaustion attack.</p>",
+      "eli5": "<p>An open bin that anyone can drop things into is risky, so you close it as soon as the delivery is done and never trust someone else to do it for you.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "8",
+      "title": "Changes from RFC 5046",
+      "content": "<p>RFC 7145 obsoletes <a href='/5046/'>RFC 5046</a>. Appendix A lists eleven changes. Notable ones: the requirement to start a connection in normal TCP mode and then switch to zero-copy mode was removed; <code>MaxAHSLength</code>, <code>TaggedBufferForSolicitedDataOnly</code> and <code>iSERHelloRequired</code> were added; and iWARP-specific behavior and the use of SendSE and SendInvSE were relaxed to match what implementations do.</p><p>All changes are backward compatible except one. Two 64-bit fields, the Read Base Offset and the Write Base Offset, were added to the iSER header. The RFC says this reflects all known implementations, but an implementation built strictly on RFC 5046 will not interoperate with this version.</p>",
+      "eli5": "<p>This is the second edition of the rulebook. Most new rules fit with the old ones, but one new label on every parcel means very old copies will not match.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "ISER HEADER FOR A CONTROL-TYPE PDU (RFC 7145)",
+      "data": {
+        "title": "iSER header, control-type PDU",
+        "bytes": 28,
+        "width": 32,
+        "fields": [
+          {
+            "key": "opcode",
+            "name": "Opcode",
+            "bits": 4,
+            "desc": "Identifies the iSER message type.",
+            "value": "0001b"
+          },
+          {
+            "key": "wsv",
+            "name": "WSV",
+            "bits": 1,
+            "desc": "Write STag Valid: Write STag and Write Base Offset are valid."
+          },
+          {
+            "key": "rsv",
+            "name": "RSV",
+            "bits": 1,
+            "desc": "Read STag Valid: Read STag and Read Base Offset are valid."
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 26,
+            "desc": "Set to zero on transmit, ignored on receive."
+          },
+          {
+            "key": "write-stag",
+            "name": "Write STag",
+            "bits": 32,
+            "desc": "Advertises the initiator's buffer for solicited write data."
+          },
+          {
+            "key": "write-base-offset",
+            "name": "Write Base Offset",
+            "bits": 64,
+            "desc": "Base Offset for the write I/O buffer."
+          },
+          {
+            "key": "read-stag",
+            "name": "Read STag",
+            "bits": 32,
+            "desc": "Advertises the initiator's buffer for read data."
+          },
+          {
+            "key": "read-base-offset",
+            "name": "Read Base Offset",
+            "bits": 64,
+            "desc": "Base Offset for the read I/O buffer."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "ISER OPCODES",
+      "data": {
+        "items": [
+          {
+            "code": "0001b",
+            "label": "iSCSI control-type PDU",
+            "desc": "A Send message carrying a control PDU after the iSER header.",
+            "highlight": true
+          },
+          {
+            "code": "0010b",
+            "label": "iSER Hello",
+            "desc": "First message from the initiator when iSERHelloRequired is Yes."
+          },
+          {
+            "code": "0011b",
+            "label": "iSER HelloReply",
+            "desc": "First message from the target in answer to a Hello."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "SCSI READ OVER ISER (SIMPLIFIED FROM RFC 7145)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator"
+          },
+          {
+            "key": "target",
+            "label": "Target"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "target",
+            "label": "Send: SCSI Command + Read STag",
+            "color": "blue",
+            "note": "Advertises the read buffer in the iSER header."
+          },
+          {
+            "from": "target",
+            "to": "initiator",
+            "label": "RDMA Write (data)",
+            "color": "green",
+            "note": "One or more writes straight into the advertised buffer."
+          },
+          {
+            "from": "target",
+            "to": "initiator",
+            "label": "Send: SCSI Response",
+            "color": "neutral",
+            "note": "Read STag is invalidated at the initiator."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "SCSI WRITE OVER ISER, SOLICITED DATA (SIMPLIFIED FROM RFC 7145)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator"
+          },
+          {
+            "key": "target",
+            "label": "Target"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "target",
+            "label": "Send: SCSI Command + Write STag",
+            "color": "blue",
+            "note": "Advertises the buffer holding the write data."
+          },
+          {
+            "from": "target",
+            "to": "initiator",
+            "label": "RDMA Read Request (from R2T)",
+            "color": "green",
+            "note": "The target turns each R2T into an RDMA Read."
+          },
+          {
+            "from": "initiator",
+            "to": "target",
+            "label": "RDMA Read Response (data)",
+            "color": "green",
+            "note": "Handled by the initiator's RCaP layer."
+          },
+          {
+            "from": "target",
+            "to": "initiator",
+            "label": "Send: SCSI Response",
+            "color": "neutral",
+            "note": "Write STag is invalidated at the initiator."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5046]",
+      "text": "Ko, M., Chadalapaka, M., Hufferd, J., Elzur, U., Shah, H., and P. Thaler, \"Internet Small Computer System Interface (iSCSI) Extensions for Remote Direct Memory Access (RDMA)\", RFC 5046, October 2007.",
+      "rfc": 5046
+    },
+    {
+      "number": "[iSCSI]",
+      "text": "Chadalapaka, M., Satran, J., Meth, K., and D. Black, \"Internet Small Computer System Interface (iSCSI) Protocol (Consolidated)\", RFC 7143, April 2014.",
+      "rfc": 7143
+    },
+    {
+      "number": "[RDMAP]",
+      "text": "Recio, R., Metzler, B., Culley, P., Hilland, J., and D. Garcia, \"A Remote Direct Memory Access Protocol Specification\", RFC 5040, October 2007.",
+      "rfc": 5040
+    },
+    {
+      "number": "[DDP]",
+      "text": "Shah, H., Pinkerton, J., Recio, R., and P. Culley, \"Direct Data Placement over Reliable Transports\", RFC 5041, October 2007.",
+      "rfc": 5041
+    },
+    {
+      "number": "[MPA]",
+      "text": "Culley, P., Elzur, U., Recio, R., Bailey, S., and J. Carrier, \"Marker PDU Aligned Framing for TCP Specification\", RFC 5044, October 2007.",
+      "rfc": 5044
+    },
+    {
+      "number": "[RDDPSEC]",
+      "text": "Pinkerton, J. and E. Deleganes, \"Direct Data Placement Protocol (DDP) / Remote Direct Memory Access Protocol (RDMAP) Security\", RFC 5042, October 2007.",
+      "rfc": 5042
+    },
+    {
+      "number": "[IPSEC-IPS]",
+      "text": "Black, D. and P. Koning, \"Securing Block Storage Protocols over IP: RFC 3723 Requirements Update for IPsec v3\", RFC 7146, April 2014.",
+      "rfc": 7146
+    },
+    {
+      "number": "[iSCSI-SAM]",
+      "text": "Knight, F. and M. Chadalapaka, \"Internet Small Computer System Interface (iSCSI) SCSI Features Update\", RFC 7144, April 2014.",
+      "rfc": 7144
+    },
+    {
+      "number": "[DA]",
+      "text": "Chadalapaka, M., Hufferd, J., Satran, J., and H. Shah, \"DA: Datamover Architecture for the Internet Small Computer System Interface (iSCSI)\", RFC 5047, October 2007.",
+      "rfc": 5047
+    },
+    {
+      "number": "[IPoIB]",
+      "text": "Chu, J. and V. Kashyap, \"Transmission of IP over InfiniBand (IPoIB)\", RFC 4391, April 2006.",
+      "rfc": 4391
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

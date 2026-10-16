@@ -9,13 +9,336 @@
   },
   "questions": [
     "how does rtcp work with source-specific multicast",
-    "what is unicast feedback in rtcp"
+    "what is unicast feedback in rtcp",
+    "how does rtcp work with source specific multicast",
+    "what is a feedback target in rtcp",
+    "what is the rtcp rsi packet",
+    "what is the rtcp-unicast sdp attribute"
+  ],
+  "tags": [
+    "RTP",
+    "Multicast",
+    "Feedback"
+  ],
+  "subtitle": "How receivers in a one-sender multicast session can report back by unicast, and how the source can boil their reports down.",
+  "tldr": {
+    "problem": "RTCP assumes every member of a multicast group can send to the whole group. In Source-Specific Multicast and other one-to-many networks, receivers cannot, so they have no way to share their control reports.",
+    "mechanism": "Receivers send their RTCP reports by unicast to a Feedback Target. The Distribution Source then either reflects each report to the group unchanged (Simple Feedback Model) or sends summaries in a new RSI packet (Distribution Source Feedback Summary Model).",
+    "outcome": "RTCP keeps working in single-source multicast sessions without a many-to-many network. The main risk is a wrong Feedback Target address, which can point a large group at an innocent host. RFC 6128 later updated this specification.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "New RTCP packet type",
+      "value": "RSI, payload type 209"
+    },
+    {
+      "label": "Sub-report block types",
+      "value": "0 to 2 and 4 to 8, 10 to 12 (3 and 9 reserved)"
+    },
+    {
+      "label": "Bucket count field",
+      "value": "NDB, 12 bits"
+    },
+    {
+      "label": "Multiplicative factor",
+      "value": "2^MF, MF is 4 bits"
+    },
+    {
+      "label": "SDP attribute",
+      "value": "rtcp-unicast (reflection or rsi)"
+    },
+    {
+      "label": "Silence limit",
+      "value": "No RSI for five times the sender reporting interval stops receiver reports"
+    }
+  ],
+  "today": "<p>RFC 5760 is a Proposed Standard and has been updated by <a href='/6128/'>RFC 6128</a>, which deals with the RTCP port in SSM sessions. No RFC obsoletes it.</p>",
+  "glossary": [
+    "rtcp",
+    "rtp",
+    "multicast",
+    "ssrc",
+    "sdp",
+    "jitter",
+    "rtp-mixer",
+    "rtp-translator",
+    "srtp",
+    "replay-attack",
+    "source-specific-multicast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why RTCP Needs Unicast Feedback",
+      "content": "<p>The <strong>RTP Control Protocol</strong> (RTCP) is the control channel of RTP. Group members send periodic control packets so everyone can estimate the group size and learn things like packet loss and round-trip time. RTP assumes an Any Source Multicast (ASM) model, where any member can send to the whole group.</p><p>That model is not always available or wanted. With <strong>Source-Specific Multicast</strong> (SSM) and satellite links, the multicast channel only carries traffic from the source to the receivers. In a large ASM group with one active sender and many passive receivers, building a routing mesh just for RTCP is wasteful.</p><p>This RFC adds <strong>unicast feedback</strong>: receivers send RTCP to the source by unicast, and the RTP data stream itself is unchanged. The RFC lists three scenarios: SSM groups with a single sender, one-to-many broadcast networks with a return channel, and ASM with a single sender. For the last one it says the approach is no more efficient than normal multicast RTCP and is not expected to replace it.</p>",
+      "eli5": "<p>Imagine a teacher talking to a huge hall where students can hear her but cannot shout to each other. This gives every student a private way to pass notes to the teacher.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "4",
+      "title": "The Roles and the Two Models",
+      "content": "<p>The RFC defines a few roles. The <strong>Distribution Source</strong> is the single entity that sends RTP data to the receivers and redistributes RTCP information. A <strong>Media Sender</strong> originates the RTP packets; there MUST be only one Distribution Source but there MAY be several Media Senders, and often one Media Sender is co-located with the Distribution Source. The <strong>Feedback Target</strong> is the logical function to which receivers address their unicast RTCP. It can live in the Distribution Source or in separate entities, and each receiver MUST direct its reports to a single Feedback Target instance.</p><p>The RTP channel is multicast from the Distribution Source to the receivers. The RTCP channel is the collection of unicast channels going back. Two models are defined: the <strong>Simple Feedback Model</strong>, a basic reflection mechanism, and the <strong>Distribution Source Feedback Summary Model</strong>, which consolidates reports into summaries. The model MUST be decided before the session starts and the Distribution Source MUST NOT change it during the session.</p><div class='callout callout-info'><p>Setting up how Media Senders reach the Distribution Source, and how Feedback Targets coordinate with each other, is outside the scope of the RFC. Appendix A gives informative examples of sender-side configurations.</p></div>",
+      "eli5": "<p>There is one announcer who speaks to everybody, and a mailbox where listeners drop notes. The announcer either reads every note out loud or reads a short summary of them.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "The Simple Feedback Model",
+      "content": "<p>In the <strong>Simple Feedback Model</strong> the packets are the same as in ordinary RTCP. Receivers still send Receiver Reports, the Distribution Source MUST create Sender Reports, and both Media Senders and receivers send SDES packets. The change is where packets go.</p><p>The Distribution Source MUST listen for unicast RTCP on the RTCP port and forward every valid packet to the group on the multicast RTCP channel. It MUST NOT stack report blocks from different receivers into one packet; each receiver packet is reflected individually. It also forwards Media Sender RTCP to the receivers and, where Media Senders are not in the multicast group, forwards receiver packets to them. If the Feedback Target is a separate entity, it MUST forward all receiver RTCP, directly or indirectly, to the Distribution Source.</p><p>Receivers compute their share of the control bandwidth and send a unicast Receiver Report when eligible. A receiver that sees an SSRC colliding with its own MUST change its SSRC immediately, before sending more feedback. The advantage is that existing receiver implementations need little change and the model stays backwards compatible with standard RTP/RTCP.</p>",
+      "eli5": "<p>Here the announcer just repeats every note out loud, one at a time, without mixing them together. Listeners hear what everyone said, as in a normal room.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "7.1",
+      "title": "The RSI Packet and Its Sub-Reports",
+      "content": "<p>The summary model adds one new RTCP packet type, <strong>Receiver Summary Information</strong> (RSI), payload type <code>209</code>. Its fixed header carries the Distribution Source's <code>SSRC</code>, a <code>Summarized SSRC</code> (the Media Sender being summarized), and a 64-bit NTP timestamp that lets receivers detect duplicates and reordering. Optional <strong>sub-report blocks</strong> follow, each starting with an 8-bit sub-report block type (SRBT) and an 8-bit length in 32-bit words, and each 32-bit aligned. Multi-octet values use network byte order.</p><p>Four sub-reports (Loss, Jitter, Round-trip time and Cumulative loss) use a shared <strong>data bucket</strong> layout. A 12-bit <code>NDB</code> gives the number of buckets, a 4-bit <code>MF</code> field scales the bucket values by 2^MF, and minimum and maximum 32-bit values define the range the equal-sized buckets cover. Loss values are fixed-point like the fraction lost field in SR and RR packets, and the minimum MUST be less than the maximum.</p><p>Other sub-reports carry the Feedback Target address (IPv4, IPv6 or DNS name, with a port that MUST NOT be zero), a list of colliding SSRCs, general statistics (median fraction lost, highest cumulative loss, median jitter), an RTCP bandwidth indication, and the group size with average RTCP packet size.</p>",
+      "eli5": "<p>The summary is like a class report card. It has a fixed top part saying who it is from, and then optional extra pages such as a chart of how many notes were complaints and how many were praise.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "7.2",
+      "title": "How the Distribution Source Summarizes",
+      "content": "<p>In the summary model the Distribution Source acts like a regular RTCP receiver and also aggregates what receivers report. Every RTCP report it sends MUST start with an RR, followed by SDES, then an RSI. Each RSI MUST carry either a Group and Average Packet Size sub-report or an RTCP Bandwidth sub-report. A source that includes only the bandwidth sub-report can hide the group size from receivers while still avoiding feedback implosion. If both are present, receivers give precedence to the bandwidth sub-report.</p><p>To build distribution sub-reports the source MUST keep the last value reported by each receiver, replacing it when a new one arrives and deleting it when the receiver times out or sends BYE. For the General Statistics block it keeps a timer <code>T_summary</code> initialized to 1.5 * Td and uses data from the last three reporting intervals, so that lost reports do not cause sudden resets. The source MUST NOT forward RR packets to the receiver group, though it MAY reflect others such as APP, RTPFB and PSFB.</p><p>Receivers MUST process RSI packets and adapt their RTCP bandwidth. If the bandwidth field was used earlier but is missing from the last five RSI reports, the receiver reverts to group-size calculation. If it hears no RSI for five times the sender reporting interval, it MUST stop sending Receiver Reports until the next RSI arrives. Media Senders MUST also be able to process RSI packets.</p>",
+      "eli5": "<p>The announcer keeps only each listener's latest note, throws away old ones, and reads out a short summary. If listeners do not hear the announcer for a long while, they stop sending notes until they hear them again.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "10",
+      "title": "Signalling in SDP",
+      "content": "<p>Session setup uses SDP. A new attribute <code>rtcp-unicast</code> MUST be used to say that feedback is unicast instead of multicast. The value <code>reflection</code> selects the Simple Feedback Model. The value <code>rsi</code> selects the summary model and may list rules in the form <code>processing:rtcp-type</code>, where the processing is <code>aggr</code> (aggregate), <code>forward</code> (pass unchanged) or <code>term</code> (terminate at the Distribution Source or Feedback Targets). By default, RR and SDES packets are aggregated into RSI packets and all other receiver packets are terminated. Aggregation of RR packets and forwarding of SR packets MUST NOT be changed.</p><p>For SSM, only the inclusion form <code>a=source-filter:incl</code> MUST be used, listing the Distribution Source address, and the RTCP port comes from the <code>m=</code> line. An alternative Feedback Target address and port MAY be given with the SDP <code>rtcp</code> attribute. Media Sender SSRCs MAY be announced with the <code>ssrc</code> attribute, which MUST include a <code>cname</code>.</p>",
+      "eli5": "<p>Before the show starts, the invitation says how to send notes and what the announcer will do with them. Listeners read the invitation so they follow the same rules.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "11",
+      "title": "Security Considerations",
+      "content": "<p>The RFC states that the security of the current RTP/RTCP model MUST NOT be diminished by unicast feedback. It covers four threats: denial of service, packet forgery, session replay and eavesdropping, and looks at three contexts: source to receivers, receivers to Distribution Source, and receivers to Feedback Target.</p><p>The source-to-receiver channel matters most because it controls how much feedback comes back. A forged group size, bandwidth allowance or Feedback Target address could make many receivers send traffic at one host. Data integrity and source authenticity MUST be applied to source traffic, and confidentiality is RECOMMENDED. For the return contexts integrity, authenticity and confidentiality are RECOMMENDED. A fake BYE could shift the advertised group size, so the source MUST follow proper timeout rules before reporting a change.</p><div class='callout callout-warning'><p>A Feedback Target address that is authenticated but simply mistyped cannot be fixed by security mechanisms. The resulting traffic is limited to the session's control bandwidth, but the host receiving it may be unable to tell where it comes from, especially if SRTP/SRTCP encrypts it. The RFC leaves a general solution for further study.</p></div><p>The RFC suggests distributing SDP securely (for example with SAP authentication, HTTPS, signed email, RTSP or SIP with S/MIME) and mentions SRTP, IPsec with GDOI, and TESLA for protecting the media session, and MIKEY and GSAKMP for key distribution.</p>",
+      "eli5": "<p>If someone gives everyone the wrong mailbox address, every listener will send their notes to the wrong person. The rules limit how many notes can pile up, but they cannot tell that the address is wrong.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "THE TWO FEEDBACK MODELS",
+      "data": {
+        "columns": [
+          "Model",
+          "What the Distribution Source does",
+          "SDP value"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Simple Feedback Model",
+              "Reflects every receiver packet individually to the group",
+              "rtcp-unicast:reflection"
+            ]
+          },
+          {
+            "cells": [
+              "Distribution Source Feedback Summary Model",
+              "Aggregates receiver reports into RSI summary packets",
+              "rtcp-unicast:rsi"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "RSI PACKET FIXED HEADER (RFC 5760)",
+      "data": {
+        "title": "RSI: Receiver Summary Information",
+        "width": 32,
+        "fields": [
+          {
+            "key": "version",
+            "name": "V",
+            "bits": 2,
+            "desc": "Version, 2.",
+            "value": "2"
+          },
+          {
+            "key": "padding",
+            "name": "P",
+            "bits": 1,
+            "desc": "Padding bit."
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 5,
+            "desc": "Reserved."
+          },
+          {
+            "key": "pt",
+            "name": "PT",
+            "bits": 8,
+            "desc": "Packet type RSI.",
+            "value": "209"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Packet length in 32-bit words minus one."
+          },
+          {
+            "key": "ssrc",
+            "name": "SSRC",
+            "bits": 32,
+            "desc": "SSRC of the Distribution Source."
+          },
+          {
+            "key": "summarized-ssrc",
+            "name": "Summarized SSRC",
+            "bits": 32,
+            "desc": "SSRC of the Media Sender this report summarizes."
+          },
+          {
+            "key": "ntp-msw",
+            "name": "NTP Timestamp (most significant word)",
+            "bits": 32,
+            "desc": "Wallclock time when the report was sent."
+          },
+          {
+            "key": "ntp-lsw",
+            "name": "NTP Timestamp (least significant word)",
+            "bits": 32,
+            "desc": "Fractional part of the timestamp."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "SUB-REPORT BLOCK TYPES (SRBT)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "IPv4 Address",
+            "desc": "IPv4 Feedback Target address."
+          },
+          {
+            "code": "1",
+            "label": "IPv6 Address",
+            "desc": "IPv6 Feedback Target address."
+          },
+          {
+            "code": "2",
+            "label": "DNS Name",
+            "desc": "DNS name of the Feedback Target."
+          },
+          {
+            "code": "3",
+            "label": "Reserved",
+            "desc": "Reserved for Standards Action."
+          },
+          {
+            "code": "4",
+            "label": "Loss",
+            "desc": "Distribution of loss reported by receivers."
+          },
+          {
+            "code": "5",
+            "label": "Jitter",
+            "desc": "Distribution of jitter."
+          },
+          {
+            "code": "6",
+            "label": "RTT",
+            "desc": "Distribution of round-trip times."
+          },
+          {
+            "code": "7",
+            "label": "Cumulative loss",
+            "desc": "Distribution of cumulative loss."
+          },
+          {
+            "code": "8",
+            "label": "Collisions",
+            "desc": "List of SSRCs that collide."
+          },
+          {
+            "code": "10",
+            "label": "Stats",
+            "desc": "General statistics."
+          },
+          {
+            "code": "11",
+            "label": "RTCP BW",
+            "desc": "RTCP bandwidth indication.",
+            "highlight": true
+          },
+          {
+            "code": "12",
+            "label": "Group Info",
+            "desc": "Group size and average RTCP packet size.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "rfc": 3550
+    },
+    {
+      "number": "[3]",
+      "text": "Baugher, M., McGrew, D., Naslund, M., Carrara, E., and K. Norrman, \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
+      "rfc": 3711
+    },
+    {
+      "number": "[4]",
+      "text": "Quinn, B. and R. Finlayson, \"Session Description Protocol (SDP) Source Filters\", RFC 4570, July 2006.",
+      "rfc": 4570
+    },
+    {
+      "number": "[5]",
+      "text": "Handley, M., Jacobson, V., and C. Perkins, \"SDP: Session Description Protocol\", RFC 4566, July 2006.",
+      "rfc": 4566
+    },
+    {
+      "number": "[10]",
+      "text": "Casner, S., \"Session Description Protocol (SDP) Bandwidth Modifiers for RTP Control Protocol (RTCP) Bandwidth\", RFC 3556, July 2003.",
+      "rfc": 3556
+    },
+    {
+      "number": "[12]",
+      "text": "Lennox, J., Ott, J., and T. Schierl, \"Source-Specific Media Attributes in the Session Description Protocol (SDP)\", RFC 5576, June 2009.",
+      "rfc": 5576
+    },
+    {
+      "number": "[15]",
+      "text": "Ott, J., Wenger, S., Sato, N., Burmeister, C., and J. Rey, \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
+      "rfc": 4585
+    },
+    {
+      "number": "[28]",
+      "text": "Ott, J. and E. Carrara, \"Extended Secure RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/SAVPF)\", RFC 5124, February 2008.",
+      "rfc": 5124
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

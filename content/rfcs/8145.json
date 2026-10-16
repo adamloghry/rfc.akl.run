@@ -9,13 +9,192 @@
   },
   "questions": [
     "dnssec trust anchor signaling",
-    "how to monitor dnssec key rollover"
+    "how to monitor dnssec key rollover",
+    "what is edns key tag",
+    "how does dnssec key tag signaling work",
+    "what is a _ta query in dns",
+    "how to monitor dnssec root key rollover"
+  ],
+  "tags": [
+    "DNS",
+    "DNSSEC",
+    "Operations"
+  ],
+  "subtitle": "How a DNSSEC validating resolver can tell a server which trust anchor keys it uses, so key rollovers can be watched.",
+  "tldr": {
+    "problem": "When a DNSSEC zone such as the root rolls over its keys, administrators have no way to see how many validating resolvers have picked up the new trust anchor.",
+    "mechanism": "A validating resolver reports the Key Tags of its trust anchors in one of two optional ways: an edns-key-tag option (option code 14) on DNSKEY queries, or a separate NULL query whose name starts with _ta- followed by the hexadecimal Key Tags.",
+    "outcome": "Authoritative servers can log the signals and judge when a rollover is safe to complete. The document was later updated by RFC 8553.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "EDNS0 option code",
+      "value": "14 (edns-key-tag)"
+    },
+    {
+      "label": "Key Tag size",
+      "value": "16 bits"
+    },
+    {
+      "label": "Key Tag query type",
+      "value": "NULL, class IN"
+    },
+    {
+      "label": "Query name prefix",
+      "value": "_ta-"
+    },
+    {
+      "label": "Hex padding",
+      "value": "4 digits per Key Tag"
+    },
+    {
+      "label": "Implementation",
+      "value": "OPTIONAL"
+    }
+  ],
+  "today": "<p>RFC 8145 is a Proposed Standard that has been updated by <a href='/8553/'>RFC 8553</a>. Both signaling mechanisms are optional to implement and use.</p>",
+  "glossary": [
+    "dnssec",
+    "trust-anchor",
+    "key-tag",
+    "dnskey",
+    "edns0",
+    "opt-record",
+    "validating-resolver",
+    "key-signing-key",
+    "negative-caching"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Signal Trust Anchor Knowledge",
+      "content": "<p>DNSSEC protects DNS data with digital signatures. A validating resolver checks them by building a chain of trust that starts at a <strong>trust anchor</strong>, a configured DNSKEY record or the hash of one. The root zone is the case the RFC cares about most: when its keys or algorithms roll over using <a href='/5011/'>RFC 5011</a>, resolvers update their trust anchors automatically, and the zone operators cannot tell who has done so.</p><p>RFC 8145 gives resolvers two optional ways to tell a server which keys they would use to validate its answers. The data lets zone administrators gauge the deployment of new keys. The RFC is clear that it introduces no new process for rolling keys or updating trust anchors. It only signals the set of keys a client uses.</p>",
+      "eli5": "<p>When the teacher changes the secret handshake, she needs to know when enough kids have learned it. Without a way to ask, she is guessing.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "3",
+      "title": "Key Tags and Trust Anchors",
+      "content": "<p>A <strong>Key Tag</strong> is a 16-bit number computed from the RDATA of a DNSKEY record, using a formula not unlike a ones-complement checksum. It exists so software can quickly pick the right key when several are candidates. RRSIG records and DS records both carry a Key Tag field that points at the DNSKEY involved.</p><p>Because the Key Tag is short and already public, it makes a compact way to say which key a resolver is using. A resolver learns the Key Tags of a zone's key signing keys from the zone's DS records in the parent or from a trust anchor. DNSSEC does not require Key Tags to be unique, so the RFC warns that during a rollover an old and a new key could, with small probability, share the same tag. Zone operators relying on the edns-key-tag mechanism SHOULD make sure new keys have unique Key Tags.</p>",
+      "eli5": "<p>A Key Tag is like a short number on a key ring tag, so you can find the right key without trying all of them.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "The edns-key-tag Option",
+      "content": "<p>The first method puts the Key Tags into an EDNS option in the OPT record of a DNS query. The option code is <code>14</code>. <code>OPTION-LENGTH</code> is 2 times the number of Key Tags, followed by one or more 16-bit <code>KEY-TAG</code> values.</p><p>A validating resolver sets the option when it sends a DNSKEY query, and SHOULD also set the DO bit. The tags represent the keys it expects to validate the response with. A client SHOULD include the option for a DNSKEY query for a zone with a trust anchor, and MAY include it for other zones, using tags learned from DS records. It MUST NOT include the option on non-DNSKEY queries, and MUST NOT include tags for keys not learned from a trust anchor or DS record. Non-validating stub resolvers MUST NOT include the option at all.</p><p>Recursive resolvers have extra rules. If a client's Key Tag list differs from the resolver's own, the resolver SHOULD forward both lists, each in a separate instance of the option. The RFC's example is a resolver list of (19036, 12345) and a client list of (19036, 34567). A recursive resolver MAY combine tags from several clients, and is RECOMMENDED to limit how many it includes. A non-validating recursive resolver SHOULD copy the option it received. Responders MUST NOT include the option in any response, and a client that sees it in a response MUST ignore it.</p>",
+      "eli5": "<p>The resolver tucks a little note onto its question saying which keys it knows. The server never writes a note back.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "The Key Tag Query",
+      "content": "<p>The second method sends a separate query. A Key Tag query is a standard DNS query of type NULL and class IN. The first label of the name is <code>_ta-</code> followed by a sorted, hyphen-separated list of hexadecimal Key Tags, with the trust anchor's zone name appended. Each value MUST be zero-padded to four hexadecimal digits, so decimal 999 becomes <code>03e7</code>, and multiple tags MUST be sorted from smallest to largest.</p><p>A validating resolver SHOULD send a Key Tag query whenever it sends a DNSKEY query for a trust anchor zone, and SHOULD NOT do so for non-trust-anchor zones. A non-validating resolver MUST NOT send them. Resolvers with caches SHOULD cache the answer like any other.</p><p>Authoritative servers MAY log the queries. The server needs no special logic; the response code depends on whether the name is in the zone or covered by wildcards. Zone operators may add Key Tag records, with chosen TTLs, to influence how often clients ask. This also matters for aggressive NSEC/NSEC3 negative caching: if answers are NXDOMAIN, resolvers that implement it will send fewer Key Tag queries than those that do not. During a rollover from Key Tag 1111 to 2222 (hex), the RFC suggests publishing <code>_ta-1111</code>, <code>_ta-2222</code> and <code>_ta-1111-2222</code> as empty NULL records.</p>",
+      "eli5": "<p>Instead of a note on the question, the resolver asks a made-up question whose words spell out the keys it knows. The server just reads the question.</p>"
+    },
+    {
+      "id": "history",
+      "number": "1.1",
+      "title": "Why There Are Two Methods",
+      "content": "<p>The work started with only the EDNS option, modeled on <a href='/6975/'>RFC 6975</a> (DNSSEC algorithm signaling). DNSOP working group participants suggested using the query name instead, because forwarding makes EDNS awkward. EDNS(0) is hop-by-hop, so unknown option codes are not forwarded by default, middleboxes might block queries with unknown options, and a recursive resolver might need to remember tags from its clients.</p><p>The EDNS option still has an advantage: it can show that a stub client has a different Key Tag list from its forwarder. The authors judged this not enough to drop the QNAME approach. The QNAME approach has downsides too: it needs a separate query, it can be affected by aggressive negative caching, and it cannot be used when adding the prefix would push a name beyond 255 octets. For this reason the RFC recommends Key Tag queries only for trust anchors, while EDNS-based tags can go on any DNSKEY query.</p>",
+      "eli5": "<p>The authors first wrote notes on the question, then found notes can get lost on the way, so they added the made-up-question trick too.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>An eavesdropper or server could infer which validator a client uses from its Key Tag list. That might let an attacker find validators with old, possibly broken keys, or narrow down implementations that have a known vulnerability.</p><p>Consumers of the collected data are also warned that Key Tag values may be made up. An attacker with enough resources could send many queries listing only old Key Tags to delay the completion of a key rollover.</p>",
+      "eli5": "<p>Someone listening could learn which handshake you know, and someone could lie about it to keep the teacher from ever switching.</p>"
+    },
+    {
+      "id": "privacy-considerations",
+      "number": "8",
+      "title": "Privacy Considerations",
+      "content": "<p>Key Tag values are not considered private, but an eavesdropper might use them to fingerprint particular validating clients, especially if the validator has trust anchors for zones beyond the root. A resolver need not send tags on every query; it MAY send them for a subset, such as every 25th time or with a probability such as 5%. Implementations MAY be configured to send tags only for certain zones.</p><p>Since the main goal is measuring root zone rollovers, implementations are RECOMMENDED to at least include the edns-key-tag option for root zone DNSKEY queries.</p>",
+      "eli5": "<p>You do not have to tell the teacher every time. You can mention it now and then, or only for certain classes.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE EDNS-KEY-TAG OPTION (RFC 8145)",
+      "data": {
+        "title": "edns-key-tag option",
+        "bytes": 6,
+        "width": 16,
+        "fields": [
+          {
+            "key": "option-code",
+            "name": "OPTION-CODE",
+            "bits": 16,
+            "desc": "The EDNS0 option code assigned to edns-key-tag.",
+            "value": "14"
+          },
+          {
+            "key": "option-length",
+            "name": "OPTION-LENGTH",
+            "bits": 16,
+            "desc": "2 x the number of key-tag values present."
+          },
+          {
+            "key": "key-tag",
+            "name": "KEY-TAG",
+            "bits": 16,
+            "desc": "One or more 16-bit Key Tag values; the list may continue."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "KEY TAG QUERY NAME FROM THE RFC'S EXAMPLE",
+      "data": {
+        "title": "Three trust anchors for example.com",
+        "lang": "text",
+        "code": "Key Tags (decimal): 1589, 43547, 31406\nKey Tags (hex, sorted): 0635, 7aae, aa1b\n\nQTYPE=NULL, QCLASS=IN,\nQNAME=_ta-0635-7aae-aa1b.example.com."
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4033]",
+      "text": "Arends, R., et al., \"DNS Security Introduction and Requirements\", RFC 4033, March 2005.",
+      "rfc": 4033
+    },
+    {
+      "number": "[RFC4034]",
+      "text": "Arends, R., et al., \"Resource Records for the DNS Security Extensions\", RFC 4034, March 2005.",
+      "rfc": 4034
+    },
+    {
+      "number": "[RFC5011]",
+      "text": "StJohns, M., \"Automated Updates of DNS Security (DNSSEC) Trust Anchors\", STD 74, RFC 5011, September 2007.",
+      "rfc": 5011
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC6975]",
+      "text": "Crocker, S. and S. Rose, \"Signaling Cryptographic Algorithm Understanding in DNS Security Extensions (DNSSEC)\", RFC 6975, July 2013.",
+      "rfc": 6975
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

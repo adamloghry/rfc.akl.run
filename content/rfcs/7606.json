@@ -10,13 +10,234 @@
   "questions": [
     "bgp malformed attribute handling",
     "treat-as-withdraw",
-    "avoid bgp session reset"
+    "avoid bgp session reset",
+    "what is treat-as-withdraw in bgp",
+    "what does rfc 7606 change",
+    "how does bgp handle malformed update messages"
+  ],
+  "tags": [
+    "BGP",
+    "Routing",
+    "Error Handling"
+  ],
+  "subtitle": "Why a single malformed BGP attribute should cost you some routes, not the whole peering session.",
+  "tldr": {
+    "problem": "The base BGP specification requires a speaker that receives an UPDATE with a malformed attribute to reset the whole session, which also disrupts valid routes and lets one bad attribute spread damage across many sessions.",
+    "mechanism": "RFC 7606 defines four error-handling approaches, from session reset down to attribute discard, and assigns treat-as-withdraw or attribute discard to the attributes where a session reset used to be required.",
+    "outcome": "Sessions stay up and only the routes in the bad UPDATE are affected. The RFC is a Proposed Standard and is not obsoleted.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Approaches defined",
+      "value": "4"
+    },
+    {
+      "label": "IPv4 NLRI length limit",
+      "value": "Over 32 is invalid"
+    },
+    {
+      "label": "Fixed-length NEXT_HOP",
+      "value": "4 octets"
+    },
+    {
+      "label": "Zero-length attributes allowed",
+      "value": "AS_PATH and ATOMIC_AGGREGATE only"
+    },
+    {
+      "label": "Updates",
+      "value": "RFC 1997, 4271, 4360, 4456, 4760, 5543, 5701, 6368"
+    }
+  ],
+  "today": "<p>RFC 7606 is a Proposed Standard published in August 2015. The metadata lists no RFC that obsoletes or updates it, so it remains the current definition of revised UPDATE error handling for the RFCs it amends.</p>",
+  "glossary": [
+    "bgp",
+    "nlri",
+    "autonomous-system",
+    "ibgp-and-ebgp",
+    "treat-as-withdraw",
+    "attribute-discard"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Session Reset Is a Problem",
+      "content": "<p>Under the base BGP specification (<a href='/4271/'>RFC 4271</a>), a speaker that receives an UPDATE message with a malformed attribute must reset the session it arrived on. That hurts not only the routes with the bad attribute but also every other valid route exchanged over the session.</p><p>The problem is worst for optional transitive attributes. Routers that do not recognize such an attribute pass it along unchecked, so it can be effectively tunneled. When it reaches a router that does check it, the session that gets reset may not belong to the router at fault. By then the attribute may have been replicated many times, so one bad update can reset many peering sessions.</p><p>The stated goal is to minimize the impact of a malformed UPDATE while keeping the protocol correct: keep the session, keep the valid routes, and remove only the routes carried in the malformed UPDATE.</p>",
+      "eli5": "<p>Hanging up on a friend because one word in a letter was smudged is a bad idea. It is better to ignore just that letter and keep talking.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Four Error-Handling Approaches",
+      "content": "<p>The RFC names four ways to handle an error in an UPDATE, listed from the strongest action to the weakest:</p><ul><li><strong>Session reset</strong>: send a NOTIFICATION and terminate the session, as the base specification does throughout.</li><li><strong>AFI/SAFI disable</strong>: the option from <a href='/4760/'>RFC 4760</a> to ignore all subsequent routes of that address family received over the session.</li><li><strong>Treat-as-withdraw</strong>: treat the UPDATE as though all its routes were listed as withdrawn, so they are removed from the Adj-RIB-In. This MUST be done as if they had been in the WITHDRAWN ROUTES field (or in MP_UNREACH_NLRI).</li><li><strong>Attribute discard</strong>: drop the malformed attribute and keep processing the UPDATE. This MUST NOT be used except for an attribute that has no effect on route selection or installation.</li></ul><p>When several errors exist in one UPDATE and they call for different approaches, the strongest action wins.</p>",
+      "eli5": "<p>There are four ways to react to a bad letter: hang up, stop listening about one topic, throw away that letter, or just cross out the smudged line.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Revised UPDATE Error Handling",
+      "content": "<p>Section 3 amends Section 6.3 of <a href='/4271/'>RFC 4271</a>. A NOTIFICATION with the error code UPDATE Message Error is now sent only for errors where a session reset is specified. Several rules follow.</p><ul><li>If the Optional or Transitive bit in the Attribute Flags conflicts with its specified value, the attribute is malformed and treat-as-withdraw is used, unless the attribute's own specification says otherwise.</li><li>If a well-known mandatory attribute is missing, treat-as-withdraw is used.</li><li>Treat-as-withdraw replaces session reset for ORIGIN, AS_PATH, NEXT_HOP, MULTI_EXIT_DISC and LOCAL_PREF. Attribute discard replaces it for ATOMIC_AGGREGATE and AGGREGATOR.</li><li>If MP_REACH_NLRI or MP_UNREACH_NLRI appears more than once, a NOTIFICATION with the subcode Malformed Attribute List is still sent. For any other attribute that appears more than once, every occurrence after the first is discarded.</li><li>A too-large Withdrawn Routes Length or Total Attribute Length (Withdrawn Routes Length + Total Attribute Length + 23 exceeding the message Length) keeps its old handling.</li></ul><p>Treat-as-withdraw only works if the NLRI can be parsed successfully. If it cannot, the session reset or AFI/SAFI disable procedures still apply.</p>",
+      "eli5": "<p>Each kind of mistake now gets a gentler reaction, and only a few really confusing mistakes still end the call.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "Lengths and NLRI Parsing",
+      "content": "<p>Two cases make the Total Attribute Length conflict with the attributes inside it: the last attribute's length would run past the total, or fewer than three octets remain (four if the Extended Length bit is set) while unconsumed data is left. In both, treat-as-withdraw MUST be used, and the Total Attribute Length MUST be relied on to find the start of the NLRI. A zero-length attribute is a syntax error, except that only AS_PATH and ATOMIC_AGGREGATE may validly have length zero.</p><p>To make the NLRI easy to locate, the MP_REACH_NLRI or MP_UNREACH_NLRI attribute SHALL be encoded as the first path attribute. An UPDATE MUST NOT contain more than one of: a non-empty Withdrawn Routes field, a non-empty NLRI field, MP_REACH_NLRI, or MP_UNREACH_NLRI. Receivers must still accept older, differently arranged messages.</p><p>An UPDATE that carries other attributes but no reachable NLRI cannot be trusted to have been parsed correctly. If it has an error calling for anything other than attribute discard, session reset MUST be used. NLRI are syntactically incorrect if a prefix length is greater than 32 (or inconsistent with the AFI/SAFI, for example greater than 128 for IPv6), or if the last NLRI overruns the remaining data. Unrecognized NLRI types in a typed address family MUST be discarded.</p>",
+      "eli5": "<p>To throw away the right page, you first have to know where each page starts and ends. These rules make the page boundaries easy to find.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5",
+      "title": "Handling of Existing Attributes",
+      "content": "<p>Section 7 goes through the existing attributes one by one and says what counts as malformed and which approach applies. Attributes that already have suitable error handling (such as AS4_PATH and AIGP) or are deprecated are not covered.</p><p>Treat-as-withdraw applies to ORIGIN (length not 1 or an undefined value), AS_PATH (bad segment type or malformed segment), NEXT_HOP (length not 4), MULTI_EXIT_DISC (length not 4), Community (length not a non-zero multiple of 4), Extended Community (not a non-zero multiple of 8), IPv6 Address Specific Extended Community (not a non-zero multiple of 20), the Traffic Engineering attribute and ATTR_SET.</p><p>Attribute discard applies to ATOMIC_AGGREGATE (length not 0) and AGGREGATOR (length not 6, or not 8 when the 4-octet AS number capability is both advertised and received). LOCAL_PREF, ORIGINATOR_ID and CLUSTER_LIST are discarded when they come from an external neighbor, and treated as withdraw if malformed when they come from an internal one.</p><p>One case keeps the heavy approach: if the next hop length in MP_REACH_NLRI is not what was expected, the NLRI cannot be located reliably, so session reset or AFI/SAFI disable MUST be used. A speaker MUST NOT treat an unrecognized Extended Community type or sub-type as an error.</p>",
+      "eli5": "<p>Each kind of label on a package has its own rule for what to do when it is wrong, such as throw away the package or just peel off the bad sticker.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "6",
+      "title": "Operational Considerations and Author Guidance",
+      "content": "<p>Treat-as-withdraw is not free. On an IBGP session it can cause inconsistent routing inside an Autonomous System, with possible long-lived forwarding loops and black holes. The RFC expects this to be rare and judges it less harmful than the session reset it replaces. It recommends tracing such routes back to the ingress router and filtering them there. Treat-as-withdraw is different from discarding the UPDATE, which breaks BGP's incremental update principle and could leave invalid routes in place.</p><p>A speaker must provide debugging facilities, at a minimum logging an error that lists the NLRI involved and contains the entire malformed UPDATE. Operators writing routing policy that depends on a discardable attribute should consider the consequences of discarding it.</p><p>Authors of new BGP attributes MUST specify what counts as an error and how it is handled. Treat-as-withdraw is generally preferred and session reset is discouraged. Discarding an attribute that has or may have an effect on route selection is presumed unsafe unless careful analysis shows otherwise.</p>",
+      "eli5": "<p>Throwing away a page can still cause confusion later, so keep a note of what you threw away and why.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The RFC addresses an attack in which a distant attacker generates a malformed optional transitive attribute that intervening routers do not recognize and so propagate unchecked. Where the attribute reaches a router that does recognize it, that router resets the session, and the fan-out between attacker and those routers could make the attack especially harmful.</p><p>The RFC also notes that improved error handling could interact badly with weak cryptographic mechanisms that lack data integrity if they were used to secure BGP in future: an attacker could make many attempts to observe how the receiver reacts, where a session reset would previously have ended the session. It recommends preferring AEAD ciphers and discarding messages that do not verify. In other respects BGP's security characteristics are unchanged.</p>",
+      "eli5": "<p>A prankster could hide a trick in a message that many people pass along without opening. Now the one who opens it just ignores the trick instead of everyone hanging up.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "THE FOUR APPROACHES, STRONGEST FIRST",
+      "data": {
+        "items": [
+          {
+            "title": "Session reset",
+            "text": "Send a NOTIFICATION and terminate the session."
+          },
+          {
+            "title": "AFI/SAFI disable",
+            "text": "Ignore all later routes of that address family on the session."
+          },
+          {
+            "title": "Treat-as-withdraw",
+            "text": "Handle the UPDATE as if all its routes were withdrawn."
+          },
+          {
+            "title": "Attribute discard",
+            "text": "Drop the bad attribute and keep processing the UPDATE."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "WHICH APPROACH APPLIES TO WHICH ATTRIBUTE",
+      "data": {
+        "columns": [
+          "Attribute",
+          "Malformed when",
+          "Approach"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "ORIGIN",
+              "Length not 1, or undefined value",
+              "Treat-as-withdraw"
+            ]
+          },
+          {
+            "cells": [
+              "NEXT_HOP",
+              "Length not 4",
+              "Treat-as-withdraw"
+            ]
+          },
+          {
+            "cells": [
+              "Community",
+              "Length not a non-zero multiple of 4",
+              "Treat-as-withdraw"
+            ]
+          },
+          {
+            "cells": [
+              "Extended Community",
+              "Length not a non-zero multiple of 8",
+              "Treat-as-withdraw"
+            ]
+          },
+          {
+            "cells": [
+              "ATOMIC_AGGREGATE",
+              "Length not 0",
+              "Attribute discard"
+            ]
+          },
+          {
+            "cells": [
+              "AGGREGATOR",
+              "Length not 6 (or 8 with 4-octet AS numbers)",
+              "Attribute discard"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4271]",
+      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "rfc": 4271
+    },
+    {
+      "number": "[RFC4760]",
+      "text": "Bates, T., Chandra, R., Katz, D., and Y. Rekhter, \"Multiprotocol Extensions for BGP-4\", RFC 4760, January 2007.",
+      "rfc": 4760
+    },
+    {
+      "number": "[RFC1997]",
+      "text": "Chandra, R., Traina, P., and T. Li, \"BGP Communities Attribute\", RFC 1997, August 1996.",
+      "rfc": 1997
+    },
+    {
+      "number": "[RFC4360]",
+      "text": "Sangli, S., Tappan, D., and Y. Rekhter, \"BGP Extended Communities Attribute\", RFC 4360, February 2006.",
+      "rfc": 4360
+    },
+    {
+      "number": "[RFC4456]",
+      "text": "Bates, T., Chen, E., and R. Chandra, \"BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP)\", RFC 4456, April 2006.",
+      "rfc": 4456
+    },
+    {
+      "number": "[RFC4724]",
+      "text": "Sangli, S., Chen, E., Fernando, R., Scudder, J., and Y. Rekhter, \"Graceful Restart Mechanism for BGP\", RFC 4724, January 2007.",
+      "rfc": 4724
+    },
+    {
+      "number": "[RFC6793]",
+      "text": "Vohra, Q. and E. Chen, \"BGP Support for Four-Octet Autonomous System (AS) Number Space\", RFC 6793, December 2012.",
+      "rfc": 6793
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

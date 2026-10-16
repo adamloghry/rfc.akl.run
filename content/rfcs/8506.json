@@ -9,13 +9,341 @@
   },
   "questions": [
     "diameter credit control",
-    "real-time charging diameter"
+    "real-time charging diameter",
+    "what is diameter credit control",
+    "what is the credit-control request ccr",
+    "how does prepaid charging work in diameter",
+    "what is final unit indication"
+  ],
+  "tags": [
+    "Diameter",
+    "Charging",
+    "AAA"
+  ],
+  "subtitle": "How a network element asks a credit server for permission and quota before it lets a prepaid user consume a service.",
+  "tldr": {
+    "problem": "Ordinary authorization and accounting only tell a network what a user is allowed to do or what they did afterwards. Prepaid services need the account checked and credit reserved before the service starts.",
+    "mechanism": "A credit-control client asks a credit-control server for credit with Credit-Control-Request messages. The server reserves and grants units, the client reports what was used, and a final request releases whatever is left. One-time events cover single-shot cases such as price inquiries and direct debiting.",
+    "outcome": "RFC 8506 obsoletes RFC 4006 and must be supported by all new Diameter Credit-Control implementations. It defines the messages, AVPs, state machines, failure handling and security and privacy guidance.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Diameter application id",
+      "value": "4"
+    },
+    {
+      "label": "Command code (CCR and CCA)",
+      "value": "272"
+    },
+    {
+      "label": "Tx timer (recommended)",
+      "value": "10 seconds"
+    },
+    {
+      "label": "Tcc timer",
+      "value": "may be 2 x Validity-Time"
+    },
+    {
+      "label": "Result codes defined",
+      "value": "4010, 4011, 4012, 5030, 5031"
+    },
+    {
+      "label": "Obsoletes",
+      "value": "RFC 4006"
+    }
+  ],
+  "today": "<p>RFC 8506 is a Proposed Standard published in March 2019. It obsoletes <a href='/4006/'>RFC 4006</a>, and its abstract says it must be supported by all new Diameter Credit-Control application implementations. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "diameter",
+    "avp",
+    "credit-control",
+    "radius",
+    "nas",
+    "tls",
+    "ipsec",
+    "sctp",
+    "replay-protection"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Real-Time Credit-Control for Prepaid Services",
+      "content": "<p>RFC 8506 specifies a <strong>Diameter</strong> application for real-time <strong>credit-control</strong> of services such as network access, Session Initiation Protocol (SIP) services, messaging and downloads. The RFC defines credit-control as a process of checking whether credit is available, reserving credit, deducting credit when the service is completed and refunding reserved credit that was not used.</p><p>The motivation is the prepaid model. In mobile networks an application must be able to rate service information in real time and check that the account covers a service before it starts. Other Diameter applications only provide service-specific authorization, not credit authorization for prepaid users.</p><p>The scope is credit authorization only. Service-specific authorization and authentication are out of scope. Nodes that support the application advertise it by including the value <code>4</code> in the Auth-Application-Id of their Capabilities-Exchange messages.</p>",
+      "eli5": "<p>If you pay in advance, the shop must check your balance before it gives you anything. This document is the rulebook for that check between computers.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Clients, Servers and the Architecture Around Them",
+      "content": "<p>The typical setup has a <strong>Service Element</strong> (a Network Access Server, a SIP proxy or an application server) with an embedded credit-control client, a <strong>credit-control server</strong>, a AAA server and usually a Business Support System that handles billing. The credit-control server and AAA server are logical entities and may run on one host. The protocol is the Diameter base protocol (RFC 6733) plus this application.</p><p>There can be several credit-control servers for redundancy and load balancing, and separate rating servers. To avoid charging or crediting an account twice for one service event, only one entity in the credit-control system should perform duplicate detection. Relays and redirect agents may sit between client and server, and credit-control proxies MUST advertise support for the application.</p><p>Section 11 describes interworking with RADIUS prepaid: a home AAA server can act as a translation agent and as a credit-control client, mapping RADIUS Access-Request messages to Credit-Control-Request messages.</p>",
+      "eli5": "<p>A shop clerk (the client) phones the bank (the server) to ask if you have enough money. There can be a backup bank phone, but only one person should write down each purchase.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The Credit-Control Request and Answer",
+      "content": "<p>The application adds two commands that share Command Code <code>272</code>: the <strong>Credit-Control-Request</strong> (CCR), identified by the 'R' bit being set, and the <strong>Credit-Control-Answer</strong> (CCA), where it is cleared. Both can be extended with further Attribute-Value Pairs (AVPs). In a CCR the Auth-Application-Id MUST be set to <code>4</code>.</p><p>Every CCR carries <code>CC-Request-Type</code> and <code>CC-Request-Number</code> plus a <code>Service-Context-Id</code>. The context identifier names the service-specific document that applies, because the RFC does not define rating inputs itself. If the server cannot rate a request, it answers with <code>DIAMETER_RATING_FAILED</code> and lists the offending AVPs in Failed-AVP, and the client MUST NOT send similar requests again.</p><p>The CC-Request-Number, together with the globally unique Session-Id, matches requests with answers. A simple scheme is to use 0 for the initial request, 1 for the first update, 2 for the second, and so on.</p>",
+      "eli5": "<p>Every question to the bank has a kind (starting, middle, ending, or one-off) and a number, so answers never get mixed up.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Session-Based Credit-Control",
+      "content": "<p>When the client reserves credit before granting service, it uses several <strong>interrogations</strong> (request and answer pairs) in one session with a constant Session-Id. The server MUST keep session state.</p><ul><li><strong>First interrogation</strong> (<code>INITIAL_REQUEST</code>) MUST come before any service is allowed. The server rates the request, reserves money and returns a <code>Granted-Service-Unit</code> in time, volume, service-specific units or money. It can be sent as part of the authorization message exchange or after authorization, depending on the network.</li><li><strong>Intermediate interrogation</strong> (<code>UPDATE_REQUEST</code>) is sent when granted units run out or the Validity-Time expires. The client reports used units and the server deducts them and may reserve more.</li><li><strong>Final interrogation</strong> (<code>TERMINATION_REQUEST</code>) reports the last usage, and the server MUST refund reserved credit that was not used.</li></ul><p>A client can control several services in one (sub-)session using the Multiple-Services-Credit-Control AVP, keyed by Service-Identifier or Rating-Group. Units can be shared through a credit pool to avoid credit fragmentation. The server may also start a re-authorization with a Re-Auth-Request, which the client answers before sending an update. Optional tariff time change support lets the server split a grant into before-change and after-change quotas.</p>",
+      "eli5": "<p>The bank gives you a small pile of coins to spend. When you run low you tell the bank what you spent and get more, and at the end any unused coins go back in your account.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5.6",
+      "title": "Graceful Termination and Failure Handling",
+      "content": "<p>When an account runs out, the server can include a <code>Final-Unit-Indication</code> (or <code>QoS-Final-Unit-Indication</code>) in an answer to say the granted units are the last ones. Once they are used, the client acts on <code>Final-Unit-Action</code>: <code>TERMINATE</code> ends the service, <code>REDIRECT</code> sends the user to a given address such as a top-up portal, and <code>RESTRICT_ACCESS</code> limits traffic to permitted filters. Support for TERMINATE is mandatory and is the default for unsupported values. If the user tops up, the server may send a Re-Auth-Request so that restrictions are removed.</p><p>The <strong>Credit-Control-Failure-Handling</strong> AVP (CCFH) tells the client what to do if it cannot reach the server: <code>TERMINATE</code> (the default), <code>CONTINUE</code> or <code>RETRY_AND_TERMINATE</code>. The Direct-Debiting-Failure-Handling AVP (DDFH) does the same for direct debiting, with <code>TERMINATE_OR_BUFFER</code> or <code>CONTINUE</code>.</p><p>The client supervises the server with a <strong>Tx timer</strong>, recommended at 10 seconds, rather than waiting for the base protocol watchdog, whose recommended default initial value is 30 seconds. The server uses a Tcc timer, which can be set to 2 times the Validity-Time. Failover of an ongoing session is allowed only if the server sent <code>FAILOVER_SUPPORTED</code> in the CC-Session-Failover AVP.</p>",
+      "eli5": "<p>When your money runs out you can be sent to the top-up desk instead of just being thrown out. If the phone line to the bank breaks, the shop's rules decide whether you keep going.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "One-Time Events",
+      "content": "<p>A <strong>one-time event</strong> is a single request and answer with no session state in the server. The client sets <code>CC-Request-Type</code> to <code>EVENT_REQUEST</code> and must include a <code>Requested-Action</code>, which chooses what the event does:</p><ul><li><code>PRICE_ENQUIRY</code> returns the estimated cost in Cost-Information without checking the balance or reserving credit.</li><li><code>CHECK_BALANCE</code> returns <code>ENOUGH_CREDIT</code> or <code>NO_CREDIT</code> in Check-Balance-Result without reserving anything, so it does not guarantee credit will remain for a later debit.</li><li><code>DIRECT_DEBITING</code> deducts the amount immediately, for services that always succeed, so session-based control is unnecessary.</li><li><code>REFUND_ACCOUNT</code> adds units back to the account, for example for gaming services.</li></ul><p>Because the server keeps no state, failover to another server is allowed. Direct debiting and refund requests that cannot be delivered may be stored and resent, marked as possible duplicates with the T flag.</p>",
+      "eli5": "<p>Sometimes you just ask the price, check your balance, pay once, or get a refund. These are one-off questions, so the bank does not need to remember you afterwards.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "7",
+      "title": "State Machines",
+      "content": "<p>Section 7 defines five state machines: four for clients and one for the server. Clients use one machine for a first interrogation that is part of authorization, one for a first interrogation sent as a CCR, one for intermediate and final interrogations, and one for one-time events. The server machine covers both session-based and event-based requests. Any event not listed MUST be treated as an error.</p><p>The client states are <code>Idle</code>, <code>Open</code> and the pending states <code>PendingI</code>, <code>PendingU</code>, <code>PendingT</code>, <code>PendingE</code> and <code>PendingB</code>, which wait for the answer to an initial, update, termination, event or buffered request. The Tx timer runs while the client waits. On the server, an initial request moves <code>Idle</code> to <code>Open</code> and starts the Tcc timer; if Tcc expires, the server releases the reserved units and returns to <code>Idle</code>.</p>",
+      "eli5": "<p>The rules are like a board game with squares: waiting, playing, and asking the bank. Each message moves you from one square to the next.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "14",
+      "title": "Security and Privacy",
+      "content": "<p>This application handles money, so all parties MUST be authenticated, including TLS client authentication, and client authorization to do credit-control for a given user SHOULD be emphasized. In a single domain with a single hop, TLS/TCP, DTLS/SCTP or IPsec is considered sufficient. Replay protection comes from the Session-Id and CC-Request-Number. The RFC warns about tampering with, injecting, delaying or eavesdropping on messages, and says sensitive AVPs should not travel through untrusted proxies.</p><p>The redirect feature adds risk: redirection can occur at any point in a session, so an attacker may redirect users to phishing sites that imitate payment pages. Service providers should follow industry best practice and make their users aware.</p><p>Section 15 lists privacy-sensitive AVPs, which MUST NOT cross untrusted networks or agents without end-to-end authentication and confidentiality protection. They include the Subscription-Id family (subscriber identity), the User-Equipment-Info family (device identity), Check-Balance-Result, Service-Identifier and Rating-Group. It also gives data-minimization advice, such as deleting client data when a session ends and keeping transaction records no longer than required.</p>",
+      "eli5": "<p>Because real money is involved, everyone must prove who they are and keep messages secret. Beware of fake top-up pages, and only keep personal details as long as you really need them.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "SESSION-BASED CREDIT-CONTROL, SIMPLIFIED FROM FIGURE 3",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Credit-control client"
+          },
+          {
+            "key": "server",
+            "label": "Credit-control server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "CCR (Initial)",
+            "color": "blue",
+            "note": "Asks for credit before service starts."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "CCA (Granted-Units)",
+            "color": "green",
+            "note": "Reserves money and grants units."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "CCR (Update, Used-Units)",
+            "color": "blue",
+            "note": "Reports usage and asks for more."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "CCA (Granted-Units)",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "CCR (Termination, Used-Units)",
+            "color": "blue",
+            "note": "Reports final usage at end of service."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "CCA",
+            "color": "green",
+            "note": "Unused reserved credit is refunded."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "CC-REQUEST-TYPE VALUES",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "INITIAL_REQUEST",
+            "desc": "Starts a credit-control session."
+          },
+          {
+            "code": "2",
+            "label": "UPDATE_REQUEST",
+            "desc": "Reports usage and asks for more credit in an existing session."
+          },
+          {
+            "code": "3",
+            "label": "TERMINATION_REQUEST",
+            "desc": "Ends a credit-control session."
+          },
+          {
+            "code": "4",
+            "label": "EVENT_REQUEST",
+            "desc": "One-time event with no session state; needs a Requested-Action."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "FINAL-UNIT-ACTION VALUES",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "TERMINATE",
+            "desc": "End the service session. Mandatory to support and the default for unknown values.",
+            "highlight": true
+          },
+          {
+            "code": "1",
+            "label": "REDIRECT",
+            "desc": "Send the user to the address in the Redirect-Server AVPs."
+          },
+          {
+            "code": "2",
+            "label": "RESTRICT_ACCESS",
+            "desc": "Allow only traffic that matches the given filters; drop the rest."
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "CLIENT SESSION STATES, SIMPLIFIED FROM TABLES 3 AND 4",
+      "data": {
+        "states": [
+          {
+            "key": "idle",
+            "label": "Idle",
+            "initial": true
+          },
+          {
+            "key": "pending-i",
+            "label": "PendingI"
+          },
+          {
+            "key": "open",
+            "label": "Open"
+          },
+          {
+            "key": "pending-u",
+            "label": "PendingU"
+          },
+          {
+            "key": "pending-t",
+            "label": "PendingT"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "idle",
+            "to": "pending-i",
+            "label": "service requested: send initial CCR"
+          },
+          {
+            "from": "pending-i",
+            "to": "open",
+            "label": "successful initial answer"
+          },
+          {
+            "from": "open",
+            "to": "pending-u",
+            "label": "granted units elapse or Validity-Time ends: send update"
+          },
+          {
+            "from": "pending-u",
+            "to": "open",
+            "label": "successful update answer"
+          },
+          {
+            "from": "open",
+            "to": "pending-t",
+            "label": "user service terminated: send termination"
+          },
+          {
+            "from": "pending-t",
+            "to": "idle",
+            "label": "termination answer received"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6733]",
+      "text": "Fajardo, V., Ed., et al., \"Diameter Base Protocol\", RFC 6733, October 2012.",
+      "rfc": 6733
+    },
+    {
+      "number": "[RFC4006]",
+      "text": "Hakala, H., et al., \"Diameter Credit-Control Application\", RFC 4006, August 2005.",
+      "rfc": 4006
+    },
+    {
+      "number": "[RFC7155]",
+      "text": "Zorn, G., Ed., \"Diameter Network Access Server Application\", RFC 7155, April 2014.",
+      "rfc": 7155
+    },
+    {
+      "number": "[RFC4004]",
+      "text": "Eronen, P., et al., \"Diameter Mobile IPv4 Application\", RFC 4004, August 2005.",
+      "rfc": 4004
+    },
+    {
+      "number": "[RFC3539]",
+      "text": "Aboba, B. and J. Wood, \"Authentication, Authorization and Accounting (AAA) Transport Profile\", RFC 3539, June 2003.",
+      "rfc": 3539
+    },
+    {
+      "number": "[RFC2866]",
+      "text": "Rigney, C., \"RADIUS Accounting\", RFC 2866, June 2000.",
+      "rfc": 2866
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

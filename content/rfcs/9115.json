@@ -9,13 +9,279 @@
   },
   "questions": [
     "acme delegated certificates cdn",
-    "how can a cdn get a certificate for my domain"
+    "how can a cdn get a certificate for my domain",
+    "what is acme delegation",
+    "what is a csr template",
+    "how do i revoke a delegated certificate",
+    "what is an ndc and ido"
+  ],
+  "tags": [
+    "ACME",
+    "Certificates",
+    "Delegation"
+  ],
+  "subtitle": "How a CDN can get a certificate for your domain without ever holding your private key, and how you can cut it off.",
+  "tldr": {
+    "problem": "A content provider that hires a CDN needs the CDN to present a certificate for the provider's domain name, but neither side wants to share long-term private keys.",
+    "mechanism": "The CDN (the NDC) sends ACME orders and a CSR to the domain owner (the IdO), who checks the CSR against an agreed template and then requests the certificate from the CA itself, usually as a short-term, automatically renewed (STAR) certificate.",
+    "outcome": "The CDN holds its own key and fetches certificates, the owner keeps control and can end the delegation at any time, and no changes are needed in deployed TLS clients and servers.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Error for unknown delegation",
+      "value": "403 with unknownDelegation"
+    },
+    {
+      "label": "Parties",
+      "value": "IdO, NDC and CA"
+    },
+    {
+      "label": "New account attribute",
+      "value": "delegations"
+    },
+    {
+      "label": "New order attribute",
+      "value": "delegation"
+    },
+    {
+      "label": "New IANA registry",
+      "value": "STAR Delegation CSR Template Extensions"
+    }
+  ],
+  "today": "<p>RFC 9115 is a Proposed Standard from September 2021. It has not been obsoleted or updated, and it works together with <a href='/8739/'>RFC 8739</a> for STAR certificates.</p>",
+  "glossary": [
+    "certificate-authority",
+    "csr",
+    "x509-certificate",
+    "cname",
+    "crl",
+    "ocsp",
+    "subject-alternative-name",
+    "name-delegation-consumer"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Delegating a Name Without Sharing Keys",
+      "content": "<p>An <strong>Identifier Owner</strong> (IdO) has agreements with one or more <strong>Name Delegation Consumers</strong> (NDC) to use and attest its identity. In the main use case the IdO is a content provider and the NDC is a Content Delivery Network (CDN) that terminates HTTPS at its edge servers. Browsers, apps and set-top boxes expect a certificate whose name matches the provider's domain.</p><p>Some owners balk at sharing their long-term private keys, and delegates would rather not hold other parties' secrets. This RFC defines a profile of ACME (<a href='/8555/'>RFC 8555</a>) in which the NDC asks the IdO, acting as a profiled ACME server, for a certificate for a delegated identity. The IdO then uses ACME, with the STAR extensions of <a href='/8739/'>RFC 8739</a>, to obtain the certificate from the CA.</p><p>The RFC contrasts this with other approaches. One extends the TLS certificate chain with a customer-owned signing certificate, and another moves the server key into a separate secure component. This profile needs no changes to the TLS stack of the client or server and adds no latency to the TLS connection.</p>",
+      "eli5": "<p>A shop wants a delivery company to show a badge with the shop's name on it, but nobody wants to hand over their secret stamp. This is a way to get the badge without swapping stamps.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "The Parties and Their Preconditions",
+      "content": "<p>Three parties take part. The <strong>IdO</strong> owns the identifier, such as a domain name. The <strong>NDC</strong> receives the delegation for a limited time. The <strong>CA</strong> is the Certification Authority that implements ACME and issues the certificate.</p><p>Before the protocol starts, four things must hold:</p><ul><li>The IdO exposes an ACME server interface to the NDC.</li><li>The NDC has registered an ACME account with the IdO.</li><li>The NDC and IdO have agreed on a <strong>CSR template</strong>: at a minimum the subject name, algorithms and key length, key usage and extensions.</li><li>The IdO has an ACME account with the CA.</li></ul><p>Even though the IdO runs an ACME server, it is not a CA. For issuance it acts as a policing forwarder of the NDC's key pair and completes identity verification towards the CA.</p>",
+      "eli5": "<p>There is the shop owner, the delivery company and the badge office. Before anything happens they agree what the badge may say and who is allowed to ask for it.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "The Delegation Flow",
+      "content": "<p>For STAR certificates the flow runs two linked ACME exchanges. The NDC sends an order for the delegated identifier to the IdO, which creates it directly in state <code>ready</code>. The NDC immediately sends a <code>finalize</code> request containing the CSR. The normal interactive authorization step is skipped between NDC and IdO, because the CSR is checked against the template instead.</p><p>If the CSR fails the check, the order becomes <code>invalid</code> and everything stops. If it passes, the IdO moves the order to <code>processing</code> and places its own order with the CA for the same identifier, completing validation there. If the STAR run succeeds, the IdO copies the <code>star-certificate</code> URL into the NDC's order and marks it <code>valid</code>.</p><p>The NDC then downloads, installs and uses each short-term certificate. It can do so with an unauthenticated GET, because it has no account at the CA. So the IdO SHOULD check that the CA supports unauthenticated GET, and MUST NOT forward the order if it does not. Instead it sets the order to <code>invalid</code> and <code>allow-certificate-get</code> to false, which signals the failure to the NDC.</p><p>If the identifier is a DNS name, the IdO can also install the CNAME records listed in the delegation object, for example aliasing <code>abc.ido.example.</code> to <code>abc.ndc.example.</code>. Non-STAR (long-lived) certificates follow a similar flow.</p>",
+      "eli5": "<p>The delivery company asks the shop owner for a badge. The owner checks the request matches the agreement, then asks the badge office on its own. When the badge is ready, the delivery company picks it up.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "4",
+      "title": "Accounts, Delegations and Orders",
+      "content": "<p>The profile adds a few pieces to ACME. The NDC's account on the IdO gets a required <code>delegations</code> attribute: a URL from which a list of delegation configurations can be fetched with a POST-as-GET request. Each entry points to a read-only <strong>delegation object</strong>.</p><p>A delegation object holds a required <code>csr-template</code> and an optional <code>cname-map</code>, a map of fully qualified domain name pairs for identifiers of type <code>dns</code>. Orders on the NDC-IdO side carry a new <code>delegation</code> attribute with the URL of the delegation to use. A URL the account cannot use gets a 403 (Forbidden) with the error type <code>urn:ietf:params:acme:error:unknownDelegation</code>.</p><p>A STAR order from the NDC must carry the <code>delegation</code> attribute, list every delegated name, omit <code>notBefore</code> and <code>notAfter</code>, and include an <code>auto-renewal</code> object with <code>allow-certificate-get</code> set to true. The IdO's own order to the CA copies the identifiers and the auto-renewal object but strips the <code>delegation</code> attribute.</p><p>Proxy behavior is also specified. A server may act as a proxy into another ACME delegation server, as in chained delegation. It copies identifiers and the auto-renewal object as is and rewrites the <code>finalize</code> URL, <code>Location</code> header and <code>Link</code> relations to point at itself.</p>",
+      "eli5": "<p>The agreement is written on a card. The delivery company shows which card it is using, and the owner only helps if that card really belongs to that company.</p>"
+    },
+    {
+      "id": "syntax",
+      "number": "5",
+      "title": "The CSR Template",
+      "content": "<p>The <strong>CSR template</strong> is a JSON document that describes and limits the CSR the NDC may send. It is used for every certificate under the same delegation, and checking against it is a critical part of the security of the whole mechanism. The RFC deliberately defines only a minimum set of attributes and leaves more specific ones to later documents.</p><p>Each template field is one of three kinds: a literal value the CSR must contain, a double asterisk for a mandatory field the client chooses, or a single asterisk for an optional field the client may include. The NDC MUST NOT put anything in the CSR, including extensions, that the template does not specify.</p><p>The <code>keyTypes</code> property is not copied into the CSR. It instead limits the type and size of the CSR's public key. <code>subjectAltName</code> currently covers DNS names, email addresses and URIs. The IdO MUST verify the CSR against the template and MAY add stricter limits. If the client may define the domain name itself, the IdO MUST apply its own local-policy checks too.</p>",
+      "eli5": "<p>The template is a form with some boxes already filled in, some the company must fill, and some it may leave blank. Anything written outside the boxes is rejected.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Ending a Delegation",
+      "content": "<p>How a delegation ends depends on the certificate type.</p><p>For STAR certificates, the IdO cancels the automatic renewal with the CA, as defined in <a href='/8739/'>RFC 8739</a>. Only the IdO holds the CA account key, so the NDC cannot cancel. STAR also disables the <code>revokeCert</code> interface. Shortly after renewal stops, the last certificate expires and the delegation ends.</p><p>For non-STAR certificates, the IdO asks the CA to revoke the certificate through the <code>revokeCert</code> URL, then waits for the revocation to spread through CRL and OCSP. Because revocation may be authorized with the certificate key, an NDC could revoke on its own, but the RFC says the trust relationship and the lack of incentive make this no major risk.</p>",
+      "eli5": "<p>The owner ends the deal by not renewing the badge, which then runs out quickly. For long-lasting badges, the owner has to ask the office to cancel and wait for everyone to hear about it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Trust and Security Considerations",
+      "content": "<p>Delegation adds a trust relationship between NDC and IdO to the ACME trust model, and the chain can become recursive. With plain RFC 6125 identity verification, the IdO has no mechanism to restrict use of the name after handing it to the first NDC, so contractual measures are expected to stop redelegation.</p><p>The security goal is that only an NDC authorized by the IdO, directly or transitively, can obtain a certificate with the IdO's identity. The RFC splits this into five parts: enabling the NDC, checking the request shape, serving the certificate back, revoking the delegation, and revoking the certificate. The NDC's ACME account is central, so the IdO MUST tie each account to exactly the delegation objects that say which names it may get and how. If the account key is compromised, the delegate MUST use the account deactivation procedure of <a href='/8555/'>RFC 8555</a>.</p><div class='callout callout-warning'><p>A malicious or breached CDN that controls the website can pass HTTPS-based validation and get a certificate regardless of this mechanism. The suggested mitigation is for the domain holder to control the DNS zone alone, use CAA records to limit issuance to specific ACME CAs and an account it controls, and require <code>dns-01</code> as the only validation method.</p></div>",
+      "eli5": "<p>The owner has to trust the delivery company, and the paperwork has to say exactly what the company may do. If the company could also edit the shop's own sign, it could trick the badge office, so the owner should keep control of the sign.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "IANA Registrations",
+      "content": "<p>The RFC adds <code>delegation-enabled</code> and <code>allow-certificate-get</code> to the ACME Directory Metadata Fields registry, and <code>allow-certificate-get</code> and <code>delegation</code> to the ACME Order Object Fields registry. It adds <code>delegations</code> to the ACME Account Object Fields registry and the <code>unknownDelegation</code> error type to the ACME Error Types registry.</p><p>It also creates a new registry, STAR Delegation CSR Template Extensions, with Specification Required as the registration procedure. Its initial entries are <code>keyUsage</code>, <code>extendedKeyUsage</code> and <code>subjectAltName</code>.</p>",
+      "eli5": "<p>The new words used by this system are written in the official dictionary so everyone spells them the same way.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "STAR DELEGATION FLOW, SIMPLIFIED FROM RFC 9115 FIGURE 1",
+      "data": {
+        "lanes": [
+          {
+            "key": "ndc",
+            "label": "NDC (CDN)"
+          },
+          {
+            "key": "ido",
+            "label": "IdO (owner)"
+          },
+          {
+            "key": "ca",
+            "label": "ACME CA"
+          }
+        ],
+        "messages": [
+          {
+            "from": "ndc",
+            "to": "ido",
+            "label": "Order1",
+            "color": "blue",
+            "note": "Order for the delegated identifier."
+          },
+          {
+            "from": "ndc",
+            "to": "ido",
+            "label": "CSR (finalize)",
+            "color": "blue",
+            "note": "Checked against the CSR template."
+          },
+          {
+            "from": "ido",
+            "to": "ca",
+            "label": "Order2",
+            "color": "blue",
+            "note": "IdO's own STAR order."
+          },
+          {
+            "from": "ca",
+            "to": "ido",
+            "label": "Required authorizations",
+            "color": "neutral"
+          },
+          {
+            "from": "ido",
+            "to": "ca",
+            "label": "Responses, then CSR",
+            "color": "blue",
+            "note": "Validation completes with the CA."
+          },
+          {
+            "from": "ndc",
+            "to": "ca",
+            "label": "Unauthenticated GET",
+            "color": "green",
+            "note": "Fetches the STAR certificate."
+          },
+          {
+            "from": "ca",
+            "to": "ndc",
+            "label": "Certificate #1, #2, ... #n",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "HOW A DELEGATION ENDS",
+      "data": {
+        "columns": [
+          "Certificate type",
+          "How the IdO ends it",
+          "What follows"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "STAR",
+              "Cancels automatic renewal with the CA",
+              "Last certificate expires shortly after"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Non-STAR",
+              "Requests revocation at the CA's revokeCert URL",
+              "Revocation propagates via CRL and OCSP"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "syntax",
+      "position": "after",
+      "caption": "THREE KINDS OF CSR TEMPLATE FIELD",
+      "data": {
+        "items": [
+          {
+            "title": "Literal value",
+            "text": "The template fixes the value; the CSR must contain exactly it."
+          },
+          {
+            "title": "\"**\"",
+            "text": "Mandatory field whose content the client defines."
+          },
+          {
+            "title": "\"*\"",
+            "text": "Optional field; the client decides whether to include it and what it says."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8555]",
+      "text": "Barnes, R., Hoffman-Andrews, J., McCarney, D., and J. Kasten, \"Automatic Certificate Management Environment (ACME)\", RFC 8555, March 2019.",
+      "rfc": 8555
+    },
+    {
+      "number": "[RFC8739]",
+      "text": "Short-Term, Automatically Renewed (STAR) Certificates in the Automated Certificate Management Environment (ACME), RFC 8739.",
+      "rfc": 8739
+    },
+    {
+      "number": "[RFC2986]",
+      "text": "Nystrom, M. and B. Kaliski, \"PKCS #10: Certification Request Syntax Specification Version 1.7\", RFC 2986, November 2000.",
+      "rfc": 2986
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC7807]",
+      "text": "Nottingham, M. and E. Wilde, \"Problem Details for HTTP APIs\", RFC 7807, March 2016.",
+      "rfc": 7807
+    },
+    {
+      "number": "[RFC8657]",
+      "text": "CAA Record Extensions for Account URI and ACME Method Binding, RFC 8657.",
+      "rfc": 8657
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

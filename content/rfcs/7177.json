@@ -9,13 +9,391 @@
   },
   "questions": [
     "trill adjacency",
-    "how trill switches discover neighbors"
+    "how trill switches discover neighbors",
+    "what is trill adjacency",
+    "how does trill elect a designated rbridge",
+    "what are the trill adjacency states",
+    "what is a pseudonode in trill"
+  ],
+  "tags": [
+    "Routing",
+    "TRILL",
+    "IS-IS"
+  ],
+  "subtitle": "How TRILL switches say hello, confirm they can really talk, and agree on who is in charge of a shared link.",
+  "tldr": {
+    "problem": "TRILL switches (RBridges) can be joined by many kinds of links, and Layer 3 IS-IS hello rules do not fit: multiple designated routers, padded hellos and VLAN-restricted links can all break loop-safe forwarding of native frames.",
+    "mechanism": "TRILL Hellos run an adjacency state machine (Down, Detect, 2-Way, Report), elect one Designated RBridge per LAN link, optionally test the MTU and use BFD, and let the designated RBridge choose whether to use a pseudonode.",
+    "outcome": "It obsoletes RFC 6327 and updates RFC 6325, and extends the Hello protocol to point-to-point and non-Ethernet links. It is a Proposed Standard that later RFCs have updated.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Max Hello size",
+      "value": "1,470 bytes"
+    },
+    {
+      "label": "Adjacency states",
+      "value": "Down, Detect, 2-Way, Report"
+    },
+    {
+      "label": "DRB priority field",
+      "value": "7 bits"
+    },
+    {
+      "label": "Hello multicast address",
+      "value": "01-80-C2-00-00-41"
+    },
+    {
+      "label": "Ethertype",
+      "value": "0x22F4"
+    },
+    {
+      "label": "BFD-Enabled TLV type",
+      "value": "148"
+    }
+  ],
+  "today": "<p>RFC 7177 is a Proposed Standard that obsoletes <a href='/6327/'>RFC 6327</a> and updates <a href='/6325/'>RFC 6325</a>. It has itself been updated by <a href='/7780/'>RFC 7780</a>, <a href='/8139/'>RFC 8139</a>, <a href='/8249/'>RFC 8249</a>, <a href='/8377/'>RFC 8377</a> and <a href='/8564/'>RFC 8564</a>.</p>",
+  "glossary": [
+    "trill",
+    "rbridge",
+    "adjacency",
+    "designated-rbridge",
+    "pseudonode",
+    "link-state-routing",
+    "mtu",
+    "ethernet",
+    "ethertype",
+    "broadcast",
+    "multicast",
+    "finite-state-machine"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What This Document Covers",
+      "content": "<p><strong>TRILL</strong> (Transparent Interconnection of Lots of Links) uses IS-IS link-state routing between TRILL switches, also called <strong>RBridges</strong>. End stations attach with Ethernet, but the switches can be joined by any link technology. <a href='/6325/'>RFC 6325</a> is the base protocol; this RFC gives detailed rules for five link-local aspects of it.</p><p>The five aspects are: adjacency formation and dissolution, Designated RBridge (DRB) election, MTU matching, one-hop BFD (Bidirectional Forwarding Detection) for adjacency, and creation and use of pseudonodes. The first, third and fourth also apply to point-to-point links. There is no DRB election and no pseudonode on a link configured as point-to-point.</p><p>If this document and <a href='/6325/'>RFC 6325</a> conflict, this document prevails. Other implementations are allowed as long as they interoperate on the wire.</p>",
+      "eli5": "<p>Think of switches as neighbors on a street. This document is the rulebook for how they meet, check they can hear one another, and pick a leader when many share one street.</p>"
+    },
+    {
+      "id": "background",
+      "number": "2",
+      "title": "Why TRILL Hellos Differ from Layer 3 IS-IS",
+      "content": "<p>Layer 3 IS-IS handles two kinds of links: point-to-point and broadcast. TRILL replaces those subnetwork-dependent functions because RBridges live in a different environment.</p><ul><li><strong>Ethernet interconnection.</strong> Links between RBridges may include 802.1Q bridges that restrict VLANs. So TRILL Data and IS-IS packets travel in a <strong>Designated VLAN</strong> chosen by the DRB, and adjacency is judged only by connectivity in that VLAN.</li><li><strong>Native frames.</strong> TRILL must carry \"untamed\" native frames that have no hop count. A loop through egress and re-ingress would be unprotected, so exactly one RBridge, the Designated RBridge with its Appointed Forwarder mechanism, should handle ingress and egress on a link.</li><li><strong>Zero or minimal configuration</strong>, unlike Layer 3 routers.</li><li><strong>MTU robustness.</strong> TRILL Hellos have a mandatory maximum size, and optional MTU testing lets a campus with larger frames use them safely.</li></ul><p>The Hello protocol has three purposes: decide which neighbors are reported in the topology, elect a unique DRB on LAN links, and find the MTU that is safe to use with each neighbor. Layer 3 IS-IS mixes these together and can elect several designated routers on one LAN. That is unacceptable for TRILL, because several RBridges might ingress or egress the same native frame.</p><p>LAN Hellos are not padded but can get very large, so TRILL uses a Neighbor TLV that lists neighbors seen for a range of MAC addresses.</p>",
+      "eli5": "<p>Normal routers can tolerate two leaders on one street. TRILL cannot, because two leaders might both copy the same letter and send it around forever. So TRILL has stricter rules for saying hello.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "3",
+      "title": "The Adjacency State Machine",
+      "content": "<p>Each port keeps a table of adjacencies (zero or one on a point-to-point port). Every adjacency is in one of four states:</p><ul><li><strong>Down</strong>: a virtual state; no table entry exists.</li><li><strong>Detect</strong>: a Hello was heard, but 2-way connectivity is not confirmed, or it was heard outside the Designated VLAN.</li><li><strong>2-Way</strong>: 2-way connectivity is confirmed on the Designated VLAN, but an enabled test such as MTU or BFD has not yet succeeded.</li><li><strong>Report</strong>: 2-way connectivity and all enabled tests have succeeded, so the adjacency is reported in the link-state packet (LSP).</li></ul><p>Events A1 to A8 move an adjacency between states. In short: a Hello that lists the receiver (or, on point-to-point, carries a Three-Way Handshake TLV with the receiver's System ID and Extended Circuit ID) is event A1; a Hello that does not is A2 or A3; hold timers expiring are A4 and A5; tests passing or failing are A6 and A7; and the port going down is A8. If no tests are enabled, A6 happens immediately on entering 2-Way.</p><p>Each entry stores the neighbor's address, Port ID and System ID, one Hello holding timer (two on a LAN: one for the Designated VLAN and one for the others, each a 16-bit number of seconds), the 7-bit DRB priority, the 5 bytes of PORT-TRILL-VER data and the Desired Designated VLAN.</p><p>If the adjacency table is full, a new Hello can displace the lowest-priority existing entry only if its DRB priority is higher. Parallel links bonded by link aggregation look like one link to TRILL; other parallel adjacencies appear in LSPs as a single adjacency whose cost MAY be reduced.</p>",
+      "eli5": "<p>A neighbor starts as someone you only heard a shout from, becomes someone you have confirmed can hear you back, and finally becomes a neighbor you tell everyone about once every check has passed.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Electing the Designated RBridge",
+      "content": "<p>On a LAN port the DRB state is one of four: <strong>Down</strong>, <strong>Suspended</strong>, <strong>DRB</strong> or <strong>Not DRB</strong>. A port is Suspended when another, higher-priority port on the same link has the same MAC address. A suspended port accepts Hellos only to manage its Suspension Timer and sends none.</p><p>The candidates are the local port and every neighbor not in the Down state. The winner has the highest 7-bit priority to be the DRB, with MAC address as the first tiebreaker, Port ID as the second and System ID as the third, all compared as unsigned integers.</p><p>Unnecessary DRB changes should be avoided because they can briefly interrupt native frame service. Changing the Designated VLAN can interrupt adjacency, so where practical all ports on a link should use the same Desired Designated VLAN. When the Designated VLAN changes, each adjacency's non-Designated VLAN timer takes the larger of the two remaining times, and the Designated VLAN timer is expired.</p><p>If one RBridge has several ports on the same broadcast link, it can detect this from Hellos carrying the same LAN ID. Only the elected port's Hellos dictate the Designated VLAN or the pseudonode choice.</p>",
+      "eli5": "<p>Everyone on the street holds up a number. The highest number becomes the leader, and ties are settled by looking at other numbers on their name tags. Two people with the same tag must not both be active, so one sits out.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "5",
+      "title": "MTU Testing and BFD Bootstrapping",
+      "content": "<p>MTU testing makes sure links in the campus can carry IS-IS packets, especially LSPs, at the campus MTU. An RBridge works out the desired campus MTU as the minimum of the originatingL1LSPBufferSize values advertised by RBridges, but not less than 1,470 bytes. In TRILL that value ranges from 1,470 to 65,535 bytes, unlike the 512 to 1,492 range in Layer 3 IS-IS.</p><p>Testing is optional, but responding to an MTU-probe with an MTU-ack is mandatory. Testing happens only in the Designated VLAN. An adjacency that fails at the campus MTU does not enter the Report state, or leaves it. Because both ends must report an adjacency for it to be used, one end noticing the failure is enough. TRILL Hellos are exempt from the campus MTU and stay small for loop safety.</p><p>For BFD, an RBridge learns that its neighbor has BFD enabled from a <strong>BFD-Enabled TLV</strong> (Type 148) in the neighbor's Hellos. A one-hop BFD session starts when both ports have BFD enabled and the adjacency is in 2-Way or Report. If the session starts while the adjacency is in 2-Way, the adjacency MUST NOT reach Report until BFD and other enabled tests succeed. If it starts while the adjacency is already in Report, the adjacency MUST stay in Report until a test fails. The egress nickname comes from received Hellos; on point-to-point links the Any-RBridge nickname can be used.</p>",
+      "eli5": "<p>Before trusting a road, the neighbors send a big truck down it to check it is wide enough. If you want quick warnings, you can also keep a fast phone line open to check the neighbor is still there.</p>"
+    },
+    {
+      "id": "section-2",
+      "number": "7",
+      "title": "Pseudonodes",
+      "content": "<p>A <strong>pseudonode</strong> is a made-up node that represents a LAN in link-state data. It applies only to broadcast links, and the DRB decides whether to use one.</p><p>If the DRB sets the <strong>bypass pseudonode</strong> bit in its Hellos, every RBridge on the link directly reports all its adjacencies that are in the Report state. If the bit is not set, the DRB reports its adjacency to the pseudonode and sends LSPs on the pseudonode's behalf, and every other RBridge reports only its adjacency to the pseudonode. The bit changes which LSPs are generated, not how they are flooded.</p><p>Many links between RBridges are really point-to-point even if the technology supports multi-access, and then a pseudonode only adds complexity. In the RFC's two-RBridge example, a pseudonode makes 3 LSPs where bypassing it needs 2. A DRB SHOULD set the bypass bit if it has not seen at least two simultaneous adjacencies in the Report state since it last rebooted or was reset by network management.</p>",
+      "eli5": "<p>When many kids are on one playground, a teacher can speak for the whole group. If there are only two kids, it is easier to let them talk to each other directly.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "8",
+      "title": "Hello Contents, Sending and Receiving",
+      "content": "<p>TRILL Hellos on Ethernet go to the All-IS-IS-RBridges multicast address <code>01-80-C2-00-00-41</code> with the L2-IS-IS Ethertype <code>0x22F4</code>. They use a single Level 1 area with the fixed Area Address zero. RBridges do not implement the externalDomain flag, or fix it at false, so they send and receive Hellos on every enabled port.</p><p>Hellos use the same timing as Layer 3 IS-IS Hellos, but none are sent from a Suspended or Down port. They SHOULD NOT be padded and MUST NOT be sent if they exceed 1,470 bytes, though a longer received Hello is processed normally. The headers must have Maximum Area Addresses equal to 1 and Circuit Type equal to 1.</p><p>A LAN Hello carries a TRILL Neighbor TLV; a point-to-point Hello carries a Three-Way Handshake TLV instead. A Neighbor TLV should not be put in point-to-point Hellos. On a LAN, an RBridge's neighbor lists must eventually cover every possible range of MAC addresses, with no gaps, so that others can tell definitively whether it can hear them.</p><p>On receipt, a Hello is discarded if its type (LAN or point-to-point) does not match the port, the Circuit Type is not 1, the Area Address is not exactly zero, a Protocols Supported TLV omits the TRILL NLPID (<code>0xC0</code>), the VLAN-FLAGS sub-TLV is missing, maximumAreaAddresses is not 1, or authentication is in use and fails. Otherwise it counts as event A0, A1, A2 or A3.</p>",
+      "eli5": "<p>A hello has to be short and written in the right form. If it has the wrong stamp or is missing a required part, it is thrown away.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "11",
+      "title": "Security and Changes",
+      "content": "<p>This memo documents aspects of the TRILL base protocol more clearly and does not change the security considerations in Section 6 of <a href='/6325/'>RFC 6325</a>. For BFD, see <a href='/7175/'>RFC 7175</a>.</p><p>Compared with <a href='/6327/'>RFC 6327</a>, this document extends the Hello size limit, MTU testing and state machine to point-to-point links, incorporates updates from <a href='/7180/'>RFC 7180</a>, generalizes the text beyond Ethernet to links such as PPP and pseudowires, and adds one-hop BFD session establishment. It updates <a href='/6325/'>RFC 6325</a> by replacing its Sections 4.4.1 and most of 4.4.2, and by forbidding Hellos from a Suspended port. IANA updated the reference for the 'Fail' flag in the TRILL Neighbor TLV registry to point here.</p>",
+      "eli5": "<p>This rulebook does not add new dangers. It mostly writes down existing rules more clearly and fixes some gaps.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "ADJACENCY STATES (RFC 7177, SECTION 3.4, SIMPLIFIED)",
+      "data": {
+        "states": [
+          {
+            "key": "down",
+            "label": "Down",
+            "initial": true
+          },
+          {
+            "key": "detect",
+            "label": "Detect"
+          },
+          {
+            "key": "two-way",
+            "label": "2-Way"
+          },
+          {
+            "key": "report",
+            "label": "Report"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "down",
+            "to": "detect",
+            "label": "A2, A3"
+          },
+          {
+            "from": "down",
+            "to": "two-way",
+            "label": "A1"
+          },
+          {
+            "from": "detect",
+            "to": "two-way",
+            "label": "A1"
+          },
+          {
+            "from": "two-way",
+            "to": "report",
+            "label": "A6"
+          },
+          {
+            "from": "report",
+            "to": "two-way",
+            "label": "A7"
+          },
+          {
+            "from": "two-way",
+            "to": "detect",
+            "label": "A3, A5"
+          },
+          {
+            "from": "report",
+            "to": "detect",
+            "label": "A3, A5"
+          },
+          {
+            "from": "detect",
+            "to": "down",
+            "label": "A4, A8"
+          },
+          {
+            "from": "two-way",
+            "to": "down",
+            "label": "A4, A8"
+          },
+          {
+            "from": "report",
+            "to": "down",
+            "label": "A4, A8"
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "PORT STATES FOR DRB ELECTION (RFC 7177, SECTION 4.3)",
+      "data": {
+        "states": [
+          {
+            "key": "down",
+            "label": "Down",
+            "initial": true
+          },
+          {
+            "key": "suspended",
+            "label": "Suspended"
+          },
+          {
+            "key": "drb",
+            "label": "DRB"
+          },
+          {
+            "key": "not-drb",
+            "label": "Not DRB"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "down",
+            "to": "drb",
+            "label": "D1"
+          },
+          {
+            "from": "suspended",
+            "to": "drb",
+            "label": "D1"
+          },
+          {
+            "from": "drb",
+            "to": "not-drb",
+            "label": "D2"
+          },
+          {
+            "from": "not-drb",
+            "to": "drb",
+            "label": "D3"
+          },
+          {
+            "from": "drb",
+            "to": "suspended",
+            "label": "D4"
+          },
+          {
+            "from": "not-drb",
+            "to": "suspended",
+            "label": "D4"
+          },
+          {
+            "from": "drb",
+            "to": "down",
+            "label": "D5"
+          },
+          {
+            "from": "not-drb",
+            "to": "down",
+            "label": "D5"
+          },
+          {
+            "from": "suspended",
+            "to": "down",
+            "label": "D5"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "HELLO CONTENT ITEMS (RFC 7177, TABLE 4)",
+      "data": {
+        "columns": [
+          "Content item",
+          "LAN Hello",
+          "P2P Hello"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Area Addresses TLV (Area Address zero only)",
+              "Mandatory",
+              "Mandatory"
+            ]
+          },
+          {
+            "cells": [
+              "MT Port Capabilities TLV with VLAN-FLAGS sub-TLV",
+              "Mandatory",
+              "Mandatory"
+            ]
+          },
+          {
+            "cells": [
+              "TRILL Neighbor TLV",
+              "Mandatory",
+              "Ignored"
+            ]
+          },
+          {
+            "cells": [
+              "Three-Way Handshake TLV",
+              "Ignored",
+              "Mandatory"
+            ]
+          },
+          {
+            "cells": [
+              "BFD-Enabled TLV",
+              "Optional",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "Authentication TLV",
+              "Optional",
+              "Optional"
+            ]
+          },
+          {
+            "cells": [
+              "Padding TLV",
+              "SHOULD NOT",
+              "SHOULD NOT"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6325]",
+      "text": "Perlman, R., Eastlake 3rd, D., Dutt, D., Gai, S., and A. Ghanwani, \"Routing Bridges (RBridges): Base Protocol Specification\", RFC 6325, July 2011.",
+      "rfc": 6325
+    },
+    {
+      "number": "[RFC6327]",
+      "text": "Eastlake 3rd, D., Perlman, R., Ghanwani, A., Dutt, D., and V. Manral, \"Routing Bridges (RBridges): Adjacency\", RFC 6327, July 2011.",
+      "rfc": 6327
+    },
+    {
+      "number": "[RFC7176]",
+      "text": "Eastlake 3rd, D., Senevirathne, T., Ghanwani, A., Dutt, D., and A. Banerjee, \"Transparent Interconnection of Lots of Links (TRILL) Use of IS-IS\", RFC 7176, May 2014.",
+      "rfc": 7176
+    },
+    {
+      "number": "[RFC7175]",
+      "text": "Manral, V., Eastlake 3rd, D., Ward, D., and A. Banerjee, \"Transparent Interconnection of Lots of Links (TRILL): Bidirectional Forwarding Detection (BFD) Support\", RFC 7175, May 2014.",
+      "rfc": 7175
+    },
+    {
+      "number": "[RFC7180]",
+      "text": "Eastlake 3rd, D., Zhang, M., Ghanwani, A., Manral, V., and A. Banerjee, \"Transparent Interconnection of Lots of Links (TRILL): Clarifications, Corrections, and Updates\", RFC 7180, May 2014.",
+      "rfc": 7180
+    },
+    {
+      "number": "[RFC6439]",
+      "text": "Perlman, R., Eastlake, D., Li, Y., Banerjee, A., and F. Hu, \"Routing Bridges (RBridges): Appointed Forwarders\", RFC 6439, November 2011.",
+      "rfc": 6439
+    },
+    {
+      "number": "[RFC6213]",
+      "text": "Hopps, C. and L. Ginsberg, \"IS-IS BFD-Enabled TLV\", RFC 6213, April 2011.",
+      "rfc": 6213
+    },
+    {
+      "number": "[RFC7178]",
+      "text": "Eastlake 3rd, D., Manral, V., Li, Y., Aldrin, S., and D. Ward, \"Transparent Interconnection of Lots of Links (TRILL): RBridge Channel Support\", RFC 7178, May 2014.",
+      "rfc": 7178
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

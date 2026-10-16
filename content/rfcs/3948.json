@@ -9,13 +9,235 @@
   },
   "questions": [
     "udp encapsulation of ipsec esp",
-    "ipsec nat-t udp encapsulation"
+    "ipsec nat-t udp encapsulation",
+    "what is udp encapsulation of esp",
+    "what is a nat keepalive",
+    "what is the non-esp marker",
+    "why does ipsec nat-t use port 4500"
+  ],
+  "tags": [
+    "IPsec",
+    "NAT",
+    "ESP"
+  ],
+  "subtitle": "Wrapping IPsec ESP packets inside UDP so they can cross NAT devices that only understand TCP and UDP.",
+  "tldr": {
+    "problem": "NATs cannot handle IPsec ESP packets, which are neither TCP nor UDP, so IPsec connections break when a NAT sits in the path.",
+    "mechanism": "ESP packets are carried inside UDP packets that use the same port numbers as IKE traffic. A non-ESP marker tells IKE and ESP apart, and small keepalive packets hold the NAT mapping open.",
+    "outcome": "IPsec can run through NATs in both transport and tunnel mode, when IKE negotiates it. Hosts behind the same NAT can still conflict, so implementations must guard against that.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Non-ESP marker",
+      "value": "4 zero-valued bytes"
+    },
+    {
+      "label": "Keepalive payload",
+      "value": "1 octet, 0xFF"
+    },
+    {
+      "label": "Default keepalive idle time (M)",
+      "value": "20 seconds"
+    },
+    {
+      "label": "Default SA grace period (N)",
+      "value": "5 minutes"
+    },
+    {
+      "label": "ESP SPI",
+      "value": "Must not be zero"
+    }
+  ],
+  "today": "<p>RFC 3948 is a Proposed Standard, and the unit metadata lists no RFC that obsoletes or updates it. It works together with <a href='/3947/'>RFC 3947</a>, which negotiates the encapsulation in IKE.</p>",
+  "glossary": [
+    "esp",
+    "udp",
+    "nat",
+    "nat-traversal",
+    "ike",
+    "ipsec",
+    "security-association",
+    "port-number",
+    "internet-checksum"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>RFC 3948 defines how to encapsulate and decapsulate IPsec ESP packets inside UDP packets so they can traverse Network Address Translators. The UDP port numbers are the same as those used by IKE traffic, as defined in <a href='/3947/'>RFC 3947</a>.</p><p>Sharing the ports was chosen because it scales better (only one NAT mapping, and no separate IKE keepalives), is easier to configure (only one port in firewalls) and is easier to implement. The encapsulation is written in terms of IPv4 headers, but the RFC says there is no technical reason an IPv6 header could not be used as the outer or inner header.</p><p>Some limits apply. IPsec AH is left out because protecting the outer IP addresses is inherently incompatible with NAT. The protocol assumes IKE (IKEv1 or IKEv2) negotiates the IPsec SAs, and manual keying is not supported. An IKE implementation supporting this MUST NOT use ESP SPI field zero for ESP packets, so IKE and ESP packets can be distinguished.</p>",
+      "eli5": "<p>This memo explains how to hide a special kind of secure message inside an ordinary kind that the middle box lets through.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "2.1",
+      "title": "The UDP-Encapsulated ESP Header",
+      "content": "<p>A UDP-encapsulated ESP packet is a standard UDP header followed directly by the ESP header. The source and destination ports MUST be the same as those used by IKE traffic. The IPv4 UDP checksum SHOULD be transmitted as zero, and receivers MUST NOT depend on the checksum being zero. The SPI field in the ESP header MUST NOT be zero.</p>",
+      "eli5": "<p>The outer envelope has an ordinary address label, and the secure message is tucked right inside.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2.2",
+      "title": "IKE on Port 4500 and the Non-ESP Marker",
+      "content": "<p>IKE and ESP share the same ports, so the receiver needs a way to tell them apart. IKE packets on this port carry a <strong>non-ESP marker</strong> between the UDP header and the IKE header. It is 4 zero-valued bytes that line up with the SPI field of an ESP packet. Since ESP packets never use SPI zero, a receiver can sort the two by looking at those first bytes.</p><p>The UDP header is used as defined in <a href='/3947/'>RFC 3947</a>, and this document sets no new requirements for the checksum of an IKE packet.</p>",
+      "eli5": "<p>Both kinds of mail arrive at the same door. IKE mail starts with four zeros, and real ESP mail never does, so the doorman can sort them.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Encapsulation and Decapsulation",
+      "content": "<p>In transport mode, ordinary ESP encapsulation is applied, a properly formatted UDP header is inserted between the original IP header and the ESP header, and the Total Length, Protocol and Header Checksum fields of the IP header are edited to match. In tunnel mode the UDP header goes between the new outer header and the ESP header, with the same edits to the new IP header.</p><p>Decapsulation reverses this: the UDP header is removed, the IP header fields are edited to match, ordinary ESP decapsulation is performed, and then the matching NAT procedure for the mode is applied.</p>",
+      "eli5": "<p>To send, you add the outer envelope and fix the label. To receive, you tear the outer envelope off and open the secure message inside.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "3.1",
+      "title": "Fixing Up Addresses and Checksums After NAT",
+      "content": "<p>In tunnel mode the inner IP header may carry addresses unsuitable for the current network. Depending on local policy, an implementation MUST do one of three things: check the inner source address against a valid address space for that peer, check it against the address assigned to the peer, or perform NAT on the packet. Tunnel mode TCP checksums MUST be verified.</p><p>In transport mode, TCP and UDP checksums become wrong because parts of the IP header changed in transit. Depending on policy, the receiver MUST either incrementally recompute the checksum using the real addresses received via IKE in NAT-OA payloads (subtract the received address, add the real one, for both source and destination), or recompute the checksum from scratch, or, for integrity-protected transport mode packets, set the UDP checksum to zero or flag the stack that the TCP checksum need not be computed. An implementation MAY also fix other protocols that NAT has broken.</p>",
+      "eli5": "<p>The middle box changed the return address on the outer envelope, so the numbers written inside no longer add up. The receiver redoes the sums with the real address.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "4",
+      "title": "NAT Keepalives",
+      "content": "<p>A NAT forgets idle mappings, so a peer behind one needs to keep the mapping alive. A <strong>NAT-keepalive packet</strong> is a UDP packet with the same source and destination ports as UDP-encapsulated ESP and a payload of exactly one octet with the value <code>0xFF</code>. The IPv4 UDP checksum SHOULD be zero, and the receiver SHOULD ignore the packet.</p><p>The only purpose is to keep NAT mappings alive; receiving one MUST NOT be used to decide whether a connection is live. A peer MAY send keepalives while a phase I or phase II SA exists, or existed at most N minutes earlier, where N is configurable and defaults to 5 minutes. A peer SHOULD send one if the need was detected under <a href='/3947/'>RFC 3947</a> and nothing else was sent in M seconds, where M is configurable and defaults to 20 seconds.</p>",
+      "eli5": "<p>The middle box forgets friends who stay quiet, so now and then you send a tiny blank note that just says you are still here.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations: Clients Behind the Same NAT",
+      "content": "<p>The main concern is several clients behind one NAT reaching the same server, which sees them all as one address. In tunnel mode, two laptops can both use <code>10.1.2.3</code> behind different NATs, and the security gateway may not know where to send return packets. Implementors MUST prevent this. It is RECOMMENDED that the gateway assign locally unique addresses (for example with DHCP over IPsec) or use NAT to map the clients to unique addresses.</p><p>In transport mode, overlapping traffic descriptions for two clients behind one NAT cannot be told apart by simple filter lookups, and implementations MUST handle this, for example by disallowing conflicting connections. A server also cannot enforce a policy where one client behind a NAT must use IPsec while another may use clear text, because a misbehaving client sending clear text looks the same as the clear-text one. For security guarantees that scenario MUST NOT be allowed. For best-effort security it MAY be used.</p><p>Appendix A lists ways to avoid the problem, such as a built-in NAT or NAPT above IPsec decapsulation, falling back to tunnel mode, or assigning an address via DHCP-IPsec. It also lists options with limited interoperability that are not expected to work with TCP.</p>",
+      "eli5": "<p>If two kids behind the same front door both write to one pen pal, the pen pal cannot tell whose letter is whose. The memo says to give each a different name tag.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "IKE ON PORT 4500 (RFC 3948, SECTION 2.2)",
+      "data": {
+        "title": "UDP-encapsulated IKE packet",
+        "width": 32,
+        "fields": [
+          {
+            "key": "src-port",
+            "name": "Source Port",
+            "bits": 16,
+            "desc": "Same as the port used by IKE traffic."
+          },
+          {
+            "key": "dst-port",
+            "name": "Destination Port",
+            "bits": 16,
+            "desc": "Same as the port used by IKE traffic."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Standard UDP length field."
+          },
+          {
+            "key": "checksum",
+            "name": "Checksum",
+            "bits": 16,
+            "desc": "Standard UDP checksum; no new requirements for IKE packets."
+          },
+          {
+            "key": "non-esp-marker",
+            "name": "Non-ESP Marker",
+            "bits": 32,
+            "desc": "4 zero-valued bytes aligned with the ESP SPI field."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "NAT-KEEPALIVE PACKET (RFC 3948, SECTION 2.3)",
+      "data": {
+        "title": "NAT-keepalive packet",
+        "width": 32,
+        "fields": [
+          {
+            "key": "src-port",
+            "name": "Source Port",
+            "bits": 16,
+            "desc": "Same as for UDP-encapsulated ESP."
+          },
+          {
+            "key": "dst-port",
+            "name": "Destination Port",
+            "bits": 16,
+            "desc": "Same as for UDP-encapsulated ESP."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Standard UDP length field."
+          },
+          {
+            "key": "checksum",
+            "name": "Checksum",
+            "bits": 16,
+            "desc": "IPv4 checksum SHOULD be sent as zero."
+          },
+          {
+            "key": "payload",
+            "name": "Payload",
+            "bits": 8,
+            "desc": "A single octet; the receiver SHOULD ignore the packet.",
+            "value": "0xFF"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC0768]",
+      "text": "Postel, J., \"User Datagram Protocol\", STD 6, RFC 768, August 1980.",
+      "rfc": 768
+    },
+    {
+      "number": "[RFC2406]",
+      "text": "Kent, S. and R. Atkinson, \"IP Encapsulating Security Payload (ESP)\", RFC 2406, November 1998.",
+      "rfc": 2406
+    },
+    {
+      "number": "[RFC2409]",
+      "text": "Harkins, D. and D. Carrel, \"The Internet Key Exchange (IKE)\", RFC 2409, November 1998.",
+      "rfc": 2409
+    },
+    {
+      "number": "[RFC3947]",
+      "text": "Kivinen, T., \"Negotiation of NAT-Traversal in the IKE\", RFC 3947, January 2005.",
+      "rfc": 3947
+    },
+    {
+      "number": "[RFC3715]",
+      "text": "Aboba, B. and W. Dixon, \"IPsec-Network Address Translation (NAT) Compatibility Requirements\", RFC 3715, March 2004.",
+      "rfc": 3715
+    },
+    {
+      "number": "[RFC3193]",
+      "text": "Patel, B., et al., \"Securing L2TP using IPsec\", RFC 3193, November 2001.",
+      "rfc": 3193
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

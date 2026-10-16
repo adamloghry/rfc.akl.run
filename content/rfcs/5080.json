@@ -9,13 +9,200 @@
   },
   "questions": [
     "common radius implementation issues",
-    "radius specification clarifications"
+    "radius specification clarifications",
+    "what is radius state attribute",
+    "radius retransmission timers",
+    "radius duplicate detection cache",
+    "what does radius access-reject mean"
+  ],
+  "tags": [
+    "Security",
+    "AAA",
+    "RADIUS"
+  ],
+  "subtitle": "A field guide to the ambiguities and bugs that kept showing up in RADIUS clients and servers, with the fixes the IETF recommends.",
+  "tldr": {
+    "problem": "After years of RADIUS deployment, the original specifications turned out to be ambiguous or wrong in places, and implementations handled State, retransmissions, accounting and Access-Reject in incompatible ways.",
+    "mechanism": "RFC 5080 walks through each recurring problem, quotes the earlier text, says what it should mean, and sets new requirements, such as jittered exponential backoff for retransmission and a response cache for duplicate detection.",
+    "outcome": "It updates RFC 2865, RFC 2866, RFC 2869 and RFC 3579, so implementers read it together with those documents. It is a Proposed Standard and the metadata lists no replacement.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default IRT",
+      "value": "2 seconds"
+    },
+    {
+      "label": "Default MRC",
+      "value": "5 attempts"
+    },
+    {
+      "label": "Default MRT",
+      "value": "16 seconds"
+    },
+    {
+      "label": "Default MRD",
+      "value": "30 seconds"
+    },
+    {
+      "label": "Duplicate cache lifetime",
+      "value": "5 to 30 seconds"
+    },
+    {
+      "label": "Randomization factor",
+      "value": "-0.1 to +0.1"
+    }
+  ],
+  "today": "<p>RFC 5080 is a Proposed Standard published in December 2007. It updates <a href='/2865/'>RFC 2865</a>, <a href='/2866/'>RFC 2866</a>, <a href='/2869/'>RFC 2869</a> and <a href='/3579/'>RFC 3579</a>, and the unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "radius",
+    "nas",
+    "retransmission",
+    "jitter",
+    "shared-secret",
+    "eap",
+    "access-challenge",
+    "udp",
+    "mib"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a Clarification Document",
+      "content": "<p>The authors observe that the previous few years had seen an increase in the deployment of <strong>RADIUS</strong> clients and servers. This document describes common issues seen in those implementations and suggests fixes. Where earlier specifications were ambiguous or contained errors, it clarifies them.</p><p>It uses a few terms precisely. A <strong>Network Access Server</strong> (NAS) is the device providing access to the network, also called the RADIUS client. A <strong>session</strong> is each service the NAS provides to a peer, from the point where service is first provided to the point where it ends. <strong>Silently discard</strong> means dropping a packet without further processing, while SHOULD still logging it and counting it in a statistics counter.</p>",
+      "eli5": "<p>When many people built the same kind of machine from one rulebook, they found the rulebook was fuzzy in places. This paper is the list of fuzzy places and the answers.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "2.1",
+      "title": "State and Session Tracking",
+      "content": "<p>RADIUS has no clear definition of a session, so servers lean on the <strong>State</strong> attribute to tie several packets into one conversation. RFC 2865 says a client must send State back unmodified. RFC 5080 adds that servers SHOULD include State in an Access-Challenge when they need it to link later requests, and that Access-Requests in an ongoing challenge exchange SHOULD carry it. A new or restarted authentication MUST NOT include State, even if one was received earlier for the same user and port.</p><p>For authorization checks, an Access-Request with Service-Type <code>Authorize Only (17)</code> MUST contain State. One with <code>Call Check (10)</code> SHOULD NOT. An authorization check without State MUST get an Access-Reject, and responses to such checks MUST NOT carry confidential information about a user unless the request contains State tying it to an earlier authentication.</p><p>For EAP, RFC 3579 suggested telling sessions apart using NAS attributes. Proxies can modify those, so this RFC recommends the approach used by FreeRADIUS: key each session by the EAP identifier, the State attribute and the source IP address. The server allocates a unique State on EAP start or identity, so uniqueness is controlled by the server. The RFC says this algorithm SHOULD be used in preference to any other method.</p><div class='callout callout-warning'><p>Using the same value, such as a MAC address, for both User-Name and User-Password is NOT RECOMMENDED. It gives an attacker both the clear text and the cipher text of the password field.</p></div>",
+      "eli5": "<p>If you hand out a numbered ticket at a coat check, you can match each coat to its owner. The State attribute is that ticket, and everyone must hand it back exactly as given.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "2.2",
+      "title": "Retransmission and Overload",
+      "content": "<p>Some clients retransmit aggressively, with default timeouts of one second or less and no congestive backoff. The RFC gives an example: after a power failure, a network of 3,000 NAS devices with a fixed one second timer will continuously generate 3,000 Access-Requests per second, enough to overwhelm most servers. Clients SHOULD add random jitter and SHOULD support congestive backoff.</p><p>The recommended timers are modelled on DHCPv6. The variables are <code>IRT</code> (default 2 seconds), <code>MRC</code> (default 5 attempts), <code>MRT</code> (default 16 seconds) and <code>MRD</code> (default 30 seconds). Each timeout includes a random factor between -0.1 and +0.1. The first timeout is <code>RT = IRT + RAND*IRT</code>, and later ones are <code>RT = 2*RTprev + RAND*RTprev</code>, capped at MRT. MRD MUST be set and SHOULD be between 5 and 30 seconds. For Accounting-Request, the defaults for MRC, MRD and MRT SHOULD be zero, so the client keeps trying until the request is acknowledged.</p><p>On the server side, an overloaded server that drops packets evenly hurts multi-round authentication such as EAP. Servers should preferentially accept Access-Requests with a valid State, and a proxy should handle responses from home servers before new requests from a NAS.</p>",
+      "eli5": "<p>If everyone knocks on a door every second, the door-keeper gets swamped. Better to wait a bit longer each time, and a slightly random amount, so not everybody knocks together.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2.2.2",
+      "title": "Duplicate Detection and the Response Cache",
+      "content": "<p>Because RADIUS runs over UDP, a server may see duplicate or reordered requests. Without duplicate detection a server could process one login twice and conclude the user logged in twice. RFC 5080 therefore says servers MUST detect duplicate Access-Requests and MUST cache the responses they send. A valid duplicate for which a response was already sent MUST get the original response resent without reprocessing. A duplicate for which no response has been sent yet MUST be silently discarded.</p><p>Cache entries SHOULD be purged after no less than 5 seconds and no more than 30 seconds, since most clients and users have given up by then. An entry MUST also be purged if a valid request matches it on source address, source port, Identifier and receiving socket but has a different Request Authenticator.</p><p>Clients MUST NOT reuse an Identifier for a source IP address and UDP port until a valid response arrives or the request times out, and SHOULD allocate Identifiers least-recently-used first. Clients do not need duplicate detection: they accept the first response with a valid Response Authenticator and silently discard later ones.</p>",
+      "eli5": "<p>If someone asks the same question twice, a good helper just repeats the first answer instead of doing the work again, but forgets old answers after a little while.</p>"
+    },
+    {
+      "id": "section-2",
+      "number": "2.3",
+      "title": "Accounting, Attributes and Reject Semantics",
+      "content": "<p><strong>Accounting.</strong> RFC 2866 said certain counters could appear only in Stop records, but RFC 2869 envisioned Interim records with all Stop attributes except Acct-Term-Cause. RFC 5080 confirms the counters are allowed in Interim updates. Acct-Session-Id and Acct-Multi-Session-Id are of type Text, not String. An Accounting-Request with an invalid Request Authenticator is silently discarded by new servers, and new clients MUST compute it correctly. A locally configured Interim-Accounting-Interval need not be overridden by a smaller value from an Access-Accept, though a larger one may override it.</p><p><strong>Attributes.</strong> The meaning of multiple Filter-ID attributes is undefined within RADIUS, so sending several SHOULD be avoided in heterogeneous or roaming deployments. A client that gets an Access-Accept with a known attribute for an unimplemented service MUST treat it as an Access-Reject. For an unknown Type it SHOULD do the same, while unknown vendor-specific attributes SHOULD be ignored.</p><p><strong>Access-Reject.</strong> It means denial of the requested service and carries no service provisioning. New specifications MUST NOT use Access-Reject where Access-Challenge semantics are intended, and after a reject the NAS MUST NOT send further Access-Requests for that user session. The RFC also corrects the Password-Retry entry in the attribute table of RFC 2869, moving it from the Reject column to the Challenge column.</p>",
+      "eli5": "<p>A \"no\" has to really mean no, and a \"please try again\" has to be a different kind of message. The paper also says which parts of the record-keeping rules were typos.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "6",
+      "title": "Addresses, Identity and Late Responses",
+      "content": "<p>A NAS SHOULD NOT put a link-local address in NAS-IP-Address or NAS-IPv6-Address, because such an address is unique only on its own link. A server SHOULD NOT count such an attribute toward the requirement that one of those attributes or NAS-Identifier be present. A NAS with several global addresses and no way to pick one is RECOMMENDED to send NAS-Identifier. Since the server picks the shared secret by source IP address, a client using several source addresses needs a secret configured for each.</p><p>For an EAP-Response/Identity of zero octets, the NAS is RECOMMENDED either to omit User-Name or to put the Calling-Station-Id in User-Name along with a Calling-Station-Id attribute. An empty identity MUST NOT be read as a request for privacy.</p><p>Changing the contents of a retransmitted Access-Request can lead to a belated Access-Accept for the first request and an Access-Reject for the retransmission. Contents SHOULD NOT change on retransmission. If they must, earlier responses MUST be silently discarded and the current response is definitive. Finally, a Framed-IPv6-Prefix longer than /64 is unclear in purpose, and the RFC explains how it relates to the Delegated-IPv6-Prefix attribute.</p>",
+      "eli5": "<p>This part tidies up who is who. Give each machine a name it can be recognised by, do not change your question when you ask again, and be clear about what an address is for.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "3",
+      "title": "Security Considerations",
+      "content": "<p>The contents of the State attribute are visible to the client and to anyone observing the protocol, so servers should make sure it does not disclose sensitive information.</p><p>The duplicate cache is vulnerable when Access-Requests lack a Message-Authenticator. Without it, packets can be trivially forged and cache entries forcibly expired, which defeats the cache. The mitigation is to follow RFC 3579 Section 4 or to require Message-Authenticator, which servers may do by silently discarding requests without one. Clients SHOULD include it in every Access-Request.</p><p>More broadly, the specifications here inherit all the threats of other RADIUS applications, and the RFC points to RFC 2865, RFC 2607, RFC 3162, RFC 3579 and RFC 3580 for that discussion.</p>",
+      "eli5": "<p>A cheap forged note can make the helper forget its answers. Signing every note stops that.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "RETRANSMISSION TIMER RULES (RFC 5080)",
+      "data": {
+        "title": "Retransmission timeout",
+        "lang": "text",
+        "code": "RT = IRT + RAND*IRT              (first transmission)\nRT = 2*RTprev + RAND*RTprev      (each retransmission)\nif (RT > MRT)\n   RT = MRT + RAND*MRT"
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "DEFAULT RETRANSMISSION VARIABLES",
+      "data": {
+        "items": [
+          {
+            "code": "IRT",
+            "label": "Initial retransmission time",
+            "desc": "Default 2 seconds."
+          },
+          {
+            "code": "MRC",
+            "label": "Maximum retransmission count",
+            "desc": "Default 5 attempts."
+          },
+          {
+            "code": "MRT",
+            "label": "Maximum retransmission time",
+            "desc": "Default 16 seconds."
+          },
+          {
+            "code": "MRD",
+            "label": "Maximum retransmission duration",
+            "desc": "Default 30 seconds; MUST be set."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2865]",
+      "text": "Rigney, C., Willens, S., Rubens, A., and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "rfc": 2865
+    },
+    {
+      "number": "[RFC2866]",
+      "text": "Rigney, C., \"RADIUS Accounting\", RFC 2866, June 2000.",
+      "rfc": 2866
+    },
+    {
+      "number": "[RFC2869]",
+      "text": "Rigney, C., Willats, W., and P. Calhoun, \"RADIUS Extensions\", RFC 2869, June 2000.",
+      "rfc": 2869
+    },
+    {
+      "number": "[RFC3579]",
+      "text": "Aboba, B. and P. Calhoun, \"RADIUS (Remote Authentication Dial In User Service) Support For Extensible Authentication Protocol (EAP)\", RFC 3579, September 2003.",
+      "rfc": 3579
+    },
+    {
+      "number": "[RFC3315]",
+      "text": "Droms, R., Ed., et al., \"Dynamic Host Configuration Protocol for IPv6 (DHCPv6)\", RFC 3315, July 2003.",
+      "rfc": 3315
+    },
+    {
+      "number": "[RFC3162]",
+      "text": "Aboba, B., Zorn, G., and D. Mitton, \"RADIUS and IPv6\", RFC 3162, August 2001.",
+      "rfc": 3162
+    },
+    {
+      "number": "[RFC4818]",
+      "text": "Salowey, J. and R. Droms, \"RADIUS Delegated-IPv6-Prefix Attribute\", RFC 4818, April 2007.",
+      "rfc": 4818
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

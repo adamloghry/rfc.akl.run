@@ -9,13 +9,363 @@
   },
   "questions": [
     "what are lisp map-resolvers and map-servers",
-    "how does lisp map eids to rlocs"
+    "how does lisp map eids to rlocs",
+    "what is a lisp map-server",
+    "what is a lisp map-resolver",
+    "what is lisp rloc probing",
+    "what port does lisp use"
+  ],
+  "tags": [
+    "Routing",
+    "Control Plane",
+    "Mapping"
+  ],
+  "subtitle": "The messages and helper servers LISP uses to look up where an endpoint currently lives and to keep that answer up to date.",
+  "tldr": {
+    "problem": "LISP separates endpoint identifiers (EIDs) from routing locators (RLOCs), so routers need a way to learn which locators currently serve an EID, without each router having to understand the details of a mapping database.",
+    "mechanism": "Map-Resolvers answer lookups for ingress routers and Map-Servers accept registrations from egress routers, using Map-Request, Map-Reply, Map-Register and Map-Notify messages over UDP port 4342.",
+    "outcome": "Routers only talk to a simple front end, which keeps the mapping database design swappable and lowers the cost of deploying LISP. This document obsoletes RFC 6830 and RFC 6833.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Control plane UDP port",
+      "value": "4342"
+    },
+    {
+      "label": "Map-Request rate limit",
+      "value": "1 per second per EID-Prefix"
+    },
+    {
+      "label": "Suggested Map-Register interval",
+      "value": "1 minute"
+    },
+    {
+      "label": "Registration timeout",
+      "value": "3 minutes without a valid Map-Register"
+    },
+    {
+      "label": "Map-Register nonce",
+      "value": "8 octets"
+    },
+    {
+      "label": "TTL: negative reply, non-LISP space",
+      "value": "15 minutes"
+    }
+  ],
+  "today": "<p>RFC 9301 is a Proposed Standard published in October 2022, and it obsoletes <a href='/6830/'>RFC 6830</a> and <a href='/6833/'>RFC 6833</a>. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "endpoint-id",
+    "routing-locator",
+    "map-cache",
+    "tunnel-router",
+    "nonce",
+    "hmac",
+    "negative-caching",
+    "rate-limiting",
+    "replay-attack",
+    "anycast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why LISP Needs a Control Plane",
+      "content": "<p>LISP splits the addresses used by IP into two namespaces: <strong>Endpoint IDs</strong> (EIDs), used within sites, and <strong>Routing Locators</strong> (RLOCs), used on the transit networks. To make this work, LISP needs mappings from EIDs to RLOCs and a database that stores and spreads them. RFC 9301 describes the control plane and the Mapping Service that sit in front of such databases.</p><p>The Mapping Service defines two kinds of device. A <strong>Map-Resolver</strong> accepts Map-Requests from an Ingress Tunnel Router (ITR) and resolves the mapping using a database. A <strong>Map-Server</strong> learns authoritative mappings from an Egress Tunnel Router (ETR) and publishes them in a database. The RFC compares them to DNS caching resolvers and DNS servers, and borrows that terminology.</p><p>The control plane can be paired with several data planes, not only the one in <a href='/9300/'>RFC 9300</a>. The RFC also states that LISP is not meant to solve connectivity and scaling problems for arbitrary communicating parties. For use over the public Internet, it requires LISP-SEC to be implemented and forbids the Algorithm IDs <code>None</code> and <code>HMAC-SHA-1-96-None</code> in Map-Register messages.</p>",
+      "eli5": "<p>Imagine every kid has a permanent name, but moves between houses. You need a phone book that says which house a kid is at today, plus helpers who look things up and keep the book correct.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "4",
+      "title": "Map-Servers and Map-Resolvers",
+      "content": "<p>A Map-Server publishes EID-Prefixes in a LISP mapping database on behalf of a set of ETRs. To publish, an ETR periodically sends Map-Register messages that list EID-Prefixes plus the RLOCs that can reach the ETRs. When the Map-Server receives a Map-Request, it consults the database and finds an ETR that can answer with the locator set for that prefix.</p><p>A Map-Resolver receives Encapsulated Map-Requests from its client ITRs and uses a mapping database system to find the right ETR. The RFC shows how this fits two example databases. With LISP-ALT, a Map-Server acts as a last-hop ALT-Router and a Map-Resolver as a first-hop ALT-Router, using GRE tunnels and BGP. With LISP-DDT, the Map-Resolver keeps a referral cache and acts as a first-hop DDT node.</p><p>In this specification Map-Resolvers operate only in a non-caching mode: they decapsulate and forward Encapsulated Map-Requests. Caching is out of scope. A single device can act as both Map-Server and Map-Resolver.</p><div class='callout callout-info'><p>Because ITRs and ETRs only talk to these two devices, they do not depend on the details of the mapping database behind them.</p></div>",
+      "eli5": "<p>One helper writes new entries into the phone book. Another helper answers when someone asks where a kid lives. Everyone else just talks to those two helpers.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "The Control Messages",
+      "content": "<p>All control messages travel in UDP. A Map-Request, Map-Register, or a Map-Notify used as a notification uses a sender-chosen source port and destination port <code>4342</code>. A Map-Reply, a Map-Notify used as an acknowledgment, or a Map-Notify-Ack uses source port <code>4342</code>. Implementations MUST accept packets when either port is 4342, because NATs can change port numbers. The UDP checksum is set to non-zero and MUST be checked on receipt; a message that fails is dropped. Where the underlay path MTU is unknown, messages MUST be limited to 576 bytes for IPv4 or 1280 bytes for IPv6.</p><p>A <strong>Map-Request</strong> (type 1) asks for a mapping. It carries an 8-octet random nonce, an optional source EID, one or more ITR-RLOC addresses the reply can be sent to, and the EID-Prefix being asked about. Senders MUST include one record only, and Map-Requests MUST be rate limited to 1 per second per EID-Prefix. After 10 retransmits with no Map-Reply, the sender MUST wait 30 seconds.</p><p>A <strong>Map-Reply</strong> (type 2) echoes the nonce and returns records. Each record has a TTL in minutes, an EID-Prefix, and a locator set. Each locator has a Priority (lower is preferred, and 255 means do not use for unicast) and a Weight used to split traffic among equal-priority locators. When prefixes overlap, the most specific match for the requested EID is returned in a single reply. A reply with an empty locator set is a <strong>Negative Map-Reply</strong>, whose action code says what the ITR should do.</p><p>A <strong>Map-Register</strong> (type 3) publishes records. A <strong>Map-Notify</strong> (type 4) acknowledges a registration, and a <strong>Map-Notify-Ack</strong> (type 5) acknowledges an unsolicited Map-Notify. An <strong>Encapsulated Control Message</strong> (type 8) wraps another control message, for example a Map-Request sent from an ITR to a Map-Resolver. A Map-Request used as an RLOC-probe MUST NOT be sent inside an ECM. Messages with an unrecognized address family identifier MUST be dropped and the event logged.</p>",
+      "eli5": "<p>There are a few kinds of note passed around: a question (where does this kid live?), an answer, a sign-up slip, a receipt, and an envelope for passing a note along. Each has its own shape so everyone can read it.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "5.6",
+      "title": "Authenticating Registrations",
+      "content": "<p>Map-Register messages are authenticated so that a Map-Server only publishes what a trusted ETR sent. The ETR and Map-Server share a pre-shared secret, which MUST be unique per LISP Site-ID. The <code>Key ID</code> field names which secret is used, which allows rotating secrets without disruption, and the <code>Algorithm ID</code> field names the key derivation function (KDF) and message authentication code (MAC) pair.</p><p>The per-message key is derived from the nonce and the pre-shared secret, with a salt that depends on the message type: <code>Map-Register Authentication</code>, <code>Map-Notify Authentication</code> or <code>Map-Notify-Ack Authentication</code>. The MAC is then computed over the whole message with the authentication field set to zero. Implementations MUST implement HMAC-SHA-256-128 and SHOULD implement HMAC-SHA-256-128+HKDF-SHA256.</p><p>The <code>Nonce</code> in a Map-Register is incremented with each message. A Map-Server MUST save the last nonce for each xTR-ID and key pair in persistent storage, and MUST drop a Map-Register whose nonce is not greater, which defeats replay. An ETR that cannot save its nonce MUST use a new authentication key after a restart. When the I-bit is set, a 128-bit <code>xTR-ID</code> and a 64-bit <code>Site-ID</code> are appended to identify the sender and its site. Map-Notify and Map-Notify-Ack messages recompute their authentication data the same way, and a message that fails validation is dropped.</p>",
+      "eli5": "<p>When you sign up for the phone book you show a secret stamp that only you and the book-keeper know. A fresh number on every slip stops anyone from re-using an old slip you already sent.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "8",
+      "title": "Resolving and Registering Mappings",
+      "content": "<p>An ITR is configured with one or more Map-Resolver addresses. These are RLOCs and MUST be routable on the underlying network, since resolving them through LISP would be circular. When the ITR has no cached mapping, it sends an Encapsulated Map-Request to a Map-Resolver. It then expects an immediate Negative Map-Reply with action <code>Natively-Forward</code> and a 15-minute TTL if the EID is known not to exist, a Negative Map-Reply from a Map-Server for a hole in an authoritative prefix, or a real Map-Reply from the owning ETR or from a Map-Server answering on its behalf.</p><p>On the registration side, an ETR sends Map-Register messages periodically, with a suggested interval of one minute. A Map-Server SHOULD remove a registration it has not refreshed within three minutes. After a restart or a change, an ETR MAY register as often as once every 20 seconds, for at most five minutes. The ETR can set the M-bit to ask for a Map-Notify, and the P-bit to ask the Map-Server to answer Map-Requests itself, in which case the ETR SHOULD list all RLOCs for all ETRs of the prefix. The Map-Server accepts only EID-Prefixes configured for that ETR, because skipping this check would leave the system open to trivial prefix hijacking.</p><p>When a Map-Server gets a Map-Request, it checks for a configured matching prefix, then for a registered ETR. With no match it returns a Negative Map-Reply with a 15-minute TTL; with a configured but unregistered prefix, a 1-minute TTL. If an ETR asked for proxy replies, the Map-Server answers. Otherwise it re-encapsulates the request to a registered ETR, which answers the ITR directly. A Map-Resolver that cannot answer from its own data forwards the unencapsulated request, with the ITR's RLOC as source, into the mapping database, so the answer also goes straight to the ITR. A Map-Resolver address can be anycast.</p>",
+      "eli5": "<p>When your router does not know where a kid lives, it asks a lookup helper. The helper either says where, says nobody lives there, or passes the question to the kid's own helper, who answers you directly.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Keeping Mappings Fresh",
+      "content": "<p>ITRs keep a local Map-Cache, so when an ETR changes a mapping, remote ITRs need to find out. The RFC defines the <strong>Solicit-Map-Request</strong> (SMR), a push-style mechanism that is simply a bit set in a Map-Request. An ETR sends SMRs to sites it has been sending encapsulated data to during the last minute. An ITR that receives an SMR sends its own SMR-invoked Map-Request, and this one MUST go through the Mapping System rather than directly. Both sides MUST rate limit these messages; the RFC recommends no more than one packet every 3 seconds. An ITR with no cached mapping for the EID SHOULD NOT send an SMR-invoked request, because it will ask when it next needs to send.</p><p>The RFC also lists ways to learn that a locator is down: ICMP Network or Host Unreachable messages, a missing route in the underlay routing table, ICMP Port Unreachable, and receiving a Map-Reply. ICMP is unreliable because many operators turn it off.</p><p><strong>RLOC-Probing</strong> is the explicit method. An ITR sends a Map-Request with the probe bit set directly to a locator, not through the Mapping System. The ETR answers with a Map-Reply with the probe bit set, which should include the current mapping for the EID-Prefix. Probing can handle many failures and gives rough round-trip time estimates, but costs control messages and bandwidth, especially if failures must be detected quickly.</p>",
+      "eli5": "<p>If a kid moves house, they send a quick note to friends who recently wrote to them saying to look up the new address. Friends can also knock on the door now and then to check someone is home.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security and Privacy",
+      "content": "<p>The RFC assumes the Mapping System is secure and trusted, that ETRs have a preconfigured trust relationship with it including a shared secret, and that LISP-SEC (<a href='/9303/'>RFC 9303</a>) MUST be implemented. The Map-Request and Map-Reply exchange can be used for denial of service or amplification, which filters and rate limiters mitigate. It can also be used to inject forged mappings into an ITR's cache, and a valid ETR can try to overclaim a larger prefix than it owns. LISP-SEC addresses origin authentication, integrity, man-in-the-middle and prefix overclaiming. Deployments worried about forged requests and replies MUST drop control messages without LISP-SEC material.</p><p>Map-Register uses a MAC over the whole message and nonce-based replay protection. A compromised ETR could still overclaim, so a Map-Server MUST check that registered prefixes match its own configuration. Mechanisms for encrypting control messages between xTRs and the Mapping System SHOULD be deployed, with DTLS and lisp-crypto given as examples.</p><p>The privacy section notes that EIDs are long-lived identifiers that map to RLOCs, so an attacker who can read or query mappings could track a user's topological location or mobility. Suggested defenses are access control lists, stronger authentication in the Mapping System, and ephemeral EIDs.</p>",
+      "eli5": "<p>The phone book must make sure only the real owner can change an entry, and must not let strangers freely watch where someone moves. Secret stamps and limits on who may look things up help with that.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "11",
+      "title": "Changes From RFC 6830 and RFC 6833",
+      "content": "<p>This document replaces <a href='/6830/'>RFC 6830</a> and <a href='/6833/'>RFC 6833</a>. The RFC lists the changes that matter to implementers:</p><ul><li>The 16-bit Key ID field of Map-Register and Map-Notify is split into an 8-bit Key ID and an 8-bit Algorithm ID.</li><li>A Map-Notify-Ack message is defined to make Map-Notify reliable. Implementations of it already existed before the RFC.</li><li>The Map-Referral codepoint from LISP-DDT is incorporated.</li><li>Bits L and D are added to Map-Request, and bits S, I, E, T, a, R and M to Map-Register.</li><li>Two action values are added to EID-Records: Drop/Policy-Denied and Drop/Auth-Failure.</li></ul><p>For IANA, UDP port <code>4342</code> is the LISP control plane port, the packet type registry now points to this document, and the Key ID registry is renamed \"LISP Algorithm ID Numbers\" with values 0 to 3 defined here. The separate address type registry requested by RFC 6830 is closed in favor of the LCAF types registry.</p>",
+      "eli5": "<p>This is the new edition of the rule book. It fixes up some old rules and adds a way to say you got the message.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "LISP CONTROL PACKET TYPES (RFC 9301, TABLE 1)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "Map-Request",
+            "desc": "Asks for an EID-to-RLOC mapping or probes a locator.",
+            "highlight": true
+          },
+          {
+            "code": "2",
+            "label": "Map-Reply",
+            "desc": "Returns mapping records, or an empty set for a negative reply.",
+            "highlight": true
+          },
+          {
+            "code": "3",
+            "label": "Map-Register",
+            "desc": "An ETR publishes its EID-Prefixes to a Map-Server."
+          },
+          {
+            "code": "4",
+            "label": "Map-Notify",
+            "desc": "Acknowledges a Map-Register, or notifies changes."
+          },
+          {
+            "code": "5",
+            "label": "Map-Notify-Ack",
+            "desc": "Acknowledges an unsolicited Map-Notify."
+          },
+          {
+            "code": "6",
+            "label": "DDT Map-Referral",
+            "desc": "Used by the LISP-DDT mapping system."
+          },
+          {
+            "code": "8",
+            "label": "Encapsulated Control Message",
+            "desc": "Wraps another control message, such as a Map-Request."
+          },
+          {
+            "code": "15",
+            "label": "Shared Extension Message",
+            "desc": "For experimenting with new message formats."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "RESOLVING AN EID THROUGH A MAP-RESOLVER AND MAP-SERVER",
+      "data": {
+        "lanes": [
+          {
+            "key": "itr",
+            "label": "ITR"
+          },
+          {
+            "key": "resolver",
+            "label": "Map-Resolver"
+          },
+          {
+            "key": "server",
+            "label": "Map-Server"
+          },
+          {
+            "key": "etr",
+            "label": "ETR"
+          }
+        ],
+        "messages": [
+          {
+            "from": "itr",
+            "to": "resolver",
+            "label": "Encapsulated Map-Request",
+            "color": "blue",
+            "note": "Sent to UDP port 4342 when the Map-Cache has no entry."
+          },
+          {
+            "from": "resolver",
+            "to": "server",
+            "label": "Map-Request",
+            "color": "blue",
+            "note": "Forwarded into the mapping database, with the ITR RLOC as source."
+          },
+          {
+            "from": "server",
+            "to": "etr",
+            "label": "Encapsulated Map-Request",
+            "color": "blue",
+            "note": "Re-encapsulated when no ETR asked for proxy replies."
+          },
+          {
+            "from": "etr",
+            "to": "itr",
+            "label": "Map-Reply",
+            "color": "green",
+            "note": "Sent directly to the ITR RLOC, with the nonce echoed."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "REGISTERING EID-PREFIXES WITH A MAP-SERVER",
+      "data": {
+        "lanes": [
+          {
+            "key": "etr",
+            "label": "ETR"
+          },
+          {
+            "key": "server",
+            "label": "Map-Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "etr",
+            "to": "server",
+            "label": "Map-Register",
+            "color": "blue",
+            "note": "Authenticated; M-bit set if a Map-Notify is wanted."
+          },
+          {
+            "from": "server",
+            "to": "etr",
+            "label": "Map-Notify",
+            "color": "green",
+            "note": "Copies the Map-Register fields and recomputes the authentication data."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "changes",
+      "position": "after",
+      "caption": "LISP ALGORITHM ID NUMBERS (RFC 9301, TABLE 5)",
+      "data": {
+        "columns": [
+          "Name",
+          "Number",
+          "MAC",
+          "KDF"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "None",
+              "0",
+              "None",
+              "None"
+            ]
+          },
+          {
+            "cells": [
+              "HMAC-SHA-1-96-None",
+              "1",
+              "RFC 2404",
+              "None"
+            ]
+          },
+          {
+            "cells": [
+              "HMAC-SHA-256-128-None",
+              "2",
+              "RFC 4868",
+              "None"
+            ]
+          },
+          {
+            "cells": [
+              "HMAC-SHA256-128+HKDF-SHA256",
+              "3",
+              "RFC 4868",
+              "RFC 4868"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9300]",
+      "text": "Farinacci, D., Fuller, V., Meyer, D., Lewis, D., and A. Cabellos, Ed., \"The Locator/ID Separation Protocol (LISP)\", RFC 9300, October 2022.",
+      "rfc": 9300
+    },
+    {
+      "number": "[RFC9303]",
+      "text": "Maino, F., Ermagan, V., Cabellos, A., and D. Saucez, \"Locator/ID Separation Protocol Security (LISP-SEC)\", RFC 9303, October 2022.",
+      "rfc": 9303
+    },
+    {
+      "number": "[RFC9302]",
+      "text": "Iannone, L., Saucez, D., and O. Bonaventure, \"Locator/ID Separation Protocol (LISP) Map-Versioning\", RFC 9302, October 2022.",
+      "rfc": 9302
+    },
+    {
+      "number": "[RFC9304]",
+      "text": "Boucadair, M. and C. Jacquenet, \"Locator/ID Separation Protocol (LISP): Shared Extension Message and IANA Registry for Packet Type Allocations\", RFC 9304, October 2022.",
+      "rfc": 9304
+    },
+    {
+      "number": "[RFC6833]",
+      "text": "Fuller, V. and D. Farinacci, \"Locator/ID Separation Protocol (LISP) Map-Server Interface\", RFC 6833, January 2013.",
+      "rfc": 6833
+    },
+    {
+      "number": "[RFC8085]",
+      "text": "Eggert, L., Fairhurst, G., and G. Shepherd, \"UDP Usage Guidelines\", BCP 145, RFC 8085, March 2017.",
+      "rfc": 8085
+    },
+    {
+      "number": "[RFC4868]",
+      "text": "Kelly, S. and S. Frankel, \"Using HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512 with IPsec\", RFC 4868, May 2007.",
+      "rfc": 4868
+    },
+    {
+      "number": "[RFC5869]",
+      "text": "Krawczyk, H. and P. Eronen, \"HMAC-based Extract-and-Expand Key Derivation Function (HKDF)\", RFC 5869, May 2010.",
+      "rfc": 5869
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

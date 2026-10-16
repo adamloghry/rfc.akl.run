@@ -10,13 +10,219 @@
   "questions": [
     "bfd multipoint",
     "bfd for multicast networks",
-    "point-to-multipoint bfd"
+    "point-to-multipoint bfd",
+    "what is multipoint bfd",
+    "what is a bfd multipoint head and tail",
+    "how does a bfd tail detect failure"
+  ],
+  "tags": [
+    "Routing",
+    "BFD",
+    "Multicast"
+  ],
+  "subtitle": "How BFD, the fast liveness check, is adapted so one sender can let a whole group of receivers detect a broken multicast path.",
+  "tldr": {
+    "problem": "Bidirectional Forwarding Detection (BFD) verifies connectivity between a pair of systems, but multicast and other multipoint paths are one-way and reach many receivers, so the pairwise handshake does not fit.",
+    "mechanism": "The head sends periodic BFD Control packets, marked with the Multipoint (M) bit, down the multipoint path. Each tail declares the path failed if no packet arrives within a Detection Time computed from the packet's own timer values.",
+    "outcome": "Tails can detect a lost multipoint path quickly without sending anything back. The RFC updates RFC 5880 and is on the Standards Track; it is itself updated by RFC 9780.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "BFD UDP destination port",
+      "value": "3784"
+    },
+    {
+      "label": "Max transmit jitter",
+      "value": "up to 25%"
+    },
+    {
+      "label": "Min Length field",
+      "value": "24 (26 if A bit set)"
+    },
+    {
+      "label": "IPv4 LSP destination range",
+      "value": "127.0.0.0/8"
+    },
+    {
+      "label": "Tail Detection Time",
+      "value": "Desired Min TX Interval x Detect Mult"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 8562 is a Proposed Standard that updates <a href='/5880/'>RFC 5880</a>, and per the metadata it is itself updated by <a href='/9780/'>RFC 9780</a>. Read RFC 9780 together with it.</p>",
+  "glossary": [
+    "bfd",
+    "multicast",
+    "unicast",
+    "mpls",
+    "jitter",
+    "detection-time"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Extending BFD to Multipoint",
+      "content": "<p>The base BFD protocol, <a href='/5880/'>RFC 5880</a>, verifies unicast connectivity between a pair of systems. RFC 8562 adds a method for verifying multipoint or multicast connectivity between one sender, the <strong>head</strong>, and one or more receivers, the <strong>tails</strong>. In this document, \"multipoint\" means one or more systems receiving packets from a single sender, and it specifically includes IP multicast and point-to-multipoint MPLS.</p><p>Multipoint transmission is one-way, so the mechanism verifies only that one direction. This seems at odds with the word \"Bidirectional\" in BFD, but BFD Demand mode lets a tail monitor the path even with no return path to the head. If a return path exists, a tail may notify the head of lost connectivity; those details are left to <a href='/8563/'>RFC 8563</a>. Nearly all options and timing parameters are controlled by the head.</p>",
+      "eli5": "<p>BFD is a quick way to check that a friend is still there. Here the check is changed so one person can keep many listeners informed that the line is still working, even though the listeners cannot talk back.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "3",
+      "title": "Goals and Overview",
+      "content": "<p>The primary goal is for tails to rapidly detect that multipoint connectivity from the head has failed. Other goals are to work on any multicast technology, to support several overlapping point-to-multipoint paths as well as multipoint-to-multipoint paths, and to allow ordinary point-to-point BFD sessions to run at the same time. It is explicitly not a goal to verify point-to-point bidirectional connectivity between the head and a tail; point-to-point BFD can do that separately.</p><p>The heart of the protocol is the periodic transmission of BFD Control packets from the head along the multipoint path to all tails. The packets carry what a tail needs to calculate the Detection Time. If a tail receives no Control packets for a Detection Time, it declares the path failed. For some applications that is all that is needed and the head can stay ignorant of the tails' status.</p>",
+      "eli5": "<p>The goal is for the listeners to notice fast when the \"still here\" calls stop. Checking each listener one by one is a different job that other tools can handle.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "5.2",
+      "title": "Session Types and State Variables",
+      "content": "<p>Multipoint BFD is modeled as sessions of different types, using new values of the <code>bfd.SessionType</code> variable. <code>PointToPoint</code> is classic BFD. <code>MultipointHead</code> is the session on the head, bound to a multipoint path, which sends Control packets and never receives any. <code>MultipointTail</code> is the session on each tail, which receives packets from the head over the path.</p><p>Some initial values differ. On a <code>MultipointHead</code> session, <code>bfd.RequiredMinRxInterval</code> MUST start at zero and <code>bfd.DemandMode</code> MUST start at 1. On a <code>MultipointTail</code> session, <code>bfd.DemandMode</code> MUST start at zero. Multipoint packets are marked by the Multipoint (M) bit, so the receiver does not need to know by other means that a packet arrived over a multipoint path.</p><p>A <code>MultipointHead</code> session cannot fail, since it is controlled administratively. If a <code>MultipointTail</code> session fails, the tail has definitely lost contact with the head (or the head was administratively disabled), and it may notify the user by means other than BFD, for example logging or NETCONF.</p>",
+      "eli5": "<p>There are two roles: the one who calls out \"still here\" and the ones who listen. The caller never listens for answers, and a listener who hears nothing for too long knows the caller is gone or the line is broken.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "5.5",
+      "title": "State Machine and Session Setup",
+      "content": "<p>Because many tails map to one head, a three-way handshake for setup and teardown is neither possible nor appropriate, so there is no <code>Init</code> state. A <code>MultipointHead</code> session MUST NOT send packets with the State field set to INIT, and such packets MUST be ignored on receipt. A tail session only moves between Down and Up: it goes Up when it receives a packet with State Up, and goes Down on a received Down or AdminDown state or when the Detection Timer expires. A head has no Detection Timer, so its transitions are driven administratively.</p><p>Multipoint BFD includes a form of discovery: the only information both sides need in advance is the binding to the multipoint path. A <code>MultipointHead</code> session is created for each path, runs in the Active role, and is normally always Up and in Demand mode. Tail sessions MAY be created dynamically when a multipoint Control packet arrives, and always take the Passive role.</p>",
+      "eli5": "<p>There is no \"hello, hello back\" routine here, since the caller cannot hear everyone. A listener simply counts itself connected while it hears the call and disconnected when it stops.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5.7",
+      "title": "Demultiplexing, Timers and Detection",
+      "content": "<p>The head sends Control packets with My Discriminator set to a value bound to the path and Your Discriminator set to zero. IP and MPLS tails MUST demultiplex on the combination of source address, My Discriminator and the identity of the multipoint path. For this reason the head's My Discriminator MUST NOT change during the session's life. A tail identifies BFD on an IP multicast path by destination UDP port <code>3784</code>, and packets for an IP multicast group MUST be consumed by the tail and not forwarded to receivers. For multipoint LSPs using IP/UDP encapsulation, the destination address MUST be in <code>127.0.0.0/8</code> for IPv4 or <code>0:0:0:0:0:FFFF:7F00:0/104</code> for IPv6.</p><p>A tail cannot influence the head's transmit rate, so the tail's <strong>Detection Time</strong> does not use <code>bfd.RequiredMinRxInterval</code>. It is the product of the last received Desired Min TX Interval and Detect Mult. A head SHOULD NOT start a Poll Sequence when timers change, but MUST send packets with the P bit set to signal a change. When raising its transmit interval, the head MUST send P-bit packets at the old interval first to avoid false timeouts at the tails.</p><p>Starting and stopping are handled so tails react quickly. A new head SHOULD begin in Down for a time equal to <code>bfd.DesiredMinTxInterval * bfd.DetectMult</code>, which resets all tail sessions. To shut down in a controlled way, the head MUST set the state to Down or AdminDown and SHOULD keep sending packets for that same period, so tails need not wait a full Detection Time.</p>",
+      "eli5": "<p>Each listener works out its own patience from numbers in the call: how often calls come and how many it may miss. If it misses too many, it decides the line is down. A caller who is leaving says goodbye, so listeners do not have to wait.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5.13",
+      "title": "Replacement Receive and Transmit Rules",
+      "content": "<p>RFC 8562 replaces Section 6.8.6 (reception) and Section 6.8.7 (transmission) of RFC 5880 entirely, so multipoint is handled without changing point-to-point processing. On reception, a packet is discarded for reasons such as a wrong version (not 1), a Length below the minimum (24 if the A bit is clear, 26 if set), a Detect Mult of zero, or a My Discriminator of zero. If the M bit is set and Your Discriminator is nonzero, the packet MUST be discarded. If no session is found, a new <code>MultipointTail</code> session MAY be created or the packet MAY be discarded, depending on local policy such as a maximum number of tail sessions.</p><p>On transmission, a system MUST NOT send at an interval less than the larger of <code>bfd.DesiredMinTxInterval</code> and <code>bfd.RemoteMinRxInterval</code>, less jitter. Periodic transmission MUST be jittered by up to 25%, reducing the interval by a random value of 0 to 25%. If <code>bfd.DetectMult</code> is 1, the interval MUST be no more than 90% and no less than 75% of the negotiated interval. A <code>MultipointTail</code> MUST NOT transmit any BFD Control packets. A head sets M to 1 and D to 1, and sets Required Min Echo RX Interval to zero for both head and tail sessions.</p>",
+      "eli5": "<p>The rules for who may speak and when are rewritten for this setup. Listeners never speak, the caller varies its timing a little so it does not fall into step with others, and bad or odd-looking messages are thrown away.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Congestion and Security",
+      "content": "<p>Because a tail sends nothing back, the head has no BFD-based way to know the tail's state and could keep sending after a failure. When the head needs to know, the RFC RECOMMENDS the extension in <a href='/8563/'>RFC 8563</a>. Where BFD runs over multiple hops, a congestion control mechanism MUST be implemented and BFD MUST reduce its traffic when congestion is detected; that control loop is outside this document.</p><p>The security considerations of RFC 5880 apply. In addition, implementations that create tail sessions dynamically MUST protect against an unbounded number of them. Suggestions include not creating a session if the packet did not arrive on a multicast path, capping tail sessions at the number of expected streams and raising an alarm when exceeded, and setting reasonable upper bounds on head and tail sessions.</p><p>Shared authentication keys in multipoint use allow any tail to spoof the head to any other tail, a significant exposure unless all tails are trusted. Asymmetric authentication such as TESLA (<a href='/4082/'>RFC 4082</a>) would be needed, and its applicability is left for further study. The RFC has no IANA actions.</p>",
+      "eli5": "<p>Since listeners never answer, the caller may not know a listener lost the line, and extra tools exist for that. Also, if everyone shares one secret password, any listener could pretend to be the caller, so it is only safe among listeners you trust.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "MULTIPOINTTAIL SESSION STATES (RFC 8562, SECTION 5.5)",
+      "data": {
+        "states": [
+          {
+            "key": "down",
+            "label": "DOWN",
+            "initial": true
+          },
+          {
+            "key": "up",
+            "label": "UP"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "down",
+            "to": "up",
+            "label": "received state UP"
+          },
+          {
+            "from": "up",
+            "to": "down",
+            "label": "received DOWN or ADMIN DOWN, or timer expires"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "THE THREE SESSION TYPES",
+      "data": {
+        "columns": [
+          "Session type",
+          "Runs on",
+          "Role"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "PointToPoint",
+              "Either end of a pair",
+              "Classic BFD, as in RFC 5880"
+            ]
+          },
+          {
+            "cells": [
+              "MultipointHead",
+              "The head",
+              "Sends Control packets along the multipoint path; receives none"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "MultipointTail",
+              "Each tail",
+              "Receives packets from the head; transmits none"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5880]",
+      "text": "Katz, D. and D. Ward, \"Bidirectional Forwarding Detection (BFD)\", RFC 5880, June 2010.",
+      "rfc": 5880
+    },
+    {
+      "number": "[RFC7880]",
+      "text": "Pignataro, C., et al., \"Seamless Bidirectional Forwarding Detection (S-BFD)\", RFC 7880, July 2016.",
+      "rfc": 7880
+    },
+    {
+      "number": "[RFC8029]",
+      "text": "Kompella, K., et al., \"Detecting Multiprotocol Label Switched (MPLS) Data-Plane Failures\", RFC 8029, March 2017.",
+      "rfc": 8029
+    },
+    {
+      "number": "[RFC8563]",
+      "text": "Katz, D., et al., \"Bidirectional Forwarding Detection (BFD) Multipoint Active Tails\", RFC 8563, April 2019.",
+      "rfc": 8563
+    },
+    {
+      "number": "[RFC5883]",
+      "text": "Katz, D. and D. Ward, \"Bidirectional Forwarding Detection (BFD) for Multihop Paths\", RFC 5883, June 2010.",
+      "rfc": 5883
+    },
+    {
+      "number": "[RFC4082]",
+      "text": "Perrig, A., et al., \"Timed Efficient Stream Loss-Tolerant Authentication (TESLA): Multicast Source Authentication Transform Introduction\", RFC 4082, June 2005.",
+      "rfc": 4082
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

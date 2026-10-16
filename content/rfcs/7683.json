@@ -9,13 +9,273 @@
   },
   "questions": [
     "what is diameter overload control",
-    "what is doic"
+    "what is doic",
+    "how does doic work",
+    "what is the doic loss algorithm"
+  ],
+  "tags": [
+    "Diameter",
+    "Overload Control",
+    "AAA"
+  ],
+  "subtitle": "How Diameter nodes tell each other \"I am overloaded, please send less\" using extra fields in ordinary messages.",
+  "tldr": {
+    "problem": "A Diameter node that is overloaded needs a way to ask other nodes to reduce the load they send, and existing and future Diameter applications need that without changes to the Diameter base protocol.",
+    "mechanism": "Nodes piggyback new AVPs on existing requests and answers. OC-Supported-Features announces support, and OC-OLR carries an overload report. Reacting nodes then apply an abatement algorithm, by default a percentage-based loss algorithm.",
+    "outcome": "RFC 7683 is a base solution that leaves several features, such as agent overload and further algorithms, for later specifications. It has been updated by RFC 8581.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "AVP codes",
+      "value": "621 to 627"
+    },
+    {
+      "label": "Default validity",
+      "value": "30 seconds"
+    },
+    {
+      "label": "Maximum validity",
+      "value": "86,400 seconds (24 hours)"
+    },
+    {
+      "label": "Reduction percentage",
+      "value": "0 to 100"
+    },
+    {
+      "label": "Feature vector",
+      "value": "64-bit flags (Unsigned64)"
+    },
+    {
+      "label": "Mandatory algorithm",
+      "value": "loss"
+    }
+  ],
+  "today": "<p>RFC 7683 is a Proposed Standard published in October 2015 and has been updated by <a href='/8581/'>RFC 8581</a>. It is a base solution, and the RFC itself lists further algorithms and agent overload as work left to later specifications.</p>",
+  "glossary": [
+    "diameter",
+    "attribute-value-pair",
+    "overload-control",
+    "throttling",
+    "sequence-number",
+    "realm",
+    "stateless-protocol",
+    "tls",
+    "ipsec"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>RFC 7683 defines a base solution for Diameter overload control called <strong>Diameter Overload Indication Conveyance</strong> (DOIC). It is based on the requirements in <a href='/7068/'>RFC 7068</a>. It works between Diameter nodes that support DOIC, applies to existing and future Diameter applications, and requires no changes to the Diameter base protocol (<a href='/6733/'>RFC 6733</a>).</p><p>It can be deployed where some nodes do not implement it. A new application can adopt DOIC by making it mandatory to implement and referencing this specification, but application designers remain responsible for defining how overload control works for their application.</p><p>The RFC states that this solution does not address every requirement in RFC 7068. Features such as new abatement algorithms, agent overload and new error diagnostics are left for future specifications.</p>",
+      "eli5": "<p>Some computers get too many requests at once. This document gives them a polite way to say \"please slow down\" without changing the basic rules of how they talk.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "4",
+      "title": "Reporting Nodes and Reacting Nodes",
+      "content": "<p>A node that supports DOIC is a <strong>DOIC node</strong>, and it can be a Diameter client, server or agent. A <strong>reporting node</strong> asks for overload abatement by sending <strong>overload reports</strong> (OLRs). A <strong>reacting node</strong> acts on them. The role depends on message direction: reacting nodes send requests and reporting nodes send answers. One node can be both at once, and an agent can react to reports from servers while reporting to its clients.</p><p>DOIC creates no new messages. It <em>piggybacks</em> new AVPs on existing requests and answers: <code>OC-Supported-Features</code> announces support and <code>OC-OLR</code> carries a report. A report applies to the realm and application of the message that carries it. It works through non-supporting agents that pass unknown AVPs unchanged.</p><p>Reacting nodes cut traffic with an agreed <strong>abatement algorithm</strong>, which separates requests into those that get abatement treatment and those routed normally. There are two treatments: <strong>diversion</strong> (choosing another destination or path) and <strong>throttling</strong> (a permanent rejection of the transaction). A reacting node SHOULD divert when it can and MUST throttle otherwise.</p><p>A report has a type. A <code>HOST_REPORT</code> is for one host and affects host-routed requests. A <code>REALM_REPORT</code> is for an entire realm and affects realm-routed requests. Diverting makes no sense when a whole realm is overloaded, which is why the types differ.</p>",
+      "eli5": "<p>One side is like a restaurant kitchen shouting \"we are swamped,\" and the other side is the waiters who then take fewer orders to the kitchen, or send some to another kitchen.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "5.1",
+      "title": "Capability Announcement",
+      "content": "<p>Before any overload happens, nodes find out what the other side supports through <strong>DOIC Capability Announcement</strong>. It is separate from Diameter Capability Exchange and is done per transaction. A reacting node MUST include <code>OC-Supported-Features</code> in every request. It MAY include <code>OC-Feature-Vector</code>, and if it does, it MUST indicate support for the <code>loss</code> algorithm.</p><p>If a request carries that AVP, the reporting node MUST include it in the answer, and it MUST NOT include any DOIC AVPs when the request did not. The reporting node MUST select a single abatement algorithm from those the request offered, the one it wants used if it becomes overloaded. Omitting the feature vector means the loss algorithm.</p><p>Agents help non-supporting nodes. An agent MAY act as a reacting node for a client that lacks DOIC by inserting <code>OC-Supported-Features</code> into its requests, and as a reporting node for a non-supporting server if it can see all traffic to that server. An agent may also modify the AVP, but must stay consistent toward both its upstream and downstream DOIC nodes.</p>",
+      "eli5": "<p>Before anyone gets too busy, the two sides swap notes: \"I know how to slow down this way. Do you?\" That way, when a rush comes, they already agree on the rules.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5.2",
+      "title": "Overload Reports and State",
+      "content": "<p>Both kinds of node keep <strong>Overload Control State</strong> (OCS). A reacting node keeps an entry per application for each host or realm it has a report for, holding the sequence number, expiry time, algorithm and algorithm inputs such as the reduction percentage. A report that matches an existing entry is processed by its <strong>sequence number</strong>: if it is greater than the stored one, the entry is updated, and if it is less than or equal, the report is silently ignored. The reacting node also recognizes rollover when the number moves from within 1% of the maximum to within 1% of the minimum.</p><p>A reporting node SHOULD start a new entry when it becomes overloaded, with sequence number zero. Any new number MUST be greater than any in an unexpired report for the same application and report type, even across a reboot. It MUST increment the number whenever the entry changes. When the overload ends, it SHOULD send an OLR with a validity duration of zero, and it should reduce abatement in a controlled fashion to avoid oscillation. The absence of an OC-OLR in an answer means \"no change.\"</p><p>When a reacting node sends a request, it checks for a matching active entry and applies the entry's algorithm. If it throttles a request and is an agent, it MUST send an error. A DOIC node rejecting a request should use <code>DIAMETER_TOO_BUSY</code> if the same request may succeed on a different path, and <code>DIAMETER_UNABLE_TO_COMPLY</code> if it assumes it will not. For example, a request that already names this very host is not worth retrying elsewhere.</p>",
+      "eli5": "<p>Each side keeps a notepad of who is busy and for how long. A numbered note beats an older note, and a note that says \"all clear\" ends the slowdown.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "6",
+      "title": "The Loss Algorithm",
+      "content": "<p>The <strong>loss algorithm</strong> is the default that every DOIC node must support. It is stateless: the reporting node asks for a percentage reduction compared with what the node would otherwise send, regardless of what it sent before. The reporting node MUST give the percentage in <code>OC-Reduction-Percentage</code>, and it MAY change it in later reports.</p><p>Which requests get abatement is up to the reacting node. One approach in the RFC is to pick a uniformly random number from 1 to 100 for each request. If the number is less than or equal to the reduction percentage, the request gets abatement treatment, and otherwise it is routed normally. Because it is stateless, the algorithm guarantees that the requested percentage of new requests is treated, not an absolute reduction in traffic.</p><p>After a 100% reduction ends because the report timed out, the sender SHOULD be conservative, for example by first sending \"probe\" messages. The goal is to avoid overload thrashing, where jumping straight from 100% to 0% reduction sends the reporting node back into overload.</p>",
+      "eli5": "<p>If the shop says \"send me 30 percent fewer orders,\" you roll a 100-sided die for each order, and if it lands on 30 or less, you send that order somewhere else or hold it back.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "7",
+      "title": "The DOIC AVPs",
+      "content": "<p>DOIC defines seven AVPs, with AVP codes 621 to 627. <code>OC-Supported-Features</code> and <code>OC-OLR</code> are Grouped AVPs. <code>OC-Feature-Vector</code> is a 64-bit flags field, and the only feature defined is <code>OLR_DEFAULT_ALGO</code> (<code>0x0000000000000001</code>), meaning the loss algorithm is supported or will be used.</p><p>An <code>OC-OLR</code> contains an <code>OC-Sequence-Number</code>, an <code>OC-Report-Type</code>, an optional <code>OC-Reduction-Percentage</code> and an optional <code>OC-Validity-Duration</code>. The validity duration is in seconds, defaults to 30 seconds, and has a maximum of 86,400 seconds (24 hours). If the value exceeds the maximum, the default applies. The reduction percentage runs from 0 to 100, values over 100 are ignored, and 100 means all traffic is throttled because the reporting node has stopped processing new messages.</p><p>None of these AVPs may have the V flag set. The application and the host or realm for an OLR are not carried in the AVP but are taken from the enclosing message's header and its Origin-Host and Origin-Realm AVPs.</p>",
+      "eli5": "<p>The \"slow down\" sign has a few boxes to fill in: how many orders ago it was updated, who it is about, how much to slow down, and how long the sign is good for.</p>"
+    },
+    {
+      "id": "extensibility",
+      "number": "5.3",
+      "title": "Extending DOIC",
+      "content": "<p>DOIC is designed to grow. Expected extensions include new abatement algorithms, new report types and new scopes of messages affected by a report. An extension that needs new normative behavior MUST define a new feature bit in <code>OC-Feature-Vector</code>, and new AVPs should be added as extensions to <code>OC-Supported-Features</code> or <code>OC-OLR</code>.</p><p>Optional sub-AVPs can be added only if an older DOIC implementation can safely ignore them, and they must not require the M-bit. New feature bits and report types MUST be registered with IANA, under the Specification Required policy. Appendix A lists topics intentionally left for future work: more algorithms, agent overload, and an AVP that says overload was the reason for a rejection.</p>",
+      "eli5": "<p>The sign is built so new kinds of signs can be added later, and old machines that do not know the new ones can simply ignore them.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>Overload reports directly reduce traffic, so they are a possible denial-of-service vector. For instance, a series of injected realm OLRs with a 100% reduction could eliminate all traffic to that realm. Reports can also reveal the topology and current status of a Diameter network, which may be sensitive.</p><p>Diameter has no end-to-end authentication, integrity or confidentiality, so agents between two nodes can read or change a report. Trust is therefore transitive. Implementations MUST check that an answer carrying a report is a properly constructed response to a pending request received over an appropriate transport connection. Nodes must check that a report falls within the sender's responsibility, and they MUST NOT honor or forward OLRs from peers that are not trusted to send them.</p><p>Operators MUST be able to choose which peers are trusted to deliver reports and which are authorized to receive them, and DOIC nodes MUST strip DOIC AVPs from messages received from untrusted peers. A node also cannot assume that others comply with a report, so other protections against floods of requests are still needed.</p>",
+      "eli5": "<p>A fake \"we are swamped\" sign could make everyone stop sending to an honest shop. So each side must only believe signs from people it trusts.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "CAPABILITY ANNOUNCEMENT AND AN OVERLOAD REPORT (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "reacting",
+            "label": "Reacting node"
+          },
+          {
+            "key": "reporting",
+            "label": "Reporting node"
+          }
+        ],
+        "messages": [
+          {
+            "from": "reacting",
+            "to": "reporting",
+            "label": "Request + OC-Supported-Features",
+            "color": "blue",
+            "note": "Announces DOIC support and the loss algorithm."
+          },
+          {
+            "from": "reporting",
+            "to": "reacting",
+            "label": "Answer + OC-Supported-Features",
+            "color": "green",
+            "note": "Selects one abatement algorithm."
+          },
+          {
+            "from": "reporting",
+            "to": "reacting",
+            "label": "Answer + OC-OLR",
+            "color": "green",
+            "note": "Sent once overloaded; carries a sequence number and a reduction percentage."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THE TWO REPORT TYPES (RFC 7683, SECTION 7.6)",
+      "data": {
+        "columns": [
+          "Report type",
+          "Value",
+          "Concerns",
+          "Applies to"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "HOST_REPORT",
+              "0",
+              "A specific host",
+              "Host-routed requests"
+            ]
+          },
+          {
+            "cells": [
+              "REALM_REPORT",
+              "1",
+              "An entire realm",
+              "Realm-routed requests"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "DOIC AVP CODES (RFC 7683, SECTION 7)",
+      "data": {
+        "items": [
+          {
+            "code": "621",
+            "label": "OC-Supported-Features",
+            "desc": "Grouped; announces DOIC support."
+          },
+          {
+            "code": "622",
+            "label": "OC-Feature-Vector",
+            "desc": "Unsigned64 flags of supported features."
+          },
+          {
+            "code": "623",
+            "label": "OC-OLR",
+            "desc": "Grouped; the overload report.",
+            "highlight": true
+          },
+          {
+            "code": "624",
+            "label": "OC-Sequence-Number",
+            "desc": "Unsigned64 counter that orders reports."
+          },
+          {
+            "code": "625",
+            "label": "OC-Validity-Duration",
+            "desc": "Unsigned32 seconds; default 30, maximum 86,400."
+          },
+          {
+            "code": "626",
+            "label": "OC-Report-Type",
+            "desc": "Enumerated; HOST_REPORT or REALM_REPORT."
+          },
+          {
+            "code": "627",
+            "label": "OC-Reduction-Percentage",
+            "desc": "Unsigned32 from 0 to 100."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6733]",
+      "text": "Fajardo, V., Ed., Arkko, J., Loughney, J., and G. Zorn, Ed., \"Diameter Base Protocol\", RFC 6733, October 2012.",
+      "rfc": 6733
+    },
+    {
+      "number": "[RFC7068]",
+      "text": "McMurry, E. and B. Campbell, \"Diameter Overload Control Requirements\", RFC 7068, November 2013.",
+      "rfc": 7068
+    },
+    {
+      "number": "[RFC4006]",
+      "text": "Hakala, H., et al., \"Diameter Credit-Control Application\", RFC 4006, August 2005.",
+      "rfc": 4006
+    },
+    {
+      "number": "[RFC5226]",
+      "text": "Narten, T. and H. Alvestrand, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 5226, May 2008.",
+      "rfc": 5226
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

@@ -10,13 +10,289 @@
   "questions": [
     "udp speed test protocol",
     "how to measure one-way ip capacity",
-    "udpstp"
+    "udpstp",
+    "what is udpstp",
+    "which port does udpstp use",
+    "how does udpstp authenticate messages"
+  ],
+  "tags": [
+    "Measurement",
+    "Transport",
+    "Capacity"
+  ],
+  "subtitle": "A UDP-based speed test protocol where the receiver's feedback steers the sender's rate to find the maximum IP-layer capacity.",
+  "tldr": {
+    "problem": "RFC 9097 defines how to measure one-way IP capacity, but its method needs a feedback channel from the receiver so the sender's rate can be adjusted in near real time. No standard protocol supplied that, and earlier measurement protocols such as OWAMP, TWAMP and STAMP lack closed-loop feedback.",
+    "mechanism": "UDPSTP runs over UDP in two phases. A Control phase (Test Setup, then Test Activation) negotiates the test and authenticates it with HMAC-SHA-256. A Data phase then has one side send Load PDUs while the other returns Status Feedback PDUs that drive a load rate adjustment algorithm at the server.",
+    "outcome": "UDPSTP is a Proposed Standard that makes the RFC 9097 capacity measurement runnable in practice. It is limited to infrequent, diagnostic, short-term tests and must not be used as a general congestion control algorithm.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "UDP port",
+      "value": "24601 (udpstp)"
+    },
+    {
+      "label": "Protocol version",
+      "value": "20"
+    },
+    {
+      "label": "Authentication digest",
+      "value": "32-octet HMAC-SHA-256"
+    },
+    {
+      "label": "Replay tolerance window",
+      "value": "10 seconds (+/- 5 seconds)"
+    },
+    {
+      "label": "Derived key material",
+      "value": "512 bits (64 octets)"
+    },
+    {
+      "label": "Default Load and Status PDU timeouts",
+      "value": "No more than 1 second"
+    }
+  ],
+  "today": "<p>RFC 9946 is a Standards Track document published in April 2026 with the status Proposed Standard, and it is not marked as obsoleted or updated. It is the definition of UDPSTP.</p>",
+  "glossary": [
+    "udp",
+    "port-number",
+    "hmac",
+    "key-derivation",
+    "nonce",
+    "replay-protection",
+    "internet-checksum",
+    "congestion-control",
+    "nat",
+    "ephemeral-port",
+    "firewall-pinhole"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a Speed Test Protocol",
+      "content": "<p>The <strong>UDP Speed Test Protocol</strong> (UDPSTP) exists to measure the One-Way IP Capacity metrics defined in <a href='/9097/'>RFC 9097</a>. The measurement method in that RFC needs a feedback channel from the receiver so that the sender's transmission rate can be controlled in near real time.</p><p>The RFC explains that earlier measurement protocols such as OWAMP, TWAMP and STAMP could create asymmetric traffic in combination with some two-way communication, but they are limited to reflection or unidirectional load and lack support for closed loop feedback. That control loop, which keeps congestion of the measured bottleneck to a short time, is the main purpose of UDPSTP.</p><p>Two secondary choices are worth knowing. A key derivation function was added so that authentication keys are separated in a standard way. And because the protocol carries synthetic payload and no direct user information, encryption was deliberately left out, which is also expected to let more low-end devices support the test.</p>",
+      "eli5": "<p>Other tools could send test traffic, but none could be told \"slow down\" or \"speed up\" while the test ran. This one can, so the test finds the top speed without making a mess for long.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "How a Test Runs",
+      "content": "<p>All messages use UDP. One endpoint is the <strong>server</strong>, listening on a standard UDPSTP port; the other is the <strong>client</strong>, which starts every test. In a <em>downstream</em> test the server sends and the client receives. In an <em>upstream</em> test the client sends and the server receives.</p><p>The protocol has two phases. The <strong>Control phase</strong> is two exchanges: Test Setup Request and Response, then Test Activation Request and Response. The <strong>Data phase</strong> is the Load PDUs and Status Feedback messages, followed by a stop exchange. The server answers a Setup Request by allocating a new ephemeral UDP port for the test connection, and the client sends all later messages there.</p><p>Multi-connection tests are supported. Each connection is independent and tries to maximize its own rate, and the client process is responsible for managing and aggregating them. The fields <code>mcIndex</code>, <code>mcCount</code> and <code>mcIdent</code> in the Setup Request tie the connections of one test together.</p><p>The server also sends a <strong>Null Request</strong> from the new ephemeral port right after accepting a setup. It opens a pinhole in the server's own firewall when that firewall does not allow a range of ephemeral ports, and it needs no response.</p>",
+      "eli5": "<p>First the two sides agree on the rules and a private phone line (setup). Then one side sends a stream of test messages while the other keeps reporting back how many arrived, and at the end they both say goodbye.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "Adjusting the Load Rate Safely",
+      "content": "<p>Active capacity measurement means causing congestion on purpose, so the RFC adds safeguards. The load rate adjustment algorithm MUST NOT be used as a general congestion control algorithm, and the specification MUST only be used for diagnostic and operations measurements. The number of concurrent independent tests of a path SHALL be limited to one, regardless of the number of flows.</p><p>Both Load and Status messages MUST carry sequence numbers. Congestion is inferred when the Status Feedback shows sequence number anomalies or a delay range above the upper delay variation threshold. The recommended thresholds are 10 for sequence number gaps, 30 ms for the lower delay variation threshold and 90 ms for the upper one. The number of consecutive feedback intervals needed to infer congestion is configurable with a default of 3, and a maximum of 500 ms to infer congestion.</p><p>Timeouts stop a test when traffic ceases unexpectedly. The default Load PDU timeout and Status PDU timeout MUST each be no more than 1 second, and the default measurement interval <code>testIntTime</code> MUST be no more than 10 seconds.</p><p>The server runs the algorithm, whichever direction the traffic flows, so it can be updated at fewer hosts than there are clients. Algorithm B is the default and Algorithm C, defined in TR-471, is optional. B has two modes: a fast high-speed mode, and a slow single-step mode that continues after congestion is first inferred. C uses multiplicative increases in its fast mode and can retry the fast mode during a test.</p><p>Fixed-rate testing, which skips the algorithm, SHOULD only be activated by operators inside their own network domain, and a client or consumer MUST NOT be able to start one.</p><div class='callout callout-warning'><p>Fixed-rate tests run without congestion control, so they must not be run over other operators' network segments.</p></div>",
+      "eli5": "<p>The test pushes more and more water through the pipe until it starts to overflow, then backs off right away. It is only allowed to do this one test at a time and for a short time, so nobody else's water gets squeezed out.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "4",
+      "title": "Authentication and Keys",
+      "content": "<p>UDPSTP defines two authentication modes. <strong>Mode 1</strong> is REQUIRED and authenticates the Control phase (Test Setup, the Null Request and Test Activation). <strong>Mode 2</strong> is OPTIONAL and also authenticates the Status Feedback PDUs of the Data phase. Mode 1 suits large-scale servers and low-end clients; Mode 2 adds integrity checking throughout the test.</p><p>The sender fills <code>authUnixTime</code> with its current time and puts a 32-octet HMAC-SHA-256 of the whole PDU in <code>authDigest</code>, computed with the <code>authDigest</code> and <code>checkSum</code> fields set to zero. The receiver checks length, digest, timestamp and format. A 10-second tolerance window (+/- 5 seconds) distinguishes a replay. If validation of a Control phase message fails, the receiver SHOULD stay silent unless the hosts are set up for troubleshooting.</p><p>Keys come from a shared key table, selected by <code>keyId</code>, in the style of <a href='/7210/'>RFC 7210</a>. The shared key is only used as input to a key derivation function: a counter-mode KDF from NIST SP 800-108 using HMAC-SHA-256 as the pseudorandom function. The label is the string <code>UDPSTP</code>, and the context is the <code>authUnixTime</code> of the first Setup Request. The derived material is 512 bits (64 octets), split into a 256-bit client key and a 256-bit server key. The KDF runs once per test connection.</p>",
+      "eli5": "<p>Both sides share a secret password and use it to sign every control note with a secret stamp. If the stamp is wrong or the note is too old, the note is ignored.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "The Setup and Activation PDUs",
+      "content": "<p>Every PDU begins with a two-octet <code>pduId</code> that says what it is. The Test Setup PDU carries the protocol version, the multi-connection fields, a command request and response, <code>maxBandwidth</code> (in Mbps, with its top bit marking an upstream test), the server's <code>testPort</code>, a <code>modifierBitmap</code> for jumbo and traditional-MTU options, and the authentication fields. IANA assigned 20 as the protocol version and registered port 24601 for the <code>udpstp</code> service.</p><p>If the client's jumbo, traditional MTU or authentication choices do not match the server, the server MUST reject the Setup Request. If the digest is valid it sends a response with an error code; if not, it SHOULD fail silently. A successful Setup Response sets <code>cmdResponse</code> to the acknowledgment value and fills in the ephemeral port.</p><p>The Test Activation Request carries the test parameters: the delay variation thresholds, the trial interval, <code>testIntTime</code>, the DSCP/ECN field, the starting or fixed rate index, which delay measure to use, and the rate adjustment algorithm. The server may accept, ignore or coerce these values and returns the set that will be used. If the request exceeds the server's maximum rate, the server MUST either reject it or coerce the value to its configured maximum. The client can end the test if it does not like the result.</p><p>Fields marked reserved for alignment MUST be set to 0 and MUST be ignored on receipt. An optional 16-bit header checksum, computed like the IPv4 header checksum, may be used, but every datagram MUST still carry the standard UDP checksum.</p>",
+      "eli5": "<p>The setup note is like a form: who I am, how fast I think we can go, and the password stamp. The activation note is the rule sheet for the game: how long to play and how careful to be.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "6",
+      "title": "Load PDUs and Status Feedback",
+      "content": "<p>During the Data phase, one endpoint sends <strong>Load PDUs</strong> and the other returns <strong>Status Feedback PDUs</strong>. A Load PDU has a header with a sequence number, the UDP payload size, the local send time and a copy of the last Status PDU's send time, followed by payload that is all zeroes, all ones or pseudorandom. The optional checksum covers only the header, not the payload.</p><p>The Status PDU reports conditions at the receiver for the latest trial interval and for the last completed Sub-Interval: datagram and byte counts, loss, out-of-order and duplicate totals, one-way delay variation statistics and round-trip time variation. It is sent at the configured feedback interval, but only after at least one Load PDU has arrived. When the client sends the load, it follows the sending parameters the server places in each Status PDU, so the server controls the rate and the algorithm.</p><p>Every PDU receipt resets a watchdog timer. The <code>rxStopped</code> flag tells the other end that the local receive traffic has stopped. The RFC notes that the watchdog is only meant to detect a connection failure or massive congestion.</p>",
+      "eli5": "<p>One side keeps throwing numbered balls. The other side counts which balls arrived, how late they were, and shouts that back every so often, so the thrower knows whether to throw faster or slower.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "7",
+      "title": "Stopping a Test",
+      "content": "<p>When the server's test duration timer (<code>testIntTime</code>) expires, it moves to <code>TEST_ACT_STOP1</code>, a local, non-reversible state. On its next Load or Status PDU it switches to <code>TEST_ACT_STOP2</code> and marks outgoing PDUs with it. The client, on receiving <code>TEST_ACT_STOP2</code>, finalizes the test, displays results and confirms by sending <code>TEST_ACT_STOP2</code> on its next Load or Status PDU. The server then closes the socket. That exchange is the graceful termination.</p><p>If the path fails, the watchdog timers expire at each endpoint, notifications are made and each endpoint schedules an immediate end to the connection. If an attacker clears the stop indication, the configured test duration timer takes precedence at both ends.</p>",
+      "eli5": "<p>When time is up, the server says \"stop\", the client says \"okay, stopped\", and both hang up. If the line goes dead, each side hangs up on its own after a short wait.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and Operational Limits",
+      "content": "<p>The RFC requires cooperating client and server hosts with agreement to test the path. It also requires a client-initiated setup handshake so that firewalls on each host can keep controlling unsolicited inbound UDP traffic. Hosts MUST limit simultaneous tests, and senders MUST be rate-limited, for example using a pre-built table of supported sending rates. Authentication and integrity protection of feedback messages is RECOMMENDED.</p><p>One attack the RFC names is an on-path change to the <code>testAction</code> field. Setting the stop indication ends the test early, which is only an annoyance. Clearing it is countered by both hosts stopping when the known test duration ends. The RFC also advises that subscribers with limited data volumes who test heavily may see provider controls, so testing against provider hosts SHOULD be limited in frequency or volume.</p><p>Operationally, test endpoints are RECOMMENDED to sit close to the measured links, the operator MUST set a MaxHops value, and non-measurement traffic that shares the subscriber's resources should be stopped during a test.</p>",
+      "eli5": "<p>Only friends who agreed to play can run the game, they must take turns, and they cannot send faster than the speed limit. If a troublemaker shouts \"stop\" too early, the game just ends sooner.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "A SUCCESSFUL DOWNSTREAM TEST (RFC 9946 FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Test Setup Request",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Test Setup Response (Accept)",
+            "color": "green"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Null Request PDU",
+            "color": "neutral",
+            "note": "Sent from the new ephemeral port to open the server firewall."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Test Activation Request",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Test Activation Response (Accept)",
+            "color": "green"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Load PDUs",
+            "color": "neutral"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Status Feedback PDUs",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Load PDU (TEST_ACT_STOP)",
+            "color": "neutral",
+            "note": "After the server's test duration timer expires."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Status Feedback PDU (TEST_ACT_STOP)",
+            "color": "blue"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "PDU IDENTIFIERS ASSIGNED BY IANA",
+      "data": {
+        "items": [
+          {
+            "code": "0xACE1",
+            "label": "Test Setup PDU",
+            "desc": "Setup Request and Response in the Control phase."
+          },
+          {
+            "code": "0xACE2",
+            "label": "Test Activation PDU",
+            "desc": "Carries the test parameters and the server's answer."
+          },
+          {
+            "code": "0xDEAD",
+            "label": "Null PDU",
+            "desc": "Sent by the server from the ephemeral port; no response."
+          },
+          {
+            "code": "0xBEEF",
+            "label": "Load PDU",
+            "desc": "The test traffic, with a header and payload.",
+            "highlight": true
+          },
+          {
+            "code": "0xFEED",
+            "label": "Status Feedback PDU",
+            "desc": "Receiver's report of traffic conditions."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9097]",
+      "text": "RFC 9097, defining the One-Way IP Capacity metrics and the Method of Measurement that UDPSTP supports.",
+      "rfc": 9097
+    },
+    {
+      "number": "[RFC0768]",
+      "text": "Postel, J., \"User Datagram Protocol\", RFC 768.",
+      "rfc": 768
+    },
+    {
+      "number": "[RFC4656]",
+      "text": "One-Way Active Measurement Protocol (OWAMP), RFC 4656.",
+      "rfc": 4656
+    },
+    {
+      "number": "[RFC5357]",
+      "text": "Two-Way Active Measurement Protocol (TWAMP), RFC 5357.",
+      "rfc": 5357
+    },
+    {
+      "number": "[RFC8762]",
+      "text": "Simple Two-Way Active Measurement Protocol (STAMP), RFC 8762.",
+      "rfc": 8762
+    },
+    {
+      "number": "[RFC7210]",
+      "text": "RFC 7210, which specifies a conceptual database for long-lived cryptographic keys.",
+      "rfc": 7210
+    },
+    {
+      "number": "[RFC6234]",
+      "text": "RFC 6234, the source of the HMAC-SHA-256 definition used here.",
+      "rfc": 6234
+    },
+    {
+      "number": "[RFC7594]",
+      "text": "The LMAP Framework, RFC 7594.",
+      "rfc": 7594
+    },
+    {
+      "number": "[RFC7497]",
+      "text": "RFC 7497, the problem statement for access-network measurement.",
+      "rfc": 7497
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

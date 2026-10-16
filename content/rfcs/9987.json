@@ -10,13 +10,264 @@
   "questions": [
     "ssh agent protocol",
     "how does ssh-agent work",
-    "ssh agent forwarding"
+    "ssh agent forwarding",
+    "what is the ssh agent protocol",
+    "how does ssh agent forwarding work",
+    "what is ssh_auth_sock"
+  ],
+  "tags": [
+    "Security",
+    "SSH",
+    "Keys"
+  ],
+  "subtitle": "How SSH clients ask a separate agent process to hold private keys and sign on their behalf.",
+  "tldr": {
+    "problem": "Loading and unwrapping a private key for every use can require a passphrase each time, and putting the key inside a full SSH client or server exposes it to a larger attack surface.",
+    "mechanism": "The agent protocol is a client-driven request and reply protocol over a local socket. Clients add, remove and list keys, ask the agent to sign data, and can lock the agent. Access can also be forwarded over an SSH connection.",
+    "outcome": "Keys stay in the agent while clients get signatures. The protocol has no authentication or transport security of its own, so protecting access to the agent endpoint is essential.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Message layout",
+      "value": "uint32 length, byte type, contents"
+    },
+    {
+      "label": "Sign request type",
+      "value": "13"
+    },
+    {
+      "label": "Add key type",
+      "value": "17 (25 with constraints)"
+    },
+    {
+      "label": "Private use range",
+      "value": "240-255"
+    },
+    {
+      "label": "Environment variable",
+      "value": "SSH_AUTH_SOCK"
+    },
+    {
+      "label": "RSA signature flags",
+      "value": "0x00000002 (SHA2-256), 0x00000004 (SHA2-512)"
+    }
+  ],
+  "today": "<p>RFC 9987 is a Proposed Standard published in May 2026, and it has not been obsoleted or updated. It is the written specification of the SSH agent protocol.</p>",
+  "glossary": [
+    "ssh",
+    "ssh-channel",
+    "public-key-cryptography",
+    "digital-signature",
+    "socket",
+    "port-forwarding",
+    "requirement-keyword",
+    "ssh-agent",
+    "agent-forwarding"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why an Agent Holds Keys",
+      "content": "<p>Secure Shell (<a href='/4251/'>RFC 4251</a>) supports public key authentication. RFC 9987 specifies the protocol that SSH clients, and possibly SSH servers, use to talk to a key management component called an <strong>agent</strong> that holds private keys.</p><p>The RFC lists three advantages. Keys held in an agent need not be loaded and unwrapped at each use, and each unwrapping may need a passphrase. Access to an agent may be forwarded across an SSH connection, so remote systems can use stored keys without seeing the key material. And the agent can be a dedicated component with a smaller attack surface than a full SSH client or server.</p>",
+      "eli5": "<p>Instead of typing a secret password every time, a helper remembers your key and does the unlocking for you.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "Protocol Overview and Messages",
+      "content": "<p>The agent protocol is a packetised request and response protocol driven solely by the client. The agent never sends a message except in reply to a request, and replies are sent in order. Each message has a <code>uint32</code> length, a <code>byte</code> type and the contents. Data types follow <a href='/4251/'>RFC 4251</a>.</p><p>An agent MAY support only a subset of key types and MAY refuse operations in some contexts, for example allowing only local clients to add keys. Clients SHOULD be ready to fail gracefully. On success an agent replies <code>SSH_AGENT_SUCCESS</code> or a request-specific success message; on failure it replies <code>SSH_AGENT_FAILURE</code>, which it MUST also send for unknown or unsupported request types.</p>",
+      "eli5": "<p>The helper only speaks when spoken to. You ask, it answers, in the same order, and it can say no.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Managing and Using Keys",
+      "content": "<p>Keys are added with <code>SSH_AGENTC_ADD_IDENTITY</code> or the constrained variant <code>SSH_AGENTC_ADD_ID_CONSTRAINED</code>, which carries a key type, key data, a comment and, for the constrained form, constraints. The RFC gives layouts for DSA, ECDSA, EdDSA and RSA keys, and lets vendors add other key types with domain-qualified names. Keys on smartcards or tokens are added with the smartcard requests, where the agent delegates later private key operations to the token.</p><p>Two constraints are defined: a lifetime in seconds after which the agent deletes the key, and a confirmation requirement for each private key operation. If an agent does not recognise a constraint it MUST abort parsing, refuse the request and return failure, so an ignored limit never leaves a key more available than intended.</p><p>Clients list keys with <code>SSH_AGENTC_REQUEST_IDENTITIES</code>, remove one or all, and request signatures with <code>SSH_AGENTC_SIGN_REQUEST</code>, giving a key blob, the data and flags. Two flags request RSA signatures with SHA-2 256 or 512. An agent can also be locked with a passphrase, and while locked it MUST suspend sensitive operations such as signing. Removing all keys SHOULD be honoured regardless of agent policy, so a user can quickly clear their keys in an urgent situation.</p>",
+      "eli5": "<p>You can hand the helper a key, tell it to forget a key, ask which keys it has, or ask it to sign something. You can even lock it with a secret word.</p>"
+    },
+    {
+      "id": "extensibility",
+      "number": "4",
+      "title": "Extensions",
+      "content": "<p>An optional extension mechanism carries vendor-specific and experimental messages with <code>SSH_AGENTC_EXTENSION</code>. Implementation-specific extension names MUST end with the implementer's domain, such as <code>foo@example.com</code>. An agent that does not support the requested extension, or extensions at all, MUST reply with an empty <code>SSH_AGENT_FAILURE</code>.</p><p>Extensions should signal their own failures with <code>SSH_AGENT_EXTENSION_FAILURE</code> rather than the standard failure message, so a failed request can be told apart from an unsupported extension. A single extension, <code>query</code>, lets a client ask which extensions the agent supports. Constraints have a similar escape route, an extension constraint that carries a name.</p>",
+      "eli5": "<p>If a maker wants the helper to learn a new trick, there is a polite way to add it, and the helper says so if it does not know the trick.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "5",
+      "title": "Connecting and Forwarding",
+      "content": "<p>Agents are exposed through a connection-oriented local endpoint: typically a Unix domain socket on Unix-like systems and a Windows Named Pipe on Windows. The location is commonly given in the environment variable <code>SSH_AUTH_SOCK</code>, and access SHOULD be controlled.</p><p>Using the SSH connection protocol (<a href='/4254/'>RFC 4254</a>), agent access may be forwarded over an SSH connection, in a way similar to X11 forwarding. This is OPTIONAL. A server can advertise support with the <code>agent-forward</code> extension name. A client then sends a channel request named <code>agent-req</code> on an open session channel, and the server later opens a channel of type <code>agent-connect</code> to reach the client-side agent. Many deployed implementations only know the pre-standard names <code>auth-agent-req@openssh.com</code> and <code>auth-agent@openssh.com</code>, and the standard names SHOULD only be used if support was advertised.</p><p>An SSH client SHOULD handle several concurrent forwarded connections and MUST refuse unauthorised agent connection requests. Because the open request has no session identifier, one SSH connection can forward access to only a single client-side agent.</p>",
+      "eli5": "<p>Your helper normally stays on your own computer. With forwarding, a far-away computer can ask your helper to unlock things for it, without ever seeing the keys.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The agent protocol includes no authentication or transport security, and being able to talk to an agent is usually enough to make it perform private key operations. The agent must therefore only be exposed to its owner and their authorised delegates, for example through filesystem permissions on a socket, identity checks on connected clients or a security descriptor on a Windows named pipe.</p><p>The design aim is that an attacker with unprivileged access cannot copy loaded keys, though they may still steal use of keys loaded without a confirmation constraint. Agents should resist memory reads and SHOULD use side-channel-resistant cryptography. Forwarding creates transitive trust: implementations SHOULD NOT forward an agent by default, and users SHOULD NOT forward to hosts that are not fully trusted. Agents that load token libraries SHOULD ensure only trusted libraries are loadable, and SHOULD slow or limit brute-force attempts to unlock a locked agent.</p>",
+      "eli5": "<p>Anyone who can talk to the helper can borrow its power, so only trusted people should be allowed near it, and you should be careful whose computer you let it help.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "7",
+      "title": "Protocol Numbers and IANA",
+      "content": "<p>Message types are single bytes. Requests include <code>11</code> for listing keys, <code>13</code> for signing, <code>17</code> for adding a key and <code>25</code> for adding one with constraints. Replies include <code>5</code> for failure, <code>6</code> for success, <code>12</code> for the key list and <code>14</code> for a signature. Numbers 1-4, 7-10, 15-16 and 24 are reserved for legacy SSH protocol version 1, number 0 is reserved, and 240-255 are for private use.</p><p>IANA is asked to create five registries (message types, constraint numbers, signature flags, constraint extension names and extension request names), all by Expert Review, and to add entries to three existing SSH registries for <code>agent-forward</code>, <code>agent-req</code> and <code>agent-connect</code>.</p>",
+      "eli5": "<p>Each kind of message gets a number, like a code word, and an official list keeps the numbers from clashing.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "SELECTED AGENT MESSAGE TYPE NUMBERS (RFC 9987)",
+      "data": {
+        "items": [
+          {
+            "code": "5",
+            "label": "SSH_AGENT_FAILURE",
+            "desc": "Generic failure reply."
+          },
+          {
+            "code": "6",
+            "label": "SSH_AGENT_SUCCESS",
+            "desc": "Generic success reply."
+          },
+          {
+            "code": "11",
+            "label": "SSH_AGENTC_REQUEST_IDENTITIES",
+            "desc": "Client asks for the list of keys."
+          },
+          {
+            "code": "12",
+            "label": "SSH_AGENT_IDENTITIES_ANSWER",
+            "desc": "Agent returns the key list."
+          },
+          {
+            "code": "13",
+            "label": "SSH_AGENTC_SIGN_REQUEST",
+            "desc": "Client asks for a signature.",
+            "highlight": true
+          },
+          {
+            "code": "14",
+            "label": "SSH_AGENT_SIGN_RESPONSE",
+            "desc": "Agent returns the signature."
+          },
+          {
+            "code": "17",
+            "label": "SSH_AGENTC_ADD_IDENTITY",
+            "desc": "Client adds a key."
+          },
+          {
+            "code": "25",
+            "label": "SSH_AGENTC_ADD_ID_CONSTRAINED",
+            "desc": "Client adds a key with constraints."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "AGENT FORWARDING OVER AN SSH SESSION (RFC 9987, SIMPLIFIED)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "SSH client"
+          },
+          {
+            "key": "server",
+            "label": "SSH server"
+          },
+          {
+            "key": "agent",
+            "label": "Client-side agent"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "channel request agent-req",
+            "color": "blue",
+            "note": "Sent on an open session channel, before a shell or command runs."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "channel open agent-connect",
+            "color": "green",
+            "note": "The server asks for a channel to the client's agent."
+          },
+          {
+            "from": "client",
+            "to": "agent",
+            "label": "forwarded agent requests",
+            "color": "neutral",
+            "note": "Requests such as a sign request are passed to the agent."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4251]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Protocol Architecture\", RFC 4251, January 2006.",
+      "rfc": 4251
+    },
+    {
+      "number": "[RFC4253]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Transport Layer Protocol\", RFC 4253, January 2006.",
+      "rfc": 4253
+    },
+    {
+      "number": "[RFC4254]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Connection Protocol\", RFC 4254, January 2006.",
+      "rfc": 4254
+    },
+    {
+      "number": "[RFC4252]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Authentication Protocol\", RFC 4252, January 2006.",
+      "rfc": 4252
+    },
+    {
+      "number": "[RFC5656]",
+      "text": "Stebila, D. and J. Green, \"Elliptic Curve Algorithm Integration in the Secure Shell Transport Layer\", RFC 5656, December 2009.",
+      "rfc": 5656
+    },
+    {
+      "number": "[RFC8032]",
+      "text": "Josefsson, S. and I. Liusvaara, \"Edwards-Curve Digital Signature Algorithm (EdDSA)\", RFC 8032, January 2017.",
+      "rfc": 8032
+    },
+    {
+      "number": "[RFC8308]",
+      "text": "Bider, D., \"Extension Negotiation in the Secure Shell (SSH) Protocol\", RFC 8308, March 2018.",
+      "rfc": 8308
+    },
+    {
+      "number": "[RFC8332]",
+      "text": "Bider, D., \"Use of RSA Keys with SHA-256 and SHA-512 in the Secure Shell (SSH) Protocol\", RFC 8332, March 2018.",
+      "rfc": 8332
+    },
+    {
+      "number": "[RFC8709]",
+      "text": "Harris, B. and L. Velvindron, \"Ed25519 and Ed448 Public Key Algorithms for the Secure Shell (SSH) Protocol\", RFC 8709, February 2020.",
+      "rfc": 8709
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

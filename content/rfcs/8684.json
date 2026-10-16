@@ -10,13 +10,416 @@
   "questions": [
     "multipath tcp",
     "mptcp version 1",
-    "use wifi and cellular together tcp"
+    "use wifi and cellular together tcp",
+    "what is multipath tcp",
+    "how does mptcp add a subflow",
+    "what is mp_capable"
+  ],
+  "tags": [
+    "Transport",
+    "TCP",
+    "Multipath"
+  ],
+  "subtitle": "How one TCP connection can spread its data over several paths at once, while still looking like ordinary TCP to the application.",
+  "tldr": {
+    "problem": "A regular TCP connection uses a single path between two addresses, even when a host has several addresses and paths available. That wastes resources and means one path failing breaks the connection.",
+    "mechanism": "Multipath TCP (MPTCP) sets up extra TCP subflows over other address pairs, joins them to one connection with keys, tokens and HMACs, and uses a connection-level data sequence number to reassemble the byte stream. All signaling is carried in one TCP option.",
+    "outcome": "Applications see one reliable byte stream with better resource use and resilience, and MPTCP falls back to plain TCP when a middlebox or peer cannot support it. RFC 8684 specifies version 1 and obsoletes the experimental RFC 6824.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "TCP option Kind",
+      "value": "30"
+    },
+    {
+      "label": "Data sequence number",
+      "value": "64-bit"
+    },
+    {
+      "label": "Connection token",
+      "value": "32 bits (from the key)"
+    },
+    {
+      "label": "Key size",
+      "value": "64 bits"
+    },
+    {
+      "label": "Handshake algorithm",
+      "value": "HMAC-SHA256"
+    },
+    {
+      "label": "Maximum DSS option length",
+      "value": "28 octets"
+    }
+  ],
+  "today": "<p>RFC 8684 is a Proposed Standard published in March 2020. It specifies MPTCP version 1 and obsoletes the experimental <a href='/6824/'>RFC 6824</a>; the unit metadata lists no later RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "subflow",
+    "tcp",
+    "hmac",
+    "nonce",
+    "middlebox",
+    "multihoming",
+    "nat",
+    "receive-window",
+    "sequence-number",
+    "pseudo-header",
+    "congestion-control",
+    "internet-checksum"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Multipath TCP and Its Design Goals",
+      "content": "<p><strong>Multipath TCP</strong> (MPTCP) is a set of extensions to TCP that lets one transport connection operate across multiple paths at the same time. The RFC covers signaling and setting up paths (called <strong>subflows</strong>), managing them, reassembling data, and ending sessions. It is one of four documents; architecture (<a href='/6182/'>RFC 6182</a>), congestion control (<a href='/6356/'>RFC 6356</a>) and application considerations (<a href='/6897/'>RFC 6897</a>) are covered elsewhere.</p><p>Two constraints shaped the design. MPTCP must be backward compatible with regular TCP, and it can be assumed that one or both hosts have several addresses. The RFC takes the presence of multiple addresses to be enough to indicate multiple paths, even if those paths share some routers. Compatibility means it must work through NATs, firewalls and proxies, give applications the same service model as TCP, and fall back to TCP when needed.</p><p>MPTCP sits at the transport layer. The application opens an ordinary socket, the MPTCP layer sits above several TCP subflows, and each subflow runs over its own IP path. A subflow is started and ended like a normal TCP connection, and a connection maps one-to-one to an application socket.</p>",
+      "eli5": "<p>It is like having two phone lines to the same friend. You still have one conversation, but you can use whichever line works best, and the call survives if one line goes dead.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "2",
+      "title": "Starting a Connection with MP_CAPABLE",
+      "content": "<p>All MPTCP signaling uses a single TCP option kind, with a 4-bit <strong>subtype</strong> for each message. A connection starts like regular TCP, with the SYN, SYN/ACK and ACK each carrying the <code>MP_CAPABLE</code> option. It shows that the sender supports MPTCP and exchanges the keys used to authenticate later subflows.</p><p>In version 1 the SYN carries only the version and flags, the SYN/ACK carries the listener's 64-bit key, and the third packet carries both keys. Version 1 is not backward compatible with version 0 of RFC 6824, which put the initiator's key in the SYN. A host that supports several versions signals its highest, and the receiver answers with a version equal to or lower. If the initiator wants to send data first, the keys are repeated on the first data packet so TCP's own reliability delivers them; if the listener sends first, a DSS option with a Data ACK confirms receipt.</p><p>The flags include <code>A</code> (checksum required; checksums are used unless both sides set A to 0), <code>B</code> (an extensibility flag that MUST be 0 today), <code>C</code> (the sender will not accept more subflows to its address and port) and <code>H</code> (HMAC-SHA256). At least one crypto bit must be set. The token is the most significant 32 bits of the SHA-256 hash of the key, and the initial data sequence number (IDSN) is the least significant 64 bits of that hash. If a SYN has MP_CAPABLE but the SYN/ACK does not, or the third ACK lacks it, the session falls back to regular TCP.</p>",
+      "eli5": "<p>When two computers meet, each secretly picks a long password. If both said they speak the new language, they use it; if one did not, they quietly go back to the ordinary kind of talking.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "3",
+      "title": "Adding Subflows with MP_JOIN",
+      "content": "<p>Once the first subflow exists, either host may add subflows over unused address pairs, though normally the original initiator does. The new subflow does a normal SYN, SYN/ACK, ACK handshake with the <code>MP_JOIN</code> option. The SYN carries the receiver's 32-bit <strong>token</strong> (which identifies the connection), the sender's random number and an <strong>Address ID</strong>. The Address ID names the source address even if a NAT changes the packet, and the first subflow's ID is implicitly zero. A flag bit <code>B</code> asks that the subflow be used only as a backup.</p><p>Authentication uses HMAC-SHA256 over the two keys from the MP_CAPABLE handshake. For Host A the HMAC key is Key-A followed by Key-B and the message is the random numbers R-A followed by R-B. The SYN/ACK carries a truncated 64-bit HMAC and the final ACK carries a truncated 160-bit one. The random numbers prevent replay.</p><p>The final ACK must be delivered reliably, so the sender sits in the PRE_ESTABLISHED state, where it may not send data, until the receiver ACKs it. An unknown token or a local policy refusal gets a RST, and an HMAC mismatch makes the host close the subflow with a RST. SYNs for new subflows are demultiplexed by token rather than by destination port; once set up, packets are demultiplexed by the 5-tuple as in TCP.</p>",
+      "eli5": "<p>To let a new friend join a group chat, they must show a secret handshake built from both original passwords plus fresh random numbers, so nobody can just copy an old handshake.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Moving Data: DSS, Data ACKs and Shared Windows",
+      "content": "<p>MPTCP numbers all data on a connection with a 64-bit <strong>Data Sequence Number</strong> (DSN), while each subflow keeps its own 32-bit TCP sequence space. The <code>DSS</code> (Data Sequence Signal) option carries a <strong>Data Sequence Mapping</strong> (subflow sequence number, DSN and length) and optionally a connection-level Data ACK. The mapping is explicit and covers a range, not each packet, so it survives segmentation offload or coalescing. A mapping is fixed once declared, but the same DSN can be mapped on different subflows, which allows retransmission elsewhere.</p><p>If checksums were negotiated, the mapping also carries a checksum over the covered data and a pseudo-header (DSN, subflow sequence number, length). It detects middleboxes that changed the payload, and the RFC recommends checksums unless no such devices exist on the path. DSNs are always 64-bit values, but a sender at a slow rate may send only the lower 32 bits; it MUST send all 64 bits if the 32-bit value could wrap within the Maximum Segment Lifetime.</p><p>There are two levels of acknowledgment. Regular TCP ACKs cover each subflow, while the <strong>Data ACK</strong> is a cumulative connection-level ACK that also marks the left edge of a receive window shared by all subflows. A sender MUST NOT free data until it is acknowledged both by a Data ACK and at subflow level on every subflow that carried it. Closing uses <code>DATA_FIN</code>, a flag in the DSS that works like FIN for the whole connection, and a plain FIN only closes its subflow. Congestion control is coupled across subflows, with <a href='/6356/'>RFC 6356</a> given as one safe algorithm. Subflow priority can be changed with <code>MP_PRIO</code>, which sets the backup flag.</p>",
+      "eli5": "<p>Imagine numbering every page of a long letter and mailing the pages by different post offices. The numbers let the reader put the pages in order, and the reader sends back one note saying which pages arrived.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "5",
+      "title": "Telling the Peer About Addresses",
+      "content": "<p>Hosts learn about extra paths in two ways. The simple one is just starting an <code>MP_JOIN</code> from a new address. The other is explicit: <code>ADD_ADDR</code> announces an additional IPv4 or IPv6 address, optionally with a port, together with its Address ID. This lets a host invite its peer to connect out, which helps when a NAT or firewall blocks new inbound connections.</p><p>ADD_ADDR carries a truncated HMAC (the rightmost 64 bits), computed like the MP_JOIN one, so an off-path attacker cannot inject addresses. An <code>E</code> flag marks an echo, which gives the option some reliability: a receiver echoes it back with E set and no HMAC, and the lack of an echo may lead to retransmission. Address advertisements are soft state, may be ignored, and can be refreshed. If a connection to an advertised address fails, the host SHOULD NOT try that address and port again unless the information is refreshed.</p><p><code>REMOVE_ADDR</code> lists Address IDs that are no longer valid. Before closing subflows, the receiver SHOULD send a TCP keepalive on the path, and if a reply arrives the path is not removed. A subflow still working is closed with a normal FIN exchange, not this option. By default, new subflows use the same ports as the first subflow.</p>",
+      "eli5": "<p>It is like telling a friend, \"you can also reach me at this other phone number,\" and later, \"that number does not work anymore, please forget it.\"</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "Fast Close, Resets and Falling Back to TCP",
+      "content": "<p>A normal RST affects only the subflow it is sent on, so MPTCP adds <code>MP_FASTCLOSE</code> to abruptly close the whole connection. It carries the peer's key, either on an ACK (with RSTs sent on other subflows) or on a RST on all subflows. A subflow RST can include <code>MP_TCPRST</code>, which has a Transient/Permanent flag and a one-octet reason code so the other side can decide whether to retry.</p><p>Fallback exists because middleboxes can strip options or change payload. If MP_CAPABLE is lost on either direction of the SYN exchange, the connection falls back to regular TCP. A sender includes DSS mappings in every segment until a Data ACK comes back; an ACK for data without one means the path is not MPTCP capable, so on the first subflow it drops to plain TCP and on an added subflow it closes it. A checksum failure triggers <code>MP_FAIL</code>, carrying the full 64-bit DSN where the bad data began. With several subflows the affected one is closed; with a single contiguous subflow an \"infinite mapping\" (Data-Level Length 0) turns off further MPTCP signaling. Once it has fallen back, MPTCP MUST NOT return to MPTCP on that connection.</p><p>Other errors follow TCP habits: an unknown token or bad HMAC gets a RST, data with an out-of-window DSN is dropped without Data ACKs, and a removal request for an unknown Address ID is ignored.</p>",
+      "eli5": "<p>If something in the middle keeps scrambling the special notes, the two computers give up on the fancy method and go back to ordinary talking, and they do not switch back once they have given up.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security",
+      "content": "<p>The stated goal is for MPTCP security to be no worse than regular TCP. The key requirements are to confirm that a new subflow's parties match those of the original connection, to verify the peer can receive traffic at a new address, and to give replay protection. The design meets these by sending the keys in the clear only once, at the start (and again only if Fast Close is used), then using a token derived from the key and HMACs with fresh random numbers on joins.</p><p>The RFC calls the result a \"medium\" security solution and expects a future version may need stronger security. Weak spots it names include a possible bid-down attack on the crypto bits by an on-path active attacker, and that ADD_ADDR for private addresses could be used to push unwanted handshake traffic at other hosts. The ADD_ADDR HMAC addresses off-path injection, and version 1 drops the Address ID field from <code>MP_PRIO</code> because an attacker could otherwise place a subflow in backup mode. Added reassembly buffers are limited by window sizing to reduce denial-of-service risk.</p>",
+      "eli5": "<p>Everyone shows a secret handshake to join, and the secret itself is almost never said out loud. It is not perfect, so the authors say a stronger lock may be needed later.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "8",
+      "title": "Middleboxes and Changes from Version 0",
+      "content": "<p>The RFC discusses how classes of middleboxes affect MPTCP. NATs change source addresses, so MPTCP uses Address IDs and authenticated joins. Performance Enhancing Proxies that ACK early cannot provide accurate congestion signals, so MPTCP falls back or closes the subflow. Firewalls that randomize initial sequence numbers are handled because mappings use relative subflow sequence numbers. Content-aware firewalls that change payload are caught by the checksum, and an intrusion detection system that is not MPTCP aware may see only part of the traffic.</p><p>Compared with <a href='/6824/'>RFC 6824</a>, version 1 changes the handshake so the SYN does not include the initiator's key, assigns flag C, uses HMAC-SHA256 instead of HMAC-SHA1, adds MP_TCPRST, removes the Address ID from MP_PRIO and adds an HMAC and echo to ADD_ADDR. Appendix material also covers TCP Fast Open, control blocks and a finite state machine.</p>",
+      "eli5": "<p>Some devices along the road mess with unusual packages. MPTCP is built to notice and retreat to the plain kind rather than break.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "MP_CAPABLE THEN MP_JOIN (FIGURE 8, RFC 8684)",
+      "data": {
+        "lanes": [
+          {
+            "key": "host-a",
+            "label": "Host A"
+          },
+          {
+            "key": "host-b",
+            "label": "Host B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "host-a",
+            "to": "host-b",
+            "label": "SYN + MP_CAPABLE",
+            "color": "blue"
+          },
+          {
+            "from": "host-b",
+            "to": "host-a",
+            "label": "SYN/ACK + MP_CAPABLE (Key-B)",
+            "color": "green"
+          },
+          {
+            "from": "host-a",
+            "to": "host-b",
+            "label": "ACK + MP_CAPABLE (Key-A, Key-B)",
+            "color": "blue"
+          },
+          {
+            "from": "host-a",
+            "to": "host-b",
+            "label": "SYN + MP_JOIN (Token-B, R-A)",
+            "color": "blue",
+            "note": "From a second address of Host A."
+          },
+          {
+            "from": "host-b",
+            "to": "host-a",
+            "label": "SYN/ACK + MP_JOIN (HMAC-B, R-B)",
+            "color": "green"
+          },
+          {
+            "from": "host-a",
+            "to": "host-b",
+            "label": "ACK + MP_JOIN (HMAC-A)",
+            "color": "blue"
+          },
+          {
+            "from": "host-b",
+            "to": "host-a",
+            "label": "ACK",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "MP_JOIN OPTION ON THE INITIAL SYN (FIGURE 5, RFC 8684)",
+      "data": {
+        "title": "MP_JOIN (SYN)",
+        "bytes": 12,
+        "width": 32,
+        "fields": [
+          {
+            "key": "kind",
+            "name": "Kind",
+            "bits": 8,
+            "desc": "The single TCP option kind used for MPTCP."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 8,
+            "desc": "Length of the option.",
+            "value": "12"
+          },
+          {
+            "key": "subtype",
+            "name": "Subtype",
+            "bits": 4,
+            "desc": "Identifies MP_JOIN.",
+            "value": "0x1"
+          },
+          {
+            "key": "rsv",
+            "name": "Reserved",
+            "bits": 3,
+            "desc": "Reserved flag bits, set to 0 by the sender."
+          },
+          {
+            "key": "b",
+            "name": "B",
+            "bits": 1,
+            "desc": "Backup flag: use this subflow only if no B=0 subflow is available."
+          },
+          {
+            "key": "address-id",
+            "name": "Address ID",
+            "bits": 8,
+            "desc": "Identifies the sender's source address."
+          },
+          {
+            "key": "token",
+            "name": "Receiver's Token",
+            "bits": 32,
+            "desc": "Identifies the connection being joined."
+          },
+          {
+            "key": "nonce",
+            "name": "Sender's Random Number",
+            "bits": 32,
+            "desc": "Used in the later HMAC to prevent replay."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "MPTCP OPTION SUBTYPES (TABLE 2, RFC 8684)",
+      "data": {
+        "items": [
+          {
+            "code": "0x0",
+            "label": "MP_CAPABLE",
+            "desc": "Multipath Capable, starts a connection.",
+            "highlight": true
+          },
+          {
+            "code": "0x1",
+            "label": "MP_JOIN",
+            "desc": "Join Connection, adds a subflow."
+          },
+          {
+            "code": "0x2",
+            "label": "DSS",
+            "desc": "Data Sequence Signal: Data ACK and Data Sequence Mapping."
+          },
+          {
+            "code": "0x3",
+            "label": "ADD_ADDR",
+            "desc": "Add Address."
+          },
+          {
+            "code": "0x4",
+            "label": "REMOVE_ADDR",
+            "desc": "Remove Address."
+          },
+          {
+            "code": "0x5",
+            "label": "MP_PRIO",
+            "desc": "Change Subflow Priority."
+          },
+          {
+            "code": "0x6",
+            "label": "MP_FAIL",
+            "desc": "Fallback."
+          },
+          {
+            "code": "0x7",
+            "label": "MP_FASTCLOSE",
+            "desc": "Fast Close."
+          },
+          {
+            "code": "0x8",
+            "label": "MP_TCPRST",
+            "desc": "Subflow Reset."
+          },
+          {
+            "code": "0xf",
+            "label": "MP_EXPERIMENTAL",
+            "desc": "Reserved for private use."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "MP_TCPRST REASON CODES (SECTION 3.6, RFC 8684)",
+      "data": {
+        "items": [
+          {
+            "code": "0x00",
+            "label": "Unspecified error",
+            "desc": "Default; the subflow is no longer available."
+          },
+          {
+            "code": "0x01",
+            "label": "MPTCP-specific error",
+            "desc": "Error in processing MPTCP options.",
+            "highlight": true
+          },
+          {
+            "code": "0x02",
+            "label": "Lack of resources",
+            "desc": "Sender cannot support the subflow."
+          },
+          {
+            "code": "0x03",
+            "label": "Administratively prohibited",
+            "desc": "Subflow prohibited by the sender's policy."
+          },
+          {
+            "code": "0x04",
+            "label": "Too much outstanding data",
+            "desc": "Too much data queued that was already acknowledged on other subflows."
+          },
+          {
+            "code": "0x05",
+            "label": "Unacceptable performance",
+            "desc": "Subflow too slow compared with the others."
+          },
+          {
+            "code": "0x06",
+            "label": "Middlebox interference",
+            "desc": "Interference detected, such as a checksum failure."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC0793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2104]",
+      "text": "Krawczyk, H., Bellare, M., and R. Canetti, \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104, February 1997.",
+      "rfc": 2104
+    },
+    {
+      "number": "[RFC5961]",
+      "text": "Ramaiah, A., Stewart, R., and M. Dalal, \"Improving TCP's Robustness to Blind In-Window Attacks\", RFC 5961, August 2010.",
+      "rfc": 5961
+    },
+    {
+      "number": "[RFC6181]",
+      "text": "Bagnulo, M., \"Threat Analysis for TCP Extensions for Multipath Operation with Multiple Addresses\", RFC 6181, March 2011.",
+      "rfc": 6181
+    },
+    {
+      "number": "[RFC6182]",
+      "text": "Ford, A., Raiciu, C., Handley, M., Barre, S., and J. Iyengar, \"Architectural Guidelines for Multipath TCP Development\", RFC 6182, March 2011.",
+      "rfc": 6182
+    },
+    {
+      "number": "[RFC6234]",
+      "text": "Eastlake 3rd, D. and T. Hansen, \"US Secure Hash Algorithms (SHA and SHA-based HMAC and HKDF)\", RFC 6234.",
+      "rfc": 6234
+    },
+    {
+      "number": "[RFC6356]",
+      "text": "Raiciu, C., Handley, M., and D. Wischik, \"Coupled Congestion Control for Multipath Transport Protocols\", RFC 6356, October 2011.",
+      "rfc": 6356
+    },
+    {
+      "number": "[RFC6824]",
+      "text": "Ford, A., Raiciu, C., Handley, M., and O. Bonaventure, \"TCP Extensions for Multipath Operation with Multiple Addresses\", RFC 6824, January 2013.",
+      "rfc": 6824
+    },
+    {
+      "number": "[RFC6897]",
+      "text": "Scharf, M. and A. Ford, \"Multipath TCP (MPTCP) Application Interface Considerations\", RFC 6897, March 2013.",
+      "rfc": 6897
+    },
+    {
+      "number": "[RFC7430]",
+      "text": "Bagnulo, M., Paasch, C., Gont, F., Bonaventure, O., and C. Raiciu, \"Analysis of Residual Threats and Possible Fixes for Multipath TCP (MPTCP)\", RFC 7430, July 2015.",
+      "rfc": 7430
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

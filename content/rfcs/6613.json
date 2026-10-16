@@ -9,13 +9,171 @@
   },
   "questions": [
     "can radius use tcp",
-    "what is radius over tcp"
+    "what is radius over tcp",
+    "which port does radius over tcp use",
+    "is radius over tcp secure",
+    "when should radius use udp instead of tcp"
+  ],
+  "tags": [
+    "RADIUS",
+    "AAA",
+    "Transport"
+  ],
+  "subtitle": "How RADIUS can run over TCP instead of UDP, and the rules that keep it safe and sane.",
+  "tldr": {
+    "problem": "RADIUS has required UDP, which is unreliable, connectionless, has no congestion control and forces large packets to fragment. These problems make RADIUS over TLS awkward between servers.",
+    "mechanism": "The RADIUS packet format stays the same and is sent over a TCP connection, with rules for liveness checks, no application retransmission, closing the connection on bad packets and limiting in-flight requests.",
+    "outcome": "Bare TCP MUST NOT be used without TLS, IPsec or another secure layer, and the RFC is Experimental. UDP SHOULD still be used between a NAS and a RADIUS server.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Default ports",
+      "value": "1812, 1813, 3799 (TCP)"
+    },
+    {
+      "label": "RADIUS/TLS port",
+      "value": "2083/tcp (radsec)"
+    },
+    {
+      "label": "Max RADIUS packet",
+      "value": "4096 octets"
+    },
+    {
+      "label": "In-flight requests per connection",
+      "value": "256"
+    },
+    {
+      "label": "ID reserved for Status-Server",
+      "value": "0 (SHOULD)"
+    }
+  ],
+  "today": "<p>RFC 6613 is an Experimental RFC. It has been updated by <a href='/7930/'>RFC 7930</a> and <a href='/9765/'>RFC 9765</a>, so read those alongside it.</p>",
+  "glossary": [
+    "radius",
+    "tcp",
+    "udp",
+    "tls",
+    "ipsec",
+    "nas",
+    "proxy",
+    "eap",
+    "mtu",
+    "head-of-line-blocking",
+    "congestion-control",
+    "application-layer-watchdog"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Move RADIUS to TCP",
+      "content": "<p>RADIUS, defined in <a href='/2865/'>RFC 2865</a>, uses UDP. The RFC lists four limitations: transport is unreliable, so applications need their own timers and retransmissions; packets of up to 4096 octets exceed the common Internet MTU (576) and fragment, which some devices handle poorly; there is no positive signal that a connection is down; and there is no congestion control.</p><p>The choice of TCP is largely driven by the wish to improve RADIUS security with RADIUS/TLS, which <a href='/6614/'>RFC 6614</a> defines. For practical reasons the transport (TCP) is specified separately from the security mechanism (TLS).</p><p>The RFC also points to <strong>EAP</strong> traffic. With EAP-TLS and 8 KB certificate chains, as many as 15 round trips can be needed if RADIUS packets are held to the common Ethernet MTU of 1500 octets, and a 4096-octet payload over TCP can bring that down to 7 or fewer.</p>",
+      "eli5": "<p>Sending mail the loose way, you never know if it got there. A delivery service that confirms each parcel makes long conversations less likely to fall apart halfway.</p>"
+    },
+    {
+      "id": "scope",
+      "number": "2",
+      "title": "Where TCP Fits and Where It Does Not",
+      "content": "<p>The intent is to address transport issues for inter-server communication, such as proxies of different domains talking to each other. Such links carry a lot of traffic in both directions, so the congestion window stays open and the application-layer watchdog adds little extra traffic.</p><p>For a Network Access Server (<strong>NAS</strong>) talking to a RADIUS server, TCP is usually a poor fit. A NAS often sends so few requests that the congestion window stays small, which means more ACK packets than UDP without matching benefits, and extra watchdog traffic is needed. So <code>UDP</code> SHOULD continue to be used there, and RADIUS Dynamic Authorization (<a href='/5176/'>RFC 5176</a>) implementations SHOULD also keep using UDP.</p><div class='callout callout-warning'><p>\"Bare\" TCP provides no confidentiality and no negotiation of credible ciphersuites. It MUST NOT be used without TLS, IPsec or another secure upper layer.</p></div>",
+      "eli5": "<p>A delivery service is worth it when you send parcels all day. If you only send one letter now and then, the old way is cheaper.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "What Stays the Same, and the Ports",
+      "content": "<p>The RADIUS packet format is unchanged. The RFC lists the parts that MUST stay the same over TCP: packet format, permitted codes, Request and Response Authenticator calculation, minimum and maximum packet length, attribute and Vendor-Specific Attribute format, permitted data types and the calculation of dynamic and encrypted attributes. Changes to implementations are largely limited to the code that sends and receives packets.</p><p>The default TCP ports are the ones IANA already assigned: <code>1812</code> for <code>radius</code>, <code>1813</code> for <code>radius-acct</code> and <code>3799</code> for <code>radius-dynauth</code>. TCP ports 1645 and 1646 MUST NOT be used as defaults. For RADIUS/TLS the <code>radsec</code> port <code>2083</code> SHOULD be the default, and port 1812 SHOULD NOT be used for it.</p><p>The MIB modules written for RADIUS over UDP do not support RADIUS/TCP and SHOULD NOT be reused to count statistics for TCP connections.</p>",
+      "eli5": "<p>The letter inside stays exactly the same. Only the delivery truck changes, and it uses the same house numbers, called ports, as before.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Connections, Liveness and Retransmission",
+      "content": "<p>RADIUS is hop by hop, so a client cannot tell whether a silent proxy or a silent server is the problem. A client MUST mark a connection DOWN when the network stack says it is no longer active, and MUST NOT decide it is down while the stack says it is active until the application-layer <strong>watchdog</strong> from <a href='/3539/'>RFC 3539</a> marks it DOWN. The <code>Status-Server</code> packet from <a href='/5997/'>RFC 5997</a> MUST be the watchdog message, and a client MUST NOT call a server unresponsive until all TCP connections to it are DOWN.</p><p>Because TCP is reliable, request packets MUST NOT be retransmitted over a given connection, or over another connection to the same address and port while the first is still OKAY. If a connection breaks, unanswered requests MAY be sent over a new one. The ID may change, in which case security attributes such as <code>Message-Authenticator</code> MUST be recalculated. Servers SHOULD still detect duplicates.</p><p>The ID field is one octet, so one connection can have only 256 requests in flight. Implementations SHOULD reserve ID <code>0</code> on each connection for Status-Server. Extending RADIUS to allow more than 256 outstanding packets MUST NOT be done. For EAP, clients SHOULD keep all packets of one EAP session on one TCP connection.</p><p>TCP also brings head-of-line blocking: a lost segment delays the packets behind it, which can lower the maximum packet processing rate. Clients and servers SHOULD implement configurable limits on connections, connection lifetime and idle time, and on the rate of new connections.</p>",
+      "eli5": "<p>A friend checks in now and then to ask whether you are still there. Each parcel is sent once, because the delivery service already promises to bring it, and you only send it again if the truck broke down.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5",
+      "title": "Bad Packets Close the Connection",
+      "content": "<p>RADIUS says to \"silently discard\" a bad packet. Over UDP the next packet is independent, but over TCP the next packet can only be decoded if the previous one was decoded correctly. So implementations SHOULD treat \"silently discard\" as \"silently discard and close the connection\", and the connection MUST be closed in these cases:</p><ul><li>a connection from an unknown client;</li><li>a RADIUS <code>Length</code> field below the minimum or above the maximum packet length;</li><li>an attribute <code>Length</code> of zero or one, or attributes that do not exactly fill the packet;</li><li>a failed Request Authenticator, Response Authenticator or Message-Authenticator check, where validation applies.</li></ul><p>Packets with an invalid code field, and responses that match no outstanding request, MUST be silently discarded, and the connection MAY stay open or be closed. When a connection closes, cached responses for it MUST be discarded and the server SHOULD stop processing its requests.</p>",
+      "eli5": "<p>If one page of a long message arrives scrambled, you cannot tell where the next page starts. So the safest thing is to hang up and start the call again.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Because the packet format, signing and client verification are unchanged, all security issues of RADIUS over UDP apply here too. Unlimited numbers of connections may exhaust resources, so clients and servers SHOULD support configurable connection limits.</p><p>For TLS security, implementors are pointed to <a href='/6614/'>RFC 6614</a> and to <a href='/5246/'>RFC 5246</a>. The RFC states that there are no other known security issues for RADIUS-over-TCP transport at the time of writing, and repeats that bare TCP MUST NOT be used without TLS, IPsec or another secure upper layer.</p><p>The document defines no new attributes or codes. Its only interaction with Diameter is through RADIUS-to-Diameter gateways, whose RADIUS side MAY implement RADIUS/TCP.</p>",
+      "eli5": "<p>Switching trucks does not make the letters any safer. They still need a lock, which is what TLS or IPsec supply.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "design",
+      "position": "after",
+      "caption": "DEFAULT PORTS FOR RADIUS OVER TCP (RFC 6613)",
+      "data": {
+        "items": [
+          {
+            "code": "1812/tcp",
+            "label": "radius",
+            "desc": "Default for RADIUS over TCP. SHOULD NOT be used for RADIUS/TLS."
+          },
+          {
+            "code": "1813/tcp",
+            "label": "radius-acct",
+            "desc": "Default for RADIUS accounting over TCP."
+          },
+          {
+            "code": "3799/tcp",
+            "label": "radius-dynauth",
+            "desc": "Default for dynamic authorization over TCP."
+          },
+          {
+            "code": "2083/tcp",
+            "label": "radsec",
+            "desc": "Default for RADIUS/TLS.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2865]",
+      "text": "Rigney, C., Willens, S., Rubens, A., and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "rfc": 2865
+    },
+    {
+      "number": "[RFC3539]",
+      "text": "Aboba, B. and J. Wood, \"Authentication, Authorization and Accounting (AAA) Transport Profile\", RFC 3539, June 2003.",
+      "rfc": 3539
+    },
+    {
+      "number": "[RFC5997]",
+      "text": "DeKok, A., \"Use of Status-Server Packets in the Remote Authentication Dial In User Service (RADIUS) Protocol\", RFC 5997, August 2010.",
+      "rfc": 5997
+    },
+    {
+      "number": "[RFC6614]",
+      "text": "Winter, S., McCauley, M., Venaas, S., and K. Wierenga, \"Transport Layer Security (TLS) Encryption for RADIUS\", RFC 6614, May 2012.",
+      "rfc": 6614
+    },
+    {
+      "number": "[RFC5080]",
+      "text": "Nelson, D. and A. DeKok, \"Common Remote Authentication Dial In User Service (RADIUS) Implementation Issues and Suggested Fixes\", RFC 5080, December 2007.",
+      "rfc": 5080
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

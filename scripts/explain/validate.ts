@@ -333,6 +333,10 @@ export function validateOutput(n: number, raw: unknown, env: Env): string[] {
   if (!isObj(raw)) return ['1. the file must contain one JSON object'];
   const tier = tierOf(n, env.summary, env.april);
   checkKeys(raw, err);
+  // Site policy: rfc.akl.run prose never names GitHub (official RFC titles/abstracts come from the index, not from here).
+  walk(raw, '', (s, w) => {
+    if (/github/i.test(s)) err.add(w || '.', 'names GitHub: say "a public code repository" (or similar) instead');
+  });
   const sectionIds = checkSections(raw, tier, env, err);
   checkViz(raw, tier, sectionIds, env, err);
   checkSmall(raw, env, sectionIds, err);

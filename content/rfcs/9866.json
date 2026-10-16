@@ -9,13 +9,269 @@
   },
   "questions": [
     "rpl border router failure detection",
-    "what is rnfd"
+    "what is rnfd",
+    "how does rpl detect a border router crash",
+    "what is a sentinel in rnfd",
+    "what is rnfd option type",
+    "what are rnfd default thresholds"
+  ],
+  "tags": [
+    "Routing",
+    "IoT",
+    "Failure Detection"
+  ],
+  "subtitle": "How nodes in a low-power RPL network team up to notice quickly that their border router has crashed.",
+  "tldr": {
+    "problem": "When the border router of an RPL network crashes, the nodes lose their way out of the network and inside it, but RPL's own repair is slow, noisy and hard to implement correctly.",
+    "mechanism": "Nodes next to the border router (Sentinels) watch their link to it, and every node shares counts of 'root looks alive' and 'root looks dead' votes in a new RPL option until enough Sentinels agree it is down.",
+    "outcome": "Once agreement is reached, every node drops its parents and advertises an infinite Rank until the root starts a new DODAG Version. The design is probabilistic, so false positives and false negatives remain possible.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RNFD Option type",
+      "value": "0x0E"
+    },
+    {
+      "label": "Option Length",
+      "value": "8-bit, even; 0 means RNFD disabled"
+    },
+    {
+      "label": "Default consensus threshold",
+      "value": "0.51"
+    },
+    {
+      "label": "Default suspicion growth threshold",
+      "value": "0.12"
+    },
+    {
+      "label": "Default saturation threshold",
+      "value": "0.63"
+    },
+    {
+      "label": "LORS states",
+      "value": "UP, SUSPECTED DOWN, LOCALLY DOWN, GLOBALLY DOWN"
+    }
+  ],
+  "today": "<p>RFC 9866 is a Proposed Standard published in October 2025. It has not been obsoleted or updated, and IANA has allocated option value 0x0E for the RNFD Option.</p>",
+  "glossary": [
+    "rpl",
+    "dodag",
+    "lln-border-router",
+    "conflict-free-replicated-counter",
+    "rnfd-sentinel",
+    "neighbor-unreachability-detection",
+    "icmpv6",
+    "multicast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Border Router Crashes Hurt",
+      "content": "<p><strong>RPL</strong> organizes a low-power network into a <strong>DODAG</strong>, a graph in which every path ends at one LLN Border Router (LBR), the DODAG root. Each node has a Rank that measures its distance to the LBR, and packets travel up these paths to reach the outside world.</p><p>If the LBR crashes, nodes cannot reach other Internet hosts, and many paths inside the DODAG become invalid. Plain RPL does eventually notice, but slowly: every neighbor of the dead LBR must detect its own link failure, nodes change parents on local knowledge and create loops, and each parent change or loop can trigger bursts of control traffic through the Trickle algorithm.</p><p>RNFD is an extension that adds explicit coordination so nodes can detect the crash fast, then leave the broken DODAG, join another, or trigger application fallbacks.</p>",
+      "eli5": "<p>When the big gateway breaks, every little device would normally find out one at a time, slowly and noisily. RNFD lets them find out together.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "3",
+      "title": "Sentinels, Acceptors and Counters",
+      "content": "<p>Only the root's neighbors can see whether their link to the root is up. So RNFD splits non-root nodes into two roles. A <strong>Sentinel</strong> is a neighbor of the root that monitors its link to it. An <strong>Acceptor</strong> is any node that is not a Sentinel, and mainly collects and passes on the Sentinels' observations.</p><p>Each node tracks its <strong>Locally Observed DODAG Root's State</strong> (LORS). It also keeps two <strong>Conflict-Free Replicated Counters</strong> (CFRCs): the PositiveCFRC counts Sentinels that consider, or once considered, the root alive in this DODAG Version, and the NegativeCFRC counts those that consider or once considered it dead. The PositiveCFRC is always at least as large as the NegativeCFRC.</p><p>Merging two counters is idempotent, commutative and associative, and values are partially ordered. That gives eventual consistency whatever the topology or order of exchanges, so a connected network ends up with the same conclusion everywhere.</p>",
+      "eli5": "<p>Kids by the door put a tally mark on a shared sheet: one sheet for 'teacher is here' and one for 'teacher is gone'. Whoever you meet, you combine sheets, and everyone ends up with the same marks.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "3.1",
+      "title": "The Four LORS States",
+      "content": "<p>A node starts in <code>UP</code> when it joins a DODAG Version. A Sentinel that suspects a crash, for example because link-layer acknowledgments stop arriving or because many other Sentinels already suspect it, moves to <code>SUSPECTED DOWN</code>. After verifying or announcing its suspicion it moves to <code>LOCALLY DOWN</code>. As an optimization it may jump from <code>UP</code> straight to <code>LOCALLY DOWN</code>.</p><p>If enough Sentinels are <code>LOCALLY DOWN</code>, every node, Sentinel or Acceptor, moves to <code>GLOBALLY DOWN</code> whatever its earlier state. This state is terminal: it ends only when the node joins a new DODAG Version. While in it, RNFD forces RPL to keep an infinite Rank and no parent, so nothing is routed upward.</p><p>In <code>UP</code>, <code>SUSPECTED DOWN</code> and <code>LOCALLY DOWN</code>, RNFD does not interfere with RPL forwarding. A Sentinel that sees the root active again returns to <code>UP</code>.</p>",
+      "eli5": "<p>A kid first thinks 'maybe the teacher left', then 'I checked and she did', and once enough kids agree, the whole class stops waiting and acts.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "The RNFD Option",
+      "content": "<p>Counters travel in the <strong>RNFD Option</strong>, a new RPL Control Message Option carried in link-local DIO and DIS messages. Its type is <code>0x0E</code>. The Option Length field is an 8-bit count of octets after the type and length fields. It MUST be even, and a value of 0 means RNFD is disabled in the current DODAG Version.</p><p>The rest holds two equal-length bit arrays, PosCFRC and NegCFRC. Half the Option Length gives the octets per array. Multiplying by 8 gives an upper bound, and the actual bit length is the largest prime number below it. For example, an Option Length of 16 gives 8 octets per array and 61 usable bits. Unused bits MUST be 0, every bit set in NegCFRC MUST also be set in PosCFRC, and if PosCFRC is all ones then NegCFRC MUST be all ones too.</p><p>The CFRC is a bit array using linear counting. <code>self()</code> sets one random bit, <code>merge()</code> is a bitwise OR, and <code>value()</code> estimates the count from the fraction of zero bits. A counter is saturated when too many bits are set.</p>",
+      "eli5": "<p>It is a little note stuck on messages the devices already send. Each note holds two rows of tiny boxes; ticking a box is like adding a tally mark.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "How Routers Behave",
+      "content": "<p>On joining a DODAG Version, RNFD starts as an Acceptor with LORS <code>UP</code> and both counters at <code>zero()</code>. To become a Sentinel a node MUST have LORS <code>UP</code>, an unsaturated PositiveCFRC, the root in its RPL parent set, and the root reachable via its link-local IPv6 address. Becoming a Sentinel adds the node to its PositiveCFRC. Entering <code>LOCALLY DOWN</code> adds it to the NegativeCFRC.</p><p>Sentinels detect trouble from external inputs such as Layer 2 triggers or Neighbor Unreachability Detection, and from internal ones: if value(NegativeCFRC)/value(PositiveCFRC) has grown by at least a threshold, they SHOULD suspect the root. Indirect evidence should lead to <code>SUSPECTED DOWN</code> and a check, such as DIS or ICMPv6 Echo Request probes with random backoff. Direct evidence such as missing acknowledgments may skip the check.</p><p>On receiving an option, a node merges both counters. If the negative-to-positive fraction reaches the consensus threshold, the node MUST go <code>GLOBALLY DOWN</code> and set both counters to <code>infinity()</code>. The root is always an Acceptor. If it ends up <code>GLOBALLY DOWN</code> it MUST generate a new DODAG Version, and it SHOULD do so, or lengthen the counters, if its PositiveCFRC saturates.</p>",
+      "eli5": "<p>Only kids who can really see the door get to vote. They double-check before voting 'gone', and when more than half say so, everyone agrees. The teacher has to come back and start class again.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "5.8",
+      "title": "Thresholds and On-Demand Activation",
+      "content": "<p>Three constants tune the protocol. Their configuration is outside the scope of the document.</p><ul><li><code>RNFD_CONSENSUS_THRESHOLD</code>, default 0.51: a majority of Sentinels must consider the root down. Higher values detect more slowly but give fewer false positives.</li><li><code>RNFD_SUSPICION_GROWTH_THRESHOLD</code>, default 0.12: in sparse networks (up to 8 neighbors per node) this triggers suspicion after just one other Sentinel considers the root dead, and it is more conservative in denser ones.</li><li><code>RNFD_CFRC_SATURATION_THRESHOLD</code>, default 0.63: the share of set bits at which a counter counts as saturated.</li></ul><p>RNFD can be activated and deactivated once per DODAG Version, and only the root decides. A non-root node starts inactive and activates only when it receives an RNFD Option with a positive Option Length. An option with length 0 deactivates it for that version.</p><p>Counters of different lengths are handled explicitly: an option with shorter arrays is ignored, and one with longer arrays makes the node extend its own counters and re-add itself. A node that cannot extend them MUST stop participating until it joins a new DODAG Version.</p>",
+      "eli5": "<p>There are three dials: how many kids must agree, how soon to get suspicious, and when the tally sheet is too full to be useful. The factory settings work for most classrooms.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "6",
+      "title": "Managing Roles and Virtual Roots",
+      "content": "<p>RNFD mostly manages itself. The two decisions left to deployments are which nodes become Sentinels and how long the counters are. Operators can pick Sentinels by hand, or let any eligible node qualify. With many root neighbors the PositiveCFRC may saturate quickly. Two remedies are described: issue a new DODAG Version in which eligible nodes become Sentinels only with probability 1/2, halving that probability in each new version as needed, or have the root increase the counter length, for example by doubling it while keeping it prime. Sentinels should preferably be stable, since flapping between <code>UP</code> and <code>LOCALLY DOWN</code> gradually saturates the counters.</p><p>With RPL virtual roots, if only one primary node acts as the real root, RNFD works as usual and a new DODAG Version MUST be issued when a new primary is elected. If several nodes act as roots at once, RNFD helps only when they could crash together, for instance in a power outage.</p><p>Implementations SHOULD report whether RNFD is active and whether LORS is <code>GLOBALLY DOWN</code>.</p>",
+      "eli5": "<p>Someone has to decide which kids stand by the door and how big the tally sheet is. Steady kids make the best door watchers.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>RNFD adds no new messages or traffic patterns, so it inherits the security issues and solutions of RPL as described in <a href='/6550/'>RFC 6550</a> and <a href='/7416/'>RFC 7416</a>. If the RNFD Option were tampered with, the root might be falsely declared crashed, leaving nodes unable to route until a new DODAG Version is issued. A real crash might also go undetected, in which case RPL falls back on its own mechanisms. Forged options may also cause extra DIO traffic through Trickle timer resets.</p><p>Deployments are RECOMMENDED to use RPL security mechanisms if control information could be modified or spoofed. Unless all of the root's neighbors are compromised, the root can detect a false positive from its own counters, and RNFD can be disabled if false positives become a problem.</p>",
+      "eli5": "<p>If a trickster scribbles fake marks on the sheet, the class might wrongly think the teacher is gone. Locking the sheet with RPL's normal security helps, and the teacher can spot a fake alarm.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "RNFD STATES (RFC 9866, FIGURE 1, SIMPLIFIED)",
+      "data": {
+        "states": [
+          {
+            "key": "up",
+            "label": "UP",
+            "initial": true
+          },
+          {
+            "key": "suspected-down",
+            "label": "SUSPECTED DOWN"
+          },
+          {
+            "key": "locally-down",
+            "label": "LOCALLY DOWN"
+          },
+          {
+            "key": "globally-down",
+            "label": "GLOBALLY DOWN"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "up",
+            "to": "suspected-down",
+            "label": "root suspected (1)"
+          },
+          {
+            "from": "suspected-down",
+            "to": "locally-down",
+            "label": "verified or announced (2a)"
+          },
+          {
+            "from": "up",
+            "to": "locally-down",
+            "label": "verification skipped (2b)"
+          },
+          {
+            "from": "suspected-down",
+            "to": "up",
+            "label": "root seen active (4a)"
+          },
+          {
+            "from": "locally-down",
+            "to": "up",
+            "label": "root seen active (4b)"
+          },
+          {
+            "from": "up",
+            "to": "globally-down",
+            "label": "consensus (3a)"
+          },
+          {
+            "from": "suspected-down",
+            "to": "globally-down",
+            "label": "consensus (3b)"
+          },
+          {
+            "from": "locally-down",
+            "to": "globally-down",
+            "label": "consensus (3c)"
+          },
+          {
+            "from": "globally-down",
+            "to": "up",
+            "label": "joins new DODAG Version (5)"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "RNFD CONSTANTS AND THEIR DEFAULTS",
+      "data": {
+        "columns": [
+          "Constant",
+          "Default",
+          "Role"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "RNFD_CONSENSUS_THRESHOLD",
+              "0.51",
+              "Fraction of negative to positive count that makes a node go GLOBALLY DOWN"
+            ]
+          },
+          {
+            "cells": [
+              "RNFD_SUSPICION_GROWTH_THRESHOLD",
+              "0.12",
+              "Growth in that fraction that makes a Sentinel suspect the root"
+            ]
+          },
+          {
+            "cells": [
+              "RNFD_CFRC_SATURATION_THRESHOLD",
+              "0.63",
+              "Share of set bits at which a counter counts as saturated"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6550]",
+      "text": "Winter, T., Ed., et al., \"RPL: IPv6 Routing Protocol for Low-Power and Lossy Networks\", RFC 6550, March 2012.",
+      "rfc": 6550
+    },
+    {
+      "number": "[RFC6206]",
+      "text": "Levis, P., et al., \"The Trickle Algorithm\", RFC 6206, March 2011.",
+      "rfc": 6206
+    },
+    {
+      "number": "[RFC6553]",
+      "text": "Hui, J. and JP. Vasseur, \"The Routing Protocol for Low-Power and Lossy Networks (RPL) Option for Carrying RPL Information in Data-Plane Datagrams\", RFC 6553, March 2012.",
+      "rfc": 6553
+    },
+    {
+      "number": "[RFC7416]",
+      "text": "Tsao, T., et al., \"A Security Threat Analysis for the Routing Protocol for Low-Power and Lossy Networks (RPLs)\", RFC 7416, January 2015.",
+      "rfc": 7416
+    },
+    {
+      "number": "[RFC4861]",
+      "text": "Narten, T., et al., \"Neighbor Discovery for IP version 6 (IPv6)\", RFC 4861, September 2007.",
+      "rfc": 4861
+    },
+    {
+      "number": "[Iwanicki16]",
+      "text": "Iwanicki, K., \"RNFD: Routing-Layer Detection of DODAG (Root) Node Failures in Low-Power Wireless Networks\", IPSN 2016."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

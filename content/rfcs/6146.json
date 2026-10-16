@@ -9,13 +9,398 @@
   },
   "questions": [
     "what is nat64",
-    "how can ipv6 only clients reach ipv4 servers"
+    "how can ipv6 only clients reach ipv4 servers",
+    "how does stateful nat64 work",
+    "what is the nat64 well known prefix"
+  ],
+  "tags": [
+    "IPv6",
+    "Translation",
+    "NAT"
+  ],
+  "subtitle": "How a NAT64 box lets IPv6-only hosts talk to IPv4 servers by translating packets and sharing IPv4 addresses.",
+  "tldr": {
+    "problem": "IPv6-only clients need to reach servers that only speak IPv4, ideally without changes to the client or the server.",
+    "mechanism": "A stateful NAT64 translator keeps binding and session tables, maps IPv6 transport addresses to ports on a small pool of IPv4 addresses, and represents each IPv4 server as an IPv6 address built from a NAT64 prefix.",
+    "outcome": "IPv6-initiated TCP, UDP and ICMP query traffic works, and with DNS64 usually no change is needed on the client or the server. The RFC is a Proposed Standard.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Protocols translated",
+      "value": "Unicast TCP, UDP and ICMP"
+    },
+    {
+      "label": "Well-Known Prefix",
+      "value": "64:ff9b::/96"
+    },
+    {
+      "label": "Maximum prefix length",
+      "value": "96 bits"
+    },
+    {
+      "label": "Tables kept",
+      "value": "6 (BIB and session table for TCP, UDP, ICMP Query)"
+    },
+    {
+      "label": "UDP session lifetime",
+      "value": "At least 2 minutes; default 5 minutes"
+    },
+    {
+      "label": "Established TCP idle time",
+      "value": "At least 2 hours 4 minutes"
+    }
+  ],
+  "today": "<p>RFC 6146 is a Proposed Standard, and the metadata lists no RFC that obsoletes or updates it. It works together with <a href='/6147/'>RFC 6147</a> (DNS64) and relies on <a href='/6145/'>RFC 6145</a> for header translation.</p>",
+  "glossary": [
+    "nat",
+    "napt",
+    "ipv4",
+    "ipv6",
+    "icmp",
+    "fragmentation",
+    "finite-state-machine",
+    "port-number",
+    "tcp",
+    "dns64",
+    "hairpinning",
+    "transport-address"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Stateful NAT64",
+      "content": "<p>Stateful <strong>NAT64</strong> is a mechanism for IPv4-IPv6 transition and coexistence. Together with DNS64 (<a href='/6147/'>RFC 6147</a>), it lets an IPv6-only client start communication with an IPv4-only server. Packet headers are translated with the IP/ICMP Translation Algorithm of <a href='/6145/'>RFC 6145</a>.</p><p>IPv4 addresses are mapped to IPv6 addresses algorithmically, using an IPv6 prefix assigned to the NAT64 (see <a href='/6052/'>RFC 6052</a>). IPv6 addresses are mapped to IPv4 addresses by installing mappings the way a normal Network Address Port Translation (NAPT) does.</p><p>The specification covers unicast TCP, UDP and ICMP only. Multicast, SCTP, DCCP and IPsec are out of scope. Without existing state, only IPv6 nodes can start sessions, which works for about the same class of applications that work through IPv4-to-IPv4 NATs.</p>",
+      "eli5": "<p>Some computers only speak the new internet language and some servers only speak the old one. NAT64 is an interpreter standing between them.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "1.2",
+      "title": "How a Connection Is Translated",
+      "content": "<p>The NAT64 device has at least an IPv6 interface and an IPv4 interface. It keeps two pools: an IPv6 prefix written <code>Pref64::/n</code>, which represents IPv4 hosts inside the IPv6 network, and a small pool of IPv4 addresses, which represents IPv6 hosts in the IPv4 network. Because IPv4 addresses are scarce, it usually binds IPv6 <em>transport addresses</em> (address plus port) to IPv4 transport addresses.</p><p>In the RFC's walk-through, host H1 at <code>2001:db8::1</code> wants <code>h2.example.com</code>. The DNS64 name server returns a synthetic AAAA record <code>64:ff9b::192.0.2.1</code>, built from the Well-Known Prefix <code>64:ff9b::/96</code> and H2's IPv4 address. H1 sends a TCP SYN there. The NAT64 picks an unused port (2000) on its IPv4 address <code>203.0.113.1</code>, records the mapping <code>(2001:db8::1,1500) <--> (203.0.113.1,2000)</code>, translates the header and forwards the packet. The reply is matched against that mapping and translated back.</p><p>Translation still works if H1 learns the IPv6 form of H2's address some other way, because DNS64 installs no state in the NAT64.</p>",
+      "eli5": "<p>The translator gives your call a temporary extension number on its shared phone line. When the answer comes to that extension, it knows which of its callers to pass it to.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Binding and Session Tables",
+      "content": "<p>Conceptually a NAT64 keeps six tables: a Binding Information Base (<strong>BIB</strong>) and a session table for each of TCP, UDP and ICMP Queries. Implementations may use other data structures, as long as the externally visible behavior is the same.</p><p>A TCP or UDP BIB entry maps an IPv6 transport address to an IPv4 transport address, <code>(X',x) <--> (T,t)</code>, where <code>T</code> is always one of the NAT64's own IPv4 addresses. An address can appear in at most one entry of a given BIB. This gives Endpoint-Independent Mappings. ICMP Query entries map an (address, ICMP Identifier) pair instead.</p><p>Session table entries add the remote host and a lifetime, for example <code>(X',x),(Y',y) <--> (T,t),(Z,z)</code>. They track when a session is finished and implement Address-Dependent Filtering. Dynamically created BIB entries disappear when their last session is removed. Manually configured entries stay until the administrator deletes them, and implementations SHOULD support them.</p>",
+      "eli5": "<p>The translator keeps two notebooks. One says which extension belongs to which caller. The other lists every conversation going on and when it should be hung up.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.3",
+      "title": "Processing a Packet",
+      "content": "<p>Every incoming packet goes through five steps: determine the incoming tuple, filter and update binding and session information, compute the outgoing tuple, translate the packet, and handle hairpinning. A NAT64 MAY reorder steps if the visible outcome is the same.</p><p>The tuple is a 5-tuple (source address, source port, destination address, destination port, protocol) for TCP, UDP and ICMP errors, or a 3-tuple (source, destination, ICMP Identifier) for ICMP queries. Fragments MUST be handled, including out of order, with limited resources devoted to storing them.</p><p>The NAT64 MUST silently discard IPv6 packets whose source address is inside <code>Pref64::/n</code>, and MUST only process IPv6 packets whose destination is in <code>Pref64::/n</code> and IPv4 packets addressed to its own IPv4 pool. For IPv4 packets, if no BIB entry matches the destination transport address the packet MUST be dropped. With Address-Dependent Filtering it must also have a session entry for that source IPv4 address.</p><p><strong>Hairpinning</strong> applies when a translated packet is destined to an IPv4 address of the NAT64 itself. Its outgoing tuple becomes the incoming tuple and processing restarts at the filtering step.</p>",
+      "eli5": "<p>For each letter, the translator reads the address, checks its notebooks, decides whether to let it in, rewrites the address, and sends it on. If the letter is for one of its own other callers, it just hands it back inside.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "3.5.2",
+      "title": "The TCP State Machine",
+      "content": "<p>TCP sessions are tracked closely because an established session may be kept for at least 2 hours and 4 minutes of inactivity (as in <a href='/5382/'>RFC 5382</a>), so each entry must match a real connection. There is one state machine per connection.</p><p>The states are <code>CLOSED</code> (a fictional state when there is no entry), <code>V4 INIT</code> and <code>V6 INIT</code> (a SYN has been seen from one side), <code>ESTABLISHED</code>, <code>V4 FIN RCV</code>, <code>V6 FIN RCV</code>, <code>V6 FIN + V4 FIN RCV</code> and <code>TRANS</code>.</p><p>A V6 SYN in CLOSED creates a BIB entry if needed, creates a session entry and moves to V6 INIT. A V4 SYN may be silently dropped by security policy; otherwise a session entry is created, the SYN is stored and the state is V4 INIT, which supports simultaneous open. When the matching SYN arrives from the other side, the state becomes ESTABLISHED.</p><p>A RST moves an established session to <code>TRANS</code>, a short timer, because the NAT64 cannot know whether the peer accepted the RST. If packets keep flowing, the session goes back to ESTABLISHED; if not, it goes to CLOSED. When an established session's lifetime expires, the NAT64 SHOULD send a probe: a TCP segment with no data, sequence and acknowledgment numbers zero and only the ACK flag set.</p>",
+      "eli5": "<p>The translator watches each phone call: who dialed, who picked up, who said goodbye. It only hangs up its record after both sides have said goodbye, or after a long silence.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "3.5.4",
+      "title": "Address Mapping and Port Allocation",
+      "content": "<p>The algorithm that gives the IPv6 form of an IPv4 address MUST be reversible and may only depend on the IPv4 address, the prefix <code>Pref64::/n</code> and stable configured parameters. The prefix length <code>n</code> MUST be at most 96. If no prefix is configured, the algorithm SHOULD use the Well-Known Prefix <code>64:ff9b::/96</code>. A NAT64 MUST support the algorithm in Section 2.3 of <a href='/6052/'>RFC 6052</a>, and it SHOULD be the default.</p><p>The IPv4 side of a new binding is chosen like this. If the same IPv6 address already has a binding to some IPv4 address, that address SHOULD be reused. A source port in 0-1023 SHOULD get a port in the same range, and a port in 1024-65535 SHOULD get a port from that range. For UDP the port parity (odd or even) SHOULD be preserved. The chosen IPv4 transport address MUST NOT already be used in the same BIB. If no address can be allocated, the packet is discarded and the NAT64 SHOULD send an ICMPv6 Destination Unreachable with Code 3 (Address Unreachable).</p><p>Only IPv6 source and IPv4 destination addresses go through the BIB. The IPv6 destination and the IPv4 source are always computed with the algorithm, which hairpinning needs.</p>",
+      "eli5": "<p>Old-style numbers are built into the new-style address by a fixed recipe, so the translator can always turn them back. The shared line's extension numbers are handed out one by one and never given to two callers at once.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Timers and Constants",
+      "content": "<p>Section 4 fixes the timers that govern how long state lives. UDP sessions last at least <code>UDP_MIN</code> (2 minutes) and by default <code>UDP_DEFAULT</code> (5 minutes). Established TCP sessions use <code>TCP_EST</code> (2 hours), plus the 4 minutes of <code>TCP_TRANS</code>, which gives the 2 hours and 4 minutes minimum of RFC 5382. A SYN from the IPv4 side that cannot yet be matched is held for <code>TCP_INCOMING_SYN</code> (6 seconds). ICMP query sessions default to <code>ICMP_DEFAULT</code> (60 seconds), and fragments must be allowed to arrive over at least <code>FRAGMENT_MIN</code> (2 seconds).</p>",
+      "eli5": "<p>The notebook entries have timers, like leaving a bike lock on for a while. If nobody uses the connection for long enough, the translator erases it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>Protocols that protect IP header information are essentially incompatible with NAT64. End-to-end IPsec verification fails with the Authentication Header and with ESP in transport mode. The RFC notes that UDP encapsulation (<a href='/3948/'>RFC 3948</a>) can restore it, and leaves the details out of scope.</p><p>A NAT64 MUST offer Endpoint-Independent Mapping and MAY offer Address-Dependent Mapping. What protects hosts is the filtering, not the mapping. Filtering only on the 5-tuple can be easy to guess, so a NAT64 MAY track TCP sequence numbers.</p><p>The device itself can be attacked. An attacker on the IPv6 side can use up the IPv4 transport addresses with many source addresses, fill memory with fragments or with SYNs (IPv4 SYNs also require storing packets), or keep state alive with periodic packets. NAT64 devices MUST protect against such attacks, and MAY choose not to extend a session lifetime when packets arrive from the external side.</p><p>A client that can guess its IPv4 binding address could use the IPv6 form of that address as its source and cause loops. This is prevented by dropping IPv6 packets whose source is in <code>Pref64::/n</code>.</p>",
+      "eli5": "<p>The translator must not be tricked or swamped. It refuses mail that claims to come from itself, limits how much it will remember, and cannot translate sealed envelopes that include the address in the seal.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THE RFC'S WALK-THROUGH: H1 (IPv6) OPENS A TCP CONNECTION TO H2 (IPv4)",
+      "data": {
+        "lanes": [
+          {
+            "key": "h1",
+            "label": "H1 (IPv6)"
+          },
+          {
+            "key": "dns64",
+            "label": "DNS64 server"
+          },
+          {
+            "key": "nat64",
+            "label": "NAT64"
+          },
+          {
+            "key": "h2",
+            "label": "H2 (IPv4)"
+          }
+        ],
+        "messages": [
+          {
+            "from": "h1",
+            "to": "dns64",
+            "label": "Query h2.example.com",
+            "color": "neutral"
+          },
+          {
+            "from": "dns64",
+            "to": "h1",
+            "label": "AAAA 64:ff9b::192.0.2.1",
+            "color": "neutral",
+            "note": "Synthetic record built from the Well-Known Prefix."
+          },
+          {
+            "from": "h1",
+            "to": "nat64",
+            "label": "SYN (2001:db8::1,1500) to (64:ff9b::192.0.2.1,80)",
+            "color": "blue"
+          },
+          {
+            "from": "nat64",
+            "to": "h2",
+            "label": "SYN (203.0.113.1,2000) to (192.0.2.1,80)",
+            "color": "blue",
+            "note": "Mapping created: (2001:db8::1,1500) <--> (203.0.113.1,2000)."
+          },
+          {
+            "from": "h2",
+            "to": "nat64",
+            "label": "SYN+ACK (192.0.2.1,80) to (203.0.113.1,2000)",
+            "color": "green"
+          },
+          {
+            "from": "nat64",
+            "to": "h1",
+            "label": "SYN+ACK (64:ff9b::192.0.2.1,80) to (2001:db8::1,1500)",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "SIMPLIFIED TCP STATE MACHINE IN THE NAT64 (RFC 6146)",
+      "data": {
+        "states": [
+          {
+            "key": "closed",
+            "label": "CLOSED",
+            "initial": true
+          },
+          {
+            "key": "v6-init",
+            "label": "V6 INIT"
+          },
+          {
+            "key": "v4-init",
+            "label": "V4 INIT"
+          },
+          {
+            "key": "established",
+            "label": "ESTABLISHED"
+          },
+          {
+            "key": "v4-fin-rcv",
+            "label": "V4 FIN RCV"
+          },
+          {
+            "key": "v6-fin-rcv",
+            "label": "V6 FIN RCV"
+          },
+          {
+            "key": "both-fin",
+            "label": "V6 FIN + V4 FIN RCV"
+          },
+          {
+            "key": "trans",
+            "label": "TRANS"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "closed",
+            "to": "v6-init",
+            "label": "V6 SYN"
+          },
+          {
+            "from": "closed",
+            "to": "v4-init",
+            "label": "V4 SYN"
+          },
+          {
+            "from": "v6-init",
+            "to": "established",
+            "label": "V4 SYN"
+          },
+          {
+            "from": "v4-init",
+            "to": "established",
+            "label": "V6 SYN"
+          },
+          {
+            "from": "established",
+            "to": "v4-fin-rcv",
+            "label": "V4 FIN"
+          },
+          {
+            "from": "established",
+            "to": "v6-fin-rcv",
+            "label": "V6 FIN"
+          },
+          {
+            "from": "v4-fin-rcv",
+            "to": "both-fin",
+            "label": "V6 FIN"
+          },
+          {
+            "from": "v6-fin-rcv",
+            "to": "both-fin",
+            "label": "V4 FIN"
+          },
+          {
+            "from": "established",
+            "to": "trans",
+            "label": "RST or lifetime expiry"
+          },
+          {
+            "from": "trans",
+            "to": "established",
+            "label": "other packet"
+          },
+          {
+            "from": "trans",
+            "to": "closed",
+            "label": "TCP_TRANS timeout"
+          },
+          {
+            "from": "both-fin",
+            "to": "closed",
+            "label": "lifetime expires"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "PROTOCOL CONSTANTS (RFC 6146, SECTION 4)",
+      "data": {
+        "items": [
+          {
+            "code": "UDP_MIN",
+            "label": "2 minutes",
+            "desc": "Minimum UDP session lifetime."
+          },
+          {
+            "code": "UDP_DEFAULT",
+            "label": "5 minutes",
+            "desc": "Default UDP session lifetime."
+          },
+          {
+            "code": "TCP_TRANS",
+            "label": "4 minutes",
+            "desc": "Transitory TCP connection idle timeout."
+          },
+          {
+            "code": "TCP_EST",
+            "label": "2 hours",
+            "desc": "Established TCP idle timer; with TCP_TRANS gives 2 hours 4 minutes."
+          },
+          {
+            "code": "TCP_INCOMING_SYN",
+            "label": "6 seconds",
+            "desc": "Wait for a matching SYN after an IPv4-side SYN."
+          },
+          {
+            "code": "FRAGMENT_MIN",
+            "label": "2 seconds",
+            "desc": "Minimum time to allow fragments to arrive."
+          },
+          {
+            "code": "ICMP_DEFAULT",
+            "label": "60 seconds",
+            "desc": "Default ICMP query session lifetime."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6147]",
+      "text": "Bagnulo, M., Sullivan, A., Matthews, P., and I. van Beijnum, \"DNS64: DNS extensions for Network Address Translation from IPv6 Clients to IPv4 Servers\", RFC 6147, April 2011.",
+      "rfc": 6147
+    },
+    {
+      "number": "[RFC6145]",
+      "text": "Li, X., Bao, C., and F. Baker, \"IP/ICMP Translation Algorithm\", RFC 6145, April 2011.",
+      "rfc": 6145
+    },
+    {
+      "number": "[RFC6052]",
+      "text": "Bao, C., Huitema, C., Bagnulo, M., Boucadair, M., and X. Li, \"IPv6 Addressing of IPv4/IPv6 Translators\", RFC 6052, October 2010.",
+      "rfc": 6052
+    },
+    {
+      "number": "[RFC6144]",
+      "text": "Baker, F., Li, X., Bao, C., and K. Yin, \"Framework for IPv4/IPv6 Translation\", RFC 6144, April 2011.",
+      "rfc": 6144
+    },
+    {
+      "number": "[RFC4787]",
+      "text": "Audet, F. and C. Jennings, \"Network Address Translation (NAT) Behavioral Requirements for Unicast UDP\", BCP 127, RFC 4787, January 2007.",
+      "rfc": 4787
+    },
+    {
+      "number": "[RFC5382]",
+      "text": "Guha, S., Biswas, K., Ford, B., Sivakumar, S., and P. Srisuresh, \"NAT Behavioral Requirements for TCP\", BCP 142, RFC 5382, October 2008.",
+      "rfc": 5382
+    },
+    {
+      "number": "[RFC5508]",
+      "text": "Srisuresh, P., Ford, B., Sivakumar, S., and S. Guha, \"NAT Behavioral Requirements for ICMP\", BCP 148, RFC 5508, April 2009.",
+      "rfc": 5508
+    },
+    {
+      "number": "[RFC3022]",
+      "text": "Srisuresh, P. and K. Egevang, \"Traditional IP Network Address Translator (Traditional NAT)\", RFC 3022, January 2001.",
+      "rfc": 3022
+    },
+    {
+      "number": "[RFC5245]",
+      "text": "Rosenberg, J., \"Interactive Connectivity Establishment (ICE): A Protocol for Network Address Translator (NAT) Traversal for Offer/Answer Protocols\", RFC 5245, April 2010.",
+      "rfc": 5245
+    },
+    {
+      "number": "[RFC3948]",
+      "text": "Huttunen, A., Swander, B., Volpe, V., DiBurro, L., and M. Stenberg, \"UDP Encapsulation of IPsec ESP Packets\", RFC 3948, January 2005.",
+      "rfc": 3948
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

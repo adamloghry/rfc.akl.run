@@ -9,13 +9,239 @@
   },
   "questions": [
     "marker pdu aligned framing",
-    "mpa for tcp ddp"
+    "mpa for tcp ddp",
+    "what is marker pdu aligned framing",
+    "what is mpa in rdma",
+    "what is an fpdu",
+    "how do mpa markers work"
+  ],
+  "tags": [
+    "Transport",
+    "TCP",
+    "RDMA"
+  ],
+  "subtitle": "How MPA wraps DDP records in TCP with lengths, CRCs and periodic markers so record boundaries survive.",
+  "tldr": {
+    "problem": "Direct Data Placement over TCP needs to find record boundaries, even when segments arrive out of order, but TCP is a plain byte stream.",
+    "mechanism": "MPA wraps each DDP record in a Framed PDU with a length, padding and a CRC32c, and can insert a 4-octet Marker every 512 octets that points back to the start of the enclosing frame.",
+    "outcome": "It keeps TCP's reliable in-order delivery, works with existing TCP, and lets optimized receivers place data out of order. It is a Proposed Standard updated by RFC 6581 and RFC 7146.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Marker interval",
+      "value": "Every 512 octets"
+    },
+    {
+      "label": "Marker size",
+      "value": "4 octets"
+    },
+    {
+      "label": "FPDU overhead",
+      "value": "At least 6 octets"
+    },
+    {
+      "label": "MULPDU range",
+      "value": "128 to 64768 octets"
+    },
+    {
+      "label": "Private Data limit",
+      "value": "512 octets"
+    },
+    {
+      "label": "CRC",
+      "value": "32-bit CRC32c"
+    }
+  ],
+  "today": "<p>RFC 5044 is a Proposed Standard that has not been obsoleted, but it has been updated by <a href='/6581/'>RFC 6581</a> and <a href='/7146/'>RFC 7146</a>, so read those alongside it.</p>",
+  "glossary": [
+    "tcp",
+    "message-framing",
+    "tcp-segment",
+    "byte-stream",
+    "mtu",
+    "nagle-algorithm",
+    "ipsec",
+    "direct-data-placement",
+    "rdma",
+    "cyclic-redundancy-check"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why TCP Needs a Framing Layer",
+      "content": "<p><strong>Marker PDU Aligned Framing</strong> (MPA) is an adaptation layer between TCP and the Direct Data Placement protocol (DDP, <a href='/5041/'>RFC 5041</a>). DDP needs to detect record boundaries, which it calls Upper Layer Protocol Data Units (ULPDUs). A network adapter that knows where a ULPDU starts can place its data directly in the application buffer, without waiting for packets to arrive in order.</p><p>The RFC contrasts two ways to frame records. A probabilistic approach embeds a detectable value in the stream, but nothing stops that value appearing in user data. MPA uses a deterministic approach: control information sits at known locations, so the receiver never misreads application data as control data.</p><p>Layering is ULP, DDP, MPA, TCP, IP. MPA is described as fully compliant with the TCP RFCs and usable with existing TCP implementations, and it also allows integrated implementations that combine TCP, MPA and DDP.</p>",
+      "eli5": "<p>A long strip of tape has no marks showing where each sentence starts. MPA adds marks in places the reader already knows to look, so it never confuses writing for a mark.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "4.1",
+      "title": "The FPDU Format",
+      "content": "<p>MPA turns each ULPDU into a <strong>Framed Protocol Data Unit</strong> (FPDU), and exactly one ULPDU goes in one FPDU. The FPDU has a 16-bit <code>ULPDU_Length</code> field, then the ULPDU, then a <strong>PAD</strong> of 0 to 3 zero octets that makes the FPDU a multiple of four, then a 32-bit <code>CRC</code>.</p><p><code>ULPDU_Length</code> counts only the ULPDU, not the header, pad, CRC or any Markers inside it. The FPDU adds a minimum of 6 octets to the ULPDU.</p><p>When CRCs are enabled, the CRC field holds a CRC32c computed as for the iSCSI header and data digests. When they are not, the field is still present, may hold any value, and MUST NOT be checked.</p>",
+      "eli5": "<p>Each message goes into an envelope with its length on the front and a check number on the back. Extra blank space makes the envelope the right size.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4.3",
+      "title": "Markers",
+      "content": "<p>Markers let a receiver find FPDU starts when packets arrive out of order. Each Marker is four octets: a 16-bit reserved field set to zero and a 16-bit <code>FPDUPTR</code>. It is inserted at a periodic 512-octet interval in the TCP sequence number space, starting immediately before the first FPDU of the full operation phase.</p><p><code>FPDUPTR</code> is a back-pointer: the number of octets from the start of the enclosing FPDU's <code>ULPDU_Length</code> field to the first octet of the Marker. A value of <code>0x0000</code> is used when the Marker falls exactly between FPDUs, so the FPDU header follows immediately. The low two bits are always zero. If an FPDU spans several Markers, they all point to the same place.</p><p>Markers are optional per receiver. A receiver that cannot recover out-of-order FPDUs can ask for them to be off, but all senders MUST be able to produce Markers on request. When used, Markers are included in the CRC of the FPDU that contains them.</p>",
+      "eli5": "<p>It is like a signpost every 512 steps along a trail that says how far back the last house starts. If you jump into the middle of the trail, you can still find your way.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4.5",
+      "title": "CRC Rules and FPDU Sizing",
+      "content": "<p>An MPA implementation MUST implement CRC support and either always use CRCs or turn them off only on an administrator's explicit request, with CRCs on by default. CRC checking is dropped only if both endpoints state a preference not to use it. That SHOULD NOT be done unless the connection has error protection at least as strong as an end-to-end CRC32c, for example end-to-end IPsec integrity. A receiver that sees a bad CRC MUST treat the FPDU as invalid.</p><p>DDP asks MPA for the <strong>MULPDU</strong>, the largest ULPDU that fits in an FPDU. With Markers it is <code>EMSS - (6 + 4 * Ceiling(EMSS / 512) + EMSS mod 4)</code>, and without them <code>EMSS - (6 + EMSS mod 4)</code>, where EMSS is the smaller of the TCP MSS and the path MTU. MULPDU MUST stay between 128 and 64768 octets inclusive, and DDP MUST NOT post a ULPDU larger than 64768 octets.</p>",
+      "eli5": "<p>Each envelope has a check number, and by default both sides use it. The size of the biggest message is picked so that it fits in one delivery truck.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "7",
+      "title": "Startup: Request and Reply Frames",
+      "content": "<p>MPA has two phases. In the <strong>Startup Phase</strong>, special frames are exchanged without CRCs or Markers. In <strong>Full Operation</strong>, FPDUs flow with all the rules above. The upper layer decides which side is Initiator (sends first) and which is Responder. Both sides MUST switch MPA on at the same place in the octet stream, either right after the TCP connection opens or after a streaming-mode negotiation.</p><p>The Initiator sends an MPA Request Frame and the Responder answers with an MPA Reply Frame. Each begins with a 16-byte key, <code>MPA ID Req Frame</code> or <code>MPA ID Rep Frame</code>, followed by flag bits <code>M</code> (Markers required), <code>C</code> (CRC preferred) and <code>R</code> (connection rejected, Reply only), a revision field that senders set to one, and a <code>PD_Length</code> for 0 to 512 octets of Private Data. A wrong key or a bad length means closing the connection and reporting an error.</p><p>A Responder rejects by returning a Reply with <code>R</code> set to one, leaving the TCP connection open. A Responder MUST receive and validate at least one FPDU before sending any FPDU or Marker. Implementations SHOULD time out while waiting for startup frames, to help against denial-of-service attacks. Each half connection ends when DDP closes the matching TCP half connection.</p>",
+      "eli5": "<p>Before talking, one side knocks and says a secret password, and the other answers with a password too. They also agree on a few rules, and only then do they start chatting properly.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "8",
+      "title": "Error Semantics",
+      "content": "<p>MPA MUST detect four errors and SHOULD report their codes to DDP: <strong>1</strong>, the TCP connection was closed, terminated or lost; <strong>2</strong>, a CRC mismatch; <strong>3</strong>, a valid CRC but a Marker and the <code>ULPDU_Length</code> chain disagree on where an FPDU starts; and <strong>4</strong>, an invalid Request or Reply Frame, which MUST close the TCP connection immediately.</p><p>For errors 2 and 3, an optimized implementation MAY silently drop the TCP segment instead, so the sender's TCP retransmits it. Once MPA reports any error it MUST NOT pass any further FPDUs on that half connection, and for codes 2 and 3 it MUST NOT close TCP itself. Closing is left to the upper layer, which may first send a last diagnostic message the other way.</p>",
+      "eli5": "<p>If a letter arrives smudged or the signposts disagree, the mail room stops handing over mail on that road and tells the boss. The boss decides whether to close the road.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>MPA is no more vulnerable to third-party attacks than any other protocol over TCP. Random packets that are valid TCP but contain no FPDU headers produce an error to DDP, and attacks that reach DDP and RDMAP buffers can end in loss of connection, a denial of service. The RFC discusses impersonation, stream hijacking, man-in-the-middle attacks and eavesdropping, and names end-to-end IPsec as the best protection.</p><p>An MPA on TCP implementation MUST follow the IPsec requirements of <a href='/3723/'>RFC 3723</a>, Sections 2.3 and 5. Receiving an IKE Phase 2 delete message MUST NOT tear down a DDP/RDMA stream. These requirements use the older IPsec (RFC 2401 family) so that RDDP and iSCSI share one profile. IPsec in a tunnel in the middle of the network leaves hosts between the peer and the tunnel able to attack the stream freely.</p>",
+      "eli5": "<p>Anyone on the road can pretend to be your friend or tamper with parcels. The best fix is a secure tube from you all the way to your friend.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "10",
+      "title": "Optimized Implementations",
+      "content": "<p>The appendices are informative and not part of the standard. Appendix A describes an <strong>optimized MPA/TCP</strong> design. The sender starts each TCP segment with an FPDU (FPDU Alignment), may pack several whole FPDUs into one segment, and reports the current EMSS to MPA. The receiver passes valid segments to MPA even when out of order, so DDP can place data immediately. SACK is recommended.</p><p>Receivers MUST NOT depend on alignment, since middleboxes may re-segment the stream. Markers then let an optimized receiver recover FPDUs, though extra buffering may be needed. The RFC also notes that Nagle packing trades latency for wire efficiency and that applications should be able to disable it. Appendix C covers interoperating with earlier RDMA Consortium protocols.</p>",
+      "eli5": "<p>If the delivery driver starts every truck with a fresh parcel, the receiver can unload straight away. If a truck is repacked on the way, the signposts still help.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "design",
+      "position": "after",
+      "caption": "MPA MARKER (RFC 5044, FIGURE 3)",
+      "data": {
+        "title": "MPA Marker",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "reserved",
+            "name": "RESERVED",
+            "bits": 16,
+            "desc": "Set to zero on transmit and ignored on receive, except for CRC calculation."
+          },
+          {
+            "key": "fpduptr",
+            "name": "FPDUPTR",
+            "bits": 16,
+            "desc": "Octets back to the start of the enclosing FPDU's ULPDU_Length field; zero if the Marker falls between FPDUs."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "MPA STARTUP, SIMPLIFIED FROM THE RFC'S EXAMPLES",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator"
+          },
+          {
+            "key": "responder",
+            "label": "Responder"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "MPA Request Frame",
+            "color": "blue",
+            "note": "May carry Private Data."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "MPA Reply Frame",
+            "color": "green",
+            "note": "R bit says accept or reject."
+          },
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "First FPDU",
+            "color": "neutral",
+            "note": "Responder must see one before sending any."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "FPDUs",
+            "color": "neutral"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[DDP]",
+      "text": "Shah, H., Pinkerton, J., Recio, R., and P. Culley, \"Direct Data Placement over Reliable Transports\", RFC 5041, October 2007.",
+      "rfc": 5041
+    },
+    {
+      "number": "[iSCSI]",
+      "text": "Satran, J., Meth, K., Sapuntzakis, C., Chadalapaka, M., and E. Zeidner, \"Internet Small Computer Systems Interface (iSCSI)\", RFC 3720, April 2004.",
+      "rfc": 3720
+    },
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC3723]",
+      "text": "Aboba, B., Tseng, J., Walker, J., Rangan, V., and F. Travostino, \"Securing Block Storage Protocols over IP\", RFC 3723, April 2004.",
+      "rfc": 3723
+    },
+    {
+      "number": "[RDMASEC]",
+      "text": "Pinkerton, J. and E. Deleganes, \"Direct Data Placement Protocol (DDP) / Remote Direct Memory Access Protocol (RDMAP) Security\", RFC 5042, October 2007.",
+      "rfc": 5042
+    },
+    {
+      "number": "[APPL]",
+      "text": "Bestler, C. and L. Coene, \"Applicability of Remote Direct Memory Access Protocol (RDMA) and Direct Data Placement (DDP)\", RFC 5045, October 2007.",
+      "rfc": 5045
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }

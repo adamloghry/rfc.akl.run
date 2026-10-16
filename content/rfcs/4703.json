@@ -9,13 +9,199 @@
   },
   "questions": [
     "dhcp fqdn conflict resolution",
-    "dhcid conflict detection"
+    "dhcid conflict detection",
+    "what is dhcid",
+    "how do dhcp clients avoid fqdn conflicts",
+    "what does yxdomain mean in dns update",
+    "how does dhcp update dns records"
+  ],
+  "tags": [
+    "DHCP",
+    "DNS",
+    "Naming"
+  ],
+  "subtitle": "How DHCP clients and servers use a DHCID record in the DNS to tell whose hostname is whose.",
+  "tldr": {
+    "problem": "When DHCP clients and servers update the DNS with dynamically assigned names and addresses, two clients can end up with the same FQDN, or several servers can overwrite each other's records, and nobody can tell who owns the name.",
+    "mechanism": "Whoever adds A, AAAA or PTR records also adds a DHCID record that identifies the client. Later updaters use DNS UPDATE prerequisites to check that record before changing or removing anything.",
+    "outcome": "Updaters can detect a name that another client holds and apply the site's policy, for example by picking another name. The scheme is advisory and cooperative, and it does not replace DNS security.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Ownership record",
+      "value": "DHCID RR (RFC 4701)"
+    },
+    {
+      "label": "Name already in use",
+      "value": "YXDOMAIN"
+    },
+    {
+      "label": "DHCID missing or different",
+      "value": "NXRRSET"
+    },
+    {
+      "label": "Fatal update errors",
+      "value": "FORMERR, SERVFAIL, REFUSED, NOTIMP"
+    }
+  ],
+  "today": "<p>RFC 4703 is a Proposed Standard, and the unit metadata lists no RFC that obsoletes or updates it. It relies on the DHCID record from <a href='/4701/'>RFC 4701</a> and the client FQDN options in <a href='/4702/'>RFC 4702</a> and <a href='/4704/'>RFC 4704</a>.</p>",
+  "glossary": [
+    "dhcp",
+    "dns",
+    "resource-record",
+    "fqdn",
+    "dhcid-record",
+    "lease"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why DHCP and DNS Updates Collide",
+      "content": "<p>DHCP can hand a client an IP address and a <strong>fully qualified domain name</strong> (FQDN). To keep the DNS accurate, the A and AAAA records (name to address) and the PTR records (address to name) must be updated as well. The client FQDN option lets clients and servers negotiate the name and decide who updates which records.</p><p>This document covers what happens when those updates conflict. It describes a strategy that uses the DHCID DNS resource record to resolve conflicts. Whether a site lets all, some or no clients and servers update its zones is a matter of local administrative policy, and this document does not propose a policy. It applies only to DHCP clients and servers, not to other processes that send DNS updates.</p>",
+      "eli5": "<p>Computers ask for a name and an address when they join a network. Sometimes two computers pick the same name, and this document says how to notice and sort that out.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "3",
+      "title": "Two Kinds of Conflict",
+      "content": "<p>Two situations need special care: more than one client configured with the same FQDN, and more than one DHCP server allowed to update the same zone. Without a way to detect them, DNS records can change in inconsistent ways.</p><p>In the <strong>client misconfiguration</strong> example, clients A and B in example.com are both set up with the hostname <code>foo</code>. A adds an A record to <code>foo.example.com</code>, then B boots and updates the same name. If the policy is that the newest client wins, A must be able to tell that the record now belongs to B, so it does not remove it when its own lease expires. If the policy is that the first client keeps the name, B must be able to tell whether it already owns the name or should pick another.</p><p>In the <strong>multiple servers</strong> example, client A gets an address from server S1, which adds an A record for <code>foo.example.com</code>. A then moves to a subnet served by S2. S2 cannot tell whether A already owns that name or a different client with the same name does, unless the servers have some way to share that knowledge. A single server could keep a database of names, but that database would be proprietary and fails once more than one server is deployed.</p>",
+      "eli5": "<p>Two kids might both claim the same seat, or a kid might move to a new classroom and the new teacher does not know if the seat was already theirs. Somebody needs a way to check.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "The DHCID Record as an Ownership Marker",
+      "content": "<p>The fix is for the updater, whether a DHCP client or a server, to learn which client is associated with an FQDN. A <strong>DHCID</strong> record, specified in <a href='/4701/'>RFC 4701</a>, ties a unique client identity (derived from the client's DHCP message) to the FQDN and its A, AAAA and PTR records. Whenever an updater adds those records, it also adds a DHCID record. Only one client is associated with a given FQDN at a time.</p><p>With this marker, cooperating updaters can check whether their client currently owns a name and then follow the configured policy. A client that holds a name can also move from one DHCP server to another without losing it.</p><div class='callout callout-warning'><p>The scheme only works when all updaters cooperate. It is advisory, and it is not a substitute for DNS security nor replaced by it.</p></div>",
+      "eli5": "<p>Every name gets a sticker with the owner's secret code. Before anyone changes a name, they look at the sticker to see if it is theirs.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Adding Address Records",
+      "content": "<p>To add A or AAAA records, the updater runs a short loop of DNS UPDATE requests. Because it can loop, implementers SHOULD limit the total number of attempts for one transaction.</p><ol><li><strong>Initial request.</strong> The update has a prerequisite that the FQDN does not exist, and tries to add the A and/or AAAA records plus the DHCID record. If it succeeds, the address records are done. A <code>YXDOMAIN</code> answer means the name is in use, so the updater moves to step 2. Any other status means it SHOULD NOT try an update.</li><li><strong>Name in use.</strong> A second request has two prerequisites: the FQDN exists, and it has a DHCID record matching this client. Its update section deletes old A or AAAA records as the updater's policy requires and adds the current ones. Success means this client was the last one associated with the name. <code>NXDOMAIN</code> means the name has gone, so the updater goes back to step 1. <code>NXRRSET</code> means there is no DHCID record or it does not match, so it moves to step 3.</li><li><strong>Name held by someone else.</strong> The updater SHOULD choose another FQDN and restart, or give up with a failure. Suggested ways to pick another name are adding a prefix or suffix, or generating a random hostname.</li></ol><p>Certain error codes (<code>FORMERR</code>, <code>SERVFAIL</code>, <code>REFUSED</code>, <code>NOTIMP</code>) mean the server cannot perform the update, and the updater MUST stop. Updaters MAY log such errors for the administrator.</p>",
+      "eli5": "<p>First you try to claim a brand new name. If it is taken, you check whether the tag on it is yours. If it is not yours, you pick a different name.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "PTR Records, Removal and Dual-Stack Clients",
+      "content": "<p>For PTR records, the DHCP server sends an update that deletes all PTR records for the client's address and adds one pointing to the client's (possibly changed) FQDN. It MAY also add a DHCID record. No DHCID check is needed for PTR updates, because the servers assign an address to only one client at a time.</p><p>When removing entries, the key rule is to remove only what you added, or what an administrator explicitly gave you responsibility for. When a lease expires or a client releases its address, the server SHOULD delete the matching PTR record. The entity handling A or AAAA records SHOULD delete those records using a request that requires the client's DHCID record to exist. A second request then deletes the whole FQDN, but only if the DHCID record exists and no A or AAAA records remain. If either request fails, the updater MUST NOT delete the FQDN, since the client may have moved and had its records replaced, or an administrator may have changed the data.</p><p>Sites that want one FQDN to hold both A and AAAA records from the same client MUST use DHCPv4 clients and servers that use a DUID as the client identifier, so that both protocols compute the same DHCID value. Otherwise a dual-stack client using older-style DHCPv4 identifiers can have only its A or its AAAA records under one name. Updates to other record types are out of scope.</p>",
+      "eli5": "<p>When you leave, you may only erase your own name tag, never someone else's. And if you use two kinds of mail, you must sign both the same way so people know it is you.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Administrators should be wary of allowing unsecured DNS updates, even in zones not exposed to the global Internet. DHCP clients and servers SHOULD authenticate update requests, for example with TSIG (<a href='/2845/'>RFC 2845</a>). Whether the client or the server updates the name-to-address mapping is a site-local choice that may follow from the security model in use.</p><p>A server that updates on behalf of a client must be sure of the FQDN and the client's identity. DHCP itself has no entity authentication, so servers rarely know a client's identity for certain. The text gives two examples of more trustworthy setups: clients behind a DOCSIS cable modem whose head-end prevents MAC address spoofing, and clients that connect through a PPP network access server that encodes the user's identity in the DHCP client identifier.</p>",
+      "eli5": "<p>Anyone could scribble on the class list, so teachers should check who is writing. The best case is when the school already knows exactly who each kid is.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "ADDING A AND AAAA RECORDS: THE UPDATE LOOP (RFC 4703)",
+      "data": {
+        "lanes": [
+          {
+            "key": "updater",
+            "label": "Updater (client or server)"
+          },
+          {
+            "key": "dns",
+            "label": "DNS server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "updater",
+            "to": "dns",
+            "label": "UPDATE: FQDN must not exist; add A/AAAA + DHCID",
+            "color": "blue",
+            "note": "Initial request."
+          },
+          {
+            "from": "dns",
+            "to": "updater",
+            "label": "YXDOMAIN",
+            "color": "neutral",
+            "note": "The name is already in use."
+          },
+          {
+            "from": "updater",
+            "to": "dns",
+            "label": "UPDATE: FQDN exists and DHCID matches; replace A/AAAA",
+            "color": "blue",
+            "note": "Check that this client owns the name."
+          },
+          {
+            "from": "dns",
+            "to": "updater",
+            "label": "NXRRSET",
+            "color": "neutral",
+            "note": "No DHCID or no match: choose another FQDN or fail."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[2]",
+      "text": "Stapp, M., Lemon, T., and A. Gustafsson, \"A DNS Resource Record (RR) for Encoding Dynamic Host Configuration Protocol (DHCP) Information (DHCID RR)\", RFC 4701, October 2006.",
+      "rfc": 4701
+    },
+    {
+      "number": "[3]",
+      "text": "Vixie, P., Thomson, S., Rekhter, Y., and J. Bound, \"Dynamic Updates in the Domain Name System (DNS UPDATE)\", RFC 2136, April 1997.",
+      "rfc": 2136
+    },
+    {
+      "number": "[4]",
+      "text": "Droms, R., \"Dynamic Host Configuration Protocol\", RFC 2131, March 1997.",
+      "rfc": 2131
+    },
+    {
+      "number": "[5]",
+      "text": "Droms, R., et al., \"Dynamic Host Configuration Protocol for IPv6 (DHCPv6)\", RFC 3315, July 2003.",
+      "rfc": 3315
+    },
+    {
+      "number": "[8]",
+      "text": "Stapp, M., Volz, B., and Y. Rekhter, \"The Dynamic Host Configuration Protocol (DHCP) Client Fully Qualified Domain Name (FQDN) Option\", RFC 4702, October 2006.",
+      "rfc": 4702
+    },
+    {
+      "number": "[9]",
+      "text": "Volz, B., \"The Dynamic Host Configuration Protocol for IPv6 (DHCPv6) Client Fully Qualified Domain Name (FQDN) Option\", RFC 4704, October 2006.",
+      "rfc": 4704
+    },
+    {
+      "number": "[10]",
+      "text": "Wellington, B., \"Secure Domain Name System (DNS) Dynamic Update\", RFC 3007, November 2000.",
+      "rfc": 3007
+    },
+    {
+      "number": "[11]",
+      "text": "Lemon, T. and B. Sommerfeld, \"Node-specific Client Identifiers for Dynamic Host Configuration Protocol Version Four (DHCPv4)\", RFC 4361, February 2006.",
+      "rfc": 4361
+    },
+    {
+      "number": "[13]",
+      "text": "Vixie, P., Gudmundsson, O., Eastlake, D., and B. Wellington, \"Secret Key Transaction Authentication for DNS (TSIG)\", RFC 2845, May 2000.",
+      "rfc": 2845
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-16"
 }
