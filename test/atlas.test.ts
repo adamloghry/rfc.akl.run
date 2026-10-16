@@ -6,6 +6,7 @@ import { areasModel, HASH_FORWARDER, journeysModel, rfcPath, SUGGESTIONS, timeli
 import { buildSite, type Site } from '../src/lib/model';
 import { parseIndex } from '../src/lib/rfc-index';
 import { decode } from '../src/scripts/atlas';
+import { must } from './helpers';
 
 const FIX = path.join(process.cwd(), 'test', 'fixtures');
 const site = buildSite({
@@ -59,7 +60,7 @@ test('timeline: 1969..max year with tooltips', () => {
   assert.equal(t.axis.at(-1), maxYear);
 });
 
-test('atlas decode: state and category from the packed byte', () => {
+test('atlas decode: state (status class) and category from the packed byte', () => {
   const b64 = Buffer.from([0x04 | (3 << 4), 0x00, 0x02 | (15 << 4), 0x05 | (0 << 4)]).toString('base64');
   const d = decode(b64);
   assert.deepEqual(Array.from(d.state), [4, 0, 2, 5]);
@@ -83,6 +84,29 @@ withDist('built index.html: cool palette, site header, inline forwarder in head,
   assert.ok(!built.includes('at-fresh') && !built.includes('at-goal') && !built.includes('at-ladder'));
   assert.ok(!/JUST PUBLISHED|GOAL ·|Coverage report|Follow \(RSS\)/.test(built));
   assert.match(built, /<title>rfc\.akl\.run — the RFCs, explained<\/title>/);
-  assert.match(built, /class="at-legend"[\s\S]*Summary ·/);
+  const legend = must(/class="at-legend"[\s\S]*?<\/div>/.exec(built))[0];
+  for (const label of ['Standard / BCP', 'Informational / Experimental', 'Unknown', 'Historic or obsoleted', 'Not issued or reserved'])
+    assert.ok(legend.includes(label), `legend entry ${label}`);
+  assert.equal((legend.match(/class="at-sw at-sw-/g) || []).length, 4);
+  assert.ok(legend.includes('at-hatch') && !/var\(--cat-|Summary ·|Deep explainer/.test(legend));
   assert.equal((built.match(/class="at-acard"/g) || []).length, 11);
+});
+
+test('the status ramp has four tokens per theme, strongest to faintest, and the --cat-* tokens are gone', () => {
+  const css = fs.readFileSync(path.join(process.cwd(), 'src', 'styles', 'tokens.css'), 'utf8');
+  assert.ok(!css.includes('--cat-'));
+  const light = must(/:root\.pal-cool \{([\s\S]*?)\n\}/.exec(css))[1];
+  const dark = must(/:root\.pal-cool\[data-theme='dark'\] \{([\s\S]*?)\n\}/.exec(css))[1];
+  for (const [name, block] of [
+    ['light', light],
+    ['dark', dark],
+  ] as const) {
+    const vals = ['standard', 'informational', 'unknown', 'historic'].map((k) =>
+      Number(must(new RegExp(`--map-${k}: oklch\\(([\\d.]+) `).exec(block), `${name} --map-${k}`)[1]),
+    );
+    assert.equal(new Set(vals).size, 4, `${name}: distinct steps`);
+    const faintening = vals.every((v, i) => i === 0 || (name === 'light' ? v > (vals[i - 1] ?? 0) : v < (vals[i - 1] ?? 0)));
+    assert.ok(faintening, `${name}: each step is fainter than the one before`);
+    assert.ok(block.includes('--map-dim:') && block.includes('--map-empty:'));
+  }
 });

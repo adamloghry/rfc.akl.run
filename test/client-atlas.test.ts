@@ -13,11 +13,12 @@ const COLS = 200;
 const WIDTH = 2000; // => 10 px cells, so (col, row) <-> pixel maths is easy to read
 
 const STYLE: Record<string, string> = {
-  '--accent': 'feat',
-  '--accent-2': 'basic',
+  '--map-standard': 'standard',
+  '--map-informational': 'informational',
+  '--map-unknown': 'unknown',
+  '--map-historic': 'historic',
   '--map-empty': 'empty',
-  '--map-feat-dim': 'featDim',
-  '--map-basic-dim': 'basicDim',
+  '--map-dim': 'dim',
   '--line-strong': 'line',
   '--ink': 'ink',
 };
@@ -112,7 +113,7 @@ async function started(extra: Record<string, unknown> = {}) {
 }
 
 describe('decode', () => {
-  test('splits each byte into state (low 3 bits) and category (high 4 bits)', () => {
+  test('splits each byte into state (low 3 bits, status class) and category (high 4 bits)', () => {
     const d = decode(Buffer.from([0x04 | (3 << 4), 0x00, 0x02 | (15 << 4), 0x05 | (11 << 4)]).toString('base64'));
     assert.deepEqual(Array.from(d.state), [4, 0, 2, 5]);
     assert.deepEqual(Array.from(d.cat), [3, 0, 15, 11]);
@@ -148,14 +149,21 @@ describe('drawing the map', () => {
     expect(at(1)).toMatchObject({ x: 0, y: 0 });
   });
 
-  test('fills use the theme colours by tier: explainer/interactive, summary, index', async () => {
+  test('fills use the status ramp: standard/BCP, informational, unknown, historic or obsoleted', async () => {
     await started();
     const style = (n: number) =>
       must(drawing.fills.find((f) => f.x === ((n - 1) % COLS) * 10 && f.y === Math.floor((n - 1) / COLS) * 10)).style;
-    expect(style(903)).toBe('feat');
-    expect(style(826)).toBe('feat');
-    expect(style(5952)).toBe('basic');
-    expect(style(1)).toBe('empty');
+    expect([903, 5952, 2119].map(style)).toEqual(['standard', 'standard', 'standard']);
+    expect(style(10055)).toBe('informational');
+    expect(style(748)).toBe('unknown');
+    expect(style(10)).toBe('historic'); // obsoleted by RFC 16, whatever status it was published with
+    expect(new Set([903, 748, 10].map((n) => must(site.rfcs.get(n)).category)).size).toBeGreaterThan(1); // colour ignores the area
+  });
+
+  test('a ramp step without a colour token falls back to the neutral fill', async () => {
+    document.documentElement.style.removeProperty('--map-standard');
+    await started();
+    expect(must(drawing.fills.find((f) => f.x === 1020 && f.y === 40)).style).toBe('empty');
   });
 
   test('a hovered cell gets an ink outline', async () => {
@@ -222,23 +230,26 @@ describe('hover caption', () => {
     await started();
     canvas().dispatchEvent(mouseAt(903));
     expect(label()).toBe('RFC 903');
-    expect(detail()).toContain('index page');
+    expect(detail()).toBe('— rfc.akl.run/903/');
     await waitFor(() => label() !== 'RFC 903');
     expect(label()).toBe('RFC 903 · RARP');
-    expect(detail()).toBe('— deep explainer · Core Protocols · 1984');
+    expect(detail()).toBe('— Internet Standard · Core Protocols · 1984');
     canvas().dispatchEvent(new MouseEvent('mouseleave'));
     expect(label()).toBe(idleLabel);
     expect(detail()).toBe(idleDetail);
   });
 
-  test('summary pages are described as summaries; index pages keep the RFC Editor description', async () => {
+  test('the caption reads title — status · area · year; obsoleted RFCs say so', async () => {
     await started();
     canvas().dispatchEvent(mouseAt(5952));
     await waitFor(() => label() !== 'RFC 5952');
-    expect(detail()).toMatch(/^— summary page · Core Protocols · 2010/);
+    expect(detail()).toMatch(/^— Proposed Standard · Core Protocols · 2010$/);
     canvas().dispatchEvent(mouseAt(1));
     await waitFor(() => label() === 'RFC 1 · Host Software');
-    expect(detail()).toMatch(/^— index page: Host Software, authors, status and lineage/);
+    expect(detail()).toBe('— Unknown · Meta & Culture · 1969');
+    canvas().dispatchEvent(mouseAt(10));
+    await waitFor(() => label() !== 'RFC 10' && label() !== 'RFC 1 · Host Software');
+    expect(detail()).toBe('— Unknown, obsoleted · Meta & Culture · 1969');
   });
 
   test('never-issued and reserved numbers are explained; no shard is fetched for them', async () => {
@@ -402,17 +413,18 @@ describe('area chips', () => {
     expect(chips.filter((c) => c.getAttribute('aria-pressed') === 'true').map((c) => c.getAttribute('data-cat'))).toEqual(['core']);
     const style = (n: number) =>
       must(drawing.fills.find((f) => f.x === ((n - 1) % COLS) * 10 && f.y === Math.floor((n - 1) / COLS) * 10)).style;
-    expect(style(903)).toBe('feat'); // core
-    expect(style(748)).toBe('empty'); // index tier is never dimmed
-    expect(style(5952)).toBe('basic'); // core summary
-    // an explainer in another category would be featDim; summaries basicDim
+    expect(style(903)).toBe('standard');
+    expect(style(5952)).toBe('standard');
+    const other = site.rfcs.get(748);
+    expect(other?.category).not.toBe('core');
+    expect(style(748)).toBe('dim'); // other areas are dimmed whatever their status
     drawing.reset();
     click(must(chips.find((c) => c.getAttribute('data-cat') === 'dns')));
-    expect(style(903)).toBe('featDim');
-    expect(style(5952)).toBe('basicDim');
+    expect(style(903)).toBe('dim');
+    expect(style(5952)).toBe('dim');
     drawing.reset();
     click(must(chips.find((c) => c.getAttribute('data-cat') === '')));
-    expect(style(903)).toBe('feat');
+    expect(style(903)).toBe('standard');
     expect(chips.filter((c) => c.getAttribute('aria-pressed') === 'true').map((c) => c.getAttribute('data-cat'))).toEqual(['']);
   });
 
@@ -422,7 +434,7 @@ describe('area chips', () => {
     chip.setAttribute('data-cat', 'not-a-category');
     drawing.reset();
     click(chip);
-    expect(must(drawing.fills.find((f) => f.x === 1020 && f.y === 40)).style).toBe('feat');
+    expect(must(drawing.fills.find((f) => f.x === 1020 && f.y === 40)).style).toBe('standard');
   });
 });
 

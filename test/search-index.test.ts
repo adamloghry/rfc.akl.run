@@ -107,6 +107,21 @@ withCore('RFC 903 is found by name, title words, question text and number', () =
   assert.ok(query('diskless').some((h) => h.href === '/903/'));
 });
 
+withCore('an RFC is found through a word that appears only in its question (questions.json no longer lists them)', () => {
+  const s2 = { ...site, rfcs: new Map(site.rfcs) };
+  const r = must(s2.rfcs.get(903));
+  s2.rfcs.set(903, { ...r, content: { ...r.content, questions: ['why does zyxwvuq happen'] } });
+  const b2 = idx.buildSearchIndex(s2);
+  const m = new Map<string, unknown>(b2.files.map((f) => [f.path, JSON.parse(f.json)]));
+  const d2 = m.get('data/search/docs.json') as core.DocRowIn[];
+  const pr = m.get('data/search/prefix.json') as Record<string, string[]>;
+  const p = core.plan('zyxwvuq', pr);
+  const postings: core.Postings = {};
+  for (const k of core.shardsOf(p, meta.shards)) Object.assign(postings, m.get(`data/search/t-${String(k).padStart(2, '0')}.json`));
+  const hits = core.rank(p, postings, 10).map((x) => core.docRow(must(d2[x.id])));
+  assert.equal(must(hits[0]).href, '/903/');
+});
+
 withCore('journeys are found by their questions', () => {
   const hits = query('diskless computer ip address');
   assert.ok(hits.some((h) => h.href === '/journeys/diskless-boot/' && h.label === 'JOURNEY' && h.tag === 'JOURNEY'));

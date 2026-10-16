@@ -17,12 +17,11 @@ import {
 type Cov = { max: number; states: Uint8Array };
 type CoverageJson = { max: number; cells: string };
 type SearchMeta = { shards: number };
-/** Titles shard (data/titles/<k>.json): RFC number -> [short title | null, title, year, status]. */
-type TitlesShard = Record<string, [string | null, string, number?, string?]>;
+/** Titles shard (data/titles/<k>.json): RFC number -> [short title | null, title, year, status, tier]. */
+type TitlesShard = Record<string, [string | null, string, number?, string?, string?]>;
 type FullText = { shards: number; docs: DocRowIn[]; prefix: Record<string, string[]> };
 type SearchInput = HTMLInputElement & { fillQuery?: (q: string) => void };
 
-const TIERS = ['NOT ISSUED', 'RESERVED', 'INDEX', 'SUMMARY', 'EXPLAINER', 'EXPLAINER'];
 const DEBOUNCE_MS = 80;
 const MAX_ROWS = 6;
 
@@ -97,9 +96,10 @@ function createLoader() {
 
   async function numberRow(n: number, cov: Cov | null): Promise<Row> {
     const row: Row = { label: `RFC ${n}`, title: '', tag: '', tier: '', href: `/${n}/` };
+    // coverage.json state bits only distinguish not-issued (0) and reserved (1) from issued (2+); the tier comes from the titles shard.
     const st = cov ? (cov.states[n - 1] ?? 2) : 2;
-    row.tag = TIERS[st] || 'INDEX';
-    row.tier = st >= 4 ? 'explainer' : st === 3 ? 'summary' : 'index';
+    row.tag = 'INDEX';
+    row.tier = 'index';
     if (st === 0) {
       row.title = 'never issued';
       row.tag = '';
@@ -113,7 +113,13 @@ function createLoader() {
     try {
       const shard = await getJSON<TitlesShard>(`/data/titles/${Math.floor((n - 1) / 1000)}.json`);
       const t = shard[String(n)];
-      if (t) row.title = t[0] ? `${t[0]}: ${t[1]}` : t[1];
+      if (t) {
+        row.title = t[0] ? `${t[0]}: ${t[1]}` : t[1];
+        if (t[4]) {
+          row.tier = t[4] === 'interactive' ? 'explainer' : t[4];
+          row.tag = row.tier.toUpperCase();
+        }
+      }
     } catch {
       /* title unavailable: show the bare number row */
     }

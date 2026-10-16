@@ -27,7 +27,38 @@ test.describe('Atlas (home)', () => {
     const body = await page.locator('body').innerText();
     expect(body).not.toMatch(/GOAL ·|JUST PUBLISHED|Coverage report|Follow \(RSS\)|Contribute an explainer|github/i);
     await expect(page.locator('a[href*="feed.xml"], a[href*="/contribute"], a[href*="/coverage"]')).toHaveCount(0);
-    await expect(page.locator('.at-legend')).toContainText('Summary');
+    const legend = page.locator('.at-legend');
+    for (const label of ['Standard / BCP', 'Informational / Experimental', 'Unknown', 'Historic or obsoleted', 'Not issued or reserved'])
+      await expect(legend).toContainText(label);
+    await expect(legend.locator('i')).toHaveCount(5);
+    await expect(legend).not.toContainText('Summary');
+  });
+
+  test('cells are shaded by status on a single-hue ramp in both themes, and an area chip dims the rest', async ({ page }) => {
+    await page.goto('/');
+    const swatches = () =>
+      page.locator('.at-legend i:not(.at-hatch)').evaluateAll((els) => els.map((e) => getComputedStyle(e).backgroundColor));
+    const light = await swatches();
+    expect(light).toHaveLength(4);
+    expect(new Set(light).size).toBe(4);
+    await page.locator('.theme-toggle').first().click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    const dark = await swatches();
+    expect(new Set(dark).size).toBe(4);
+    expect(dark).not.toEqual(light);
+    const canvas = page.locator('#atlas-map');
+    await expect.poll(() => canvas.evaluate((c: HTMLCanvasElement) => c.height)).toBeGreaterThan(0);
+    const colours = () =>
+      canvas.evaluate((c: HTMLCanvasElement) => {
+        const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+        const seen = new Set<number>();
+        for (let i = 0; i < d.length; i += 4) if (d[i + 3] === 255) seen.add((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]);
+        return seen.size;
+      });
+    await expect.poll(colours).toBeGreaterThanOrEqual(4); // the ramp steps are all present
+    await expect.poll(colours).toBeLessThanOrEqual(6); // a calm ramp, not one hue per area
+    await page.getByRole('button', { name: 'DNS', exact: true }).click();
+    await expect.poll(colours).toBeLessThanOrEqual(6); // the chosen area keeps its ramp, the rest is dimmed
   });
 
   test('hover shows a caption and clicking a cell navigates to that RFC', async ({ page }) => {

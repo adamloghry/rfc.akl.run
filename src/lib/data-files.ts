@@ -3,11 +3,27 @@
  * questions.json, sitemap.xml, robots.txt. Astro endpoints call these.
  */
 import { createHash } from 'node:crypto';
+import { glossaryModel } from './glossary';
 import type { Site } from './model';
 import { buildSearchIndex } from './search-index';
 
 export const ORIGIN = 'https://rfc.akl.run';
-export const STATE: Record<string, number> = { 'not-issued': 0, reserved: 1, index: 2, summary: 3, explainer: 4, interactive: 5 };
+/**
+ * coverage.json cell state (low 3 bits of a cell byte): 0 not issued, 1 reserved, then the status class
+ * that drives the Atlas ramp, faintest to strongest: 2 historic or obsoleted, 3 unknown,
+ * 4 informational or experimental, 5 standard or BCP.
+ */
+export const STATE: Record<string, number> = { 'not-issued': 0, reserved: 1, historic: 2, unknown: 3, informational: 4, standard: 5 };
+
+const STANDARD_TRACK = new Set(['internet-standard', 'draft-standard', 'proposed-standard', 'bcp']);
+
+/** Status class of an issued RFC (a key of STATE). Obsoleted or Historic wins over the status it was published with. */
+export function statusClass(r: { status: string; obsoletedBy: readonly number[] }): 'historic' | 'unknown' | 'informational' | 'standard' {
+  if (r.obsoletedBy.length || r.status === 'historic') return 'historic';
+  if (STANDARD_TRACK.has(r.status)) return 'standard';
+  if (r.status === 'informational' || r.status === 'experimental') return 'informational';
+  return 'unknown';
+}
 
 export function xmlEsc(s: unknown): string {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -23,11 +39,11 @@ export function coverageJson(site: Site): string {
     let state: number,
       cat = 15;
     if (r) {
-      state = STATE[r.tier];
+      state = STATE[statusClass(r)];
       const i = catKeys.indexOf(r.category);
       cat = i < 0 ? 15 : i;
     } else state = site.notIssued.has(n) ? STATE['not-issued'] : STATE.reserved;
-    cells[n - 1] = (cat << 4) | state; // low 3 bits state, high 4 bits category (15 = none)
+    cells[n - 1] = (cat << 4) | state; // low 3 bits state (status class), high 4 bits category (15 = none)
   }
   return JSON.stringify({
     max: site.max,
@@ -39,27 +55,27 @@ export function coverageJson(site: Site): string {
 
 /** Shard key k = floor((n-1)/1000) → JSON. */
 export function titleShards(site: Site): Record<string, string> {
-  const titles: Record<number, Record<number, [string | null, string, number, string]>> = {};
+  const titles: Record<number, Record<number, [string | null, string, number, string, string]>> = {};
   for (const r of site.rfcs.values()) {
     const k = Math.floor((r.number - 1) / 1000);
     const shard = titles[k] ?? {};
     titles[k] = shard;
-    shard[r.number] = [r.shortTitle || null, r.title, r.year, r.status];
+    shard[r.number] = [r.shortTitle || null, r.title, r.year, r.status, r.tier];
   }
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(titles)) out[k] = JSON.stringify(v);
   return out;
 }
 
+/**
+ * Curated questions only (journeys). Per-RFC questions are not listed here: the sharded search index
+ * already carries them (search-index.ts weights them as W.question), so listing them again would grow
+ * this eagerly-loaded file with every explainer.
+ */
 export function questionsJson(site: Site): string {
   const questions: { q: string; href: string; label: string; title: string }[] = [];
   for (const j of site.journeys) {
     for (const q of j.questions || []) questions.push({ q, href: `/journeys/${j.slug}/`, label: 'JOURNEY', title: j.title });
-  }
-  for (const r of site.rfcs.values()) {
-    if (r.tier !== 'explainer' && r.tier !== 'interactive') continue;
-    const t = r.shortTitle ? `${r.shortTitle}: ${r.title}` : r.title;
-    for (const q of r.content?.questions || []) questions.push({ q, href: r.url, label: `RFC ${r.number}`, title: t });
   }
   return JSON.stringify(questions);
 }
@@ -94,6 +110,7 @@ export function dataFiles(site: Site): Record<string, string> {
 /** Sitemap URL paths: '/', every issued RFC, area pages, static pages and journeys; numeric-aware order. */
 export function sitemapUrls(site: Site): string[] {
   const urls = new Set<string>(['/', '/areas/', '/glossary/', '/graph/', '/journeys/']);
+  for (const g of glossaryModel(site).pages) urls.add(`/glossary/${g.slug}/`);
   for (const n of site.rfcs.keys()) urls.add(`/${n}/`);
   for (const c of site.categories) urls.add(`/areas/${c.key}/`);
   for (const j of site.journeys) urls.add(`/journeys/${j.slug}/`);

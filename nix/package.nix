@@ -17,6 +17,8 @@ buildNpmPackage (
     inherit (common) src npmDepsHash;
     nodejs = nodejs_22;
     npmBuildScript = "build";
+    # ~10k pages (soon all explainers): the Astro build needs more than Node's default heap.
+    NODE_OPTIONS = "--max-old-space-size=6144";
     doCheck = true;
     checkPhase = ''
       runHook preCheck

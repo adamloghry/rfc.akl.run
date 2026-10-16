@@ -17,12 +17,13 @@ const ALLOWED = [
   'components/rfc/RightRail.astro :: c.today',
   'components/rfc/IndexTier.astro :: summary',
   'components/rfc/IndexTier.astro :: eli5',
-  "pages/glossary/index.astro :: t.definition || ''",
+  'components/pages/GlossaryLetter.astro :: t.definition',
   // generated / static / escaped by their builders
   'components/rfc/MetaList.astro :: factValueHtml(f.value, site)',
   'components/rfc/Datasheet.astro :: NOSCRIPT',
   'components/viz/SequenceSim.astro :: safeJson',
   'layouts/BaseLayout.astro :: PREPAINT',
+  'pages/glossary/index.astro :: glossaryForwarder(exceptions)',
   'pages/index.astro :: HASH_FORWARDER',
 ].sort();
 

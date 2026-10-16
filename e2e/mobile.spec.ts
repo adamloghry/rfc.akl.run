@@ -1,7 +1,7 @@
 /** Accessibility smoke at phone width (390 px). Runs in the "mobile" project. */
 import { expect, test } from './fixtures';
 
-for (const p of ['/', '/903/', '/5952/', '/glossary/']) {
+for (const p of ['/', '/903/', '/5952/', '/glossary/', '/glossary/m/']) {
   test.describe(p, () => {
     test('no horizontal scrollbar at 390px', async ({ page }) => {
       await page.goto(p);

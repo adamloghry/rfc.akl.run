@@ -1,7 +1,7 @@
 /* rfc.akl.run Atlas coverage map: 200-column canvas, one cell per RFC number. */
 import { disposer, listen, nav, ownerDoc, qs, qsa } from './dom';
 
-/** byte per number: low 3 bits state, high 4 bits category index (15 = none) */
+/** byte per number: low 3 bits state (0 not issued, 1 reserved, 2-5 status class, faintest to strongest), high 4 bits category index (15 = none) */
 export function decode(b64: string): Decoded {
   const bin = atob(b64),
     n = bin.length;
@@ -17,10 +17,22 @@ export function decode(b64: string): Decoded {
 
 type Decoded = { state: Uint8Array; cat: Uint8Array };
 type CoverageJson = { max: number; categories: string[]; cells: string };
-/** Titles shard (data/titles/<k>.json): RFC number -> [short title | null, title, year, status]. */
-type TitlesShard = Record<string, [string | null, string, number, string]>;
+/** Titles shard (data/titles/<k>.json): RFC number -> [short title | null, title, year, status, tier]. */
+type TitlesShard = Record<string, [string | null, string, number, string, string?]>;
 
 const COLS = 200;
+/** Ramp step for state 2..5: historic or obsoleted, unknown, informational or experimental, standard or BCP. */
+const RAMP = ['historic', 'unknown', 'informational', 'standard'] as const;
+const STATUS_LABEL: Record<string, string> = {
+  'internet-standard': 'Internet Standard',
+  'draft-standard': 'Draft Standard',
+  'proposed-standard': 'Proposed Standard',
+  bcp: 'BCP',
+  informational: 'Informational',
+  experimental: 'Experimental',
+  historic: 'Historic',
+  unknown: 'Unknown',
+};
 
 /** Wire the coverage map under `root`. No-op without #atlas-map. Returns a function that removes the window listeners. */
 export function init(root: ParentNode = document): () => void {
@@ -67,14 +79,13 @@ export function init(root: ParentNode = document): () => void {
     x.setTransform(dpr, 0, 0, dpr, 0, 0);
     x.clearRect(0, 0, w, h);
     const col = {
-      feat: css('--accent'),
-      basic: css('--accent-2'),
       empty: css('--map-empty'),
-      featDim: css('--map-feat-dim'),
-      basicDim: css('--map-basic-dim'),
+      dim: css('--map-dim'),
       line: css('--line-strong'),
       ink: css('--ink'),
     };
+    // The cell shade encodes the status class (state 2..5); the area chips dim the cells outside the chosen area.
+    const ramp = RAMP.map((k) => css(`--map-${k}`) || col.empty);
     const size = cell - gap;
     const filterIdx = filterKey ? cats.indexOf(filterKey) : -1;
     x.beginPath();
@@ -94,7 +105,7 @@ export function init(root: ParentNode = document): () => void {
       const s = data.state[j] ?? 0;
       if (s < 2) continue;
       const dim = filterIdx >= 0 && data.cat[j] !== filterIdx;
-      x.fillStyle = s >= 4 ? (dim ? col.featDim : col.feat) : s === 3 ? (dim ? col.basicDim : col.basic) : col.empty;
+      x.fillStyle = dim ? col.dim : (ramp[s - 2] ?? col.empty);
       x.fillRect((j % COLS) * cell, Math.floor(j / COLS) * cell, size, size);
     }
     const sel = hover || (kbd ? cursor : 0);
@@ -154,17 +165,21 @@ export function init(root: ParentNode = document): () => void {
       return;
     }
     capLabel.textContent = `RFC ${n}`;
-    capDetail.textContent = `— index page: title, authors, status and lineage from the RFC Editor · rfc.akl.run/${n}/`;
+    capDetail.textContent = `— rfc.akl.run/${n}/`;
     void shard(n).then((sh) => {
       if (hover !== n && !(kbd && cursor === n && !hover)) return;
       const t = sh[String(n)];
       if (!t) return;
       const name = t[0] || t[1];
       const catKey = cats[d.cat[i] ?? 15];
-      const tier = st >= 4 ? 'deep explainer' : st === 3 ? 'summary page' : 'index page';
+      const status = STATUS_LABEL[t[3]] || t[3];
+      const parts = [
+        st === 2 && t[3] !== 'historic' ? `${status}, obsoleted` : status,
+        (catKey && NAMES[catKey]) || catKey || '',
+        String(t[2]),
+      ];
       capLabel.textContent = `RFC ${n} · ${name}`;
-      if (st >= 3) capDetail.textContent = `— ${tier} · ${(catKey && NAMES[catKey]) || catKey || ''} · ${t[2]}`;
-      else capDetail.textContent = `— index page: ${t[1]}, authors, status and lineage from the RFC Editor · rfc.akl.run/${n}/`;
+      capDetail.textContent = `— ${parts.filter(Boolean).join(' · ')}`;
     });
   }
 

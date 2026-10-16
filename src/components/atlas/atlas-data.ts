@@ -1,4 +1,5 @@
 // Pure view-model helpers for the Atlas home sections (unit-tested in test/atlas.test.ts).
+import { statusClass } from '../../lib/data-files';
 import type { Site } from '../../lib/model';
 
 export const SUGGESTIONS = ['How does email get delivered?', 'Why is the padlock there?', 'TLS 1.3', '2119'];
@@ -64,4 +65,21 @@ export function timelineModel(site: Site) {
     cols.push({ tip, hb: w(v.b, maxY), hf: w(v.f, maxY) });
   }
   return { cols, axis: [1969, 1980, 1990, 2000, 2010, maxYear] };
+}
+
+/** Legend model: the four status-ramp steps (strongest first) with RFC counts, from the same classifier as coverage.json. */
+export const RAMP = [
+  { cls: 'standard', label: 'Standard / BCP' },
+  { cls: 'informational', label: 'Informational / Experimental' },
+  { cls: 'unknown', label: 'Unknown' },
+  { cls: 'historic', label: 'Historic or obsoleted' },
+] as const;
+
+export function rampModel(site: Site) {
+  const counts: Record<string, number> = {};
+  for (const r of site.rfcs.values()) {
+    const k = statusClass(r);
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  return RAMP.map((s) => ({ ...s, count: counts[s.cls] || 0 }));
 }

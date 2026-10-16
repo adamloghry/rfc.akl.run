@@ -243,3 +243,19 @@ test('inline <style> elements must be covered by the _headers CSP style-src', ()
   assert.equal(bad.errors.length, 1);
   assert.match(bad.errors[0], /inline style 'sha256-.*' is not allowed/);
 });
+
+test('budgets: data/questions.json over 30 KB gz is an error; glossary letter pages get the 200 KB budget', () => {
+  const noise = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => `${Math.random().toString(36)}${i}`));
+  const small = checkDist(dist({ 'data/questions.json': noise(100) }));
+  assert.deepEqual(small.errors, []);
+  const big = checkDist(dist({ 'data/questions.json': noise(8000) }));
+  assert.ok(
+    big.errors.some((e) => /^data\/questions\.json: gzip .* exceeds 30 KB/.test(e)),
+    JSON.stringify(big.errors),
+  );
+  // a 60 KB+ letter page is fine (glossary budget), but the same size on an unlisted page is not
+  const body = Array.from({ length: 12000 }, (_, i) => `<p>${Math.random().toString(36)}${i}</p>`).join('');
+  assert.ok(zlibGz(body) > 60 * 1024 && zlibGz(body) < 200 * 1024);
+  assert.deepEqual(checkDist(dist({ 'glossary/m/index.html': `<!doctype html><body>${body}` })).errors, []);
+  assert.equal(checkDist(dist({ 'other/index.html': `<!doctype html><body>${body}` })).errors.length, 1);
+});

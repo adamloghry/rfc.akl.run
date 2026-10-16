@@ -91,12 +91,12 @@ describe('Datasheet', () => {
   test('right rail: eli5, glossary, journeys; unknown glossary ids skipped', async () => {
     const h = await ds(r903);
     expect(h).toContain('A computer shouts its name tag number');
-    expect(h).toContain('href="/glossary/#mac-address"');
+    expect(h).toContain('href="/glossary/m/#mac-address"');
     expect(h).toContain('MAC address');
     expect(h).toContain('href="/journeys/diskless-boot/"');
     expect(await ds(withContent(r903, { eli5: undefined }))).not.toContain('class="pullquote"');
     const g = await ds(withContent(r903, { glossary: ['mac-address', 'no-such-term'] }));
-    expect(g).toContain('href="/glossary/#mac-address"');
+    expect(g).toContain('href="/glossary/m/#mac-address"');
     expect(g).not.toContain('no-such-term');
   });
 

@@ -32,7 +32,7 @@ test('diff: numbers beyond old max are added', () => {
 
 test('diff: state change reports from/to labels', () => {
   const r = diff(cov([b(0, 2), b(0, 3)]), cov([b(0, 2), b(0, 4)]));
-  assert.deepEqual(r.changed, [{ n: 2, from: 'summary', to: 'explainer' }]);
+  assert.deepEqual(r.changed, [{ n: 2, from: 'unknown status', to: 'informational or experimental' }]);
 });
 
 test('diff: category-only change is reported too', () => {
@@ -49,8 +49,8 @@ test('diff: null old coverage treats everything as added', () => {
 
 test('render: markdown mentions counts and is non-empty when no changes', () => {
   assert.match(render({ added: [], changed: [] }), /No coverage changes/);
-  const md = render({ added: [5], changed: [{ n: 3, from: 'index', to: 'summary' }] });
+  const md = render({ added: [5], changed: [{ n: 3, from: 'historic or obsoleted', to: 'unknown status' }] });
   assert.match(md, /RFC 5/);
   assert.match(md, /RFC 3/);
-  assert.match(md, /index/);
+  assert.match(md, /historic or obsoleted/);
 });

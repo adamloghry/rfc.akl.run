@@ -149,6 +149,17 @@ describe('number jump', () => {
     expect(el('.sr-tag', b).classList.contains('is-index')).toBe(true);
   });
 
+  test('regression: the tier tag comes from the titles shard, not the coverage status bits (standards-track summary vs explainer)', async () => {
+    stubFetch(routes);
+    dispose = init();
+    expect(must(site.rfcs.get(5952)).status).toBe('proposed-standard'); // strongest status class, still only a summary
+    await search(header(), '5952');
+    expect(rowText(must(rows(header())[0])).tag).toBe('SUMMARY');
+    const explainer = must([...site.rfcs.values()].find((r) => r.tier === 'explainer')).number;
+    await search(header(), String(explainer));
+    expect(rowText(must(rows(header())[0])).tag).toBe('EXPLAINER');
+  });
+
   test('never-issued and reserved numbers say so and carry no tag', async () => {
     stubFetch(routes);
     dispose = init();

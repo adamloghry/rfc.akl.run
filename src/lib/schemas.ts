@@ -94,6 +94,8 @@ export const rfcSchema = z
         source: z.enum(['human', 'llm-draft']),
         model: z.string().optional(),
         drafted: z.string().optional(),
+        promptVersion: z.string().optional(),
+        schemaVersion: z.string().optional(),
         reviewedBy: z.string().nullable().optional(),
       })
       .optional(),
