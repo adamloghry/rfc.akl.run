@@ -1,0 +1,278 @@
+{
+  "number": 8169,
+  "shortTitle": "MPLS RTM",
+  "category": "routing",
+  "categoryReviewed": false,
+  "summary": "<p>Specifies a new Generic Associated Channel for Residence Time Measurement in MPLS. Residence time is the variable part of delay for timing messages, and knowing it lets time protocols such as PTP compute delay more accurately.</p>",
+  "eli5": {
+    "summary": "<p>Imagine timing how long a package sits in each post office. That lets you work out the true travel time much more precisely.</p>"
+  },
+  "questions": [
+    "mpls residence time measurement",
+    "ptp over mpls timing",
+    "what is residence time measurement",
+    "how does rtm work in mpls",
+    "what is the rtm g-ach",
+    "what is the scratch pad field in rtm"
+  ],
+  "tags": [
+    "MPLS",
+    "Time Sync",
+    "OAM"
+  ],
+  "subtitle": "A way for MPLS routers to add up how long timing packets sit inside them, so clocks can sync more accurately.",
+  "tldr": {
+    "problem": "Time synchronization protocols such as PTP are thrown off by the variable time a timing packet spends inside each router on an MPLS path.",
+    "mechanism": "A new Generic Associated Channel carries the timing packet plus an 8-octet Scratch Pad that each RTM-capable node adds its measured residence time to, using RSVP-TE signaling and TTL expiry to hop between those nodes.",
+    "outcome": "The egress node uses the accumulated value to correct the PTP correctionField, making the transit nodes effectively transparent to the clock protocol.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RTM G-ACh value",
+      "value": "0x000F"
+    },
+    {
+      "label": "Scratch Pad size",
+      "value": "8 octets"
+    },
+    {
+      "label": "Scratch Pad unit",
+      "value": "nanoseconds x 2^16, 64-bit signed"
+    },
+    {
+      "label": "PTP sub-TLV Length",
+      "value": "20"
+    },
+    {
+      "label": "Port ID size",
+      "value": "10 octets"
+    },
+    {
+      "label": "Fallback TTL",
+      "value": "255"
+    }
+  ],
+  "today": "<p>RFC 8169 is a Proposed Standard published in May 2017. The unit metadata shows no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "mpls",
+    "ttl",
+    "label-switching-router",
+    "jitter",
+    "bgp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem of Residence Time",
+      "content": "<p>Time synchronization protocols such as NTPv4 and PTPv2 send timing messages across a network to synchronize clocks. The cumulative time such a message spends passing through the nodes on its path is called <strong>residence time</strong>. For each node it is the difference between the time of receipt at an ingress interface and the time of transmission from an egress interface, and measuring it improves clock accuracy.</p><p>This RFC defines a new Generic Associated Channel (G-ACh) value and an associated Residence Time Measurement (RTM) message to measure residence time over a Label Switched Path (LSP) in an MPLS network. It describes RTM over an LSP signaled with RSVP-TE. Using LDP-signaled LSPs, and comparison with alternatives such as TIMING-OVER-MPLS, are out of scope.</p><p>Delay measurement as in <a href='/rfc6374'>RFC 6374</a> gives end-to-end propagation delay but is insufficient for PTP, which needs residence time accumulated in the correctionField of the event message (one-step clock) or of a follow-up message (two-step clock).</p>",
+      "eli5": "<p>Waiting time inside each router changes from packet to packet, which confuses clocks. This RFC adds a way to measure those waits and take them out.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "One-Step and Two-Step Operation",
+      "content": "<p>In <strong>one-step</strong> mode the egress interface updates the correctionField of the original event message. In <strong>two-step</strong> mode the update goes into a subsequent follow-up message. A node working in two-step mode must mark the original message to say a follow-up is coming and create a follow-up message that carries the initial residence time.</p><p>In RTM this is signaled with the S bit in the Flags field of the PTP sub-TLV. A two-step egress interface that sees the S bit clear MUST set it and create a follow-up RTM message. If it is already set, the node MUST wait, for a reasonably bounded time, for the matching follow-up (same originator and sequence number) and update its Scratch Pad. A one-step-capable node MAY work in either mode, but MUST NOT update both the original and the follow-up message.</p><p>In practice, an RTM node in two-step mode behaves like a two-step transparent clock. A node that supports RTM MUST be able to act in two-step mode and MAY also support one-step mode.</p>",
+      "eli5": "<p>One-step means writing the waiting time directly on the letter. Two-step means mailing a second note afterwards with the number, and everyone must wait for that note.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The RTM Message",
+      "content": "<p>RTM messages use the G-ACh from <a href='/rfc5586'>RFC 5586</a> and <a href='/rfc6423'>RFC 6423</a>, which transports OAM and other control messages over an LSP. After the four-octet G-ACh header come a <strong>Scratch Pad</strong>, a Type, a Length and an optional Value.</p><p>The RTM G-ACh value is <code>0x000F</code>. The Scratch Pad is 8 octets: a 64-bit signed integer giving residence time in nanoseconds multiplied by 2<sup>16</sup>. The first RTM-capable node MUST initialize it, and each later one adds its own time. The Type says what timing packet is in the Value, for example NTP or PTP, and the TLV MUST be present even if the Value is empty.</p><p>For PTP, a PTP sub-TLV (Type 1, Length MUST be 20) precedes the carried packet. It holds the S bit, the PTPType (the PTPv2 messageType), a 10-octet Port ID and a Sequence ID. Together PTPType, Port ID and Sequence ID identify the message, which matters for two-step mode. The timing packet may be authenticated or encrypted and still pass unchanged, since only the Scratch Pad is updated.</p>",
+      "eli5": "<p>The message is an envelope with a small notepad on the front. Every stop adds its waiting time to the notepad but never opens the letter inside.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Control Plane: Capability and Signaling",
+      "content": "<p>RTM relies on TTL expiry to deliver an RTM packet from one RTM-capable interface to the next, so a node must be able to compute a TTL that expires at the next such node. Capability belongs to a pair of interfaces: the ingress records arrival time and the egress, which decides one-step or two-step ability, determines departure time.</p><p>Capability is advertised per link in a sub-TLV with a 3-bit field: <code>0b001</code> for one-step, <code>0b010</code> for two-step, and <code>0b100</code> reserved. It is assigned Type 5 in OSPFv2, Type 40 in IS-IS and Type 1105 in BGP-LS. For OSPFv3, details are left for further study.</p><p>With RSVP-TE, the ingress node checks that the egress advertises RTM, then puts an LSP_ATTRIBUTES object with the RTM_SET Attribute Flag in its Path message. The egress replies with an RTM_SET TLV in the Resv message, and every RTM-capable node adds its address to it, producing an ordered list from egress to ingress. Each node uses this list with the Record Route Object to compute the TTL to the next RTM node, or 255 if no match is found, setting the I bit in that case. Duplicate or missing TLVs make LSP setup fail with a ResvErr. RTM SHOULD NOT be used if the RRO may be incomplete.</p>",
+      "eli5": "<p>Before sending, the sender asks along the route which stops can time packets. Each helpful stop signs a list, and the sender sets the packet's life so it ends at the next helpful stop.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5",
+      "title": "Data Plane Behavior",
+      "content": "<p>Once the LSP is up, the ingress node MAY send RTM packets. Each has its Scratch Pad initialized and its TTL set to expire at the next RTM-capable node. Each such node records the time the packet arrives at its ingress interface and the time it leaves its egress interface, as close to the physical layer as possible to avoid hiding jitter that should count as residence time.</p><p>In one-step operation the difference is added to the Scratch Pad while sending. In two-step operation it is computed later and applied to the follow-up message. The last RTM-capable node MAY use the Scratch Pad value to correct time, for example by updating the PTP correctionField when it is a boundary clock.</p><p>The RFC notes that a common free-running clock for the interfaces may suffice: 4.6 ppm accuracy gives a 4.6 nanosecond error for a residence time of about 1 millisecond. It cites applications satisfied with 1.5 microseconds. The approach fits PTP networks using the delay request-response mechanism, where RTM nodes act as end-to-end transparent clocks.</p>",
+      "eli5": "<p>Each stop notes the minute the letter came in and the minute it left, and adds the difference to the notepad. The last stop uses the total to fix its clock.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>RTM-supporting routers face the same security considerations as <a href='/rfc4385'>RFC 4385</a> and <a href='/rfc5085'>RFC 5085</a>. For PTP there is a presumed trust model: all PTP-aware nodes on the path must be trusted, because they are expected to modify specific content of PTP messages. So those portions cannot be covered by confidentiality or integrity protection. Methods that allow authenticated modification exist in theory but do not seem practical now for latency-sensitive timing protocols.</p><p>Authenticating or encrypting RTM and PTP data is left for further study. A compromised node could intercept and modify G-ACh content, but that is true for any data carried over an LSP. Security requirements for time protocols are in <a href='/rfc7384'>RFC 7384</a>.</p>",
+      "eli5": "<p>Everyone who writes on the notepad has to be trusted, since the notepad cannot be locked. Locking it safely without slowing the letter is still unsolved.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "RTM G-ACH MESSAGE (RFC 8169, FIGURE 1)",
+      "data": {
+        "title": "RTM message",
+        "bytes": 16,
+        "width": 32,
+        "fields": [
+          {
+            "key": "ach-flag",
+            "name": "0 0 0 1",
+            "bits": 4,
+            "desc": "First nibble of the G-ACh header."
+          },
+          {
+            "key": "version",
+            "name": "Version",
+            "bits": 4,
+            "desc": "Set to 0.",
+            "value": "0"
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 8,
+            "desc": "MUST be 0 on transmit and ignored on receipt."
+          },
+          {
+            "key": "rtm-gach",
+            "name": "RTM G-ACh",
+            "bits": 16,
+            "desc": "Identifies the packet as RTM.",
+            "value": "0x000F"
+          },
+          {
+            "key": "scratch-pad",
+            "name": "Scratch Pad",
+            "bits": 64,
+            "desc": "Accumulated residence time: nanoseconds times 2^16, as a 64-bit signed integer."
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 16,
+            "desc": "Type of timing packet in the Value, such as PTP or NTP."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Length in octets of the Value."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "RTM SETUP WITH RSVP-TE (SIMPLIFIED FROM SECTION 4.4)",
+      "data": {
+        "lanes": [
+          {
+            "key": "ingress",
+            "label": "Ingress LER"
+          },
+          {
+            "key": "transit",
+            "label": "RTM transit node"
+          },
+          {
+            "key": "egress",
+            "label": "Egress LER"
+          }
+        ],
+        "messages": [
+          {
+            "from": "ingress",
+            "to": "egress",
+            "label": "Path with RTM_SET flag",
+            "color": "blue",
+            "note": "Carried in LSP_ATTRIBUTES; RTM requested for this LSP."
+          },
+          {
+            "from": "egress",
+            "to": "transit",
+            "label": "Resv with RTM_SET TLV",
+            "color": "green",
+            "note": "Egress adds its entry first."
+          },
+          {
+            "from": "transit",
+            "to": "ingress",
+            "label": "Resv, entry added",
+            "color": "green",
+            "note": "Ingress gets the ordered list of RTM-capable nodes."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "RTM CAPABILITY BITMAP (RFC 8169, SECTION 4.3.1)",
+      "data": {
+        "items": [
+          {
+            "code": "0b001",
+            "label": "One-step",
+            "desc": "One-step RTM supported."
+          },
+          {
+            "code": "0b010",
+            "label": "Two-step",
+            "desc": "Two-step RTM supported.",
+            "highlight": true
+          },
+          {
+            "code": "0b100",
+            "label": "Reserved",
+            "desc": "Reserved."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3209]",
+      "text": "Awduche, D., Berger, L., Gan, D., Li, T., Srinivasan, V., and G. Swallow, \"RSVP-TE: Extensions to RSVP for LSP Tunnels\", RFC 3209, December 2001.",
+      "rfc": 3209
+    },
+    {
+      "number": "[RFC5586]",
+      "text": "Bocci, M., Ed., Vigoureux, M., Ed., and S. Bryant, Ed., \"MPLS Generic Associated Channel\", RFC 5586.",
+      "rfc": 5586
+    },
+    {
+      "number": "[RFC5905]",
+      "text": "Mills, D., Martin, J., Ed., Burbank, J., and W. Kasch, \"Network Time Protocol Version 4: Protocol and Algorithms Specification\", RFC 5905.",
+      "rfc": 5905
+    },
+    {
+      "number": "[RFC6374]",
+      "text": "Frost, D. and S. Bryant, \"Packet Loss and Delay Measurement for MPLS Networks\", RFC 6374.",
+      "rfc": 6374
+    },
+    {
+      "number": "[RFC7384]",
+      "text": "Mizrahi, T., \"Security Requirements of Time Protocols in Packet Switched Networks\", RFC 7384.",
+      "rfc": 7384
+    },
+    {
+      "number": "[IEEE.1588]",
+      "text": "IEEE, \"IEEE Standard for a Precision Clock Synchronization Protocol for Networked Measurement and Control Systems\", IEEE Std 1588-2008."
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

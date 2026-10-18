@@ -1,0 +1,458 @@
+{
+  "number": 4254,
+  "title": "The Secure Shell (SSH) Connection Protocol",
+  "shortTitle": "SSH Connection",
+  "category": "security",
+  "categoryReviewed": true,
+  "tags": [
+    "SSH",
+    "Channels",
+    "Tunneling"
+  ],
+  "subtitle": "How one encrypted SSH connection carries shells, commands and tunnels at the same time.",
+  "summary": "<p>The SSH Connection Protocol runs on top of the SSH transport and authentication layers and defines what you actually do over an SSH link. It multiplexes many flow-controlled channels into one encrypted connection, and uses them for interactive sessions, remote command execution, forwarded TCP/IP connections and forwarded X11 connections.</p>",
+  "eli5": {
+    "summary": "<p>Once two computers have a private line, this is the set of rules for having many different conversations on that one line at once, like typing commands, sharing a window or passing a message through a tunnel.</p>"
+  },
+  "questions": [
+    "how does ssh multiplex multiple sessions",
+    "what is an ssh channel",
+    "how does ssh port forwarding work",
+    "what is ssh_msg_channel_open",
+    "how does ssh flow control work",
+    "what does the ssh pty-req request do"
+  ],
+  "tldr": {
+    "problem": "A secure, authenticated SSH link is useless until something defines what to do over it, and people need shells, commands and tunnels at the same time.",
+    "mechanism": "Numbered channels are multiplexed over the one encrypted connection. Each channel has its own send window, and typed requests such as pty-req, shell, exec and tcpip-forward set it up.",
+    "outcome": "It is the layer that every SSH client and server uses for logins, remote commands, file-transfer subsystems and port forwarding.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Layer",
+      "value": "Above RFC 4253 and 4252"
+    },
+    {
+      "label": "Message numbers",
+      "value": "80 to 100"
+    },
+    {
+      "label": "Channel types",
+      "value": "4 defined here"
+    },
+    {
+      "label": "Max window",
+      "value": "2^32 - 1 bytes"
+    },
+    {
+      "label": "Updated by",
+      "value": "RFC 8308"
+    }
+  ],
+  "today": "<p>This is the part of SSH you meet every time you run <code>ssh host</code>, <code>ssh host command</code> or an SSH port forward, and it is what lets file transfer tools run as subsystems over the same connection. Because it is the connection layer of SSH-2, it is implemented in all mainstream SSH software, including OpenSSH. It was later updated by <a href=\"/rfc8308\">RFC 8308</a>.</p>",
+  "glossary": [
+    "ssh-channel",
+    "channel-window",
+    "pty",
+    "port-forwarding",
+    "x11-forwarding",
+    "multiplexing",
+    "subsystem"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>SSH is built in layers. <a href=\"/rfc4253\">RFC 4253</a> provides an encrypted, integrity-protected transport, and <a href=\"/rfc4252\">RFC 4252</a> proves who the user is. This document, the Connection Protocol, sits on top of both and answers the practical question: now that there is a safe pipe between two machines, what do people actually do with it?</p><p>The RFC's answer is that everything is a <strong>channel</strong>. An interactive login, a one-off remote command, a forwarded TCP connection and a forwarded X11 window are all channels, and many of them are multiplexed into the single encrypted connection. The abstract lists the four services: interactive login sessions, remote execution of commands, forwarded TCP/IP connections and forwarded X11 connections.</p><p>The protocol is symmetric where it can be. Either side may open a channel and either side may send global requests, although in practice the client opens most of them. The RFC borrows its field notation from the architecture document: <code>byte</code>, <code>uint32</code>, <code>boolean</code> and <code>string</code>.</p><div class=\"callout callout-info\"><p>The connection protocol does no encryption or authentication of its own. Section 11 states that it is assumed to run on top of a secure, authenticated transport.</p></div>",
+      "eli5": "<p>Imagine one phone line that has been made completely private. This document explains how you can have lots of separate conversations on that single line at once: one to type commands, one to send a file, one to share a window.</p>"
+    },
+    {
+      "id": "global-requests",
+      "number": "2",
+      "title": "Global Requests",
+      "content": "<p>Most messages in this protocol are about one particular channel, but some affect the connection as a whole. These are <strong>global requests</strong>. The example the RFC gives is asking the other side to start listening on a TCP port for forwarding. Either side may send a global request at any time, and the receiver must respond appropriately.</p><p>A request is an <code>SSH_MSG_GLOBAL_REQUEST</code> carrying a request name (US-ASCII), a <code>want reply</code> boolean and request-specific data. If <code>want reply</code> is TRUE, the receiver answers with <code>SSH_MSG_REQUEST_SUCCESS</code> (which may carry response-specific data) or <code>SSH_MSG_REQUEST_FAILURE</code> (which carries nothing). A receiver that does not recognise or support the request simply answers with failure.</p><p>Because the replies do not say which request they answer, the RFC requires that replies to global requests be sent in the same order as the requests. Replies to channel requests for the same channel must also stay in order, but replies for distinct channels may be sent out of order.</p><p>Request names follow the DNS extensibility naming convention from the architecture document, which is how vendors can add private requests such as <code>name@example.com</code> without asking anyone.</p>",
+      "eli5": "<p>Sometimes you need to ask the other computer for something that is not about any one conversation, like \"please start listening at this door\". The answer is always yes or no, and the answers come back in the order you asked.</p>"
+    },
+    {
+      "id": "channels",
+      "number": "3",
+      "title": "The Channel Mechanism",
+      "content": "<p>Each end gives every channel a number, and the two numbers need not match. A message that opens a channel carries the <em>sender's</em> number; every other channel message carries the <em>recipient's</em> number, so each side only ever uses its own numbering to look things up.</p><p>To open a channel, a side allocates a local number and sends <code>SSH_MSG_CHANNEL_OPEN</code> with a channel type (such as <code>\"session\"</code>), its sender channel, an initial window size and a maximum packet size, plus any type-specific data. The other side answers with <code>SSH_MSG_CHANNEL_OPEN_CONFIRMATION</code>, which echoes the original number as the recipient channel and adds its own, or with <code>SSH_MSG_CHANNEL_OPEN_FAILURE</code>.</p><p>A failure carries a reason code, a UTF-8 description and a language tag. Four codes are defined:</p><div class=\"key-points\"><div class=\"key-point\"><div class=\"key-point-title\">1</div><div class=\"key-point-text\">SSH_OPEN_ADMINISTRATIVELY_PROHIBITED</div></div><div class=\"key-point\"><div class=\"key-point-title\">2</div><div class=\"key-point-text\">SSH_OPEN_CONNECT_FAILED</div></div><div class=\"key-point\"><div class=\"key-point-title\">3</div><div class=\"key-point-text\">SSH_OPEN_UNKNOWN_CHANNEL_TYPE</div></div><div class=\"key-point\"><div class=\"key-point-title\">4</div><div class=\"key-point-text\">SSH_OPEN_RESOURCE_SHORTAGE</div></div></div><p>Codes 0xFE000000 to 0xFFFFFFFF are never assigned by IANA and are left for private use. If a server does not understand the channel type at all, it must use code 3.</p><div class=\"callout callout-note\"><p>Once a channel exists, a side can send <code>SSH_MSG_CHANNEL_REQUEST</code> to ask for channel-specific things, such as a pseudo-terminal. The request names are local to each channel type, and a request that is not recognised gets <code>SSH_MSG_CHANNEL_FAILURE</code>.</p></div>",
+      "eli5": "<p>Each conversation gets a number. When you ask to start one, you say \"I will call it number 5\", and your friend answers \"OK, I will call it number 9\". After that you each use the number the other person picked when you speak to them.</p>"
+    },
+    {
+      "id": "flow-control",
+      "number": "4",
+      "title": "Flow Control, Data and Closing",
+      "content": "<p>Channels are flow-controlled. No data may be sent on a channel until the other side has said there is room for it. The room is the <strong>window</strong>: the initial window size in the open message says how many bytes may be sent before the sender must wait. <code>SSH_MSG_CHANNEL_WINDOW_ADJUST</code> adds more bytes to the window, which may never exceed 2<sup>32</sup> - 1.</p><p>Payload travels in <code>SSH_MSG_CHANNEL_DATA</code>. The amount in any one message is limited by both the channel's maximum packet size and the current window, whichever is smaller, and the window shrinks by the amount sent. A second form, <code>SSH_MSG_CHANNEL_EXTENDED_DATA</code>, adds a <code>data_type_code</code> so that one channel can carry several kinds of data. Only one is defined: type 1, <code>SSH_EXTENDED_DATA_STDERR</code>. Extended data uses the same window as ordinary data.</p><p>Closing is a two-step affair. A party that will send no more data should send <code>SSH_MSG_CHANNEL_EOF</code>, but the channel stays open and data can still flow the other way. To end the channel, a party sends <code>SSH_MSG_CHANNEL_CLOSE</code>; the receiver must send one back unless it already has. Only when a party has both sent and received a close may it reuse the channel number.</p><div class=\"callout callout-info\"><p>EOF, CLOSE, CHANNEL_REQUEST and the success and failure replies do not consume window space, so they can be sent even when the window is empty.</p></div>",
+      "eli5": "<p>Your friend has a bucket that can only hold so much. You may only pour in as much as they said, and when they empty it they tell you \"you can pour some more\". When you are done talking you say so, and the conversation only really ends once both of you have said goodbye.</p>"
+    },
+    {
+      "id": "interactive-sessions",
+      "number": "5",
+      "title": "Interactive Sessions",
+      "content": "<p>A <strong>session</strong> is the remote execution of a program: a shell, an application, a single command or a built-in subsystem. It begins with <code>SSH_MSG_CHANNEL_OPEN</code> of type <code>\"session\"</code>, and then a series of channel requests configure it.</p><div class=\"key-points\"><div class=\"key-point\"><div class=\"key-point-title\">pty-req</div><div class=\"key-point-text\">Allocates a pseudo-terminal. Carries the TERM value (for example vt100), the width and height in characters and in pixels, and encoded terminal modes.</div></div><div class=\"key-point\"><div class=\"key-point-title\">x11-req</div><div class=\"key-point-text\">Requests X11 forwarding. The RFC recommends sending a fake, random authentication cookie and swapping in the real one when a connection arrives.</div></div><div class=\"key-point\"><div class=\"key-point-title\">env</div><div class=\"key-point-text\">Passes an environment variable name and value. The RFC warns that setting variables in a privileged process is a hazard.</div></div><div class=\"key-point\"><div class=\"key-point-title\">shell / exec / subsystem</div><div class=\"key-point-text\">Starts the user's default shell, runs a given command, or runs a named subsystem. Only one of these can succeed per channel.</div></div></div><p>While the program runs, its input and output travel as channel data, with standard error carried as extended data type 1. The client can send <code>window-change</code> when the terminal is resized, and <code>signal</code> to deliver a POSIX signal such as INT or TERM. The server can send <code>xon-xoff</code> to say whether the client may handle Ctrl-S/Ctrl-Q flow control.</p><p>When the command ends, the server sends <code>exit-status</code> (a uint32) or <code>exit-signal</code> (a signal name, a core-dumped flag and an error message), and then the channel is closed. The RFC recommends returning the status. Zero usually means success.</p>",
+      "eli5": "<p>When you log in to another computer, your keyboard and screen are connected to a program over there. You can say what kind of screen you have, ask it to start a shell, and when the program finishes it tells you whether it went well.</p>"
+    },
+    {
+      "id": "port-forwarding",
+      "number": "6",
+      "title": "TCP/IP Port Forwarding",
+      "content": "<p>The same tunnel can carry ordinary TCP connections, which is how SSH is used to protect protocols that have no security of their own. There are two directions.</p><p><strong>Local forwarding.</strong> The side that wants the traffic listens locally. When a connection arrives, it opens a channel of type <code>\"direct-tcpip\"</code> carrying the host and port to connect to, plus the originator's IP address and port. The recipient decides whether to allow it and makes the TCP connection.</p><p><strong>Remote forwarding.</strong> To have the other side do the listening, a party sends the global request <code>\"tcpip-forward\"</code> with an address to bind and a port. When a connection arrives there, the listener opens a <code>\"forwarded-tcpip\"</code> channel back. Receivers must reject such channels unless they asked for that forwarding. If the port requested is 0 and a reply is wanted, the server picks the next available unprivileged port and returns it in <code>SSH_MSG_REQUEST_SUCCESS</code>. A <code>\"cancel-tcpip-forward\"</code> request stops the listening.</p><p>The address to bind has special cases: an empty string means all protocol families, <code>0.0.0.0</code> all IPv4 addresses, <code>::</code> all IPv6 addresses, and <code>localhost</code>, <code>127.0.0.1</code> and <code>::1</code> loopback only.</p><div class=\"callout callout-warning\"><p>Forwarded channels are independent of any session. Closing a session channel does not close forwarded connections.</p></div>",
+      "eli5": "<p>Say there is a door in one room that you cannot reach. Your friend opens a secret tunnel, and anything you hand to your friend at one end comes out the door at the other end. Either of you can be the one waiting at the door.</p>"
+    },
+    {
+      "id": "terminal-modes",
+      "number": "7",
+      "title": "Terminal Modes and Message Numbers",
+      "content": "<p>The <code>pty-req</code> message ends with a string of <strong>encoded terminal modes</strong>, meant to be portable across systems. It is a stream of opcode and argument pairs. Opcodes 1 to 159 each take one uint32 argument; opcodes 160 to 255 are undefined and stop parsing; and opcode 0, <code>TTY_OP_END</code>, ends the stream.</p><p>The names mostly follow POSIX terminal flags. Examples are 1 <code>VINTR</code> (the interrupt character), 53 <code>ECHO</code> (enable echoing), 51 <code>ICANON</code> (canonicalise input lines), 128 <code>TTY_OP_ISPEED</code> and 129 <code>TTY_OP_OSPEED</code> (the input and output baud rates). The client should list every mode it knows about, and the server may ignore any it does not understand.</p><p>Section 9 gives the message number for every message. They sit in a block from 80 to 100, which leaves the lower numbers to the transport and authentication layers.</p>",
+      "eli5": "<p>When your remote screen is set up, you also send a list of settings, such as whether typed letters should show up on screen. The computer on the other side ignores any setting it does not know.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>This protocol assumes it is running on a secure, authenticated transport. User authentication and protection against network attackers are provided by the layers below it, and full security considerations are in the architecture document, <a href=\"/rfc4251\">RFC 4251</a>.</p><p>The one recommendation specific to this document is that implementations should disable all potentially dangerous features, such as agent forwarding, X11 forwarding and TCP/IP forwarding, if the host key has changed without notice or explanation.</p><p>Smaller cautions are scattered through the text. Clients should reject incoming <code>session</code> channel opens, <code>direct-tcpip</code> opens and <code>tcpip-forward</code> requests, since those are normally sent by clients to servers, and this makes it harder for a corrupt server to attack the client. X11 channel opens must be rejected if X11 forwarding was never requested. Servers should take care before setting environment variables sent by the client and before executing commands, and should only allow forwarding of privileged ports for a user authenticated as privileged.</p><div class=\"callout callout-warning\"><p>Remote text such as a channel open failure description or an exit-signal error message may be shown to the user, but only with the precautions from the architecture document, because it is untrusted input from the other end.</p></div>",
+      "eli5": "<p>This protocol trusts that the private line underneath is already safe. It still says to be careful: if the other computer suddenly looks different than before, switch off the risky extras like sharing windows and secret tunnels.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "interactive-sessions",
+      "position": "after",
+      "caption": "Running a command in a session channel",
+      "data": {
+        "lanes": [
+          {
+            "key": "c",
+            "label": "Client"
+          },
+          {
+            "key": "s",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "c",
+            "to": "s",
+            "label": "CHANNEL_OPEN \"session\"",
+            "color": "blue",
+            "note": "sender channel, initial window, max packet size"
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "CHANNEL_OPEN_CONFIRMATION",
+            "color": "green",
+            "note": "adds the server's own channel number"
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "CHANNEL_REQUEST \"pty-req\"",
+            "color": "blue",
+            "note": "TERM, size, encoded terminal modes"
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "CHANNEL_SUCCESS",
+            "color": "green"
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "CHANNEL_REQUEST \"shell\"",
+            "color": "blue"
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "CHANNEL_SUCCESS",
+            "color": "green"
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "CHANNEL_DATA",
+            "color": "neutral",
+            "note": "keystrokes; the server replies with data in the other direction"
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "CHANNEL_REQUEST \"exit-status\"",
+            "color": "neutral",
+            "note": "no reply wanted"
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "CHANNEL_EOF, CHANNEL_CLOSE",
+            "color": "neutral"
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "CHANNEL_CLOSE",
+            "color": "neutral",
+            "note": "channel is closed once both sides have sent and received CLOSE"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "channels",
+      "position": "after",
+      "caption": "SSH_MSG_CHANNEL_OPEN_CONFIRMATION (fixed part)",
+      "data": {
+        "title": "SSH_MSG_CHANNEL_OPEN_CONFIRMATION",
+        "bytes": 17,
+        "width": 32,
+        "fields": [
+          {
+            "key": "msg",
+            "name": "message number",
+            "bits": 8,
+            "desc": "byte SSH_MSG_CHANNEL_OPEN_CONFIRMATION, value 91",
+            "value": "91"
+          },
+          {
+            "key": "recipient",
+            "name": "recipient channel",
+            "bits": 32,
+            "desc": "uint32: the channel number given in the original open request"
+          },
+          {
+            "key": "sender",
+            "name": "sender channel",
+            "bits": 32,
+            "desc": "uint32: the channel number allocated by the confirming side"
+          },
+          {
+            "key": "window",
+            "name": "initial window size",
+            "bits": 32,
+            "desc": "uint32: bytes that may be sent to the confirming side before a window adjust"
+          },
+          {
+            "key": "maxpacket",
+            "name": "maximum packet size",
+            "bits": 32,
+            "desc": "uint32: the largest single data packet the confirming side will accept"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "flow-control",
+      "position": "after",
+      "caption": "Channel message numbers (section 9)",
+      "data": {
+        "columns": [
+          "Number",
+          "Message",
+          "Purpose"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "80",
+              "SSH_MSG_GLOBAL_REQUEST",
+              "Connection-wide request"
+            ]
+          },
+          {
+            "cells": [
+              "81",
+              "SSH_MSG_REQUEST_SUCCESS",
+              "Global request accepted"
+            ]
+          },
+          {
+            "cells": [
+              "82",
+              "SSH_MSG_REQUEST_FAILURE",
+              "Global request refused or unknown"
+            ]
+          },
+          {
+            "cells": [
+              "90",
+              "SSH_MSG_CHANNEL_OPEN",
+              "Ask to open a channel"
+            ]
+          },
+          {
+            "cells": [
+              "91",
+              "SSH_MSG_CHANNEL_OPEN_CONFIRMATION",
+              "Channel opened"
+            ]
+          },
+          {
+            "cells": [
+              "92",
+              "SSH_MSG_CHANNEL_OPEN_FAILURE",
+              "Channel refused, with reason code"
+            ]
+          },
+          {
+            "cells": [
+              "93",
+              "SSH_MSG_CHANNEL_WINDOW_ADJUST",
+              "Add bytes to the send window"
+            ]
+          },
+          {
+            "cells": [
+              "94",
+              "SSH_MSG_CHANNEL_DATA",
+              "Ordinary channel data"
+            ]
+          },
+          {
+            "cells": [
+              "95",
+              "SSH_MSG_CHANNEL_EXTENDED_DATA",
+              "Typed data such as stderr"
+            ]
+          },
+          {
+            "cells": [
+              "96",
+              "SSH_MSG_CHANNEL_EOF",
+              "No more data from this side"
+            ]
+          },
+          {
+            "cells": [
+              "97",
+              "SSH_MSG_CHANNEL_CLOSE",
+              "Terminate the channel"
+            ]
+          },
+          {
+            "cells": [
+              "98",
+              "SSH_MSG_CHANNEL_REQUEST",
+              "Channel-specific request"
+            ]
+          },
+          {
+            "cells": [
+              "99",
+              "SSH_MSG_CHANNEL_SUCCESS",
+              "Channel request accepted"
+            ]
+          },
+          {
+            "cells": [
+              "100",
+              "SSH_MSG_CHANNEL_FAILURE",
+              "Channel request refused or unknown"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "Four things a channel can be",
+      "data": {
+        "items": [
+          {
+            "title": "session",
+            "text": "A shell, a command or a subsystem, optionally with a pseudo-terminal and X11 forwarding."
+          },
+          {
+            "title": "x11",
+            "text": "A forwarded X11 connection, opened independently of the session that requested it."
+          },
+          {
+            "title": "forwarded-tcpip",
+            "text": "A connection that arrived at a port the other side asked us to listen on (remote forwarding)."
+          },
+          {
+            "title": "direct-tcpip",
+            "text": "A connection that arrived at a local forwarded port, to be connected onward by the recipient."
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "Where the connection protocol sits",
+      "data": {
+        "layers": [
+          {
+            "label": "Connection protocol",
+            "detail": "RFC 4254: channels, sessions, forwarding",
+            "highlight": true
+          },
+          {
+            "label": "User authentication",
+            "detail": "RFC 4252"
+          },
+          {
+            "label": "Transport layer",
+            "detail": "RFC 4253: encryption, integrity, server authentication"
+          },
+          {
+            "label": "TCP",
+            "detail": "Reliable byte stream"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Protocol Architecture\", RFC 4251, January 2006.",
+      "rfc": 4251
+    },
+    {
+      "number": "[2]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Transport Layer Protocol\", RFC 4253, January 2006.",
+      "rfc": 4253
+    },
+    {
+      "number": "[3]",
+      "text": "Ylonen, T. and C. Lonvick, Ed., \"The Secure Shell (SSH) Authentication Protocol\", RFC 4252, January 2006.",
+      "rfc": 4252
+    },
+    {
+      "number": "[4]",
+      "text": "Lehtinen, S. and C. Lonvick, Ed., \"The Secure Shell (SSH) Protocol Assigned Numbers\", RFC 4250, January 2006.",
+      "rfc": 4250
+    },
+    {
+      "number": "[5]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "See also",
+      "text": "Bider, D. and M. Baushke, \"Extension Negotiation in the Secure Shell (SSH) Protocol\", RFC 8308, March 2018.",
+      "rfc": 8308
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-15",
+    "reviewedBy": null
+  },
+  "updated": "2026-10-15"
+}

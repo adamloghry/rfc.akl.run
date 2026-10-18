@@ -1,0 +1,298 @@
+{
+  "number": 7162,
+  "shortTitle": "IMAP CONDSTORE QRESYNC",
+  "category": "email",
+  "categoryReviewed": false,
+  "summary": "<p>Multiple IMAP clients often need to coordinate changes to a shared mailbox, for example different devices of one user or several users on a shared mailbox. This document specifies CONDSTORE and QRESYNC, which let clients quickly resynchronize flag changes and mailbox state.</p>",
+  "eli5": {
+    "summary": "<p>Two people share a notebook and need to find what changed since they last looked. This gives them a quick way to see only the changes.</p>"
+  },
+  "questions": [
+    "imap condstore",
+    "imap qresync quick resynchronization",
+    "what is the difference between condstore and qresync",
+    "what is a mod-sequence in imap",
+    "what does the imap vanished response do",
+    "how does imap unchangedsince work"
+  ],
+  "tags": [
+    "Email",
+    "IMAP",
+    "Synchronization"
+  ],
+  "subtitle": "How IMAP clients and servers track flag changes and expunged messages so a reconnecting client resyncs fast.",
+  "tldr": {
+    "problem": "Several IMAP clients, such as different devices of one user or many users of a shared mailbox, need to keep up with changes to the same mailbox without refetching everything, and mobile clients disconnect often.",
+    "mechanism": "CONDSTORE gives every message a mod-sequence that rises whenever its metadata changes, so clients can ask only for changes and make conditional updates. QRESYNC builds on it so a client can resynchronize flags and expunged messages in the single SELECT command.",
+    "outcome": "RFC 7162 merges and replaces RFC 4551 (CONDSTORE) and RFC 5162 (QRESYNC), fixing errata and making mod-sequences 63-bit values.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Mod-sequence size",
+      "value": "positive unsigned 63-bit value"
+    },
+    {
+      "label": "Recommended command line length",
+      "value": "approximately 8192 octets"
+    },
+    {
+      "label": "Earlier suggested limit",
+      "value": "1000 octets (RFC 2683)"
+    },
+    {
+      "label": "Minimum client retries after MODIFIED",
+      "value": "at least 2"
+    },
+    {
+      "label": "Worst-case expunge history",
+      "value": "almost 64 GB per mailbox"
+    }
+  ],
+  "today": "<p>RFC 7162 is a Proposed Standard that obsoletes <a href='/rfc4551'>RFC 4551</a> (CONDSTORE) and <a href='/rfc5162'>RFC 5162</a> (QRESYNC) and updates <a href='/rfc2683'>RFC 2683</a>. No later RFC is listed as obsoleting or updating it, so it is the current definition of both extensions.</p>",
+  "glossary": [
+    "imap",
+    "uid",
+    "uidvalidity",
+    "conditional-request"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Two Extensions for Keeping in Sync",
+      "content": "<p>Often several IMAP clients work on one mailbox: different clients for the same user, or several users on a shared mailbox. The <strong>Conditional Store</strong> facility (<strong>CONDSTORE</strong>) lets a client quickly resynchronize flag changes. It also offers a protected update mechanism that can detect and resolve conflicts between writers, for example clients that treat a mailbox as a message queue.</p><p>CONDSTORE still leaves a gap: to learn which messages were expunged, the client has to issue a UID FETCH or UID SEARCH. <strong>Quick Mailbox Resynchronization</strong> (<strong>QRESYNC</strong>) closes it. A reconnecting client can do a full resynchronization, including expunged messages, in a single round trip, and the new VANISHED response lists removed messages compactly. The RFC points at mobile clients with frequent disconnects as a use case.</p><p>This document merges both extensions, obsoleting RFC 4551 and RFC 5162, and also updates a line-length recommendation in RFC 2683.</p>",
+      "eli5": "<p>Imagine a shared class notebook. CONDSTORE is a stamp number on every page so you can ask which pages changed. QRESYNC also tells you which pages were torn out, all in one go.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Mod-Sequences",
+      "content": "<p>A CONDSTORE server associates a positive unsigned 63-bit value, the <strong>mod-sequence</strong>, with every message. It is opaque and the server updates it whenever a metadata item (such as a flag) changes. Each STORE on a mailbox must get a different value, and within one session the later successful STORE must get a larger value than the earlier one. That rules out using the system clock directly, because a clock adjustment could produce a smaller value.</p><p>Changing the state of a flag must update the mod-sequence; setting a flag that is already set, or clearing one that is not, SHOULD NOT. A newly appended message gets a value higher than the highest in the mailbox.</p><p>A client becomes <strong>CONDSTORE-aware</strong> by issuing a CONDSTORE enabling command, for instance SELECT or EXAMINE with the CONDSTORE parameter, STATUS (HIGHESTMODSEQ), a FETCH with CHANGEDSINCE or MODSEQ, a STORE with UNCHANGEDSINCE, or ENABLE CONDSTORE. From then on the server MUST include mod-sequence data in all untagged FETCH responses for the connection.</p><p>When opening a mailbox the server answers with <code>HIGHESTMODSEQ</code>, the highest mod-sequence in the mailbox, or <code>NOMODSEQ</code> if the mailbox cannot store mod-sequences persistently. After NOMODSEQ the server MUST reject CHANGEDSINCE, MODSEQ and UNCHANGEDSINCE with a tagged BAD.</p>",
+      "eli5": "<p>Every page of the notebook gets a number from a counter that only goes up. Whenever someone edits a page, it gets the next number. To find changes, just look for pages with numbers bigger than the last one you saw.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Conditional Updates and Fetching Only Changes",
+      "content": "<p>The <code>UNCHANGEDSINCE</code> modifier on STORE and UID STORE makes an update conditional. For each message, if the mod-sequence of every affected metadata item is at or below the given value, the change is made and the mod-sequence updated. Otherwise the change MUST NOT be made and the message is added to a list. If the list ends up non-empty, the tagged response carries a <code>MODIFIED</code> code with those messages (it may appear in a NO response too). A successful conditional STORE still sends an untagged FETCH with the new MODSEQ, even with .SILENT.</p><p>When a client sees MODIFIED it should find out whether the items it cares about really changed, using FETCH or NOOP, and if not, retry with the new mod-sequence, allowing at least 2 retries. Servers are encouraged to send unsolicited FETCH responses so the client need not ask. Using UNCHANGEDSINCE 0 always fails if the metadata item exists, which is a way to test whether a keyword is set.</p><p>To fetch only changes, <code>FETCH ... (CHANGEDSINCE n)</code> returns data only for messages with a mod-sequence larger than <code>n</code>. The MODSEQ search criterion finds messages whose mod-sequence is equal to or greater than a value, and a non-empty SEARCH or SORT result then ends with the highest mod-sequence of the returned messages. STATUS gains a HIGHESTMODSEQ item, which is 0 when persistent mod-sequences are not supported.</p><div class='callout callout-info'><p>Servers SHOULD NOT change the mod-sequence when a flag is added that is already present or removed when absent, but clients MUST NOT rely on that.</p></div>",
+      "eli5": "<p>Before you change a page you say: only do this if nobody touched the page since stamp number so-and-so. If someone did, you are told which pages, so you can look again and retry.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "QRESYNC: Resynchronizing in SELECT",
+      "content": "<p>A client using QRESYNC MUST issue <code>ENABLE QRESYNC</code> once authenticated. Servers supporting QRESYNC MUST implement ENABLE, and a server MUST answer BAD if the QRESYNC parameter or the VANISHED modifier is used without QRESYNC being enabled. QRESYNC includes everything CONDSTORE requires; servers SHOULD also advertise CONDSTORE for older clients.</p><p>The QRESYNC parameter of SELECT/EXAMINE takes the last known UIDVALIDITY, the last known mod-sequence, an optional set of known UIDs, and an optional list of known message-number/UID pairs. The server first opens the mailbox normally. If the UIDVALIDITY does not match, it ignores the rest and behaves as if nothing changed, and the client can detect this by comparing the value returned. If it matches, the server reports flag changes (FETCH responses that MUST contain UIDs) and expunged messages since the given mod-sequence, restricted to the known UIDs if provided.</p><p>The <strong>sequence match data</strong> is a small sample of message numbers whose UIDs the client knows. If a pair still matches the mailbox, the client already knows of every expunge up to that message, so the server leaves that range out of its VANISHED report. The RFC says this can save a substantial amount of bandwidth when a server cannot remember expunges.</p><p>The same expunged-message reporting is available in <code>UID FETCH ... (CHANGEDSINCE n VANISHED)</code>, which is allowed only with UID FETCH and only together with CHANGEDSINCE.</p>",
+      "eli5": "<p>When you come back to the notebook, you hand the librarian your last stamp number and a few page numbers you remember. The librarian replies with a list of pages that changed and pages that were removed, so you do not have to re-read anything.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "VANISHED, EXPUNGE and CLOSED",
+      "content": "<p>The <code>VANISHED</code> response reports that UIDs were permanently removed. Unlike EXPUNGE it can list many messages and uses UIDs instead of message numbers. It has two forms that servers MUST NOT combine.</p><p><strong>VANISHED (EARLIER)</strong> answers UID FETCH (VANISHED) or SELECT/EXAMINE (QRESYNC). It does not change message numbering, so the client MUST NOT decrement sequence numbers for it. These responses MUST come before any FETCH responses.</p><p><strong>VANISHED without EARLIER</strong> announces removals in a selected mailbox. After ENABLE QRESYNC the server MUST use it instead of EXPUNGE for every mailbox that did not return NOMODSEQ, for the rest of the connection. It also reduces the message count and renumbers the remaining messages, so no separate EXISTS is needed. It MUST list only messages visible to the client in the current session, and MUST NOT be sent when no command is in progress or during FETCH, STORE or SEARCH.</p><p>EXPUNGE and UID EXPUNGE must increment the per-mailbox mod-sequence and remember it with each removed UID, and with QRESYNC enabled send HIGHESTMODSEQ in the tagged OK. CLOSE does the same bookkeeping but MUST NOT send HIGHESTMODSEQ, since that might make the client lose synchronization. Finally, the <code>CLOSED</code> response code marks the boundary when SELECT/EXAMINE on another mailbox implicitly closes the current one.</p>",
+      "eli5": "<p>VANISHED is a short list saying which pages were torn out. One kind is about the past, while you were away. The other is about right now, and tells you to renumber the pages left.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "6",
+      "title": "Server and Client Implementation Notes",
+      "content": "<p>A server that remembers nothing about expunged messages can technically comply, returning all expunged UIDs from the requested set every time, but this is discouraged because the VANISHED response can be larger than a UID SEARCH result. A server that stores just the HIGHESTMODSEQ from the last EXPUNGE can skip VANISHED when the client's value is equal or higher. A fuller design keeps a queue of UID-set and mod-sequence pairs, searched from the newest end.</p><p>Keeping that history forever can be costly: the RFC calculates almost 64 GB for one pathological mailbox, using 16-octet triples. Implementations are encouraged to cap the queue and expire old records while remembering one mod-sequence for everything expired. State for a mailbox should be deleted if its UIDVALIDITY changes or it is deleted.</p><p>For clients, an advanced disconnected client SHOULD use QRESYNC when available and CONDSTORE otherwise. It must cache HIGHESTMODSEQ and must not simply take the largest MODSEQ it sees. It must use a HIGHESTMODSEQ code even if lower, because servers may send mod-sequences out of order or delay EXPUNGE replies. If UIDVALIDITY differs, the client MUST empty its cache for that mailbox, forget the cached HIGHESTMODSEQ and drop pending actions that refer to its UIDs.</p>",
+      "eli5": "<p>The librarian can keep a diary of removed pages, but a diary that never ends gets huge. So the librarian throws away the oldest entries and just remembers the latest date thrown away.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "7",
+      "title": "Command Line Length and Changes From Earlier RFCs",
+      "content": "<p>Long UID lists in extended SELECT or FETCH commands can trip the 1000-octet command-line limit that <a href='/rfc2683'>RFC 2683</a> suggested as protection against denial of service. This document updates that advice: a client should keep command lines to approximately 8192 octets (counting quoted strings but not literals), split requests when it cannot compress them into ranges, and use literals instead of long quoted strings.</p><p>Compared with <a href='/rfc4551'>RFC 4551</a>, mod-sequences became unsigned 63-bit values instead of 64-bit, to ease implementation on platforms such as Java, and several errata were fixed. Compared with <a href='/rfc5162'>RFC 5162</a>, the requirement to return VANISHED changed from SHOULD to MUST (except for NOMODSEQ mailboxes), SETMETADATA changes now update the per-mailbox HIGHESTMODSEQ, and ENABLE QRESYNC CONDSTORE and ENABLE CONDSTORE QRESYNC are clarified as equivalent.</p>",
+      "eli5": "<p>Some mail servers refuse really long messages from clients. The new advice says keep them to about 8192 characters and cut long lists into pieces.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and IANA Considerations",
+      "content": "<p>The RFC says QRESYNC should be thoroughly tested on both sides, since it changes how expunged messages are reported. It believes neither extension raises new security concerns beyond those in <a href='/rfc3501'>RFC 3501</a>, but notes that CONDSTORE may let IMAP be used in critical applications where it could not be used before, making correct server implementation and operation even more important.</p><p>For IANA, the CONDSTORE and QRESYNC capabilities are registered, and IANA updated the references for both to point to this document.</p>",
+      "eli5": "<p>Because the new way of telling about removed pages is different, both sides should test it well. It does not add new dangers, but it might be used for more serious jobs.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "CONDITIONAL STORE WITH PARTIAL FAILURE (FROM THE RFC EXAMPLES)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "STORE 7,5,9 (UNCHANGEDSINCE 320162338) +FLAGS.SILENT (\\Deleted)",
+            "color": "blue",
+            "note": "Change only messages untouched since mod-sequence 320162338."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "* 5 FETCH (MODSEQ (320162350))",
+            "color": "neutral",
+            "note": "Message 5 passed the test and got a new mod-sequence."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "OK [MODIFIED 7,9] Conditional STORE failed",
+            "color": "green",
+            "note": "Messages 7 and 9 had changed and were left alone."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "QRESYNC RESYNCHRONIZATION (SIMPLIFIED FROM THE RFC EXAMPLE)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "ENABLE QRESYNC",
+            "color": "blue",
+            "note": "Issued once after authentication."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "ENABLED QRESYNC",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "SELECT INBOX (QRESYNC (67890007 90060115194045000 41:211,214:541))",
+            "color": "blue",
+            "note": "Last known UIDVALIDITY, mod-sequence and known UIDs."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "OK [HIGHESTMODSEQ 90060115205545359]",
+            "color": "neutral"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "VANISHED (EARLIER) 41,43:116,118,120:211,214:540",
+            "color": "neutral",
+            "note": "Expunged UIDs, sent before any FETCH."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "* 49 FETCH (UID 117 FLAGS (\\Seen \\Answered) MODSEQ (...))",
+            "color": "neutral",
+            "note": "Flag changes since the given mod-sequence."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "A03 OK [READ-WRITE] mailbox selected",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "contrast",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE TWO FORMS OF VANISHED",
+      "data": {
+        "left": {
+          "title": "VANISHED (EARLIER)",
+          "from": "server",
+          "to": "client",
+          "desc": "Reports messages removed while the client was away. Does not change message numbering."
+        },
+        "right": {
+          "title": "VANISHED",
+          "from": "server",
+          "to": "client",
+          "desc": "Reports removals in the open mailbox. Lowers the message count and renumbers the rest."
+        },
+        "joiner": "versus"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3501]",
+      "text": "Crispin, M., \"INTERNET MESSAGE ACCESS PROTOCOL - VERSION 4rev1\", RFC 3501, March 2003.",
+      "rfc": 3501
+    },
+    {
+      "number": "[RFC2683]",
+      "text": "Leiba, B., \"IMAP4 Implementation Recommendations\", RFC 2683, September 1999.",
+      "rfc": 2683
+    },
+    {
+      "number": "[RFC4466]",
+      "text": "Melnikov, A. and C. Daboo, \"Collected Extensions to IMAP4 ABNF\", RFC 4466, April 2006.",
+      "rfc": 4466
+    },
+    {
+      "number": "[RFC5161]",
+      "text": "Gulbrandsen, A. and A. Melnikov, \"The IMAP ENABLE Extension\", RFC 5161, March 2008.",
+      "rfc": 5161
+    },
+    {
+      "number": "[RFC5464]",
+      "text": "Daboo, C., \"The IMAP METADATA Extension\", RFC 5464, February 2009.",
+      "rfc": 5464
+    },
+    {
+      "number": "[RFC4731]",
+      "text": "Melnikov, A. and D. Cridland, \"IMAP4 Extension to SEARCH Command for Controlling What Kind of Information Is Returned\", RFC 4731, November 2006.",
+      "rfc": 4731
+    },
+    {
+      "number": "[RFC6851]",
+      "text": "Gulbrandsen, A. and N. Freed, \"Internet Message Access Protocol (IMAP) - MOVE Extension\", RFC 6851, January 2013.",
+      "rfc": 6851
+    },
+    {
+      "number": "[IMAP-DISC]",
+      "text": "Melnikov, A., Ed., \"Synchronization Operations For Disconnected Imap4 Clients\", RFC 4549, June 2006.",
+      "rfc": 4549
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

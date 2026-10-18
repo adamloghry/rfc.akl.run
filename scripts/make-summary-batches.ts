@@ -1,0 +1,106 @@
+// Split every index-tier RFC into .work/summaries/in/batch-NNN.json (sorted by number) for drafting agents.
+// Also writes .work/explainer-targets.json (top 60 by priority, tier index|summary, not obsoleted).
+import fs from 'node:fs';
+import path from 'node:path';
+import * as areas from '../src/lib/areas';
+import { buildSite, type RfcRecord, type Site } from '../src/lib/model';
+import { type IndexEntry, loadIndex, type RfcIndex } from '../src/lib/rfc-index';
+
+const ROOT = process.cwd();
+
+export function toItem(r: RfcRecord, entry?: IndexEntry) {
+  const existing: Record<string, unknown> = {};
+  const c = r.content;
+  if (c?.shortTitle) existing.shortTitle = c.shortTitle;
+  if (c?.category) existing.category = c.category;
+  return {
+    number: r.number,
+    title: r.title,
+    authors: r.authors,
+    year: r.year,
+    status: r.status,
+    stream: r.stream,
+    area: r.area,
+    wg: r.wg,
+    keywords: r.keywords,
+    abstract: r.abstract,
+    guessedCategory: areas.guessCategory(entry ?? r),
+    obsoletes: r.obsoletes,
+    obsoletedBy: r.obsoletedBy,
+    updates: r.updates,
+    updatedBy: r.updatedBy,
+    existing,
+  };
+}
+
+export function makeBatches({ site, index, outDir, size = 100 }: { site: Site; index: RfcIndex; outDir: string; size?: number }): {
+  batches: number;
+  items: number;
+} {
+  // Callers are responsible for the overwrite guard; this only clears old batch files it owns.
+  const items = [...site.rfcs.values()]
+    .filter((r) => r.tier === 'index')
+    .sort((a, b) => a.number - b.number)
+    .map((r) => toItem(r, index.entries.get(r.number)));
+  fs.mkdirSync(outDir, { recursive: true });
+  let n = 0;
+  for (let i = 0; i < items.length; i += size) {
+    n++;
+    fs.writeFileSync(
+      path.join(outDir, `batch-${String(n).padStart(3, '0')}.json`),
+      `${JSON.stringify(items.slice(i, i + size), null, 1)}\n`,
+    );
+  }
+  return { batches: n, items: items.length };
+}
+
+export function explainerTargets(site: Site, count = 60) {
+  return [...site.rfcs.values()]
+    .filter((r) => (r.tier === 'index' || r.tier === 'summary') && r.obsoletedBy.length === 0)
+    .sort((a, b) => b.priority - a.priority || a.number - b.number)
+    .slice(0, count)
+    .map((r) => ({ number: r.number, title: r.title, status: r.status, priority: r.priority }));
+}
+
+async function main(argv: string[]): Promise<number> {
+  let size = 100;
+  let force = false;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--size') size = Number(argv[++i]);
+    else if (argv[i] === '--force') force = true;
+    else {
+      console.error(`unknown argument: ${argv[i]}`);
+      return 2;
+    }
+  }
+  if (!Number.isInteger(size) || size < 1) {
+    console.error('--size must be a positive integer');
+    return 2;
+  }
+  const work = path.join(ROOT, '.work');
+  const dirs = ['in', 'out'].map((d) => path.join(work, 'summaries', d));
+  const targets = path.join(work, 'explainer-targets.json');
+  const busy = [...dirs.filter((d) => fs.existsSync(d) && fs.readdirSync(d).length), ...(fs.existsSync(targets) ? [targets] : [])];
+  if (busy.length && !force) {
+    console.error(
+      `refusing to overwrite existing work (drafting may be in progress):\n  ${busy.join('\n  ')}\nre-run with --force to replace`,
+    );
+    return 1;
+  }
+  const index = loadIndex();
+  const site = buildSite({ index, contentDir: path.join(ROOT, 'content') });
+  if (force) fs.rmSync(dirs[0], { recursive: true, force: true });
+  const r = makeBatches({ site, index, outDir: path.join(work, 'summaries', 'in'), size });
+  fs.writeFileSync(path.join(work, 'explainer-targets.json'), `${JSON.stringify(explainerTargets(site), null, 2)}\n`);
+  console.log(`${r.items} items in ${r.batches} batches (size ${size}); wrote .work/explainer-targets.json`);
+  return 0;
+}
+
+if (/(^|[\\/])make-summary-batches\.ts$/.test(process.argv[1] || ''))
+  main(process.argv.slice(2)).then(
+    (c) => process.exit(c),
+    (e) => {
+      console.error(e);
+      process.exit(2);
+    },
+  );

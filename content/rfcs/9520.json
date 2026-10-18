@@ -1,0 +1,220 @@
+{
+  "number": 9520,
+  "shortTitle": "DNS failure caching",
+  "category": "dns",
+  "categoryReviewed": false,
+  "summary": "<p>Resolvers cache answers to cut latency and server load. RFC 2308 covers caching of data and non-existence answers, but this document is about failures, where the resolver gets no useful response. It requires that such resolution failures be cached. It updates RFCs 2308, 4035, and 4697.</p>",
+  "eli5": {
+    "summary": "<p>If a shop's door is locked, you shouldn't knock a hundred times. Remember it's closed for a little while before trying again.</p>"
+  },
+  "questions": [
+    "dns negative caching of failures",
+    "cache servfail",
+    "resolution failure caching",
+    "how long should dns failures be cached",
+    "must resolvers cache servfail",
+    "what is a dns resolution failure"
+  ],
+  "tags": [
+    "DNS",
+    "Caching",
+    "Resilience"
+  ],
+  "subtitle": "Resolvers must remember that a lookup failed, so they stop hammering servers that cannot answer.",
+  "tldr": {
+    "problem": "When DNS servers fail to give any useful answer, resolvers tend to retry more and more aggressively. Past incidents show query traffic multiplying many times over, at the root, at TLDs and at the failing zone's servers.",
+    "mechanism": "Resolvers MUST keep a cache of resolution failures. They must not retry a server address more than twice per transport, must cache failures for at least 1 second and at most 5 minutes, and should back off for persistent failures.",
+    "outcome": "RFC 9520 turns optional failure caching from RFC 2308 into a requirement. It also makes DNSSEC validation failure caching mandatory and extends the ban on aggressive requerying to all query types and all ancestor zones.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Max retries per address and transport",
+      "value": "2 (3 queries in total)"
+    },
+    {
+      "label": "Minimum failure cache time",
+      "value": "1 second"
+    },
+    {
+      "label": "Maximum failure cache time",
+      "value": "5 minutes"
+    },
+    {
+      "label": "Example initial backoff",
+      "value": "5 seconds"
+    },
+    {
+      "label": "Typical timeouts mentioned",
+      "value": "3 to 30 seconds"
+    }
+  ],
+  "today": "<p>RFC 9520 is a Proposed Standard published in December 2023, and no later RFC obsoletes or updates it. It updates <a href='/rfc2308'>RFC 2308</a>, <a href='/rfc4035'>RFC 4035</a> and <a href='/rfc4697'>RFC 4697</a>.</p>",
+  "glossary": [
+    "negative-caching",
+    "resolver",
+    "recursive-resolver",
+    "stub-resolver",
+    "dnssec",
+    "dns"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1.1",
+      "title": "Why Failures Need a Cache",
+      "content": "<p>DNS resolvers cache answers to cut latency and load on authoritative servers. <a href='/rfc2308'>RFC 2308</a> already makes it mandatory to cache <code>NXDOMAIN</code> (name error) and <code>NODATA</code> answers when an SOA record supplies a TTL. Caching of server failures and dead servers was only optional. <strong>RFC 9520</strong> closes that gap.</p><p>The RFC lists incidents where resolvers became more aggressive when things broke. In 2018, during the root zone KSK rollover, two root servers went from about 15 million DNSKEY queries per day to 1.2 billion per day, an 80x increase. In 2021, a botnet domain averaged about 50 queries per second when its servers behaved normally, but 60,000 per second when they all returned SERVFAIL. During a 6-hour Facebook outage on October 4, 2021, traffic on the .COM/.NET infrastructure rose from 7,000 to 900,000 queries per second.</p>",
+      "eli5": "<p>When something is broken, many computers keep asking again and again, which makes the problem worse. Remembering that it is broken calms everything down.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "What Counts as a Resolution Failure",
+      "content": "<p>A <strong>resolution failure</strong> happens when none of the servers available to a resolver give any useful response for a query tuple of name, type and class. A response is useful if it carries the requested data, a referral to a descendant zone, or an indication that no data exists. <code>NXDOMAIN</code> and <code>NOERROR</code>/<code>NODATA</code> are useful answers, so they are not failures and stay under RFC 2308. If any one server answers usefully, there is no failure.</p><p>The RFC describes several causes and says the list is not exhaustive: <code>SERVFAIL</code> responses, <code>REFUSED</code> responses (for example a server queried for a zone it is not authoritative for, or a query from a source outside its access list), timeouts and unreachable servers, delegation loops, alias loops, DNSSEC validation failures and <code>FORMERR</code> responses. The document works at the level of failure, not particular causes.</p>",
+      "eli5": "<p>A failure is when you ask everyone you can and nobody gives you a helpful answer. Hearing \"that person does not exist\" is a helpful answer, so it does not count.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "2.3",
+      "title": "Timeouts, Loops and Other Troublemakers",
+      "content": "<p>Timeouts are tricky. A very popular name in a zone whose servers are all silent may draw tens or hundreds of queries per second. If the recursive resolver joins identical outstanding queries into one upstream query, it sends only one. If it does not, it may send hundreds or thousands of upstream queries while waiting for the timeout, and it is more exposed to birthday attacks (<a href='/rfc5452'>RFC 5452</a>).</p><p>A <strong>delegation loop</strong> occurs when two domains each use name servers inside the other, so nothing under either can be resolved. A resolver that does not detect it may generate DDoS-levels of traffic to authoritative servers, as shown by the TsuNAME vulnerability. An <strong>alias loop</strong> is the same idea with CNAME or DNAME records pointing at each other.</p><p>Resolvers may have two timeouts: a smaller one that triggers a retry and a larger one after which the server is considered unresponsive.</p>",
+      "eli5": "<p>Two friends each say \"ask the other one\". If you keep going back and forth you never get an answer, so you must notice the loop and stop.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "The Caching Requirements",
+      "content": "<p>Retries come first. A resolver <strong>MUST NOT</strong> retry a given query to a server address over a given DNS transport more than twice, which is three queries in total, before treating that address as unresponsive for that query. It MAY try a different transport to the same server if it has reason to believe that transport is available and fits its security policy. The RFC sets no timeout value and expects typical values of 3 to 30 seconds.</p><p>Then the cache. Resolvers <strong>MUST</strong> implement a cache for resolution failures. When an incoming query matches a cached failure, the resolver MUST NOT send any matching outgoing queries until the entry expires. Failures MUST be cached for at least 1 second, MAY be cached longer for some failure types, and MUST NOT be cached longer than 5 minutes, consistent with RFC 2308.</p><ul><li>The minimum cache duration SHOULD be configurable by the operator.</li><li>Resolvers SHOULD use exponential or linear backoff to lengthen the duration for persistent failures. For example, start at 5 seconds and grow up to a configurable maximum, never beyond 5 minutes.</li><li>Resolvers SHOULD limit the memory and processing time given to this cache.</li></ul><p>Cache design is left open. For example, DNSSEC failures might be keyed by name, class and type, while unresponsive servers might be keyed by IP address. Developers should document their choices.</p>",
+      "eli5": "<p>If a door is locked, knock at most three times, then write it down and leave it alone for a short while. Wait a little longer each time it is still locked, but never longer than five minutes.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.3",
+      "title": "Parent Zones and DNSSEC Failures",
+      "content": "<p><a href='/rfc4697'>RFC 4697</a> banned aggressive requerying of a failed zone's parent with NS queries. RFC 9520 widens this. When all name servers of a zone are non-responsive, a resolver MUST cache the failure, and MUST limit queries to that zone's parent and other ancestor zones just as it limits queries to the failed zone. This applies to all query types, not only NS.</p><p><a href='/rfc4035'>RFC 4035</a> said security-aware resolvers MAY cache data with invalid signatures. RFC 9520 changes the key word: they <strong>MUST</strong> cache DNSSEC validation failures, with the same restrictions. One restriction is to use a small TTL, partly because the TTL on such data cannot be trusted. The cache-duration advice above can guide those TTLs.</p>",
+      "eli5": "<p>If a house is empty, do not keep asking the neighbours and the whole street about it either. And if a letter's seal looks fake, remember that for a bit instead of re-checking it every minute.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and Privacy",
+      "content": "<p>An attacker could try to exhaust resolver resources by sending queries for many names or types that fail, so resolvers SHOULD bound the memory devoted to the failure cache.</p><p>A cache poisoning attack leading to denial of service may also be possible, because failure messages cannot be signed. An attacker could forge failure messages so that the resolver stops querying an authoritative server. The RFC argues this needs continued spoofing through the backoff period and repeated attacks because of the 5-minute cache limit, so effects would be localized and of limited duration. The RFC states that it has no impact on user privacy and has no IANA actions.</p>",
+      "eli5": "<p>A prankster could shout \"that shop is closed!\" to make you stay away. Because you only remember it for at most five minutes, the prank does not last long.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "requirements",
+      "position": "after",
+      "caption": "THE LIMITS RFC 9520 SETS",
+      "data": {
+        "items": [
+          {
+            "title": "Retries",
+            "text": "No more than 2 retries per server address and transport, so 3 queries in total."
+          },
+          {
+            "title": "Minimum cache time",
+            "text": "Failures MUST be cached for at least 1 second."
+          },
+          {
+            "title": "Maximum cache time",
+            "text": "Failures MUST NOT be cached longer than 5 minutes."
+          },
+          {
+            "title": "Backoff",
+            "text": "SHOULD grow the cache time for persistent failures, never past 5 minutes."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "WHAT RFC 9520 CHANGES IN EARLIER RFCS",
+      "data": {
+        "columns": [
+          "RFC",
+          "Before",
+          "After RFC 9520"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "RFC 2308",
+              "Caching server failures and dead servers is optional",
+              "Caching all resolution failures is required"
+            ]
+          },
+          {
+            "cells": [
+              "RFC 4035",
+              "Resolvers MAY cache DNSSEC validation failures",
+              "Resolvers MUST cache DNSSEC validation failures"
+            ]
+          },
+          {
+            "cells": [
+              "RFC 4697",
+              "No aggressive requerying of the parent for NS records",
+              "Applies to all query types and all ancestor zones"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1034]",
+      "text": "Mockapetris, P., \"Domain names - concepts and facilities\", STD 13, RFC 1034, November 1987.",
+      "rfc": 1034
+    },
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC2308]",
+      "text": "Andrews, M., \"Negative Caching of DNS Queries (DNS NCACHE)\", RFC 2308, March 1998.",
+      "rfc": 2308
+    },
+    {
+      "number": "[RFC4035]",
+      "text": "Arends, R., et al., \"Protocol Modifications for the DNS Security Extensions\", RFC 4035, March 2005.",
+      "rfc": 4035
+    },
+    {
+      "number": "[RFC4697]",
+      "text": "Larson, M. and P. Barber, \"Observed DNS Resolution Misbehavior\", BCP 123, RFC 4697, October 2006.",
+      "rfc": 4697
+    },
+    {
+      "number": "[RFC5452]",
+      "text": "Hubert, A. and R. van Mook, \"Measures for Making DNS More Resilient against Forged Answers\", RFC 5452, January 2009.",
+      "rfc": 5452
+    },
+    {
+      "number": "[RFC8767]",
+      "text": "Lawrence, D., Kumari, W., and P. Sood, \"Serving Stale Data to Improve DNS Resiliency\", RFC 8767, March 2020.",
+      "rfc": 8767
+    },
+    {
+      "number": "[RFC8914]",
+      "text": "Kumari, W., et al., \"Extended DNS Errors\", RFC 8914, October 2020.",
+      "rfc": 8914
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

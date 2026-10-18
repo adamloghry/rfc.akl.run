@@ -1,0 +1,287 @@
+{
+  "number": 8899,
+  "shortTitle": "DPLPMTUD",
+  "category": "transport",
+  "categoryReviewed": false,
+  "summary": "<p>Specifies Datagram Packetization Layer Path MTU Discovery, a robust way for a datagram transport or application to discover whether a network path supports a given datagram size. It does this by probing, without relying only on ICMP messages. It is a standards-track document.</p>",
+  "eli5": {
+    "summary": "<p>Before mailing a big package, you want to know the largest box the postal route will carry. This method tries sending boxes of different sizes and sees which arrive, instead of waiting for complaints.</p>"
+  },
+  "questions": [
+    "what is dplpmtud",
+    "how to discover path mtu for udp",
+    "how does path mtu discovery work for udp",
+    "what is a packet too big message",
+    "what is a path mtu black hole"
+  ],
+  "tags": [
+    "Transport",
+    "MTU",
+    "Probing"
+  ],
+  "subtitle": "How a sender of datagrams finds the biggest packet a network path will carry, by probing instead of waiting for error messages.",
+  "tldr": {
+    "problem": "Classical Path MTU Discovery depends on ICMP Packet Too Big messages, which are often rate limited, filtered by firewalls, lost in tunnels, or impossible to validate. When they go missing, large packets are silently dropped in a black hole.",
+    "mechanism": "The packetization layer sends probe packets of chosen sizes, treats an acknowledgment as proof that a size works, and uses a small state machine with timers to raise the packet size or fall back when probes stop getting through.",
+    "outcome": "Datagram transports and applications get a robust way to find and track the usable packet size. It updates RFC 4821, RFC 4960, RFC 6951, RFC 8085 and RFC 8261 to point to this method.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default MAX_PROBES",
+      "value": "3"
+    },
+    {
+      "label": "PMTU_RAISE_TIMER",
+      "value": "600 seconds"
+    },
+    {
+      "label": "PROBE_TIMER minimum",
+      "value": "1 second (SHOULD be larger than 15 seconds)"
+    },
+    {
+      "label": "Recommended IPv4 BASE_PLPMTU",
+      "value": "1200 bytes"
+    },
+    {
+      "label": "Minimum probe interval",
+      "value": "At least one RTT"
+    },
+    {
+      "label": "IPv6 minimum packet size",
+      "value": "1280 bytes"
+    }
+  ],
+  "today": "<p>RFC 8899 is a Proposed Standard and the metadata lists no RFC that obsoletes or updates it. It updates <a href='/rfc4821'>RFC 4821</a>, <a href='/rfc4960'>RFC 4960</a>, <a href='/rfc6951'>RFC 6951</a>, <a href='/rfc8085'>RFC 8085</a> and <a href='/rfc8261'>RFC 8261</a> so that they point to this method.</p>",
+  "glossary": [
+    "path-mtu-discovery",
+    "path-mtu",
+    "mtu",
+    "icmp",
+    "udp",
+    "sctp",
+    "quic",
+    "fragmentation",
+    "congestion-control",
+    "finite-state-machine",
+    "black-hole",
+    "packetization-layer"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Classical PMTUD Breaks",
+      "content": "<p>Classical Path MTU Discovery relies on <strong>Packet Too Big</strong> (PTB) messages. A PTB message is an IPv4 ICMP Unreachable message (Type 3, Code 4, Fragmentation Needed) or an ICMPv6 Packet Too Big message (Type 2). When a sender gets one, it lowers its effective MTU to the link MTU the message reports.</p><p>The RFC lists many ways those messages never arrive. ICMP generation is usually rate limited. Firewalls can block ICMP. A tunnel ingress might fail to forward the message. Asymmetric routing or Equal-Cost Multipath (ECMP) can leave no return route to the sender. A misconfigured layer 2 switch can drop a packet without any PTB being sent. The result is a <strong>black hole</strong>: every datagram larger than the real path MTU is discarded and the sender never learns why.</p><p>Even a PTB message that arrives may not be usable. RFC 792 routers only have to quote the first 64 bits of the IP payload, tunnels and encryption can shrink the quoted packet, and NAT devices may not translate the quoted packet correctly. Without validation, an off-path node could forge a PTB to force the sender to shrink its packets.</p>",
+      "eli5": "<p>Imagine you only learn a road is too narrow when a traffic officer shouts at you. If the officer is asleep, your big truck just never arrives. This RFC says: do not wait for the shout, test the road yourself.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "What a Datagram Transport Must Provide",
+      "content": "<p>Unlike TCP, a datagram <strong>packetization layer</strong> (PL) needs extra machinery to do this discovery. Section 3 lists nine requirements. The main ones:</p><ul><li>A PL <code>MUST NOT</code> send a datagram, other than a probe, larger than the current <strong>PLPMTU</strong>.</li><li>The interface below the PL must be able to send a probe larger than the PLPMTU. In IPv4 a probe <code>MUST</code> have the Don't Fragment (DF) bit set. In IPv6 it is always sent without source fragmentation.</li><li>The receiving PL must give feedback so the sender knows a probe arrived.</li><li>Probes that carry no user data are <code>RECOMMENDED</code>, so a lost probe needs no retransmission.</li><li>Any received PTB message <code>MUST</code> be validated before use, and a PTB message <code>MUST NOT</code> be used to increase the PLPMTU.</li><li>If probes are not paced by a congestion controller, the interval between probes <code>MUST</code> be at least one RTT. Loss of a probe <code>SHOULD NOT</code> be treated as congestion.</li></ul><p>The PLPMTU may also be shared with other PL instances through the IP layer cache, and the method must cope with reordering, delay and duplication of packets.</p>",
+      "eli5": "<p>To test a road you need three things: a truck you are allowed to lose, a friend at the other end who calls back when it arrives, and a rule that you never send real cargo in a size you have not proven.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Probes, Black Holes and the MPS",
+      "content": "<p>A <strong>probe packet</strong> is a datagram of a deliberately chosen size. There are three ways to build one: control information plus padding, application data plus padding, or application data alone sized to match. The receiver must be able to tell real data from padding so padding never reaches the application. A probe must carry enough information to be identified uniquely within the Maximum Segment Lifetime, and the RFC takes the MSL as 2 minutes.</p><p>Black hole detection has three possible indicators: a validated PTB message reporting a size smaller than the current PLPMTU (a method <code>MUST NOT</code> rely on this alone), repeated loss of probes at the current size, or a PL-specific event signalling excessive loss. When a black hole is found, DPLPMTUD sets a lower PLPMTU and MPS and confirms the new size works.</p><p>The <strong>Maximum Packet Size</strong> (MPS) is the largest application data block that fits in one datagram. It is the PLPMTU minus PL headers, including security overhead such as an AEAD tag. The PL <code>SHOULD</code> give applications a primitive to read it. A PL using this method <code>MUST</code> suspend network-layer enforcement of the PMTU for that flow.</p>",
+      "eli5": "<p>A probe is a test package padded out to an exact size. If the test package gets a thank-you note back, that size is safe. The MPS is how much real stuff fits in the box once you subtract the box walls.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "5",
+      "title": "Timers, Constants and Variables",
+      "content": "<p>The method uses up to three timers. The <code>PROBE_TIMER</code> waits for a probe acknowledgment and <code>MUST NOT</code> be smaller than 1 second and <code>SHOULD</code> be larger than 15 seconds. The <code>PMTU_RAISE_TIMER</code> is 600 seconds and decides when to search again for a bigger size. The <code>CONFIRMATION_TIMER</code> periodically rechecks the current size for PLs that do not acknowledge data, and <code>MUST NOT</code> be used with an acknowledged PL.</p><p>The constants are <code>MAX_PROBES</code> (default 3), <code>MIN_PLPMTU</code>, <code>MAX_PLPMTU</code> and <code>BASE_PLPMTU</code>. For IPv6, <code>MIN_PLPMTU</code> yields at least a 1280-byte IPv6 packet. For IPv4 it yields at least a 68-byte packet. For IPv4 a default <code>BASE_PLPMTU</code> of 1200 bytes is <code>RECOMMENDED</code>.</p><p>Two variables track progress: <code>PROBED_SIZE</code>, the size of the probe in flight, and <code>PROBE_COUNT</code>, the number of successive unsuccessful probes, reset to zero whenever a probe is acknowledged.</p>",
+      "eli5": "<p>There are stopwatches that say how long to wait for an answer, a smallest size that should always work, a biggest size worth trying, and a counter of how many tries in a row failed.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "6",
+      "title": "The Five States",
+      "content": "<p>DPLPMTUD runs a state machine per path. <strong>DISABLED</strong> is the initial state, entered again whenever the PL reports loss of connectivity. <strong>BASE</strong> confirms that the <code>BASE_PLPMTU</code> works. <strong>SEARCHING</strong> is the main probing state: each acknowledged probe sets the PLPMTU to the <code>PROBED_SIZE</code> and the search algorithm picks a larger one. <strong>SEARCH_COMPLETE</strong> is the normal maintenance state. <strong>ERROR</strong> covers paths that cannot sustain the base size or that give contradictory information.</p><p>SEARCHING ends when <code>PROBE_COUNT</code> reaches <code>MAX_PROBES</code>, a validated PTB equals the last good size, or a probe of <code>MAX_PLPMTU</code> is acknowledged. In SEARCH_COMPLETE, an unacknowledged PL periodically probes at the current PLPMTU. If <code>MAX_PROBES</code> successive probes fail, the method returns to BASE. The <code>PMTU_RAISE_TIMER</code> sends it back to SEARCHING to try for a larger size.</p><p>Probe sizes are chosen to maximize the gain from each step, for example from a table of common PMTU sizes. If path information looks inconsistent, a sender may clamp the offered MPS to a smaller value for a time.</p>",
+      "eli5": "<p>It is like a careful driver: first prove a small safe size works, then try bigger ones one at a time, relax once the best is found, and drop back to the safe size the moment packages stop arriving.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "7",
+      "title": "Handling Packet Too Big Messages",
+      "content": "<p>PTB messages are optional hints. A simple implementation may ignore them. A PL that uses them <code>MUST</code> check that the quoted packet matches the IP addresses, protocol and ports of a packet it actually sent. The check <code>SHOULD</code> use information that is hard for an off-path attacker to guess. A validated PTB can speed up the search by triggering an immediate probe, but it <code>MUST NOT</code> set the PLPMTU directly.</p><p>The reported size is first converted to a <code>PL_PTB_SIZE</code> by subtracting headers below the PL. Then the RFC sorts the cases. Below <code>MIN_PLPMTU</code> the message is discarded. If it falls between <code>BASE_PLPMTU</code> and the current PLPMTU, it may indicate a black hole and the PLPMTU <code>SHOULD</code> drop to <code>BASE_PLPMTU</code> and a new search start. If it falls between the PLPMTU and the probed size, the PLPMTU stays and the reported value can be the next search point. If it is at or above the probed size, it is an inconsistent signal and is discarded.</p>",
+      "eli5": "<p>If a stranger shouts that your road is narrow, first check that the shout is really about your truck. Even then, use it only as a hint for where to test next, never as proof.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "8",
+      "title": "UDP, SCTP and QUIC",
+      "content": "<p>UDP and UDP-Lite do not provide the features needed, so an application using them implements DPLPMTUD itself. It needs an application-layer request and response, <code>SHOULD</code> use a value known only to the two endpoints such as a session ID, and <code>SHOULD</code> avoid doing so when the underlying transport already does it.</p><p>For SCTP, the <code>RECOMMENDED</code> probe is a PAD chunk attached to a minimum-length HEARTBEAT chunk. The HEARTBEAT ACK confirms the probe, and this avoids interfering with user messages, congestion control and flow control. SCTP is an acknowledged PL, so it <code>MUST NOT</code> use the CONFIRMATION_TIMER. The same approach applies to SCTP over UDP, where probe size includes the 8 bytes of UDP header, and SCTP over DTLS, where DTLS headers are counted. For SCTP/DTLS, RFC 4960 gives no way to validate the ICMP payload, which can prevent PTB processing.</p><p>QUIC is treated as an acknowledged PL, and the QUIC specification describes how it uses DPLPMTUD.</p>",
+      "eli5": "<p>Different delivery services have different ways of sending a padded test package and getting a reply. This RFC says how to do it for each one it names.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The RFC's main concern is forged or misleading PTB messages. A node supporting DPLPMTUD <code>MUST</code> validate the payload of PTB messages. An on-path attacker could still forge a PTB with a valid quoted packet to push the PLPMTU down. Two mitigations are given: a PTB alone never reduces the PLPMTU below the base size, because the sender first enters the BASE state, and the design does not require PTB processing, so a sender can suspend it.</p><p>Other points: probes <code>MUST</code> be spaced at least one RTT apart to avoid excess load. The confirmation method must resist off-path injection, for example with a randomly initialized sequence number. Parsing the quoted packet <code>SHOULD</code> be limited to avoid denial of service. Probe padding should not add anything that cryptographic protection does not cover. This document has no IANA actions.</p>",
+      "eli5": "<p>A prankster might shout fake road warnings. The rules say to check the shout, never shrink below the safe size just because of it, and be willing to ignore shouting entirely.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "DPLPMTUD STATES (SIMPLIFIED FROM RFC 8899 FIGURE 5)",
+      "data": {
+        "states": [
+          {
+            "key": "disabled",
+            "label": "DISABLED",
+            "initial": true
+          },
+          {
+            "key": "base",
+            "label": "BASE"
+          },
+          {
+            "key": "searching",
+            "label": "SEARCHING"
+          },
+          {
+            "key": "search-complete",
+            "label": "SEARCH_COMPLETE"
+          },
+          {
+            "key": "error",
+            "label": "ERROR"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "disabled",
+            "to": "base",
+            "label": "PL indicates connectivity"
+          },
+          {
+            "from": "base",
+            "to": "searching",
+            "label": "BASE_PLPMTU probe acked"
+          },
+          {
+            "from": "base",
+            "to": "error",
+            "label": "PROBE_COUNT = MAX_PROBES"
+          },
+          {
+            "from": "searching",
+            "to": "search-complete",
+            "label": "MAX_PLPMTU probe acked or MAX_PROBES reached"
+          },
+          {
+            "from": "search-complete",
+            "to": "searching",
+            "label": "PMTU_RAISE_TIMER expiry"
+          },
+          {
+            "from": "search-complete",
+            "to": "base",
+            "label": "black hole detected"
+          },
+          {
+            "from": "searching",
+            "to": "base",
+            "label": "black hole detected"
+          },
+          {
+            "from": "error",
+            "to": "searching",
+            "label": "consistent connectivity and BASE_PLPMTU confirmed"
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "WHERE DPLPMTUD CAN LIVE (RFC 8899 FIGURE 2)",
+      "data": {
+        "layers": [
+          {
+            "label": "Application",
+            "detail": "Can implement DPLPMTUD itself",
+            "highlight": true
+          },
+          {
+            "label": "QUIC or SCTP",
+            "detail": "Can implement it as part of the transport",
+            "highlight": true
+          },
+          {
+            "label": "UDP",
+            "detail": "Provides no support on its own"
+          },
+          {
+            "label": "Network Interface",
+            "detail": "Must be able to send a probe larger than the PLPMTU"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4821]",
+      "text": "Mathis, M. and J. Heffner, \"Packetization Layer Path MTU Discovery\", RFC 4821, March 2007.",
+      "rfc": 4821
+    },
+    {
+      "number": "[RFC1191]",
+      "text": "Mogul, J. and S. Deering, \"Path MTU discovery\", RFC 1191, November 1990.",
+      "rfc": 1191
+    },
+    {
+      "number": "[RFC8201]",
+      "text": "McCann, J., Deering, S., Mogul, J., and R. Hinden, Ed., \"Path MTU Discovery for IP version 6\", STD 87, RFC 8201, July 2017.",
+      "rfc": 8201
+    },
+    {
+      "number": "[BCP145]",
+      "text": "Eggert, L., Fairhurst, G., and G. Shepherd, \"UDP Usage Guidelines\", BCP 145, RFC 8085, March 2017.",
+      "rfc": 8085
+    },
+    {
+      "number": "[RFC4960]",
+      "text": "Stewart, R., Ed., \"Stream Control Transmission Protocol\", RFC 4960, September 2007.",
+      "rfc": 4960
+    },
+    {
+      "number": "[RFC4820]",
+      "text": "Tuexen, M., Stewart, R., and P. Lei, \"Padding Chunk and Parameter for the Stream Control Transmission Protocol (SCTP)\", RFC 4820, March 2007.",
+      "rfc": 4820
+    },
+    {
+      "number": "[RFC6951]",
+      "text": "Tuexen, M. and R. Stewart, \"UDP Encapsulation of Stream Control Transmission Protocol (SCTP) Packets for End-Host to End-Host Communication\", RFC 6951, May 2013.",
+      "rfc": 6951
+    },
+    {
+      "number": "[RFC8261]",
+      "text": "Tuexen, M., Stewart, R., Jesup, R., and S. Loreto, \"Datagram Transport Layer Security (DTLS) Encapsulation of SCTP Packets\", RFC 8261, November 2017.",
+      "rfc": 8261
+    },
+    {
+      "number": "[RFC8900]",
+      "text": "Bonica, R., Baker, F., Huston, G., Hinden, R., Troan, O., and F. Gont, \"IP Fragmentation Considered Fragile\", RFC 8900, BCP 230, September 2020.",
+      "rfc": 8900
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

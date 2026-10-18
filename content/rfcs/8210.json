@@ -1,0 +1,319 @@
+{
+  "number": 8210,
+  "shortTitle": "RPKI-to-Router v1",
+  "category": "routing",
+  "categoryReviewed": false,
+  "summary": "<p>Describes version 1 of the protocol routers use to receive RPKI prefix origin data and router keys from a trusted cache. It updates RFC 6810, which described version 0.</p>",
+  "eli5": {
+    "summary": "<p>Routers ask a trusted helper for a list of who owns which addresses, so they can spot fakes.</p>"
+  },
+  "questions": [
+    "rpki to router protocol",
+    "rtr protocol version 1",
+    "what is the rpki to router protocol",
+    "what changed in rtr protocol version 1",
+    "what port does rpki-rtr use",
+    "what is a router key pdu"
+  ],
+  "tags": [
+    "Routing",
+    "RPKI",
+    "BGP"
+  ],
+  "subtitle": "How a router gets validated RPKI route-origin data and router keys from a trusted cache, now with timers and key delivery.",
+  "tldr": {
+    "problem": "Routers need to check the origin AS and AS path of BGP announcements, but they cannot do the RPKI cryptography themselves, so they need a simple and reliable way to receive already-validated data from a trusted cache.",
+    "mechanism": "A router keeps a persistent connection to a cache and exchanges binary PDUs: it asks for a full data set (Reset Query) or only changes since a Serial Number (Serial Query), and the cache replies with prefix and Router Key PDUs followed by an End of Data PDU carrying new timers.",
+    "outcome": "Version 1 adds the Router Key PDU, explicit timing parameters and protocol version negotiation to the version 0 protocol of RFC 6810, which it updates.",
+    "outcomeLabel": "What changed from v0"
+  },
+  "facts": [
+    {
+      "label": "Protocol version",
+      "value": "1"
+    },
+    {
+      "label": "TCP port",
+      "value": "rpki-rtr (323)"
+    },
+    {
+      "label": "TLS port",
+      "value": "rpki-rtr-tls (324)"
+    },
+    {
+      "label": "IPv4 Prefix PDU length",
+      "value": "20 bytes"
+    },
+    {
+      "label": "IPv6 Prefix PDU length",
+      "value": "32 bytes"
+    },
+    {
+      "label": "End of Data PDU length",
+      "value": "24 bytes"
+    }
+  ],
+  "today": "<p>RFC 8210 is a Proposed Standard published in September 2017 that updates <a href='/rfc6810'>RFC 6810</a>. The unit metadata records no later RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "rpki",
+    "route-origin-authorization",
+    "bgp",
+    "autonomous-system",
+    "prefix",
+    "router",
+    "tls",
+    "ssh",
+    "session-identifier",
+    "md5-hash"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Routers Need a Cache",
+      "content": "<p>To verifiably validate the origin Autonomous Systems and AS paths of BGP announcements, routers need a simple but reliable mechanism to receive cryptographically validated <strong>RPKI</strong> prefix origin data and router keys from a trusted cache. This document describes the protocol that delivers them, and its design is intentionally constrained so that it is usable on much of the current generation of ISP router platforms.</p><p>This is version 1 of the protocol. <a href='/rfc6810'>RFC 6810</a> describes version 0, and this document updates it. Compared with RFC 6810, it adds a new Router Key PDU, explicit timing parameters and protocol version negotiation, and increments the version number from 0 to 1.</p>",
+      "eli5": "<p>Routers cannot do the hard checking themselves, so a helper called a cache does it and passes the answers along. This new version adds more things the helper can pass along.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "3",
+      "title": "Global RPKI, Caches and Routers",
+      "content": "<p>Deployment has a three-level structure. The <strong>Global RPKI</strong> is the authoritative data, published on distributed servers at the IANA, the Regional Internet Registries, National Internet Registries and ISPs. <strong>Local caches</strong> are collected and verified copies of that data. <strong>Routers</strong> fetch from a local cache using this protocol and are clients of the cache.</p><p>A relying party such as a router MUST have a trust relationship with, and a trusted transport channel to, any cache it uses. A router is configured with a semi-ordered list of caches, each with a preference value where lower is more preferred, and connects to the most preferred cache that accepts it. The preference denotes proximity, not trust.</p><p>Because a cache evaluates certificates and ROAs (Route Origin Authorizations), which are time dependent, the servers' clocks MUST be correct to a tolerance of approximately an hour.</p>",
+      "eli5": "<p>There is a big public record book, nearby helpers who keep checked copies, and routers who ask the closest helper. The router picks its favorite helper first.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "How a Router Stays in Sync",
+      "content": "<p>Each cache has a <strong>Serial Number</strong>, a 32-bit strictly increasing unsigned integer that wraps from 2^32-1 to 0 and denotes the logical version of the cache. A <strong>Session ID</strong> is generated when a cache starts and binds the cache instance to its sequence of Serial Numbers. If either side finds a Session ID that does not match, the party detecting the mismatch MUST terminate the session with an Error Report PDU with code 0 (Corrupt Data), and the router MUST flush all data learned from that cache.</p><p>Periodically the router sends a <strong>Serial Query</strong> with the latest Serial Number it has, and the cache answers with all changes since then. When the router has no usable state, or starts fresh, it sends a <strong>Reset Query</strong> and receives the whole active database. When the cache updates, it may send a <strong>Serial Notify</strong>, which is only a hint; the router must poll periodically anyway. The cache SHOULD send a Notify when its serial changes but MUST rate-limit Serial Notifies to no more than one per minute.</p><p>For a Serial Query, the cache MUST return the minimum set of changes, merging multiple changes to a prefix or key so that the stream has at most one withdrawal followed by at most one announcement. If the cache cannot supply an incremental update, it replies with a <strong>Cache Reset</strong>, and the router SHOULD try more-preferred caches and otherwise MUST issue a Reset Query. If the cache has no data at all, it sends an Error Report with code 2 (No Data Available), and the router tries other caches or issues periodic Reset Queries.</p>",
+      "eli5": "<p>The router keeps a bookmark number. It asks the helper what changed since its bookmark, or asks for the whole book if it lost its place. If the helper has no list yet, the router asks someone else or tries again later.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "The PDUs",
+      "content": "<p>Every PDU starts with an 8-bit Protocol Version (currently 1), an 8-bit PDU Type, a 16-bit field (Session ID or an error code, or zero), and a 32-bit Length that counts the whole PDU including its 8-byte header. Reserved fields MUST be zero on transmission and ignored on receipt.</p><p>The prefix PDUs carry a Flags byte whose lowest bit is 1 for an announcement and 0 for a withdrawal, a Prefix Length, a Max Length (which MUST NOT be less than the Prefix Length), the prefix, and a 32-bit Autonomous System Number. The IPv4 Prefix PDU has Length 20 and the IPv6 Prefix PDU has Length 32. A withdrawal deletes one previously announced PDU with the exact same prefix, length, max length and ASN. The cache MUST ensure the router has one and only one PDU for any unique tuple, and a router that receives a duplicate SHOULD raise a Duplicate Announcement Received error.</p><p>The new <strong>Router Key</strong> PDU (type 9) carries a 20-octet Subject Key Identifier, an AS Number and the full DER-encoded subjectPublicKeyInfo. Implementations MUST compare the public key as well as the SKI when detecting duplicates, since distinct keys could in theory hash to the same SKI. The <strong>End of Data</strong> PDU has Length 24 and carries the new Serial Number plus the three timing values. An <strong>Error Report</strong> PDU carries an error code, the erroneous PDU and optional UTF-8 diagnostic text, and an Error Report MUST NOT be sent in answer to another Error Report.</p>",
+      "eli5": "<p>Every message begins with the same little header saying what kind of message it is and how long it is. Then come the details, like which addresses an AS may announce, or a public key, or just an error note.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "6",
+      "title": "Timers and Version Negotiation",
+      "content": "<p>Only the cache knows how often the data really changes, so the End of Data PDU tells the router three intervals. The <strong>Refresh Interval</strong> is how long to wait between polls (allowed 1 to 86400 seconds, recommended default 3600). The <strong>Retry Interval</strong> is how long to wait after a failed poll (1 to 7200 seconds, default 600). The <strong>Expire Interval</strong> is how long the router may keep using the data when it cannot refresh it (600 to 172800 seconds, default 7200), and the router MUST NOT retain the data longer. Caches MUST set the Expire Interval larger than the Refresh and Retry Intervals.</p><p>A router MUST start each transport connection with a Reset Query or Serial Query, which tells the cache which version it speaks. A version 1 cache that gets a version 0 query MUST either downgrade to version 0 or send an Error Report with code 4 (Unsupported Protocol Version) and close. A version 1 router talking to a version 0 cache may retry with version 0 or downgrade. Once negotiated, the version is fixed for the session, and a PDU with a different version causes the session to be dropped, ideally with Error Code 8 (Unexpected Protocol Version). Routers MUST ignore Serial Notify PDUs during negotiation.</p>",
+      "eli5": "<p>The helper tells the router how often to check back and when its list becomes too old to trust. The two also agree on which language version to speak before they start.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Transport and Security",
+      "content": "<p>The protocol runs over a persistent session. Authentication and integrity are highly desirable, but as of writing there is no mandatory-to-implement transport that provides them. Caches and routers MUST implement unprotected transport over TCP on port <code>rpki-rtr</code> (323), and if unprotected TCP is used the cache and routers MUST be on the same trusted and controlled network. Where available, they SHOULD use TCP-AO, and MAY use SSHv2 as the <code>rpki-rtr</code> subsystem, TCP MD5, TCP over IPsec, or TLS on port <code>rpki-rtr-tls</code> (324). The RFC expects TCP-AO to become the mandatory-to-implement transport once it is available on all deployed platforms.</p><p>Over TLS, client routers MUST present certificates with iPAddress identities, and routers MUST verify the cache's certificate using dNSName identities and MUST NOT use Common Name identifiers.</p><p>The Security Considerations section stresses that the RPKI relies on object trust between caches, but because routers cannot do the validation cryptography, the last link from cache to router relies on server authentication and transport security, which have a very different threat model. In the RFC's words, you are betting your routing on this, so the cache SHOULD be as close to the routers as possible in the sense of controlled and protected transport.</p>",
+      "eli5": "<p>Because the router trusts the helper completely, it matters a lot that the helper is really the helper. The safest setups prove identity and stop tampering, and otherwise the two must sit on a network you control.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "11",
+      "title": "Deployment and Multiple Caches",
+      "content": "<p>The RFC illustrates three deployment scenarios: a small multihomed end site that outsources its cache to upstream ISPs, a larger end site running a hierarchy of caches, and an ISP backbone with redundant caches in each major point of presence. It notes that complex topologies are ill-advised, since errors such as loops are easy to make.</p><p>A client may hold data from several caches but MUST keep it marked by source, and when validating BGP announcements it MUST NOT distinguish between data sources. When switching caches it SHOULD keep the old data until it has a full set from another cache. To avoid load peaks on the Global RPKI, primary caches should not all fetch at the same time, for example on the hour; the RFC suggests choosing a random time and jittering the fetch timing.</p>",
+      "eli5": "<p>A router can listen to several helpers at once and keeps notes on who said what. Helpers should not all run to the big record book at the same moment.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "TYPICAL EXCHANGE (RFC 8210, SECTION 8.2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "cache",
+            "label": "Cache"
+          },
+          {
+            "key": "router",
+            "label": "Router"
+          }
+        ],
+        "messages": [
+          {
+            "from": "cache",
+            "to": "router",
+            "label": "Serial Notify",
+            "color": "neutral",
+            "note": "Optional hint that new data exists."
+          },
+          {
+            "from": "router",
+            "to": "cache",
+            "label": "Serial Query",
+            "color": "blue",
+            "note": "Router sends its current Serial Number."
+          },
+          {
+            "from": "cache",
+            "to": "router",
+            "label": "Cache Response",
+            "color": "green",
+            "note": "Cache confirms the request."
+          },
+          {
+            "from": "cache",
+            "to": "router",
+            "label": "Payload PDUs",
+            "color": "green",
+            "note": "Zero or more IPv4 Prefix, IPv6 Prefix or Router Key PDUs."
+          },
+          {
+            "from": "cache",
+            "to": "router",
+            "label": "End of Data",
+            "color": "green",
+            "note": "Carries the new Serial Number and timers."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "PDU TYPES AND ERROR CODES (RFC 8210)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Serial Notify",
+            "desc": "Cache tells the router it has new data."
+          },
+          {
+            "code": "1",
+            "label": "Serial Query",
+            "desc": "Router asks for changes since a Serial Number."
+          },
+          {
+            "code": "2",
+            "label": "Reset Query",
+            "desc": "Router asks for the whole database."
+          },
+          {
+            "code": "3",
+            "label": "Cache Response",
+            "desc": "Cache begins its answer."
+          },
+          {
+            "code": "4",
+            "label": "IPv4 Prefix",
+            "desc": "Announces or withdraws an IPv4 prefix with max length and ASN."
+          },
+          {
+            "code": "6",
+            "label": "IPv6 Prefix",
+            "desc": "Announces or withdraws an IPv6 prefix with max length and ASN."
+          },
+          {
+            "code": "7",
+            "label": "End of Data",
+            "desc": "Ends the answer; carries Serial Number and timers."
+          },
+          {
+            "code": "8",
+            "label": "Cache Reset",
+            "desc": "Cache cannot provide an incremental update."
+          },
+          {
+            "code": "9",
+            "label": "Router Key",
+            "desc": "New in version 1: announces or withdraws a router key.",
+            "highlight": true
+          },
+          {
+            "code": "10",
+            "label": "Error Report",
+            "desc": "Reports an error to the other party."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "TIMING PARAMETERS IN SECONDS (RFC 8210, SECTION 6)",
+      "data": {
+        "columns": [
+          "Interval",
+          "Minimum",
+          "Maximum",
+          "Recommended default"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Refresh",
+              "1",
+              "86400",
+              "3600"
+            ]
+          },
+          {
+            "cells": [
+              "Retry",
+              "1",
+              "7200",
+              "600"
+            ]
+          },
+          {
+            "cells": [
+              "Expire",
+              "600",
+              "172800",
+              "7200"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6810]",
+      "text": "Bush, R. and R. Austein, \"The Resource Public Key Infrastructure (RPKI) to Router Protocol\", RFC 6810 (protocol version 0).",
+      "rfc": 6810
+    },
+    {
+      "number": "[RFC6480]",
+      "text": "RPKI architecture, RFC 6480.",
+      "rfc": 6480
+    },
+    {
+      "number": "[RFC6811]",
+      "text": "Validation of BGP announcements, RFC 6811.",
+      "rfc": 6811
+    },
+    {
+      "number": "[RFC5925]",
+      "text": "Touch, J., Mankin, A., and R. Bonica, \"The TCP Authentication Option\", RFC 5925, June 2010.",
+      "rfc": 5925
+    },
+    {
+      "number": "[RFC1982]",
+      "text": "Elz, R. and R. Bush, \"Serial Number Arithmetic\", RFC 1982, August 1996.",
+      "rfc": 1982
+    },
+    {
+      "number": "[RFC6125]",
+      "text": "Saint-Andre, P. and J. Hodges, \"Representation and Verification of Domain-Based Application Service Identity...\", RFC 6125, March 2011.",
+      "rfc": 6125
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

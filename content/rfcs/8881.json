@@ -1,0 +1,369 @@
+{
+  "number": 8881,
+  "shortTitle": "NFSv4.1",
+  "category": "applications",
+  "categoryReviewed": false,
+  "summary": "<p>Describes version 4 minor version 1 of the Network File System protocol, including features retained from the base NFSv4 protocol and later extensions. The minor version does not depend on minor version 0 and is considered a separate protocol. It is standards-track.</p>",
+  "eli5": {
+    "summary": "<p>NFS lets a computer use files stored on another computer as if they were its own. This document describes one version of the rules, including improvements over the earlier one.</p>"
+  },
+  "questions": [
+    "what is nfsv4.1",
+    "how does nfs version 4 minor version 1 work",
+    "what is pnfs",
+    "what is an nfsv4.1 session",
+    "what is a nfs delegation",
+    "what does rfc 8881 obsolete"
+  ],
+  "tags": [
+    "File Systems",
+    "Sessions",
+    "Locking",
+    "Storage"
+  ],
+  "subtitle": "The version of NFS built around sessions, delegations and parallel data access, with a rewritten account of multi-server namespaces.",
+  "tldr": {
+    "problem": "Earlier NFS versions lacked exactly once semantics, had weak callback and trunking support, and offered no way to read and write file data in parallel across many servers.",
+    "mechanism": "NFSv4.1 puts every request inside a session with slot-based reply caching, folds locking and delegations into one stateful protocol, and adds pNFS layouts that let clients talk to storage devices directly.",
+    "outcome": "RFC 8881 obsoletes RFC 5661 as the specification of NFSv4.1, with a limited-scope rewrite aimed at trunking and Transparent State Migration. Its own appendices say security and internationalization still need a fuller revision.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Client ID size",
+      "value": "64 bits"
+    },
+    {
+      "label": "Stateid size",
+      "value": "128 bits (96-bit other, 32-bit seqid)"
+    },
+    {
+      "label": "Slot sequence ID",
+      "value": "32-bit; first use is 1, wraps to 0 after 0xFFFFFFFF"
+    },
+    {
+      "label": "RPC procedures",
+      "value": "2: NULL and COMPOUND"
+    },
+    {
+      "label": "Minimum stripe unit",
+      "value": "64 bytes"
+    },
+    {
+      "label": "Standard ports",
+      "value": "2049 for TCP, 20049 for RPC-over-RDMA"
+    }
+  ],
+  "today": "<p>RFC 8881 is a Proposed Standard that obsoletes <a href='/rfc5661'>RFC 5661</a>, so it is the current specification of NFSv4.1. Per the text, the updates that <a href='/rfc8434'>RFC 8434</a> and <a href='/rfc8178'>RFC 8178</a> apply to RFC 5661 also apply to it, and its own appendices list security and internationalization as areas needing future revision.</p>",
+  "glossary": [
+    "lease",
+    "kerberos",
+    "principal",
+    "idempotent-method",
+    "replay-cache",
+    "stateless-protocol",
+    "stateid",
+    "delegation",
+    "exactly-once-semantics",
+    "filehandle",
+    "striping"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What NFSv4.1 Is and Why This Update Exists",
+      "content": "<p>The <strong>NFS version 4 minor version 1</strong> protocol (NFSv4.1) is the second minor version of NFSv4. It keeps the NFSv4 goals: good performance on the Internet, strong security with negotiation built into the protocol, cross-platform interoperability and room for extensions. The RFC adds goals of its own: fix structural weaknesses in the base protocol, add specific features based on experience, and support clustered servers with scalable parallel access to files. It has no dependencies on minor version 0 (<a href='/rfc7530'>RFC 7530</a>) and is considered a separate protocol.</p><p>This document is a limited-scope update of <a href='/rfc5661'>RFC 5661</a>, which it obsoletes. Two features defined for minor version 0 had never been fully addressed in minor version 1: <strong>trunking</strong> (using several connections between a client and server, possibly to different network addresses) and <strong>Transparent State Migration</strong> (moving a file system between servers while the client keeps its locking state). The text presents a revised Section 11 on multi-server namespaces, and Appendix A explains why.</p><p>Compared with NFSv4.0, the major differences are the sessions model, parallel access (pNFS), the RECLAIM_COMPLETE operation, enhanced delegations (including directories), atomic attribute setting on exclusive create, preserving open files that are removed, better Windows ACL compatibility, data retention, and implementation identification.</p>",
+      "eli5": "<p>NFS is a way to use a file that is kept on another computer. This version adds better rules for keeping track of who is doing what, and the update fixes the rules for moving files between computers.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2.3",
+      "title": "COMPOUND Requests Over RPC",
+      "content": "<p>NFSv4.1 is a Remote Procedure Call application that uses RPC version 2 and XDR. Unlike NFSv3, which used ancillary protocols such as NLM, NSM and MOUNT, all minor versions of NFSv4 use a single RPC protocol. In all minor versions there are exactly two RPC procedures, <code>NULL</code> and <code>COMPOUND</code>.</p><p>A <code>COMPOUND</code> carries a series of individual operations, evaluated in order by the server with no atomicity guarantee. When an operation returns a failing result, evaluation ends and the results so far go back to the client. A client can chain several <code>LOOKUP</code> operations to resolve a multi-component path, or combine <code>OPEN</code> with <code>READ</code>, without extra round trips. The same structure exists for callbacks: <code>CB_NULL</code> and <code>CB_COMPOUND</code>, where the server makes an RPC to the client.</p><p>Session-enabled requests have the minor version set to 1, and the <code>SEQUENCE</code> operation, when present, MUST be the first operation in the COMPOUND. Its main job is to carry the session identifier. A few session administration operations, such as <code>DESTROY_SESSION</code>, are exceptions.</p>",
+      "eli5": "<p>Instead of sending one tiny note for every question, the client sends one list of questions in a single envelope. The server answers them in order and stops at the first one it cannot do.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "2.10",
+      "title": "Client IDs, Sessions and Channels",
+      "content": "<p>Each client is identified by a <strong>client owner</strong>: a verifier that changes when the client restarts, plus an opaque owner string that stays the same. The server answers with a 64-bit <strong>client ID</strong>. To establish and confirm it, the client sends <code>EXCHANGE_ID</code> and then <code>CREATE_SESSION</code> using the returned client ID. Unlike NFSv4.0, only the operations needed to establish the client ID are possible before it exists.</p><p>A <strong>session</strong> is a long-lived server object created by a client and used over time from one or more transport connections. A single client may create multiple sessions, but a single session MUST NOT serve multiple clients. State (opens, locks, delegations, layouts) is tied to the client ID, not to any session, so a callback may arrive over a different session than the request that obtained the state.</p><p>Each session has a <strong>fore channel</strong> for ordinary client-to-server COMPOUNDs and optionally a <strong>backchannel</strong> for server-to-client CB_COMPOUNDs. The client creates the connections for callbacks, which solves the problem of sending callbacks through firewalls. NFSv4.1 servers MUST support backchannels.</p><p>The RFC also gives guidance on the owner string: it should be unique, the same across client restarts, and the same for each server address the client uses, so that trunking works. Embedding only a network address is warned against, because addresses can be reassigned.</p>",
+      "eli5": "<p>A session is like a membership card with a client number on it. The client shows the card on every visit, and the server can also call the client back through a phone line the client set up.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "2.10.6",
+      "title": "Exactly Once Semantics and Slots",
+      "content": "<p>Sessions give NFSv4.1 <strong>exactly once semantics</strong> (EOS) on both channels: each COMPOUND that starts with <code>SEQUENCE</code> or <code>CB_SEQUENCE</code> MUST be executed by the receiver exactly once. The RFC explains why this covers every request, not only the non-idempotent ones. A repeated <code>RENAME</code> would fail the second time, and even an idempotent <code>WRITE</code> can corrupt data if a stale retry is executed after a later overlapping write. To keep things simple, the replier MUST enforce EOS for all requests.</p><p>The mechanism replaces the RPC transaction ID (XID) as the key for a duplicate request cache. The requester picks a <strong>slot ID</strong> in the range 0..N, where N starts at <code>ca_maxrequests - 1</code> and can be adjusted by the server. Each slot holds a 32-bit <strong>sequence ID</strong> and the cached reply. The first use of a slot MUST use sequence ID one, and each reuse MUST add one, wrapping to zero after 0xFFFFFFFF.</p><p>The replier compares the sequence ID with the slot. One greater than the last means a new request. Equal means a retransmission, answered from the cached reply. Anything lower, or two or more greater, MUST get <code>NFS4ERR_SEQ_MISORDERED</code>. Because the number of slots is bounded, the slot-based reply cache cannot overflow. The RFC notes that true and complete EOS also needs the reply cache kept in stable storage.</p><p>The SEQUENCE operation also carries a <code>highest_slotid</code>, so the requester can give back unused slots and the replier can raise or lower its target and enforced limits.</p>",
+      "eli5": "<p>Imagine a ticket book with numbered pages. Each new request uses the next page, so if the same page shows up twice, the server knows it is a repeat and just hands back its saved answer instead of doing the job again.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "8",
+      "title": "State, Stateids and Leases",
+      "content": "<p>Locking is built into NFSv4.1, so the protocol is stateful. The server owns the state, the client asks for changes, and every piece of state is referred to by a 128-bit <strong>stateid</strong>. A stateid has a 96-bit <code>other</code> field naming a set of locks and a 32-bit <code>seqid</code> that the server increments whenever that set changes. A new stateid starts with seqid one. A client may send seqid zero to mean the most current one, or a non-zero value, in which case the server returns <code>NFS4ERR_OLD_STATEID</code> if it is too low and <code>NFS4ERR_BAD_STATEID</code> if it is too high.</p><p>Stateids can represent opens, sets of byte-range locks, file delegations, directory delegations and layouts. The term <em>lock</em> in this document covers byte-range locks, share reservations, delegations and layouts. A few special stateid values are reserved.</p><p>All of a client's state shares one <strong>lease</strong>. Any successful <code>SEQUENCE</code> on an unexpired lease renews it for the period given by the <code>lease_time</code> attribute, so a COMPOUND with just a SEQUENCE is enough to stay alive. The <code>sr_status_flags</code> result also tells the client about backchannel problems, revoked state and restart reclaim needs.</p><p>After a server restart, clients get a <strong>grace period</strong> to reclaim their locks. Only reclaim-type requests are normally allowed, and other requests get <code>NFS4ERR_GRACE</code>. When done reclaiming, the client sends <code>RECLAIM_COMPLETE</code>. If the lease runs out or a client restarts with a new verifier, the server can release the old state so conflicting locks from others can be granted.</p>",
+      "eli5": "<p>Every lock is like a coat-check ticket with a number on it. The server renews your tickets every time you check in, and if you vanish for too long it gives your spot to someone else.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "10",
+      "title": "Delegations and Client-Side Caching",
+      "content": "<p>NFSv4.1 does not provide distributed cache coherence. It defines a smaller set of caching guarantees so locks and share reservations are not undermined by client caches, and adds <strong>delegation</strong>: the server hands some decisions about a file to a client, so the client can act locally while nobody else is competing for the file.</p><p>A delegation is recallable. If another client makes a conflicting request, the server sends a callback to recall it, the holder flushes modified state and returns it, and only then is the conflicting request decided. If the client fails to respond, the server revokes the delegation. A server grants a delegation only when it judges it safe, and clients MUST NOT assume one will be granted.</p><p>There are two open delegation types. <code>OPEN_DELEGATE_READ</code> assures the client that the contents, the attributes (except <code>time_access</code>) and the names of links will not change without its knowledge, and several can coexist. <code>OPEN_DELEGATE_WRITE</code> lets the client handle all opens and modify data locally; only one can exist for a file and it is inconsistent with read delegations.</p><p>NFSv4.1 adds <strong>directory delegations</strong>, an OPTIONAL feature requested with <code>GET_DIR_DELEGATION</code>. They are read-only, cover the directory attributes and entries, and can be paired with asynchronous change notifications so the delegation need not be recalled for every change. Reclaiming directory delegations after a restart is not provided; the client simply asks again.</p>",
+      "eli5": "<p>If you are the only one reading a library book, the librarian lets you keep it at your desk instead of asking permission every time. If someone else wants it, the librarian calls you and you hand it back.</p>"
+    },
+    {
+      "id": "naming",
+      "number": "11",
+      "title": "Multi-Server Namespaces, Trunking and Migration",
+      "content": "<p>Section 11 is the heart of the update. NFSv4.1 lets one namespace span several servers. The <code>fs_locations</code> and <code>fs_locations_info</code> attributes tell a client where a file system can be found, with <code>fs_locations_info</code> preferred because it carries more detail. A file system can be <em>present</em> or <em>absent</em> at a spot in a server's namespace. Absent file systems enable <strong>referrals</strong>, where one server directs the client to a file system on another, usually after an <code>NFS4ERR_MOVED</code> error. Use of multi-server namespaces is OPTIONAL.</p><p><strong>Trunking</strong> means using several connections to increase data transfer speed. <strong>Session trunking</strong> attaches multiple connections to one session. <strong>Client ID trunking</strong> associates multiple sessions with one client ID, so locking state is shared across them. Servers MUST support both forms for a single network address. Whether two addresses reach the same server is decided by comparing the <code>EXCHANGE_ID</code> results (client ID, server owner and server scope), and clients can verify claims with RPCSEC_GSS or the SSV mechanism. The RFC separates <em>trunking detection</em> from <em>trunking discovery</em> and says RFC 5661 lacked a description of the latter.</p><p>The same attributes support <strong>replication</strong> and <strong>migration</strong>. On migration, the client keeps locks by continuing with its client ID on a new path, by lock reclaim with a per-file-system grace period, or by Transparent State Migration. The protocol does not specify how a file system is moved between servers.</p>",
+      "eli5": "<p>It is like a school with many classrooms in different buildings. A sign at one door can say the room moved to another building, and a student can use several hallways at once to get there faster.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "12",
+      "title": "Parallel NFS and the File Layout",
+      "content": "<p><strong>Parallel NFS</strong> (pNFS) is an OPTIONAL feature that lets clients access the storage devices that hold file data directly, in parallel. It splits the work in two. A <strong>metadata server</strong> is an NFSv4.1 server that handles names, attributes and permissions. One or more <strong>storage devices</strong> hold the file data and are reached through a <strong>storage protocol</strong>, which can be NFSv4.1 itself, a block protocol such as iSCSI, or an object protocol. A control protocol between metadata server and storage devices is outside the scope of the RFC. A pNFS server MUST still support normal NFSv4.1 access to any file it offers through pNFS.</p><p>The client asks for a <strong>layout</strong> with <code>LAYOUTGET</code>. A layout maps a byte range of a file to storage devices, belongs to a layout type, and is leased, recallable and revocable like a delegation. Layouts name devices by device ID, and <code>GETDEVICEINFO</code> resolves an ID to an address. A client MUST hold a layout to do I/O to a storage device. Other operations are <code>LAYOUTCOMMIT</code>, <code>LAYOUTRETURN</code> and the callback <code>CB_LAYOUTRECALL</code>. Access rights still come from OPEN, LOCK and ACCESS.</p><p>Section 13 defines the file layout type <code>LAYOUT4_NFSV4_1_FILES</code>, which uses NFSv4.1 data servers. Data is divided into stripe units spread over data servers in a repeating pattern. The unit number is the floor of the offset relative to <code>nfl_pattern_offset</code>, divided by the stripe unit size. The minimum stripe unit size is 64 bytes. Clients may send only a restricted set of operations to a data server: session management operations plus <code>COMMIT</code>, <code>READ</code>, <code>WRITE</code> and <code>PUTFH</code>. A layout flag decides whether <code>COMMIT</code> goes to the data server or the metadata server.</p>",
+      "eli5": "<p>Instead of asking one clerk to fetch every page of a huge book, the clerk gives you a map showing which shelves hold which pages, and you grab them from several shelves at the same time.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "21",
+      "title": "Security Model and Known Gaps",
+      "content": "<p>NFSv4.1 implementations are REQUIRED to support end-to-end authentication, where a user on a client mutually authenticates to a principal on the server. Clients and servers MUST implement RPCSEC_GSS (<a href='/rfc2203'>RFC 2203</a>) and the Kerberos V5 mechanism. Both MUST support the authentication and integrity services; servers MUST support privacy, and clients SHOULD. <code>AUTH_SYS</code>, which has no strong authentication, may be implemented as well, but it is merely optional, so interoperability through it is not assured.</p><p>Integrity protection matters most for three things. <code>SECINFO</code> and <code>SECINFO_NO_NAME</code> should be protected so a man-in-the-middle cannot push the client toward weaker algorithms. Fetching <code>fs_locations</code> and <code>fs_locations_info</code> should use integrity protection too, because an attacker could first force <code>NFS4ERR_MOVED</code> and then rewrite the locations to lure the client to a malicious server. The RFC advises that a client SHOULD NOT use unverified location entries as a basis for migration.</p><p>Appendix C is candid. It says Section 21 was not thoroughly revised and that its security weaknesses remain, and it lists issues for a future revision: continued use of AUTH_SYS, no attention to pervasive monitoring (including <code>CREATE_SESSION</code> without privacy protection exposing the session ID), and the lack of effective use of privacy and integrity even where RPCSEC_GSS infrastructure exists.</p>",
+      "eli5": "<p>NFS uses a secret handshake so the file computer knows who you really are. The authors admit the handshake is not always used and that some parts of the security still need fixing.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "10",
+      "title": "What Changed From RFC 5661",
+      "content": "<p>Appendix A lists the problems that forced this update. RFC 5661 had no provision for Transparent State Migration and no clear way to do trunking discovery. It also treated multiple network paths to the same file system as if they were multiple replicas, which blurred trunking transitions with replica transitions.</p><p>The fixes are mostly in a replacement Section 11. It separates two network paths to one file system instance (where locking state is shared) from two different replicas, recommends either transparent state transfer or a single-file-system grace period, explains how clients should handle such transfers, discusses the relationship with pNFS, and clarifies which parts of <code>fs_locations_info</code> apply to a path and which to the replica. A more realistic treatment of server scope was added, and several operations and error descriptions were revised.</p><p>The scope is deliberately limited. The text lists work still to do: reconcile with <a href='/rfc8178'>RFC 8178</a> on NFSv4-wide versioning rules, align layout types with <a href='/rfc8434'>RFC 8434</a>, address deferred errata, replace the internationalization section, which has never been implemented, and revise security. The updates that RFC 8434 and RFC 8178 apply to RFC 5661 also apply to this specification.</p>",
+      "eli5": "<p>The old rule book had a confusing chapter about moving files between computers. This version rewrites that chapter and leaves a list of other chapters that still need work.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "ESTABLISHING A CLIENT ID AND SESSION (SECTIONS 2.4, 2.10.2; SIMPLIFIED)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "EXCHANGE_ID",
+            "color": "blue",
+            "note": "Presents the client owner: verifier and owner string."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "eir_clientid",
+            "color": "green",
+            "note": "The server assigns the 64-bit client ID."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "CREATE_SESSION",
+            "color": "blue",
+            "note": "Uses the returned client ID; this establishes and confirms it."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "COMPOUND: SEQUENCE + operations",
+            "color": "blue",
+            "note": "SEQUENCE must be first and carries the session identifier."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "CB_COMPOUND: CB_SEQUENCE + operations",
+            "color": "neutral",
+            "note": "Callbacks use the backchannel."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "SPECIAL STATEIDS (SECTION 8.2.3)",
+      "data": {
+        "items": [
+          {
+            "code": "other 0, seqid 0",
+            "label": "Anonymous stateid",
+            "desc": "Used in READ, WRITE and SETATTR to indicate no OPEN state. Not allowed on data servers."
+          },
+          {
+            "code": "other all ones, seqid all ones",
+            "label": "READ bypass stateid",
+            "desc": "Treated as anonymous in WRITE and SETATTR; in READ the server may grant access otherwise denied."
+          },
+          {
+            "code": "other 0, seqid 1",
+            "label": "Current stateid",
+            "desc": "The last stateid returned by an operation within the same COMPOUND."
+          },
+          {
+            "code": "other 0, seqid NFS4_UINT32_MAX",
+            "label": "Invalid stateid",
+            "desc": "Reserved as invalid; the server MUST return NFS4ERR_BAD_STATEID."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "concepts",
+      "position": "before",
+      "caption": "KINDS OF LOCK (SECTION 1.8.4)",
+      "data": {
+        "items": [
+          {
+            "title": "Share reservations",
+            "text": "Established by OPEN operations."
+          },
+          {
+            "title": "Byte-range locks",
+            "text": "Locks on a range of bytes within a file."
+          },
+          {
+            "title": "File delegations",
+            "text": "Recallable; inconsistent opens and changes cannot occur while held."
+          },
+          {
+            "title": "Directory delegations",
+            "text": "Recallable; inconsistent directory changes cannot occur while held."
+          },
+          {
+            "title": "Layouts",
+            "text": "Recallable; the holder may access file data directly at the storage location."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "SPARSE PACKING EXAMPLE FROM SECTION 13.4.2 (FIRST FOUR STRIPE UNITS)",
+      "data": {
+        "columns": [
+          "Stripe unit",
+          "Filehandle",
+          "Data servers"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0",
+              "0x87",
+              "E"
+            ]
+          },
+          {
+            "cells": [
+              "1",
+              "0x36",
+              "A, B, C, D"
+            ]
+          },
+          {
+            "cells": [
+              "2",
+              "0x67",
+              "F, G"
+            ]
+          },
+          {
+            "cells": [
+              "3",
+              "0x36",
+              "A, B, C, D"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[66]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[68]",
+      "text": "Haynes, T., Ed. and D. Noveck, Ed., \"Network File System (NFS) Version 4 Protocol\", RFC 7530, March 2015.",
+      "rfc": 7530
+    },
+    {
+      "number": "[67]",
+      "text": "Noveck, D., \"Rules for NFSv4 Extensions and Minor Versions\", RFC 8178, July 2017.",
+      "rfc": 8178
+    },
+    {
+      "number": "[70]",
+      "text": "Haynes, T., \"Requirements for Parallel NFS (pNFS) Layout Types\", RFC 8434, August 2018.",
+      "rfc": 8434
+    },
+    {
+      "number": "[69]",
+      "text": "Noveck, D., Ed., Shivam, P., Lever, C., and B. Baker, \"NFSv4.0 Migration: Specification Update\", RFC 7931, July 2016.",
+      "rfc": 7931
+    },
+    {
+      "number": "[3]",
+      "text": "Thurlow, R., \"RPC: Remote Procedure Call Protocol Specification Version 2\", RFC 5531, May 2009.",
+      "rfc": 5531
+    },
+    {
+      "number": "[2]",
+      "text": "Eisler, M., Ed., \"XDR: External Data Representation Standard\", STD 67, RFC 4506, May 2006.",
+      "rfc": 4506
+    },
+    {
+      "number": "[4]",
+      "text": "Eisler, M., Chiu, A., and L. Ling, \"RPCSEC_GSS Protocol Specification\", RFC 2203, September 1997.",
+      "rfc": 2203
+    },
+    {
+      "number": "[38]",
+      "text": "Callaghan, B., Pawlowski, B., and P. Staubach, \"NFS Version 3 Protocol Specification\", RFC 1813, June 1995.",
+      "rfc": 1813
+    },
+    {
+      "number": "[47]",
+      "text": "Halevy, B., Welch, B., and J. Zelenka, \"Object-Based Parallel NFS (pNFS) Operations\", RFC 5664, January 2010.",
+      "rfc": 5664
+    },
+    {
+      "number": "[48]",
+      "text": "Black, D., Fridella, S., and J. Glasgow, \"Parallel NFS (pNFS) Block/Volume Layout\", RFC 5663, January 2010.",
+      "rfc": 5663
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

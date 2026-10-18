@@ -1,0 +1,284 @@
+{
+  "number": 9001,
+  "shortTitle": "QUIC-TLS",
+  "category": "transport",
+  "categoryReviewed": false,
+  "summary": "<p>Describes how TLS is used to secure QUIC. TLS provides the handshake that authenticates the endpoints and establishes keys, and QUIC uses those keys to protect its packets.</p>",
+  "eli5": {
+    "summary": "<p>QUIC borrows the secure handshake from TLS to agree on secret keys, then uses those keys to lock its packets.</p>"
+  },
+  "questions": [
+    "how does quic use tls",
+    "quic encryption handshake",
+    "what is quic header protection",
+    "how does quic key update work",
+    "does quic support 0-rtt"
+  ],
+  "tags": [
+    "Transport",
+    "Security",
+    "TLS"
+  ],
+  "subtitle": "How QUIC borrows the TLS 1.3 handshake to get keys, then uses those keys to protect every packet itself.",
+  "tldr": {
+    "problem": "QUIC needs authenticated, encrypted connections, but it does not carry TLS records over TCP, so the TLS handshake has to be fitted into QUIC's own packets.",
+    "mechanism": "TLS handshake messages travel in QUIC CRYPTO frames, TLS hands QUIC secrets at each encryption level, and QUIC uses them for its own packet protection, header protection and key updates.",
+    "outcome": "QUIC gets TLS 1.3 authentication and key agreement, including 0-RTT, while QUIC takes over the job of the TLS record layer.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "TLS version",
+      "value": "TLS 1.3 or newer; older versions MUST NOT be offered"
+    },
+    {
+      "label": "TLS extension codepoint",
+      "value": "57 (0x39), quic_transport_parameters"
+    },
+    {
+      "label": "0-RTT sentinel",
+      "value": "max_early_data_size 0xffffffff"
+    },
+    {
+      "label": "TLS alert to QUIC error",
+      "value": "Alert value added to 0x0100"
+    },
+    {
+      "label": "AES-GCM confidentiality limit",
+      "value": "2^23 encrypted packets"
+    },
+    {
+      "label": "Header protection mask",
+      "value": "5 bytes"
+    }
+  ],
+  "today": "<p>RFC 9001 is a Proposed Standard published in May 2021, and the unit metadata lists no RFC that obsoletes or updates it. It is read together with the QUIC transport specification in <a href='/rfc9000'>RFC 9000</a> and the loss recovery specification in <a href='/rfc9002'>RFC 9002</a>.</p>",
+  "glossary": [
+    "quic",
+    "tls",
+    "aead",
+    "alpn",
+    "hkdf",
+    "zero-rtt",
+    "session-ticket",
+    "replay-attack",
+    "hello-retry-request",
+    "header-protection"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>RFC 9001 describes how QUIC (defined in <a href='/rfc9000'>RFC 9000</a>) is secured with TLS 1.3 (<a href='/rfc8446'>RFC 8446</a>). TLS 1.3 brings latency improvements: absent packet loss, most new connections can be established and secured within a single round trip, and on later connections the client can often send application data immediately, which is a <strong>zero round-trip</strong> setup.</p><p>For brevity the document uses the word TLS to mean TLS 1.3, though a newer version could be used. Clients MUST NOT offer TLS versions older than 1.3, and an endpoint MUST terminate the connection if an older version is negotiated.</p>",
+      "eli5": "<p>QUIC wants its conversations to be private and trustworthy. It uses the newest version of TLS to agree on secrets quickly, sometimes before the conversation has even started.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "3",
+      "title": "How QUIC and TLS Cooperate",
+      "content": "<p>QUIC takes responsibility for confidentiality and integrity protection of packets, using keys derived from a TLS handshake. Instead of carrying TLS records over a reliable transport as TCP does, TLS handshake and alert messages are carried directly over the QUIC transport, which takes over the duties of the TLS record layer.</p><p>The RFC describes this as cooperation rather than strict layering. QUIC uses the TLS handshake, and TLS uses the reliability, ordered delivery and record layer that QUIC provides. There are two main interactions: TLS sends and receives messages through QUIC, and TLS tells QUIC about new packet protection keys to install and about state changes such as handshake completion.</p><p>Applications do not use TLS Application Data records. They send data as QUIC STREAM frames or other frame types, which are carried in QUIC packets.</p>",
+      "eli5": "<p>TLS is the expert who agrees on the secret code, and QUIC is the postman who carries the messages. They pass notes back and forth so that the postman always has the right key.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Carrying TLS Messages in CRYPTO Frames",
+      "content": "<p>QUIC carries TLS handshake data in <strong>CRYPTO frames</strong>, each holding a contiguous block of handshake data identified by an offset and length. Once TLS hands data to QUIC, QUIC is responsible for delivering it reliably, and retransmissions MUST use the same keys as the original. QUIC takes the unprotected content of TLS handshake records as CRYPTO frame content; TLS record protection is not used. TLS alerts are turned into QUIC <code>CONNECTION_CLOSE</code> error codes, where the AlertDescription value is added to <code>0x0100</code>.</p><p>Four <strong>encryption levels</strong> are used, for Initial, 0-RTT, Handshake and 1-RTT packets. CRYPTO frames are carried at three of them, omitting 0-RTT. The packet type tells the receiver which keys protect a packet, since packets can be reordered on the wire.</p><p>The handshake is considered complete when the TLS stack has sent its Finished message and verified the peer's. It is <em>confirmed</em> at the server when it completes, and the server MUST send a <code>HANDSHAKE_DONE</code> frame at once. At the client it is confirmed on receipt of that frame. Old keys are discarded in stages: a client MUST discard Initial keys when it first sends a Handshake packet, and an endpoint MUST discard Handshake keys when the handshake is confirmed.</p><div class='callout callout-info'><p>Servers are limited to sending 3 bytes for every byte received before the client address is validated, so the size of the certificate chain matters for QUIC performance.</p></div>",
+      "eli5": "<p>The secret-code messages are tucked into special envelopes called CRYPTO frames. As the two sides agree on better and better codes, they throw away the old, weaker ones.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "4.6",
+      "title": "0-RTT: Sending Data Early",
+      "content": "<p>The <strong>0-RTT</strong> feature lets a client send application data before the handshake is complete, by reusing parameters from a previous connection. The client keeps the critical parameters and gives the server a TLS session ticket that lets the server recover the same information. TLS 1.3 sets a limit of seven days between the original connection and any attempt to use 0-RTT.</p><p>QUIC does not use TLS early data. The <code>max_early_data_size</code> field in the NewSessionTicket is repurposed to hold the sentinel value <code>0xffffffff</code> to show that the server will accept QUIC 0-RTT data, and servers MUST NOT send any other value. A server accepts 0-RTT by sending an <code>early_data</code> extension in EncryptedExtensions, and rejects it by omitting that extension. If 0-RTT is rejected, the client MUST reset the state of all streams.</p><p>Because 0-RTT has no replay protection, a client MUST NOT use it for application data unless the application asks for it, and an application protocol that uses QUIC MUST define a profile of acceptable 0-RTT use. Once a client has installed 1-RTT keys it MUST NOT send any more 0-RTT packets.</p>",
+      "eli5": "<p>If you have visited a shop before, you can shout your order as you walk in. It is faster, but someone could copy your order and shout it again, so it is only for safe orders.</p>"
+    },
+    {
+      "id": "cryptography",
+      "number": "5",
+      "title": "Packet Protection and Header Protection",
+      "content": "<p>QUIC derives packet protection keys the way TLS derives record keys, using the KDF from TLS (HKDF-Expand-Label in TLS 1.3) with the labels <code>quic key</code>, <code>quic iv</code> and <code>quic hp</code>. The AEAD in use is the one negotiated by TLS, and the AEAD nonce is formed by combining the packet protection IV with the packet number.</p><p>Different packet types have different protection. Version Negotiation packets have none. Initial packets use <code>AEAD_AES_128_GCM</code> with keys derived from the Destination Connection ID of the client's first Initial packet and a fixed salt, so anyone can compute them and they offer no real confidentiality or integrity. Retry packets carry a Retry Integrity Tag computed with a fixed key. All other packets use keys and algorithms negotiated by TLS.</p><p><strong>Header protection</strong> hides parts of the header, namely the packet number and the low bits of the first byte, using a key derived separately. The ciphertext is sampled starting 4 bytes after the start of the Packet Number field, and a 5-byte mask is applied with exclusive OR. AES-based protection is defined for the AES AEADs, and ChaCha20-based protection for <code>AEAD_CHACHA20_POLY1305</code>.</p>",
+      "eli5": "<p>Every packet goes into a locked box, and then the label on the box with its number is scrambled too. Strangers watching the road cannot tell which box is which.</p>"
+    },
+    {
+      "id": "key-management",
+      "number": "6",
+      "title": "Key Update",
+      "content": "<p>Once the handshake is confirmed, an endpoint MAY start a <strong>key update</strong>. The Key Phase bit in the short header says which keys protect a packet: it starts at 0 and toggles with each update. Unlike TLS, where each side can update independently, initiating a QUIC key update makes both endpoints update. TLS KeyUpdate messages are not used; an endpoint MUST NOT send one and MUST treat receipt of one as a connection error of type <code>0x010a</code>.</p><p>The initiator derives a new write secret from the old one with the label <code>quic ku</code>, toggles the Key Phase bit and protects later packets with the new keys. It MUST NOT start another update until it has an acknowledgment for a packet sent with the current keys. The header protection key is not updated.</p><p>AEAD algorithms have usage limits. For <code>AEAD_AES_128_GCM</code> and <code>AEAD_AES_256_GCM</code> the confidentiality limit is 2^23 encrypted packets and the integrity limit is 2^52 invalid packets. Endpoints MUST initiate a key update before exceeding a confidentiality limit, and close the connection with error <code>AEAD_LIMIT_REACHED</code> when an integrity limit is exceeded.</p>",
+      "eli5": "<p>Every so often the two sides change the lock on the box together, and a little flag on each box tells the receiver which key to use.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "8",
+      "title": "QUIC-Specific Changes to the TLS Handshake",
+      "content": "<p>QUIC requires authenticated protocol negotiation, so endpoints MUST use ALPN unless another mechanism is used, and MUST close the connection with the <code>no_application_protocol</code> alert (QUIC error code <code>0x0178</code>) if no application protocol is negotiated.</p><p>QUIC transport parameters travel in a TLS extension, <code>quic_transport_parameters</code> (<code>0x39</code>), in the ClientHello and EncryptedExtensions. Endpoints MUST send it, which gives the parameters integrity protection: tampering causes the handshake to fail. Values are not authenticated until the handshake completes.</p><p>Two TLS features are removed. The EndOfEarlyData message is not used, and clients MUST NOT send it. The TLS 1.3 middlebox compatibility mode is prohibited, since it exists only for middleboxes that interfere with TLS over TCP; a client MUST NOT request it.</p>",
+      "eli5": "<p>QUIC borrows TLS but changes a few house rules. The two sides must agree on which language to talk, their settings are sealed inside the handshake, and a couple of old TLS tricks are switched off.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>All security considerations of TLS also apply to TLS in QUIC. Several points are specific to the integration.</p><ul><li><strong>Replay of 0-RTT:</strong> QUIC's own frame processing is idempotent and not vulnerable to replay, but the application data it carries may be. Disabling 0-RTT entirely is the most effective defense.</li><li><strong>Linkability:</strong> session tickets let servers and possibly other entities correlate connections by the same client.</li><li><strong>Reflection:</strong> QUIC pads the packet containing the ClientHello to a minimum size, limits a server to three times the bytes received before the address is verified, and relies on authenticated Handshake acknowledgments.</li><li><strong>Initial packets:</strong> they are not protected with a secret key, so implementations SHOULD use caution relying on data in them that is not otherwise authenticated.</li><li><strong>Timing side channels:</strong> header protection removal, packet number recovery and packet protection removal MUST be free of timing side channels.</li></ul>",
+      "eli5": "<p>The main dangers are someone copying an early message, someone tracking you by your ticket, and someone tricking a server into shouting at a victim. QUIC adds rules to shrink each of these.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "layers",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "QUIC LAYERS (RFC 9001, FIGURE 3)",
+      "data": {
+        "layers": [
+          {
+            "label": "TLS handshake, TLS alerts and QUIC applications",
+            "detail": "Applications such as h3 sit beside the TLS messages",
+            "highlight": true
+          },
+          {
+            "label": "QUIC Transport",
+            "detail": "Streams, reliability, congestion and so on"
+          },
+          {
+            "label": "QUIC Packet Protection",
+            "detail": "Keys come from the TLS handshake"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "ENCRYPTION KEYS BY PACKET TYPE (RFC 9001, TABLE 1)",
+      "data": {
+        "items": [
+          {
+            "code": "Initial",
+            "label": "Initial secrets",
+            "desc": "Packet number space: Initial."
+          },
+          {
+            "code": "0-RTT Protected",
+            "label": "0-RTT keys",
+            "desc": "Packet number space: Application data."
+          },
+          {
+            "code": "Handshake",
+            "label": "Handshake keys",
+            "desc": "Packet number space: Handshake."
+          },
+          {
+            "code": "Retry",
+            "label": "Retry",
+            "desc": "No packet number space."
+          },
+          {
+            "code": "Version Negotiation",
+            "label": "No keys",
+            "desc": "No packet number space."
+          },
+          {
+            "code": "Short Header",
+            "label": "1-RTT keys",
+            "desc": "Packet number space: Application data.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "KEY UPDATE (RFC 9001, FIGURE 9, SIMPLIFIED)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiating Peer"
+          },
+          {
+            "key": "responder",
+            "label": "Responding Peer"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "QUIC packets, Key Phase 1, keys @N",
+            "color": "blue",
+            "note": "The initiator moves from keys @M (phase 0) to updated keys @N."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "QUIC packets, Key Phase 1, containing ACK",
+            "color": "green",
+            "note": "The responder updates its send keys before acknowledging."
+          },
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "QUIC packets @N containing ACK",
+            "color": "blue",
+            "note": "After this, a further key update is permitted."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[QUIC-TRANSPORT]",
+      "text": "Iyengar, J., Ed. and M. Thomson, Ed., \"QUIC: A UDP-Based Multiplexed and Secure Transport\", RFC 9000, May 2021.",
+      "rfc": 9000
+    },
+    {
+      "number": "[QUIC-RECOVERY]",
+      "text": "Iyengar, J., Ed. and I. Swett, Ed., \"QUIC Loss Detection and Congestion Control\", RFC 9002, May 2021.",
+      "rfc": 9002
+    },
+    {
+      "number": "[TLS13]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[AEAD]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[ALPN]",
+      "text": "Friedl, S., Popov, A., Langley, A., and E. Stephan, \"Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension\", RFC 7301, July 2014.",
+      "rfc": 7301
+    },
+    {
+      "number": "[HKDF]",
+      "text": "Krawczyk, H. and P. Eronen, \"HMAC-based Extract-and-Expand Key Derivation Function (HKDF)\", RFC 5869, May 2010.",
+      "rfc": 5869
+    },
+    {
+      "number": "[CHACHA]",
+      "text": "Nir, Y. and A. Langley, \"ChaCha20 and Poly1305 for IETF Protocols\", RFC 8439, June 2018.",
+      "rfc": 8439
+    },
+    {
+      "number": "[HTTP-REPLAY]",
+      "text": "Thomson, M., Nottingham, M., and W. Tarreau, \"Using Early Data in HTTP\", RFC 8470, September 2018.",
+      "rfc": 8470
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

@@ -1,0 +1,257 @@
+{
+  "number": 8232,
+  "shortTitle": "PCEP State Sync",
+  "category": "routing",
+  "categoryReviewed": false,
+  "summary": "<p>Stateful PCEs need to learn about the current paths in the network, and doing a full synchronization every time is wasteful. This document defines optimizations, such as avoiding repeated exchange of unchanged state and allowing resynchronization after a failure, to make the process faster and cheaper.</p>",
+  "eli5": {
+    "summary": "<p>If you already have a list copied down, you only need to hear what changed, not read the whole list again. This lets the planner and routers do exactly that.</p>"
+  },
+  "questions": [
+    "how to speed up pce lsp state synchronization",
+    "pcep synchronization avoidance",
+    "what is pcep state synchronization",
+    "what is the lsp-db version number",
+    "what is incremental state synchronization in pcep",
+    "what is the speaker entity identifier tlv"
+  ],
+  "tags": [
+    "PCEP",
+    "MPLS",
+    "Routing"
+  ],
+  "subtitle": "Four PCEP extensions that let a stateful PCE and its clients skip, shrink, schedule or repeat the sync of path state.",
+  "tldr": {
+    "problem": "After a PCEP session restarts, a stateful PCE normally has the client send its entire LSP database again, even when nothing or little has changed, which wastes time and control-channel bandwidth.",
+    "mechanism": "A database version number lets peers skip synchronization or send only the changes, a speaker identifier recognizes a returning peer whose IP address changed, and capability flags let the PCE trigger the initial sync or a resync itself.",
+    "outcome": "The optimizations can reduce the data exchanged and the time taken for a stateful PCE to become fully operational, and let the PCE sanity check its state without tearing down the session.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "LSP-DB-VERSION TLV type",
+      "value": "23, length 8 octets"
+    },
+    {
+      "label": "SPEAKER-ENTITY-ID TLV type",
+      "value": "24, variable length"
+    },
+    {
+      "label": "Version number start",
+      "value": "1"
+    },
+    {
+      "label": "Reserved version values",
+      "value": "0 and 0xFFFFFFFFFFFFFFFF"
+    },
+    {
+      "label": "Capability flag bits",
+      "value": "S=30, D=27, F=26, T=28"
+    },
+    {
+      "label": "PCErr type for sync errors",
+      "value": "Error-type 20"
+    }
+  ],
+  "today": "<p>RFC 8232 is a Proposed Standard, and neither obsoleted nor updated by a later RFC according to the unit metadata. It builds on <a href='/rfc8231'>RFC 8231</a>, which defines the basic State Synchronization.</p>",
+  "glossary": [
+    "path-computation-element",
+    "label-switched-path",
+    "mpls",
+    "tls"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why State Synchronization Needs Optimizing",
+      "content": "<p>A stateful <strong>Path Computation Element</strong> (PCE) knows not only what the network's IGP advertises but also the set of active paths and their reserved resources. That extra state lets it compute constrained paths while considering individual LSPs and their interactions. <a href='/rfc8231'>RFC 8231</a> defines the basic State Synchronization mechanism between a PCE and its clients (PCCs).</p><p>RFC 8232 adds four optimizations, each advertised during the PCEP initialization phase: State Synchronization Avoidance, Incremental State Synchronization, PCE-Triggered Initial Synchronization and PCE-Triggered Resynchronization. It uses terms from <a href='/rfc5440'>RFC 5440</a>, <a href='/rfc8051'>RFC 8051</a> and RFC 8231, such as PCC, LSP State Database (LSP-DB), Delegation and LSP State Report.</p>",
+      "eli5": "<p>A path planner keeps a copy of every router's list of paths. Copying the whole list again each time they reconnect is slow, so this RFC finds shortcuts.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "Skipping Synchronization with a Version Number",
+      "content": "<p>State Synchronization can be skipped after a PCEP session restart if the state of both peers did not change in the meantime. To tell, the PCC keeps an <strong>LSP-DB Version Number</strong>, which it MUST increment by 1 for each successive change in its LSP-DB. It MUST start at 1 and may wrap around. The values 0 and <code>0xFFFFFFFFFFFFFFFF</code> are reserved; receiving either leads to a PCErr with Error-type=20 and Error-value=6, and the session is closed.</p><p>The <strong>INCLUDE-DB-VERSION (S)</strong> bit is advertised at session start. If both speakers set it to 1, the PCC MUST include the LSP-DB-VERSION TLV in each LSP object of every PCRpt message. At session restart, a speaker whose LSP-DB survived puts the TLV in its OPEN object: the PCE uses the last version number it received, the PCC its latest. A speaker whose database did not survive MUST NOT include it.</p><p>If both OPEN objects carry the TLV and the values match, the PCC MAY skip synchronization. Otherwise it MUST do a full synchronization, or an incremental one if that capability was advertised. A speaker can force synchronization by leaving the TLV out. When synchronization is needed, the PCE first marks the PCC's LSPs as stale, clears the mark on each LSP reported again, and purges any still stale when the end-of-synchronization marker arrives. That marker is a PCRpt with PLSP-ID 0 and SYNC flag 0, and it MUST carry the LSP-DB-VERSION TLV.</p><p>If a PCC tries to skip synchronization by sending SYNC=0 with a non-zero PLSP-ID on its first report when the versions do not agree, the PCE MUST send a PCErr with Error-type=20 and Error-value=2 'LSP-DB version mismatch' and close the session.</p>",
+      "eli5": "<p>Each router numbers its changes like pages in a notebook. If both sides remember the same page number after a break, they can carry on without rereading the notebook.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The New TLVs",
+      "content": "<p>The <strong>LSP-DB-VERSION TLV</strong> is optional and may appear in the OPEN object and the LSP object. It has type 23 and a fixed length of 8 octets, carrying a 64-bit unsigned integer in network byte order. It SHOULD NOT appear in PCUpd, PCReq or PCRep messages and MUST be ignored if received there. A PCC SHOULD ignore it if a PCE sends one outside OPEN.</p><p>The <strong>SPEAKER-ENTITY-ID TLV</strong> has type 24 and a variable length greater than 0. Its value is padded to a 4-octet alignment, and padding is not counted in Length. It identifies a PCEP speaker even if its IP address changes, for example when a line card changes or a PCE is moved as a virtual network function. The identifier must be unique within its scope, usually one domain. It MAY be configured by the operator or derived from a stable identifier such as a MAC address, serial number or Traffic Engineering Router ID. Across domains, the speaker SHOULD prefix it with a domain identifier such as an AS number.</p><p>A peer can use the identifier to recognize a re-established session and apply the optimizations, but only within the State Timeout Interval of RFC 8231. If a SPEAKER-ENTITY-ID arrives on a new session and matches an existing live session, the speaker MUST send a PCErr with Error-type=20 and Error-value=7 and close the session.</p>",
+      "eli5": "<p>The version TLV is the page number. The speaker ID is a name tag that stays the same even if the router moves to a new street address.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Incremental (Delta) Synchronization",
+      "content": "<p>Without this option, a PCC with a mismatched version sends every LSP even if few changed. The RFC gives an example of 320 LSPs, 80 per PCC across four PCCs, where 20 LSPs of each PCC changed. A full sync moves all 320, though 240 stayed the same.</p><p>Support is advertised with the <strong>DELTA-LSP-SYNC-CAPABILITY (D)</strong> bit. When both the PCC and the PCE set both D and S to 1, the PCC sends only the changes since the last version the PCE received. Any other combination of D and S falls back to the full procedure of RFC 8231, and a speaker can set D to 0 to avoid it.</p><p>To make this possible, each LSP is associated with the database version at its last change. A PCC does not need a complete history, only the changes the PCE may have missed, including setups, modifications and deletions. A deleted LSP has to be remembered in some form so it can be reported. If a PCC lacks enough information, it MUST send a PCErr with Error-type=20 and Error-value=5 and terminate the session, and SHOULD reconnect with D set to 0.</p>",
+      "eli5": "<p>Instead of rereading the whole notebook, the router reads out only the pages written since you last looked.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "5",
+      "title": "PCE-Triggered Synchronization and Resynchronization",
+      "content": "<p>In networks such as optical transport, the control channel can be in-band with limited bandwidth, so the PCE may want to control when each PCC synchronizes. If both speakers set the <strong>TRIGGERED-INITIAL-SYNC (F)</strong> bit to 1, the PCC MUST NOT start synchronization itself. The PCE starts it by sending a PCUpd with PLSP-ID 0 and SYNC=1, SHOULD include an empty ERO (no sub-objects, object length of 4), and the PCC MUST ignore any update content. If a PCRpt arrives before the PCE has triggered, the PCE MUST send a PCErr with Error-type=20 and Error-value=3. If the capability was not advertised and a PCC receives such a PCUpd, it MUST send a PCErr with Error-value=4.</p><p>If both speakers set the <strong>TRIGGERED-RESYNC (T)</strong> bit, the PCE can resynchronize at any point in the session, either for a single LSP or for the whole database. For one LSP, the PCE sends a PCUpd with SYNC=1, and the PCC MUST answer with a PCRpt for that LSP, SYNC=0, carrying the SRP-ID-number of the PCUpd. If the PCC cannot find the LSP, it also sets the R (remove) flag. For the whole database, the PCE first marks the PCC's LSPs stale and sends a PCUpd with PLSP-ID 0 and SYNC=1 and an empty ERO. LSPs not refreshed by the time of the end-of-synchronization marker are purged. If the PCC cannot resynchronize everything, it MUST send a PCErr with Error-type=20 and Error-value=5 and MAY terminate the session.</p><p>The RFC says the PCE may use resynchronization to continuously sanity check its state against the network or to recover from errors without tearing down sessions.</p>",
+      "eli5": "<p>Sometimes the planner wants to say when each router may start talking, so they do not all shout at once. Or it asks one router to read its list again to double check.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "6",
+      "title": "Capability Flags and IANA Allocations",
+      "content": "<p>Each optimization is advertised in the STATEFUL-PCE-CAPABILITY TLV from RFC 8231. This document defines four new flags, and IANA has allocated them in a new registry for that TLV's flag field.</p><p>It also allocates TLV types 23 (LSP-DB-VERSION) and 24 (SPEAKER-ENTITY-ID) and new error values. Under Error-type 6 (Mandatory Object missing), Error-value 12 means LSP-DB-VERSION TLV missing. Under Error-type 20 (LSP State Synchronization Error), values 2, 3, 4, 6 and 7 are added by this document.</p>",
+      "eli5": "<p>Each shortcut has an on/off switch that both sides must flip on before it is used.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Manageability and Security",
+      "content": "<p>An implementation MUST allow the operator to configure the synchronization optimization capabilities, SHOULD allow configuring the Speaker Entity Identifier, and SHOULD allow viewing the advertised stateful capabilities and the synchronization status with each peer.</p><p>The security considerations of RFC 8231 apply, and the RFC adds new attack vectors. An attacker could spoof the SPEAKER-ENTITY-ID to pretend to be another speaker, or flood a PCC with triggered resynchronization requests faster than it can process them. The RFC says securing the session with TLS, following <a href='/rfc7525'>RFC 7525</a>, is RECOMMENDED, and that an administrator could expose the Speaker Entity Identifier in the certificate for peer identity verification.</p>",
+      "eli5": "<p>Someone could pretend to be a trusted router by copying its name tag, or keep asking for rereads to wear it out. Locking the connection with TLS helps stop that.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SYNC SKIPPED WHEN DB VERSIONS MATCH (RFC 8232, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "pcc",
+            "label": "PCC"
+          },
+          {
+            "key": "pce",
+            "label": "PCE"
+          }
+        ],
+        "messages": [
+          {
+            "from": "pcc",
+            "to": "pce",
+            "label": "Open, DBv=42, S=1",
+            "color": "blue",
+            "note": "PCC advertises its LSP-DB version."
+          },
+          {
+            "from": "pce",
+            "to": "pcc",
+            "label": "Open, DBv=42, S=1",
+            "color": "green",
+            "note": "Versions match, so it is OK to skip sync."
+          },
+          {
+            "from": "pcc",
+            "to": "pce",
+            "label": "PCRpt, DBv=43, SYNC=0",
+            "color": "blue",
+            "note": "Regular LSP State Report."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "LSP-DB-VERSION TLV (RFC 8232, FIGURE 4)",
+      "data": {
+        "title": "LSP-DB-VERSION TLV",
+        "bytes": 12,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 16,
+            "desc": "TLV type.",
+            "value": "23"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Fixed length of the value, in octets.",
+            "value": "8"
+          },
+          {
+            "key": "version",
+            "name": "LSP-DB Version Number",
+            "bits": 64,
+            "desc": "64-bit unsigned integer in network byte order."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "NEW STATEFUL-PCE-CAPABILITY FLAGS (BIT NUMBERS)",
+      "data": {
+        "items": [
+          {
+            "code": "26",
+            "label": "TRIGGERED-INITIAL-SYNC (F)",
+            "desc": "PCE triggers the initial synchronization."
+          },
+          {
+            "code": "27",
+            "label": "DELTA-LSP-SYNC-CAPABILITY (D)",
+            "desc": "Allows incremental synchronization."
+          },
+          {
+            "code": "28",
+            "label": "TRIGGERED-RESYNC (T)",
+            "desc": "PCE may trigger resynchronization at any time."
+          },
+          {
+            "code": "30",
+            "label": "INCLUDE-DB-VERSION (S)",
+            "desc": "LSP-DB Version Number is carried in LSP reports.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5440]",
+      "text": "Vasseur, JP., Ed. and JL. Le Roux, Ed., \"Path Computation Element (PCE) Communication Protocol (PCEP)\", RFC 5440, March 2009.",
+      "rfc": 5440
+    },
+    {
+      "number": "[RFC8231]",
+      "text": "Crabbe, E., Minei, I., Medved, J., and R. Varga, \"Path Computation Element Communication Protocol (PCEP) Extensions for Stateful PCE\", RFC 8231, September 2017.",
+      "rfc": 8231
+    },
+    {
+      "number": "[RFC8051]",
+      "text": "Zhang, X., Ed. and I. Minei, Ed., \"Applicability of a Stateful Path Computation Element (PCE)\", RFC 8051, January 2017.",
+      "rfc": 8051
+    },
+    {
+      "number": "[RFC7525]",
+      "text": "Sheffer, Y., Holz, R., and P. Saint-Andre, \"Recommendations for Secure Use of Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)\", BCP 195, RFC 7525, May 2015.",
+      "rfc": 7525
+    },
+    {
+      "number": "[RFC8174]",
+      "text": "Leiba, B., \"Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words\", BCP 14, RFC 8174, May 2017.",
+      "rfc": 8174
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-18"
+}

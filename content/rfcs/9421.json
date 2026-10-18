@@ -1,0 +1,335 @@
+{
+  "number": 9421,
+  "shortTitle": "HTTP Message Signatures",
+  "category": "http",
+  "categoryReviewed": false,
+  "summary": "<p>Describes a way to create, encode, and verify digital signatures or MACs over parts of an HTTP message. It works when the signer doesn't know the whole message and when intermediaries may transform it. It also lets a party request signatures on later messages.</p>",
+  "eli5": {
+    "summary": "<p>A signature on part of a letter proves who wrote it and that the signed bits were not changed, even if the envelope was swapped.</p>"
+  },
+  "questions": [
+    "http message signatures",
+    "how to sign http requests",
+    "http signature verification",
+    "what is http message signatures",
+    "what is the http signature base",
+    "how does accept-signature work"
+  ],
+  "tags": [
+    "HTTP",
+    "Signatures",
+    "Security"
+  ],
+  "subtitle": "A way to sign just the parts of an HTTP message that matter, so the signature survives proxies and rewrites.",
+  "tldr": {
+    "problem": "TLS protects a single connection, but real HTTP traffic passes through gateways and proxies that split the path into several TLS connections and also rewrite messages, so end-to-end integrity and authenticity are lost.",
+    "mechanism": "The signer and verifier each rebuild a canonical text called the signature base from chosen message components, and a detached signature over that text travels in the Signature-Input and Signature fields.",
+    "outcome": "Applications can sign only the parts they care about and still verify after safe transformations. The RFC is a toolkit, so each application must define what it requires to be covered.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New HTTP fields",
+      "value": "Signature-Input, Signature, Accept-Signature"
+    },
+    {
+      "label": "Signature parameters",
+      "value": "created, expires, nonce, alg, keyid, tag"
+    },
+    {
+      "label": "Registered algorithms",
+      "value": "rsa-pss-sha512, rsa-v1_5-sha256, hmac-sha256, ecdsa-p256-sha256, ecdsa-p384-sha384, ed25519"
+    },
+    {
+      "label": "RSA-PSS salt length",
+      "value": "64 bytes"
+    },
+    {
+      "label": "Ed25519 signature",
+      "value": "64 octets"
+    },
+    {
+      "label": "New IANA registries",
+      "value": "Four"
+    }
+  ],
+  "today": "<p>RFC 9421 is a Proposed Standard published in February 2024. It has not been obsoleted or updated, so it is the current definition of HTTP message signatures.</p>",
+  "glossary": [
+    "digital-signature",
+    "hmac",
+    "canonicalization",
+    "replay-attack",
+    "nonce",
+    "header-field",
+    "proxy",
+    "tls",
+    "message-digest",
+    "end-to-end-principle"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Sign HTTP Messages",
+      "content": "<p>Message integrity and authenticity are critical to many HTTP applications, which usually rely on TLS for them. But TLS only guarantees these properties over a single connection. The path between a client and an application can be several independent TLS connections, for example behind a TLS-terminating gateway or when the client sits behind a TLS inspection appliance. Using client certificates from a browser can also be impractical.</p><p>Applications also often cannot see the exact message on the wire, because libraries, proxies or frameworks alter or hide parts of it. Object-based signatures such as JSON Web Signature need the exact signed bytes delivered intact, which forces information to be duplicated inside the payload and checked for consistency.</p><p>This RFC defines a <strong>detached signature</strong> over components of an HTTP message. It has three parts: a nomenclature and canonicalization rules for message components, algorithms for signing and verifying, and the <code>Signature-Input</code> and <code>Signature</code> fields to carry the result. An optional <code>Accept-Signature</code> field lets one side ask for signatures on later messages.</p><div class='callout callout-note'><p>The RFC is a toolkit, not a full security design. An application or profile MUST specify which components must be covered, how keys are found, which algorithms are allowed, and what errors are returned. The RFC does not cover message content directly; it relies on the digest fields in <a href='/rfc9530'>RFC 9530</a> for that.</p></div>",
+      "eli5": "<p>A regular lock on the mail truck only protects one trip. If the parcel changes trucks, you need your own seal on the parcel itself.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Message Components",
+      "content": "<p>Every thing that can be signed is a <strong>component</strong> with an identifier made of a name and optional parameters. A name is either an HTTP field name, always written in lowercase (such as <code>content-type</code>), or a <strong>derived component</strong> whose name starts with <code>@</code>. Each identifier MUST occur only once in a signature, and component values MUST NOT contain newline characters.</p><p>For fields, multiple instances are combined with a comma and a single space, and obsolete line folding is removed. Optional parameters refine this: <code>sf</code> asks for strict Structured Field serialization, <code>key</code> selects one member of a Dictionary field, <code>bs</code> wraps each value as a byte sequence to avoid ambiguity when values contain commas, <code>tr</code> takes the value from trailers, and <code>req</code> takes the value from the request when signing a response.</p><p>Derived components cover things that are not fields: the method, the target URI and its parts, a single named query parameter, and the status code of a response. The RFC recommends <code>@authority</code> instead of signing the <code>Host</code> field, and says <code>@request-target</code> is NOT RECOMMENDED unless HTTP/1.1 is the only version in use.</p><p>A signer of a response can use <code>req</code> to cover parts of the request that triggered it. The requester then has to keep those original request values to verify the response.</p>",
+      "eli5": "<p>Think of the message as a form with many boxes. Each box has a name, and you pick which boxes get your signature. You write each box in a standard handwriting so everyone reads it the same.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2.5",
+      "title": "The Signature Base",
+      "content": "<p>The <strong>signature base</strong> is the ASCII text that is actually signed. It has one line per covered component, in the chosen order, each in the form <code>\"name\";params: value</code>, followed by a final <code>@signature-params</code> line. That last line holds the ordered list of covered components plus metadata parameters, so the signature always covers its own metadata.</p><p>The metadata parameters are <code>created</code> (a UNIX timestamp, recommended), <code>expires</code>, <code>nonce</code>, <code>alg</code>, <code>keyid</code> and <code>tag</code>. Once the order of components and parameters is chosen it cannot change.</p><p>If a covered component cannot be resolved, for example a named field is missing, the parameter is unknown, or the output has non-ASCII characters, the algorithm MUST fail and no signature base is produced. Because both sides rebuild the base independently from their own copy of the message, harmless changes such as reordering fields, changing case of field names or removing stray whitespace do not break the signature.</p>",
+      "eli5": "<p>Both people copy the chosen boxes onto a fresh sheet in the same neat style. The signature is made on that clean sheet, not on the messy original.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Creating and Verifying a Signature",
+      "content": "<p>To <strong>sign</strong>, the signer picks an algorithm and key, sets the creation time (and optionally an expiration time, which is only a hint), builds the ordered list of covered components, builds the signature base and applies the signing function. Signers of a request SHOULD cover some or all control data such as <code>@method</code>, <code>@authority</code> or <code>@target-uri</code>, and SHOULD include <code>created</code>.</p><p>To <strong>verify</strong>, the verifier parses <code>Signature</code> and <code>Signature-Input</code>, picks the signature it cares about, checks that it meets the requirements, finds the key and algorithm, rebuilds the signature base from the received message, and runs the verification function. If the algorithm is stated in more than one place, all of them MUST agree. Any failure means verification fails.</p><p>Applications can add requirements, such as signing specific fields, limiting signature age, rejecting expired signatures, requiring a minimum key size, enforcing nonce uniqueness or requiring a particular <code>tag</code>. If an application defines such requirements, it MUST enforce them.</p>",
+      "eli5": "<p>The writer copies the chosen lines, signs the copy and sends both. The reader copies the same lines from what arrived and checks that the signature fits.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3.3",
+      "title": "Signature Algorithms",
+      "content": "<p>Any suitable digital signature or MAC method may be used. The RFC defines two primitives, <code>HTTP_SIGN (M, Ks) -> S</code> and <code>HTTP_VERIFY (M, Kv, S) -> V</code>, and maps six algorithms to them. The IANA registry names them: <code>rsa-pss-sha512</code> (RSASSA-PSS with SHA-512, MGF1 and a 64-byte salt), <code>rsa-v1_5-sha256</code>, <code>hmac-sha256</code>, <code>ecdsa-p256-sha256</code>, <code>ecdsa-p384-sha384</code> and <code>ed25519</code>.</p><p>For ECDSA, the two integers r and s are encoded as big-endian values, zero-padded to 32 octets each for P-256 (a 64-octet signature) or 48 octets each for P-384 (a 96-octet signature). Ed25519 signs the signature base directly with no prehash and produces a 64-octet signature. Algorithms from the JOSE registry can also be used, but never <code>none</code> or any algorithm marked prohibited.</p><p>RSA-PSS and ECDSA are non-deterministic, so a verifier MUST use the proper verify function and not re-sign and compare. HMAC and EdDSA are deterministic.</p>",
+      "eli5": "<p>There are several kinds of stamps and seals you can use. Each has its own exact way of pressing it, but they all seal the same clean sheet.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "Signature-Input and Signature Fields",
+      "content": "<p>A signature is carried by two Dictionary Structured Fields. <code>Signature-Input</code> holds, per label, the covered components and parameters. <code>Signature</code> holds, per label, the signature as a byte sequence. Labels are chosen by the signer, MUST be unique in the message, and MUST appear in both fields. The value in <code>Signature-Input</code> MUST match the <code>@signature-params</code> value used to build the base.</p><p>Both fields should be sent as headers. They MAY be trailers, but intermediaries are allowed to drop trailers, so that is NOT RECOMMENDED.</p><p>A message can carry several signatures, from one signer or many. For example, a reverse proxy can verify the client's signature, change the target host, add a <code>Forwarded</code> field and then add its own signature under a second label. The RFC advises against signing another signature's value, because that does not give the transitive coverage one might expect.</p>",
+      "eli5": "<p>One note lists which lines were signed and how. A second note holds the signature itself. Each pair has the same name tag so they can be matched.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "5",
+      "title": "Requesting Signatures",
+      "content": "<p>A verifier can ask for a signature using the <code>Accept-Signature</code> field, a Dictionary whose members list the exact components and parameters wanted. Sent in a request, it asks the server to sign the response. Sent in a response, it asks the client to sign its next request. Resources that support this SHOULD be uncacheable or list <code>Accept-Signature</code> in <code>Vary</code>.</p><p>The signer MUST use the same label, cover the same components and process all requested parameters, and MAY add more. It MAY ignore a request that does not fit the application. In the <code>created</code> and <code>expires</code> cases the request carries no value, while <code>nonce</code>, <code>alg</code>, <code>keyid</code> and <code>tag</code> ask for specific values.</p>",
+      "eli5": "<p>You can say, 'Please sign these lines and use this secret word I picked.' The other side signs just that way.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Signatures only help if they are verified. The RFC suggests testing verifiers with invalid signatures as well as valid ones, because a skipped check looks fine under positive testing. A message is only covered if the signature exists, verifies with an appropriate key and algorithm, is within time bounds, and covers the expected components.</p><p>Parts of a message that are not signed can be changed by an attacker, so applications should require as much to be signed as practical. Replay is limited by covering enough of the message and by using <code>nonce</code>, <code>created</code> and <code>expires</code>. Message bodies are covered only through a digest field such as <code>Content-Digest</code>, and the verifier MUST check that digest against the received content.</p><p>The RFC also warns about key theft, symmetric keys letting a verifier forge signatures, algorithm downgrade (such as an RSA key reused as an HMAC key), relying on labels, and ambiguous multi-valued fields. Signatures give no confidentiality, so TLS is still needed. Reusing the same key can let a party be tracked.</p>",
+      "eli5": "<p>A seal only protects you if someone actually checks it. Also, anything you did not sign can be changed, so sign what matters.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "design",
+      "position": "after",
+      "caption": "EXAMPLE SIGNATURE BASE (RFC 9421, FIGURE 1)",
+      "data": {
+        "title": "Signature base",
+        "lang": "text",
+        "code": "\"@method\": POST\n\"@authority\": example.com\n\"@path\": /foo\n\"content-digest\": sha-512=:WZDPaVn/7XgHaAy8pmojAkGWoRx2UFChF41A2svX+TaPm+AbwAgBWnrIiYllu7BNNyealdVLvRwEmTHWXvJwew==:\n\"content-length\": 18\n\"content-type\": application/json\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"content-digest\" \"content-length\" \"content-type\");created=1618884473;keyid=\"test-key-rsa-pss\""
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "DERIVED COMPONENTS DEFINED BY THE RFC",
+      "data": {
+        "items": [
+          {
+            "code": "@method",
+            "label": "Method",
+            "desc": "HTTP method of a request, case sensitive."
+          },
+          {
+            "code": "@target-uri",
+            "label": "Target URI",
+            "desc": "Full target URI of a request."
+          },
+          {
+            "code": "@authority",
+            "label": "Authority",
+            "desc": "Host and optional port, normalized; preferred over Host.",
+            "highlight": true
+          },
+          {
+            "code": "@scheme",
+            "label": "Scheme",
+            "desc": "URI scheme of the request, lowercase."
+          },
+          {
+            "code": "@request-target",
+            "label": "Request target",
+            "desc": "Request target as in the request line; not recommended outside HTTP/1.1."
+          },
+          {
+            "code": "@path",
+            "label": "Path",
+            "desc": "Absolute path with no query; empty path becomes /."
+          },
+          {
+            "code": "@query",
+            "label": "Query",
+            "desc": "Whole query string including the leading ?."
+          },
+          {
+            "code": "@query-param",
+            "label": "Query parameter",
+            "desc": "One named query parameter, selected with the name parameter."
+          },
+          {
+            "code": "@status",
+            "label": "Status code",
+            "desc": "Three-digit status code of a response; never used in a request."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "INITIAL HTTP SIGNATURE ALGORITHMS REGISTRY",
+      "data": {
+        "items": [
+          {
+            "code": "rsa-pss-sha512",
+            "label": "RSASSA-PSS",
+            "desc": "SHA-512 with MGF1 and a 64-byte salt."
+          },
+          {
+            "code": "rsa-v1_5-sha256",
+            "label": "RSASSA-PKCS1-v1_5",
+            "desc": "SHA-256."
+          },
+          {
+            "code": "hmac-sha256",
+            "label": "HMAC",
+            "desc": "Shared key with SHA-256."
+          },
+          {
+            "code": "ecdsa-p256-sha256",
+            "label": "ECDSA P-256",
+            "desc": "SHA-256; 64-octet signature."
+          },
+          {
+            "code": "ecdsa-p384-sha384",
+            "label": "ECDSA P-384",
+            "desc": "SHA-384; 96-octet signature."
+          },
+          {
+            "code": "ed25519",
+            "label": "EdDSA",
+            "desc": "Curve edwards25519; 64-octet signature."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "REVERSE PROXY ADDS A SECOND SIGNATURE (RFC 9421, SECTION 4.3)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "proxy",
+            "label": "Reverse proxy"
+          },
+          {
+            "key": "origin",
+            "label": "Origin server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "proxy",
+            "label": "Signed request (sig1)",
+            "color": "blue",
+            "note": "The client signs the method, authority, path and content fields."
+          },
+          {
+            "from": "proxy",
+            "to": "origin",
+            "label": "Forwarded request (sig1 + proxy_sig)",
+            "color": "green",
+            "note": "The proxy changes the host, adds Forwarded and signs the new message under proxy_sig."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[HTTP]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP Semantics\", STD 97, RFC 9110, June 2022.",
+      "rfc": 9110
+    },
+    {
+      "number": "[HTTP/1.1]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP/1.1\", STD 99, RFC 9112, June 2022.",
+      "rfc": 9112
+    },
+    {
+      "number": "[STRUCTURED-FIELDS]",
+      "text": "Nottingham, M. and P. Kamp, \"Structured Field Values for HTTP\", RFC 8941, February 2021.",
+      "rfc": 8941
+    },
+    {
+      "number": "[DIGEST]",
+      "text": "Polli, R. and L. Pardue, \"Digest Fields\", RFC 9530, February 2024.",
+      "rfc": 9530
+    },
+    {
+      "number": "[TLS]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[JWS]",
+      "text": "Jones, M., Bradley, J., and N. Sakimura, \"JSON Web Signature (JWS)\", RFC 7515, May 2015.",
+      "rfc": 7515
+    },
+    {
+      "number": "[RFC7239]",
+      "text": "Petersson, A. and M. Nilsson, \"Forwarded HTTP Extension\", RFC 7239, June 2014.",
+      "rfc": 7239
+    },
+    {
+      "number": "[RFC8017]",
+      "text": "Moriarty, K., Ed., Kaliski, B., Jonsson, J., and A. Rusch, \"PKCS #1: RSA Cryptography Specifications Version 2.2\", RFC 8017, November 2016.",
+      "rfc": 8017
+    },
+    {
+      "number": "[RFC8032]",
+      "text": "Josefsson, S. and I. Liusvaara, \"Edwards-Curve Digital Signature Algorithm (EdDSA)\", RFC 8032, January 2017.",
+      "rfc": 8032
+    },
+    {
+      "number": "[RFC2104]",
+      "text": "Krawczyk, H., Bellare, M., and R. Canetti, \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104, February 1997.",
+      "rfc": 2104
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

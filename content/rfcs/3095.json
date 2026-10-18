@@ -1,0 +1,546 @@
+{
+  "number": 3095,
+  "shortTitle": "ROHC",
+  "category": "transport",
+  "categoryReviewed": false,
+  "summary": "<p>Specifies RObust Header Compression, a framework and four profiles that compress headers of RTP/UDP/IP, UDP/IP, ESP/IP and uncompressed packets, built to cope with lossy links such as wireless. It is on the standards track.</p>",
+  "eli5": {
+    "summary": "<p>Every package has a long address label. If the labels are the same, you can write just a short code. ROHC does that even if some codes get lost.</p>"
+  },
+  "questions": [
+    "what is robust header compression",
+    "rohc rtp udp esp profiles",
+    "how does rohc header compression work",
+    "what are the rohc u o and r modes",
+    "why does crtp fail on cellular links",
+    "what is a rohc context"
+  ],
+  "tags": [
+    "Header Compression",
+    "Wireless",
+    "Real-Time"
+  ],
+  "subtitle": "A header compression framework built for lossy, high-latency links such as cellular radio, with profiles for RTP, UDP, ESP and uncompressed packets.",
+  "tldr": {
+    "problem": "An RTP/UDP/IPv4 packet carries 40 octets of headers on top of a speech payload that may be only 15 to 20 octets, and earlier header compression such as CRTP breaks down on cellular links with high error rates and long round-trip times.",
+    "mechanism": "ROHC keeps matching compression and decompression contexts, sends full headers first, then sends only an encoded sequence number plus checksums and small updates, and repairs the context using three modes of operation, CRCs and optional feedback.",
+    "outcome": "RFC 3095 defines the framework and four profiles (uncompressed, RTP/UDP/IP, UDP/IP and ESP/IP). It is a Proposed Standard and has since been updated by RFC 3759 and RFC 4815.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "RTP/UDP/IPv4 headers",
+      "value": "40 octets (20 + 8 + 12)"
+    },
+    {
+      "label": "RTP/UDP/IPv6 headers",
+      "value": "60 octets"
+    },
+    {
+      "label": "Small CID space",
+      "value": "0 to 15"
+    },
+    {
+      "label": "Large CID space",
+      "value": "0 to 16383"
+    },
+    {
+      "label": "Profiles defined",
+      "value": "0x0000 to 0x0003"
+    },
+    {
+      "label": "Designed-for bit error rate",
+      "value": "up to 1e-3 (1e-2 in severe cases)"
+    }
+  ],
+  "today": "<p>RFC 3095 is a Proposed Standard and has been updated by <a href='/rfc3759'>RFC 3759</a> and <a href='/rfc4815'>RFC 4815</a>; it has not been obsoleted according to the unit metadata. It remains the definition of the ROHC framework and its four original profiles.</p>",
+  "glossary": [
+    "header-compression",
+    "compression-context",
+    "lsb-encoding",
+    "cyclic-redundancy-check",
+    "rtp",
+    "udp",
+    "esp",
+    "jitter",
+    "sequence-number",
+    "sliding-window",
+    "timestamp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Cellular Links Need Robust Compression",
+      "content": "<p>RFC 3095 specifies <strong>RObust Header Compression</strong> (ROHC), a framework plus four profiles for compressing the headers of RTP/UDP/IP, UDP/IP and ESP/IP packets, and for sending other packets uncompressed. The target is IP telephony over cellular links, where radio bandwidth is the most costly resource.</p><p>The motivating numbers come from the RFC itself. A voice packet carried by RTP has an IPv4 header (20 octets), a UDP header (8 octets) and an RTP header (12 octets), a total of 40 octets. With IPv6 the IP header is 40 octets, for a total of 60. The speech payload may be as low as 15 to 20 octets, so the headers can outweigh the data.</p><p>Cellular links make this hard. A bit error rate as high as 1e-3 must be accepted to use radio resources efficiently, and in severe cases it can reach 1e-2. The round-trip time can be 100 to 200 milliseconds. Lower layers can also deliver frames with undetected (residual) errors. A viable scheme must cope with loss on the link between compressor and decompressor and with loss before the compression point.</p><p>Because bandwidth is expensive and processing power is cheap, the RFC states that implementation simplicity matters less than compression ratio and robustness.</p>",
+      "eli5": "<p>Phone calls over the internet send lots of tiny packets with big address labels. On a shaky radio link the labels waste space, so ROHC shrinks them without falling apart when messages get lost.</p>"
+    },
+    {
+      "id": "background",
+      "number": "3",
+      "title": "Why Earlier Schemes Fell Short",
+      "content": "<p>Header compression works because there is a lot of redundancy between header fields, especially between consecutive packets of one stream. Static information is sent once, and predictable fields are rebuilt from earlier packets. The remembered information is the <strong>context</strong>. If the compressor's and decompressor's contexts disagree, packets decompress wrongly, so a robust scheme must both avoid inconsistencies and repair them.</p><p>The RFC reviews the older schemes. Van Jacobson's CTCP compresses the 40-octet IP+TCP header to 4 octets. <a href='/rfc2508'>RFC 2508</a> CRTP compresses 40 octets of IPv4/UDP/RTP headers to a minimum of 2 octets (4 if the UDP checksum is enabled), but it repairs a damaged context with explicit messages from the decompressor, so the link round-trip time limits how fast it recovers. On a lossy cellular link, each lost packet causes several following packets to be lost. The RFC cites an evaluation that found CRTP did not perform well enough, and that even with the TWICE local repair mechanism it doubled the number of lost packets.</p><p>The stated requirement is more robustness without a larger compressed header. The RFC adds that loss events well over 100 ms long are hard for speech codecs to hide.</p><p>Appendix A classifies every header field. Most fields never or seldom change and can be compressed away. Only five fields, about 10 octets in total, need more care: the IPv4 Identification (IP-ID), the UDP checksum, the RTP marker bit, the RTP sequence number (SN) and the RTP timestamp (TS). The IP-ID and TS can usually be predicted from the SN, so ROHC first establishes functions from the SN to the other fields and then reliably communicates the SN.</p>",
+      "eli5": "<p>Older tricks worked like a game of telephone where one lost message made the next several useless. ROHC was designed so that one lost message does not wreck the next ones.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4.3",
+      "title": "Compressor and Decompressor States",
+      "content": "<p>ROHC is two state machines, one at the compressor and one at the decompressor, instantiated once per context. Both start in the lowest state and move up step by step. Normally only the compressor moves back down temporarily; the decompressor drops only when it detects context damage.</p><p>The compressor has three states. In <strong>IR</strong> (Initialization and Refresh) it sends complete header information so the decompressor can set up the static part of the context or recover from failure. In <strong>FO</strong> (First Order) it efficiently signals irregularities in the packet stream, usually with partly compressed information. In <strong>SO</strong> (Second Order) compression is optimal: the header is completely predictable from the SN and only the SN needs to be right. The compressor always works in the highest state it is confident the decompressor can handle.</p><p>The decompressor's states are <strong>No Context</strong>, <strong>Static Context</strong> and <strong>Full Context</strong>. Once a packet has decompressed correctly, it can go all the way to Full Context and only drops back after repeated failures. Falling back first goes to Static Context, and only repeated failures of updates there send it to No Context. In No Context only IR packets may be decompressed; in Static Context only packets carrying a 7- or 8-bit CRC (IR, IR-DYN or UOR-2) may be.</p><p>States are not the same as modes. The state abstraction is identical for all modes; the mode controls the logic of state transitions and which actions apply in each state.</p>",
+      "eli5": "<p>Think of climbing a ladder: the sender starts on the bottom rung with the full address label and moves up to short codes once it is sure the receiver understands. If things go wrong it steps back down.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4.4",
+      "title": "Three Modes of Operation",
+      "content": "<p>ROHC has three modes, and all implementations MUST implement all of them. Compression MUST start in <strong>Unidirectional</strong> mode (U-mode), where packets flow only from compressor to decompressor. State changes happen only through periodic timeouts and irregularities in the header pattern, so it suits links with no return path, at some cost in efficiency and a slightly higher chance of loss propagation.</p><p><strong>Bidirectional Optimistic</strong> mode (O-mode) adds a feedback channel for error recovery requests (NACKs) and optional acknowledgments of significant context updates. It does not use periodic refreshes. It aims for maximum compression efficiency with sparse use of feedback.</p><p><strong>Bidirectional Reliable</strong> mode (R-mode) uses feedback much more heavily. The decompressor acknowledges all context updates, and the compressor bases its confidence only on those acknowledgments, so context synchronization is not lost to packet loss except at very high residual error rates. Under the secure reference principle, only a packet carrying a 7- or 8-bit CRC can update the context or serve as a reference.</p><p>The decompressor decides when to change mode. Feedback that starts a mode transition MUST be protected by a CRC. Moving between modes uses variables such as <code>C_MODE</code> and <code>C_TRANS</code> at the compressor, and while a transition is pending the compressor may only use packet formats common to all modes and must not enter the SO state. A return to U-mode always uses a three-way handshake.</p><p>When a CRC check fails, the decompressor first tries local repairs (correcting SN wraparound, or repairing an incorrectly updated reference SN). If those fail, occasional failures are treated as residual errors and the packet is discarded; k_1 out of the last n_1 failures in Full Context makes it assume context damage, send a NACK in O- and R-mode and drop to Static Context. An optional reverse decompression step can store undecodable packets and recover them in reverse order once the context is repaired.</p>",
+      "eli5": "<p>There are three ways to talk. In one the sender just keeps repeating itself. In another the receiver speaks up only when something is wrong. In the third the receiver confirms every important change.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "4.5",
+      "title": "How Field Values Are Encoded",
+      "content": "<p><strong>LSB encoding</strong> sends only the k least significant bits of a value, and the decompressor rebuilds the full value from a previously received reference <code>v_ref</code>. The decoding works if both sides use an interpretation interval <code>[v_ref - p, v_ref + (2^k - 1) - p]</code> in which the original value is the only one with those low bits. The shift <code>p</code> is chosen to suit the field, for example -1 for always-increasing values. To avoid damage propagation, the reference is a value verified by a CRC.</p><p><strong>Window-based LSB</strong> (W-LSB) handles the fact that the compressor cannot know exactly which reference the decompressor holds. The compressor keeps a sliding window of candidate references and picks k so the value is decodable whichever one the decompressor uses. In R-mode an ACK lets older values leave the window.</p><p><strong>Scaled RTP timestamp</strong> encoding exploits the timestamp usually rising by a multiple of <code>TS_STRIDE</code>. For 8 kHz audio with 20 ms voice frames the increase is n times 160. The timestamp satisfies <code>TS = TS_SCALED * TS_STRIDE + TS_OFFSET</code>, which saves floor(log2(TS_STRIDE)) bits. <strong>Timer-based</strong> compression goes further: for conversational media the timestamp is roughly linear in wall-clock time, so the decompressor estimates it from the packet arrival time and the compressed bits only correct for jitter. Its size does not depend on the length of silence periods.</p><p>The IPv4 <strong>IP-ID</strong> is compressed as an offset from the sequence number (<code>IP-ID - SN</code>), since IP-ID usually increments with each packet the source emits. Byte-swapped counters are handled with the NBO flag, and randomly generated IP-IDs, flagged by RND, are sent as-is.</p><p>Parameters that vary widely, such as <code>TS_STRIDE</code>, use a self-describing variable-length encoding of 1 to 4 octets.</p>",
+      "eli5": "<p>Instead of writing a whole number, you write just its last few digits, because the reader already knows roughly where you are counting. It is like saying 'seven' when everyone knows it is 2007.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "5.2",
+      "title": "ROHC Packets, Feedback and Segmentation",
+      "content": "<p>A ROHC packet is made of optional padding, zero or more feedback elements, a header carrying the context identifier (CID) information, and the payload. Either feedback or a header must be present. The first bits of an octet identify the framework-level types: <code>1110</code> padding or Add-CID, <code>11110</code> feedback, <code>11111000</code> IR-DYN, <code>1111110</code> IR and <code>1111111</code> a segment. All other types are free for profiles to use.</p><p>Contexts are identified by a CID, and the CID space is separate for each channel. With small CIDs (0 to 15) CID 0 costs no bits and CIDs 1 to 15 use an Add-CID octet. Large CIDs (0 to 16383) are embedded in the header in one or two octets.</p><p>Two packet types set up contexts. An <strong>IR</strong> packet associates a CID with a profile and typically initializes the context. An <strong>IR-DYN</strong> packet can never initialize an uninitialized context, but can redefine the profile and refresh the dynamic part. Both carry an 8-bit CRC.</p><p><strong>Feedback</strong> goes from decompressor to compressor and comes in three kinds: ACK (context is up to date with high probability), NACK (the dynamic context is out of sync) and STATIC-NACK (the static context is invalid or missing). Feedback can be piggybacked on forward packets or sent separately; a length code makes this possible. ROHC RTP feedback uses FEEDBACK-1 (a single octet of SN, always an ACK) or FEEDBACK-2 (ack type, mode, SN and options). Options include CRC, REJECT (the decompressor lacks resources for the flow), SN-NOT-VALID, SN, CLOCK, JITTER and LOSS.</p><p>For the occasional packet too large for a link's efficient packet sizes, ROHC defines a simple <strong>segmentation</strong> scheme. A final-bit flag marks the last segment, and the reassembled unit ends with a 4-octet CRC; it is discarded if the CRC fails or if it exceeds the negotiated MRRU. Link-layer segmentation SHOULD be used instead whenever it is available and efficient.</p>",
+      "eli5": "<p>Each ROHC packet starts with a few marker bits that tell the receiver what kind of message it is, like a colored sticker on an envelope. There are also reply notes: thumbs up, 'please resend details' and 'I lost everything'.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "5.7",
+      "title": "Compressed RTP Headers",
+      "content": "<p>For the RTP profile, compressed headers come in three base packet types, with names of the form mode-type-property such as <code>UO-0</code> or <code>R-1-TS</code>. <strong>Type 0</strong> (R-0, R-0-CRC, UO-0) is the minimal header, used when the decompressor knows the parameters of all SN-functions and the header follows them, so only a W-LSB encoded SN is sent. <strong>Type 1</strong> (R-1, UO-1 and their -ID and -TS variants) is used when more SN bits are needed or when the TS or IP-ID functions change. <strong>Type 2</strong> (UOR-2 and variants) can change the parameters of almost any SN-function.</p><p>The UO-0 header is a single octet: a type bit, four SN bits and a 3-bit CRC. A CRC over the original header detects wrong decompression. Three polynomials are defined for 3-, 7- and 8-bit CRCs, and header octets are split into CRC-STATIC and CRC-DYNAMIC so the static part of the computation can be reused. In R-mode the smallest headers (R-0) carry no CRC, and only context-updating headers carry a 7- or 8-bit one.</p><p>Base headers can carry an <strong>extension</strong> (0, 1, 2 or 3). Extension 3 can update other fields: flags for the inner and outer IP headers, the RTP header, the mode, <code>TS_STRIDE</code> and <code>TIME_STRIDE</code>.</p><p>IR packets carry a <strong>static chain</strong> (such as IP addresses and ports, the RTP SSRC) and optionally a <strong>dynamic chain</strong> (such as TTL, IP-ID, sequence number, timestamp). Several fields are eliminated entirely and rebuilt: the IPv4 total length and header checksum, the IPv6 payload length and the UDP length. If the UDP checksum is enabled in the context, it is sent as-is with each packet.</p>",
+      "eli5": "<p>After the first full address label, most packets only carry a tiny counter and a small check number. The receiver uses the counter to fill in everything else, then uses the check number to be sure it guessed right.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "5.8",
+      "title": "Compressing Lists of Headers",
+      "content": "<p>Some header information is an ordered list that is mostly constant: the RTP CSRC list, and chains of IP extension headers (such as AH, null ESP, minimal encapsulation, GRE and IPv6 extension headers). While the list is constant, nothing about it is sent in compressed headers.</p><p>Items are shrunk with <strong>table-based item compression</strong>: the compressor assigns each item an Index and sends (Index, item) pairs until it is confident the decompressor knows the mapping, after which only the Index is sent. In R-mode confidence comes from an acknowledgment; in U/O-mode it comes from sending the pair in L lists.</p><p>Four encoding types describe changes against a reference list: type 0 is the <strong>generic</strong> scheme that sends the whole list and needs no reference, type 1 is <strong>insertion only</strong>, type 2 is <strong>removal only</strong>, and type 3 is <strong>remove then insert</strong>. In R-mode the reference is the latest acknowledged list. In U/O-mode, identical lists form a generation with a generation identifier, and a list becomes a reference after its identifier has been repeated L times or acknowledged.</p><p>Special cases cover the Next Header field, which changes when a neighbouring header is added or removed, the AH sequence number, which can be extrapolated, and ESP with the NULL algorithm, where the rest of the chain can still be compressed.</p>",
+      "eli5": "<p>If your grocery list is the same as last week's, you say nothing. If one item changes, you say 'add milk' or 'drop eggs' instead of reading out the whole list again.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "5.10",
+      "title": "The Four Profiles and IANA Rules",
+      "content": "<p>A <strong>profile</strong> specifies how to compress a certain kind of packet stream. The profile is named in IR packets by an identifier, and the decompressor advertises which ones it accepts. This RFC defines four.</p><ul><li><strong>0x0000, uncompressed.</strong> Sends packets without compression, for IP fragments, RTCP packets, and anything else that cannot or should not be compressed. After initialization the only overhead is the size of the CID. It MUST NOT be rejected.</li><li><strong>0x0001, RTP/UDP/IP.</strong> The main profile, described in sections 5.3 to 5.9.</li><li><strong>0x0002, UDP/IP.</strong> For UDP streams that are not RTP. The compressor generates its own 16-bit sequence number that increases by one per packet, since UDP has none. It is started with an IR packet, or from an existing context by an IR-DYN packet.</li><li><strong>0x0003, ESP/IP.</strong> Compresses the header chain up to and including the ESP header when a non-NULL encryption algorithm hides later headers. It uses the ESP sequence number as the basis for compression.</li></ul><p>RTCP can share a channel with RTP using separate CIDs, use its own channel, or be sent uncompressed with profile 0x0000 or compressed with the UDP profile. The RFC notes the RTP port number is always even and the RTCP port that number plus one.</p><p>On the IANA side, profile identifiers are assigned under Specification Required. The 8 least significant bits are special: in that range, 0 to 127 is reserved for IETF standard-track specifications, 128 to 254 is available for other specifications and 255 is reserved for extensibility. Two identifiers with the same 8 LSBs should only be assigned if the higher-numbered one is meant to supersede the lower one.</p>",
+      "eli5": "<p>A profile is like a recipe card for one kind of mail: one for voice calls, one for plain messages, one for locked envelopes, and one that simply says 'send it as it is'.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Encryption removes the redundancy that header compression relies on, which gives some inducement to skip header encryption on low-bandwidth links. The RFC points out that RTP offers an alternative in which only the payload is encrypted and headers stay in the clear, which still allows header compression. ROHC is transparent for the RTP sequence number and timestamp, so those values can still seed payload encryption such as an initialization vector.</p><p>A malfunctioning or malicious compressor could make the decompressor rebuild packets that differ from the originals but still have valid IP, UDP and RTP headers. End-to-end authentication and integrity mechanisms are not affected by compression and can catch this, and the internal ROHC CRC makes unnoticed mismatches less likely.</p><p>An intruder who can inject bogus static, dynamic or feedback packets onto the link can reduce compression efficiency (a denial of service). The RFC says an intruder with that much link-layer access raises further security problems that dwarf those related to header compression.</p>",
+      "eli5": "<p>Shrinking the labels does not make a message secret or safe. If someone can slip fake notes into the mail line, they can mostly just make things slower, and the bigger worry would be that they could get into the line at all.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "DECOMPRESSOR STATES (RFC 3095 5.3.2)",
+      "data": {
+        "states": [
+          {
+            "key": "nc",
+            "label": "No Context",
+            "initial": true
+          },
+          {
+            "key": "sc",
+            "label": "Static Context"
+          },
+          {
+            "key": "fc",
+            "label": "Full Context"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "nc",
+            "to": "fc",
+            "label": "success"
+          },
+          {
+            "from": "sc",
+            "to": "fc",
+            "label": "success"
+          },
+          {
+            "from": "fc",
+            "to": "sc",
+            "label": "k_1 out of n_1 failures"
+          },
+          {
+            "from": "sc",
+            "to": "nc",
+            "label": "k_2 out of n_2 failures"
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "COMPRESSOR STATES IN U-MODE (RFC 3095 5.3.1)",
+      "data": {
+        "states": [
+          {
+            "key": "ir",
+            "label": "IR",
+            "initial": true
+          },
+          {
+            "key": "fo",
+            "label": "FO"
+          },
+          {
+            "key": "so",
+            "label": "SO"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "ir",
+            "to": "fo",
+            "label": "optimistic approach"
+          },
+          {
+            "from": "fo",
+            "to": "so",
+            "label": "optimistic approach"
+          },
+          {
+            "from": "ir",
+            "to": "so",
+            "label": "optimistic approach"
+          },
+          {
+            "from": "so",
+            "to": "fo",
+            "label": "timeout or update"
+          },
+          {
+            "from": "fo",
+            "to": "ir",
+            "label": "timeout"
+          },
+          {
+            "from": "so",
+            "to": "ir",
+            "label": "timeout"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE THREE MODES (SUMMARY OF RFC 3095 4.4 AND 5.3 TO 5.5)",
+      "data": {
+        "columns": [
+          "Mode",
+          "Feedback",
+          "How the context is kept in sync",
+          "CRC use"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Unidirectional (U)",
+              "Not required; ACK(U) optional",
+              "Periodic refreshes by timeout",
+              "Every compressed header carries a CRC"
+            ]
+          },
+          {
+            "cells": [
+              "Optimistic (O)",
+              "NACKs, optional ACKs",
+              "No periodic refresh; NACK triggers updates",
+              "Every compressed header carries a CRC"
+            ]
+          },
+          {
+            "cells": [
+              "Reliable (R)",
+              "ACKs for all context updates",
+              "Compressor moves up only on ACKs",
+              "7- or 8-bit CRC on update packets only"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "OPTIMISTIC TO RELIABLE MODE TRANSITION (RFC 3095 5.6.3)",
+      "data": {
+        "lanes": [
+          {
+            "key": "decompressor",
+            "label": "Decompressor"
+          },
+          {
+            "key": "compressor",
+            "label": "Compressor"
+          }
+        ],
+        "messages": [
+          {
+            "from": "decompressor",
+            "to": "compressor",
+            "label": "ACK(R) or NACK(R) with CRC",
+            "color": "green",
+            "note": "Decompressor starts the transition (D_TRANS = I)."
+          },
+          {
+            "from": "compressor",
+            "to": "decompressor",
+            "label": "IR, IR-DYN or UOR-2 with mode R",
+            "color": "blue",
+            "note": "Compressor sets C_TRANS = P and C_MODE = R."
+          },
+          {
+            "from": "decompressor",
+            "to": "compressor",
+            "label": "ACK(SN,R)",
+            "color": "green",
+            "note": "Acknowledges the packet carrying the mode."
+          },
+          {
+            "from": "compressor",
+            "to": "decompressor",
+            "label": "R-0*, R-1* packets",
+            "color": "blue",
+            "note": "C_TRANS = D; compact R-mode packets resume."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "SELF-DESCRIBING VARIABLE-LENGTH VALUES (RFC 3095 4.5.6)",
+      "data": {
+        "columns": [
+          "First bits",
+          "Octets",
+          "Bits carried",
+          "Largest value"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0",
+              "1",
+              "7",
+              "127"
+            ]
+          },
+          {
+            "cells": [
+              "10",
+              "2",
+              "14",
+              "16 383"
+            ]
+          },
+          {
+            "cells": [
+              "110",
+              "3",
+              "21",
+              "2 097 151"
+            ]
+          },
+          {
+            "cells": [
+              "111",
+              "4",
+              "29",
+              "536 870 911"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "PACKET TYPES RESERVED BY THE FRAMEWORK (RFC 3095 5.2.6)",
+      "data": {
+        "items": [
+          {
+            "code": "1110",
+            "label": "Padding or Add-CID",
+            "desc": "Padding octet, or an octet carrying CID 1 to 15 for small CIDs."
+          },
+          {
+            "code": "11110",
+            "label": "Feedback",
+            "desc": "Feedback element from decompressor to compressor."
+          },
+          {
+            "code": "11111000",
+            "label": "IR-DYN",
+            "desc": "Refreshes the dynamic part and may redefine the profile.",
+            "highlight": true
+          },
+          {
+            "code": "1111110",
+            "label": "IR",
+            "desc": "Associates a CID with a profile and initializes the context.",
+            "highlight": true
+          },
+          {
+            "code": "1111111",
+            "label": "Segment",
+            "desc": "One piece of a reconstructed unit."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "THE UO-0 COMPRESSED HEADER (RFC 3095 5.7.1)",
+      "data": {
+        "title": "UO-0",
+        "bytes": 1,
+        "width": 8,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 1,
+            "desc": "A first bit of 0 marks packet type 0.",
+            "value": "0"
+          },
+          {
+            "key": "sn",
+            "name": "SN",
+            "bits": 4,
+            "desc": "Least significant bits of the sequence number, W-LSB encoded."
+          },
+          {
+            "key": "crc",
+            "name": "CRC",
+            "bits": 3,
+            "desc": "3-bit CRC over the original header."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "section-1",
+      "position": "after",
+      "caption": "PROFILE IDENTIFIERS ALLOCATED BY RFC 3095 (SECTION 8)",
+      "data": {
+        "items": [
+          {
+            "code": "0x0000",
+            "label": "Uncompressed",
+            "desc": "Sends IP packets without compression."
+          },
+          {
+            "code": "0x0001",
+            "label": "RTP/UDP/IP",
+            "desc": "The main ROHC RTP compression profile.",
+            "highlight": true
+          },
+          {
+            "code": "0x0002",
+            "label": "UDP/IP",
+            "desc": "Non-RTP UDP streams, using a generated sequence number."
+          },
+          {
+            "code": "0x0003",
+            "label": "ESP/IP",
+            "desc": "Header chain up to and including the ESP header."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[UDP]",
+      "text": "Postel, J., \"User Datagram Protocol\", STD 6, RFC 768, August 1980.",
+      "rfc": 768
+    },
+    {
+      "number": "[IPv4]",
+      "text": "Postel, J., \"Internet Protocol\", STD 5, RFC 791, September 1981.",
+      "rfc": 791
+    },
+    {
+      "number": "[IPv6]",
+      "text": "Deering, S. and R. Hinden, \"Internet Protocol, Version 6 (IPv6) Specification\", RFC 2460, December 1998.",
+      "rfc": 2460
+    },
+    {
+      "number": "[RTP]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R. and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", RFC 1889, January 1996.",
+      "rfc": 1889
+    },
+    {
+      "number": "[ESP]",
+      "text": "Kent, S. and R. Atkinson, \"IP Encapsulating Security Payload\", RFC 2406, November 1998.",
+      "rfc": 2406
+    },
+    {
+      "number": "[AH]",
+      "text": "Kent, S. and R. Atkinson, \"IP Authentication Header\", RFC 2402, November 1998.",
+      "rfc": 2402
+    },
+    {
+      "number": "[NULL]",
+      "text": "Glenn, R. and S. Kent, \"The NULL Encryption Algorithm and Its Use With Ipsec\", RFC 2410, November 1998.",
+      "rfc": 2410
+    },
+    {
+      "number": "[VJHC]",
+      "text": "Jacobson, V., \"Compressing TCP/IP Headers for Low-Speed Serial Links\", RFC 1144, February 1990.",
+      "rfc": 1144
+    },
+    {
+      "number": "[IPHC]",
+      "text": "Degermark, M., Nordgren, B. and S. Pink, \"IP Header Compression\", RFC 2507, February 1999.",
+      "rfc": 2507
+    },
+    {
+      "number": "[CRTP]",
+      "text": "Casner, S. and V. Jacobson, \"Compressing IP/UDP/RTP Headers for Low-Speed Serial Links\", RFC 2508, February 1999.",
+      "rfc": 2508
+    },
+    {
+      "number": "[REQ]",
+      "text": "Degermark, M., \"Requirements for robust IP/UDP/RTP header compression\", RFC 3096, June 2001.",
+      "rfc": 3096
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

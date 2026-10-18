@@ -1,0 +1,185 @@
+{
+  "number": 4696,
+  "shortTitle": "RTP MIDI guide",
+  "category": "applications",
+  "categoryReviewed": false,
+  "summary": "<p>This informational memo gives non-normative implementation guidance for the RTP MIDI payload format, using a network musical performance between two musicians as its example. It describes in detail the algorithms for sending and receiving recovery journals, which let the stream recover from packet loss.</p>",
+  "eli5": {
+    "summary": "<p>Two musicians far apart want to play like they are in one room. This is a how-to for making that work, including how to patch up lost notes.</p>"
+  },
+  "questions": [
+    "rtp midi implementation",
+    "recovery journal rtp midi",
+    "what is rtp midi",
+    "what is a recovery journal in rtp midi",
+    "what are guard packets",
+    "how does rtp midi handle packet loss"
+  ],
+  "tags": [
+    "RTP",
+    "MIDI",
+    "Real-time"
+  ],
+  "subtitle": "Worked advice for sending and receiving MIDI over RTP, using two musicians playing together across a network.",
+  "tldr": {
+    "problem": "The RTP MIDI payload format in RFC 4695 says what packets look like but not how to write senders and receivers that perform well over a lossy network.",
+    "mechanism": "This memo walks through a two-party network musical performance: session setup with SDP, a five-step sending algorithm, a sender-side recovery journal structure, and a receiver that detects loss and repairs notes, controllers, pitch wheel and program changes.",
+    "outcome": "The guidance is non-normative, so implementers may use any algorithm that conforms to the normative documents.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "First party ports",
+      "value": "RTP 16112, RTCP 16113"
+    },
+    {
+      "label": "Second party ports",
+      "value": "RTP 5004, RTCP 5005"
+    },
+    {
+      "label": "Session bandwidth (AS)",
+      "value": "20 kbs"
+    },
+    {
+      "label": "RTCP bandwidth",
+      "value": "400 bps"
+    },
+    {
+      "label": "Guard packet schedule",
+      "value": "100 ms, then backoff to 1 s limit"
+    },
+    {
+      "label": "Sending algorithm",
+      "value": "5 steps"
+    }
+  ],
+  "today": "<p>RFC 4696 is an Informational, non-normative memo, and the metadata shows no RFC that obsoletes or updates it. The normative payload format it supports is <a href='/rfc4695'>RFC 4695</a>.</p>",
+  "glossary": [
+    "rtp",
+    "rtcp",
+    "sdp",
+    "udp",
+    "ssrc",
+    "jitter",
+    "sequence-number",
+    "nat",
+    "recovery-journal"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p><a href='/rfc4695'>RFC 4695</a> normatively defines a payload format that carries MIDI (Musical Instrument Digital Interface) commands in RTP. It does not define sending or receiving algorithms, so this memo offers implementation guidance. Unlike RFC 4695, it is <strong>not normative</strong>.</p><p>The example application is two-party network musical performance over wide-area networks, using unicast UDP, the recovery journal for resiliency and RTCP. It assumes a network with low nominal jitter, low packet loss and occasional outlier packets that arrive very late. Section 6.2 discusses other networks.</p>",
+      "eli5": "<p>The rule book says what a message looks like. This memo is the coaching guide that shows how to actually play the game.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "2",
+      "title": "Starting and Maintaining a Session",
+      "content": "<p>The two parties agree on a pair of SDP session descriptions. In the first, the party receives its MIDI stream on 192.0.2.94 at UDP port 16112 with RTCP at port 16113 (16112 + 1) and payload type 96. In the second, the other party uses 192.0.2.105, port 5004, RTCP port 5005 and payload type 101. Both descriptions use the <code>mpeg4-generic</code> media type with identical parameters, so both hosts have the same rendering environment.</p><p>The bandwidth line gives 20 kbs for the whole RTP session (two 10 kbs streams) and 400 bps of shared RTCP bandwidth, enough for one RTCP packet per 5 seconds from each party. The memo shows C socket code using non-blocking sockets and a single run loop; blocking sockets give the lowest latency but need a multi-threaded design. The code assumes a clear path with no firewall or NAT.</p><p>Housekeeping covers the SSRC, RTCP, per-packet authentication (strongly recommended, since rogue packets could run arbitrary MIDI commands) and session termination. A stream stopped at an arbitrary point can leave stuck notes, so exit may be signalled by SIP BYE, RTCP BYE or by noticing missing RTCP.</p>",
+      "eli5": "<p>Before playing, the two musicians swap cards with their addresses and settings. Then they keep checking in with each other and say goodbye properly so no note keeps ringing.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Sending Streams",
+      "content": "<p>A sender transmits a packet either because the local player made new MIDI data or because too much time passed since the last packet. Each packet holds an RTP header, a MIDI command section and a recovery journal; if there is no new data, the MIDI list is empty. Figure 8 gives a five-step algorithm: build the RTP header, build the MIDI command section, build the recovery journal from the Recovery Journal Sending Structure (RJSS), send the packet, then update the RJSS.</p><p>Simple senders send a packet for each complete command, which minimizes queuing latency but uses bandwidth less efficiently; grouping commands saves bandwidth at the cost of latency. Senders should keep the RTP timestamp tied to actual sending time, because any variance looks like network jitter to the receiver.</p><p><strong>Keep-alive and guard packets</strong> have empty MIDI lists. They keep NAT state alive and help receivers notice loss during silence. The example sends a guard packet after 100 ms of inactivity, another 100 ms later, then backs off exponentially to a limit of 1 second set by the <code>guardtime</code> parameter. To limit rate, senders can pack commands, tune guard packets, shrink the journal or filter the MIDI stream.</p>",
+      "eli5": "<p>If nobody is playing, the sender still sends tiny 'still here' messages. That way the other side quickly notices if a note-off message went missing.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "5",
+      "title": "The Sender's Recovery Journal",
+      "content": "<p>The RJSS is a hierarchy that mirrors the recovery journal bitfields: a top-level journal header, a header for each of 16 channels, and leaf chapters for Pitch Wheel (W), Note (N), Control Change (C) and Program Change (P). Each structure keeps a <code>seqnum</code>, the extended RTP sequence number of the latest packet that added information to it; zero means nothing is at risk. This implementation uses the default closed-loop semantics.</p><p>To build a journal, the sender walks the structure depth-first, copying headers and the chapters that have a non-zero seqnum. After sending, it updates the affected chapter, the channel header and the journal header, and sets their seqnums to the packet's sequence number. When an RTCP receiver report arrives, the sender uses its extended highest sequence number received (EHSNR) to <strong>trim</strong> everything at or below that number, which shrinks later journals. The memo notes this sender is simplified for teaching and real implementations would use enhanced versions.</p>",
+      "eli5": "<p>The sender keeps a notebook of everything the other side might have missed. Once the other side says what it already got, the sender crosses those lines out to keep the notebook short.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "Receiving Streams and Loss Recovery",
+      "content": "<p>The example receiver follows the Network Musical Performance (NMP) design for a low-jitter network. It predicts each packet's sequence number and timestamp, and executes commands immediately when they fit; it uses no playout buffer, trading command jitter for lowest latency. A late packet's commands are still executed, except NoteOn commands with non-zero velocity, which are discarded so 'straggler notes' do not disturb the music. A packet received out of order is ignored, since a loss event already triggered recovery. Networks with significant jitter need a substantial playout buffer; LAN receivers may use a small one (100us to 2ms) with a tuning control.</p><p>When the sequence number shows a loss, the receiver checks the recovery journal of the packet that ends the loss against its own Recovery Journal Receiver Structure (RJRS), which records commands it has executed. A mismatch means commands were lost, and the receiver issues commands to repair the state. Section 7 gives the repair steps per chapter: Pitch Wheel sends the journal's value; Note chapters stop hung notes and decide whether to play or skip a lost NoteOn; Control Change uses the value, toggle or count tool; Program Change also fixes Bank Select first.</p>",
+      "eli5": "<p>When the listener notices a missing message, it reads the sender's notebook, compares it with what it heard, and quickly fixes things, like stopping a note that should have ended.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and IANA Considerations",
+      "content": "<p>This memo adds no security or IANA text of its own. Both are handled in the corresponding sections of RFC 4695. In the housekeeping discussion, the memo repeats that per-packet authentication is strongly recommended for MIDI streams, because accepting rogue packets may lead to the execution of arbitrary MIDI commands.</p>",
+      "eli5": "<p>Only accept messages from the real partner, or a stranger could make your instrument play whatever they like.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "RECOVERY JOURNAL CHAPTERS USED IN THE EXAMPLE (RFC 4696)",
+      "data": {
+        "items": [
+          {
+            "code": "P",
+            "label": "Program Change (0xC)",
+            "desc": "Protects the timbre choice and the Bank Select values in effect."
+          },
+          {
+            "code": "C",
+            "label": "Control Change (0xB)",
+            "desc": "Protects controller values using the value, toggle or count tool."
+          },
+          {
+            "code": "W",
+            "label": "Pitch Wheel (0xE)",
+            "desc": "Protects the 14-bit pitch wheel value."
+          },
+          {
+            "code": "N",
+            "label": "Note (0x8, 0x9)",
+            "desc": "Protects NoteOn and NoteOff commands so notes are not skipped or left sounding.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4695]",
+      "text": "Lazzaro, J. and J. Wawrzynek, \"RTP Payload Format for MIDI\", RFC 4695, November 2006.",
+      "rfc": 4695
+    },
+    {
+      "number": "[RFC3550]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "rfc": 3550
+    },
+    {
+      "number": "[RFC3551]",
+      "text": "Schulzrinne, H. and S. Casner, \"RTP Profile for Audio and Video Conferences with Minimal Control\", STD 65, RFC 3551, July 2003.",
+      "rfc": 3551
+    },
+    {
+      "number": "[RFC4566]",
+      "text": "Handley, M., Jacobson, V., and C. Perkins, \"SDP: Session Description Protocol\", RFC 4566, July 2006.",
+      "rfc": 4566
+    },
+    {
+      "number": "[RFC3261]",
+      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
+      "rfc": 3261
+    },
+    {
+      "number": "[NMP]",
+      "text": "Lazzaro, J. and J. Wawrzynek, \"A Case for Network Musical Performance\", NOSSDAV 2001, June 25-26, 2001."
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

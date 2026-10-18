@@ -1,0 +1,219 @@
+{
+  "number": 9616,
+  "shortTitle": "Babel RTT metric",
+  "category": "routing",
+  "categoryReviewed": false,
+  "summary": "<p>Defines an extension to the Babel routing protocol that measures round-trip time between routers, so lower-latency links can be preferred over higher-latency ones.</p>",
+  "eli5": {
+    "summary": "<p>Babel can now time how long messages take with each neighbor and choose the quicker road.</p>"
+  },
+  "questions": [
+    "babel rtt extension",
+    "babel latency metric",
+    "prefer low delay links babel",
+    "what is the babel rtt extension",
+    "how does babel measure round trip time",
+    "what is the babel timestamp sub-tlv"
+  ],
+  "tags": [
+    "Routing",
+    "Babel",
+    "Latency"
+  ],
+  "subtitle": "How Babel routers time their links and prefer the faster ones, without needing synchronised clocks.",
+  "tldr": {
+    "problem": "Babel uses packet loss on wireless links and hop count on other links, which picks poor routes in some topologies with tunnels or VPNs. A nearby route and a distant one can look identical.",
+    "mechanism": "Routers add Timestamp sub-TLVs to Hello and IHU messages to measure round-trip time. The samples are then smoothed, mapped to a bounded link cost and passed through a hysteresis filter.",
+    "outcome": "Routes with lower latency can be preferred, while smoothing and hysteresis limit route oscillation. Routers that do not understand the extension simply ignore the new data.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Timestamp sub-TLV type",
+      "value": "3"
+    },
+    {
+      "label": "Timestamp size",
+      "value": "32 bits, in microseconds"
+    },
+    {
+      "label": "Timestamp wrap-around",
+      "value": "4295 seconds (about 71 minutes)"
+    },
+    {
+      "label": "Default smoothing α",
+      "value": "0.836"
+    },
+    {
+      "label": "Default rtt-min / rtt-max",
+      "value": "10 ms / 120 ms"
+    },
+    {
+      "label": "Default max-rtt-penalty",
+      "value": "150"
+    }
+  ],
+  "today": "<p>RFC 9616 is a Proposed Standard published in September 2024. It has not been obsoleted or updated, and it extends Babel as defined in <a href='/rfc8966'>RFC 8966</a>.</p>",
+  "glossary": [
+    "round-trip-time",
+    "hysteresis",
+    "distance-vector",
+    "timestamp",
+    "ntp-timestamp"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Hop Counts Are Not Enough",
+      "content": "<p>The Babel routing protocol (<a href='/rfc8966'>RFC 8966</a>) does not mandate a metric algorithm. Existing implementations use a packet-loss-based metric on wireless links and a simple hop-count metric on all other links. That fails in some topologies involving tunnels or VPNs.</p><p>The RFC's example is a diamond: routers A, B and D are in Paris, router C is in Tokyo, and all are connected by tunnels. From A to D, the local route through B is clearly better, but with equal hop counts, existing implementations will send traffic through C in roughly half the cases.</p><p>The RFC therefore has two parts. Section 3 measures the round-trip time (RTT) between neighbours. Section 4 turns those noisy samples into a stable link cost.</p>",
+      "eli5": "<p>If a road in your town and a road to another country both count as one step, you cannot tell which is faster. Timing the trip fixes that.</p>"
+    },
+    {
+      "id": "scope",
+      "number": "2",
+      "title": "Where It Applies",
+      "content": "<p>RTT is a symmetric measure of delay, so the extension only suits environments where symmetric delay predicts whether a link should be used. It may not fit networks built over exotic link technologies.</p><p>It makes few demands on nodes: clocks need not be synchronised, and clock drift need only be negligible between two Hello TLVs, which are a few seconds apart. The cost algorithm assumes all links below rtt-min are equally good and all above rtt-max equally bad. That suits wide-area overlay networks but not networks where telling apart low-latency links matters. It also reacts slowly, so it may be a poor fit where nodes move a lot.</p>",
+      "eli5": "<p>It works best when going and coming back take about the same time, and when slightly fast roads do not need to be ranked against each other.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "Measuring RTT with Timestamps",
+      "content": "<p>Each speaker keeps a local clock counting microseconds from an arbitrary origin. Clocks need not agree between nodes. Each Neighbour Table entry gains an <strong>Origin Timestamp</strong> (the neighbour's clock) and a <strong>Receive Timestamp</strong> (the local clock), both 32-bit values modulo 2^32.</p><p>The method is Mills' algorithm, from <a href='/rfc891'>RFC 891</a> and later used in NTP (<a href='/rfc5905'>RFC 5905</a>). Node A MUST put a timestamp t1 in every Hello. When B receives it at t1' (by B's clock), B records both values. When B sends an IHU to A, and both timestamps are defined, it MUST send the IHU in a packet that also holds a timestamped Hello t2', and include t1 and t1' in the IHU. When A receives that packet at t2, it computes <code>RTT = (t2 - t1) - (t2' - t1')</code>, modulo 2^32.</p><p>Only differences taken from a single clock are used, so no synchronisation is needed. The algorithm is symmetric, asynchronous and needs just two stored timestamps per neighbour. Transmit timestamps SHOULD be taken just before the packet goes to the network stack, and receive timestamps just after it arrives.</p><p>Timestamps wrap around about every 71 minutes, and a node may restart its clock. Very old or nonsensical timestamps MUST NOT yield RTT samples. One suggested check discards samples whose Origin Timestamp seems to be in the future or older than T, with T = 3 minutes recommended.</p>",
+      "eli5": "<p>A shouts a message with the time on A's watch. B replies saying when it heard it and when it answered. A subtracts B's waiting time and what is left is the real trip time.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "From Samples to Link Cost",
+      "content": "<p>Raw RTT samples are accurate but cannot be fed straight into route selection. Bursty traffic causes spikes. Preferring low-RTT routes sends them more traffic, which raises their RTT, a negative feedback loop that can cause oscillation and packet reordering. Even without congestion, RTT varies. The three-step algorithm is RECOMMENDED when RTT is used for route selection.</p><ul><li><strong>Smoothing.</strong> Implementations SHOULD smooth samples. They MAY use the exponential average <code>RTT := α RTT + (1 - α) RTTn</code>, with α between 0.8 and 0.9 and 0.836 as the RECOMMENDED default. The first sample sets the initial value.</li><li><strong>Cost mapping.</strong> Implementations SHOULD use a bounded mapping with three parameters. Below rtt-min the cost is the nominal single-hop cost C. Between rtt-min and rtt-max it grows linearly. Above rtt-max, max-rtt-penalty is added. Defaults: rtt-min = 10 ms, rtt-max = 120 ms, max-rtt-penalty = 150.</li><li><strong>Hysteresis.</strong> Implementations SHOULD use a robust filter such as the one in Appendix A.3 of <a href='/rfc8966'>RFC 8966</a>.</li></ul>",
+      "eli5": "<p>One slow reply should not make you change roads. So the router averages recent trips, treats all very short trips as equal and all very long ones as equally bad, and only switches when the difference is clear.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "5",
+      "title": "The Timestamp Sub-TLV",
+      "content": "<p>The extension defines the Timestamp sub-TLV, Type 3. Inside a Hello TLV it carries one timestamp, the Transmit Timestamp. Inside an IHU TLV it carries two: the Origin Timestamp (a copy of the Transmit Timestamp of the last timestamped Hello from that neighbour) and the Receive Timestamp (when that Hello arrived, by the sender's clock).</p><p>Timestamps are 32-bit unsigned integers in microseconds, wrapping every 4295 seconds, roughly 71 minutes. If the Length is larger than expected (4 octets in a Hello, 8 in an IHU), the first octets are processed normally and extra data is silently ignored. If it is smaller, the sub-TLV MUST be ignored.</p>",
+      "eli5": "<p>The timestamps are small numbers tucked into the existing Hello and IHU messages, like writing the time on the back of a postcard.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "6",
+      "title": "Compatibility",
+      "content": "<p>The data lives in sub-TLVs of Hello and IHU TLVs. As described in Appendix D of <a href='/rfc8966'>RFC 8966</a>, implementations that do not understand them silently ignore them. Networks mixing extended and unextended routers may route sub-optimally but will not suffer routing loops or other pathologies.</p><p>Longer-than-expected sub-TLVs are tolerated so that a future version could add data such as high-precision or absolute timestamps.</p>",
+      "eli5": "<p>Old routers just do not read the extra numbers, so new and old routers can share a network without getting confused.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and Privacy",
+      "content": "<p>Broadcasting a reasonably accurate local clock might make a node more susceptible to timing attacks. The timestamps have an arbitrary origin, so they do not leak boot time or time zone. Still, accurate timestamps could let an attacker determine a node's physical location.</p><p>A node can avoid disclosing this by not including Timestamp sub-TLVs, which makes its neighbours fall back to hop-count routing.</p>",
+      "eli5": "<p>Telling everyone exactly what your clock says could give clues about where you are, so a router may choose to stay quiet.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "Mills' algorithm as drawn in RFC 9616 (simplified)",
+      "data": {
+        "lanes": [
+          {
+            "key": "a",
+            "label": "A"
+          },
+          {
+            "key": "b",
+            "label": "B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Hello(t1)",
+            "color": "blue",
+            "note": "B records t1 and its own receive time t1'."
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "label": "Hello(t2') + IHU(t1, t1')",
+            "color": "green",
+            "note": "A receives at t2 and computes RTT = (t2 - t1) - (t2' - t1')."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "Timestamp sub-TLV inside an IHU TLV (RFC 9616)",
+      "data": {
+        "title": "Timestamp sub-TLV in IHU",
+        "bytes": 10,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "Set to 3 for a Timestamp sub-TLV.",
+            "value": "3"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 8,
+            "desc": "Body length in octets, excluding Type and Length."
+          },
+          {
+            "key": "origin",
+            "name": "Origin Timestamp",
+            "bits": 32,
+            "desc": "Copy of the Transmit Timestamp of the last timestamped Hello from the neighbour."
+          },
+          {
+            "key": "receive",
+            "name": "Receive Timestamp",
+            "bits": 32,
+            "desc": "When that Hello was received, by the sender's clock."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8966]",
+      "text": "Chroboczek, J. and D. Schinazi, \"The Babel Routing Protocol\", RFC 8966, January 2021.",
+      "rfc": 8966
+    },
+    {
+      "number": "[RFC891]",
+      "text": "Mills, D., \"DCN Local-Network Protocols\", STD 44, RFC 891, December 1983.",
+      "rfc": 891
+    },
+    {
+      "number": "[RFC5905]",
+      "text": "Mills, D., Martin, J., Ed., Burbank, J., and W. Kasch, \"Network Time Protocol Version 4: Protocol and Algorithms Specification\", RFC 5905, June 2010.",
+      "rfc": 5905
+    },
+    {
+      "number": "[DELAY-BASED]",
+      "text": "Jonglez, B., Boutier, M., and J. Chroboczek, \"A delay-based routing metric\", March 2014."
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

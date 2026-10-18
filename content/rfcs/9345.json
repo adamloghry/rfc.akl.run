@@ -1,0 +1,257 @@
+{
+  "number": 9345,
+  "shortTitle": "Delegated Credentials",
+  "category": "security",
+  "categoryReviewed": false,
+  "summary": "<p>Specifies delegated credentials for TLS and DTLS, a way for a server operator to issue short-lived credentials of its own, based on its certificate, without going back to the certificate authority each time. Peers that do not support the extension keep working normally.</p>",
+  "eli5": {
+    "summary": "<p>A building owner gives you a short-term visitor badge signed by their own pass, instead of making you go back to the security office every time.</p>"
+  },
+  "questions": [
+    "what are tls delegated credentials",
+    "how to use short-lived credentials without a ca",
+    "delegated credentials for dtls",
+    "how long is a delegated credential valid",
+    "delegated credentials vs proxy certificates",
+    "what is the delegationusage extension"
+  ],
+  "tags": [
+    "TLS",
+    "Certificates",
+    "Security"
+  ],
+  "subtitle": "Let a TLS server mint its own short-lived signing credentials from its certificate, without going back to the CA.",
+  "tldr": {
+    "problem": "A TLS or DTLS server depends on an outside certification authority (CA) every time it needs a new certificate, and the CA limits which key types can be used. Short-lived certificates reduce key exposure but raise the risk that a CA outage takes the service down.",
+    "mechanism": "The server operator signs a small delegated credential (a public key, a validity time and an algorithm) with the private key of its own certificate. The client checks that signature against the certificate and then uses the credential's key to verify the handshake.",
+    "outcome": "Operators can rotate keys offline with no per-connection latency and use signature algorithms their CA does not issue, while clients that do not support the extension are unaffected.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Extension code point",
+      "value": "delegated_credential (34)"
+    },
+    {
+      "label": "Default maximum validity",
+      "value": "7 days"
+    },
+    {
+      "label": "Protocol versions",
+      "value": "(D)TLS 1.3 or later"
+    },
+    {
+      "label": "Required KeyUsage",
+      "value": "digitalSignature"
+    },
+    {
+      "label": "Signed prefix",
+      "value": "Octet 0x20 repeated 64 times"
+    }
+  ],
+  "today": "<p>RFC 9345 is a Proposed Standard published in July 2023. It is not obsoleted or updated by another RFC, so it is the current specification of delegated credentials for TLS and DTLS.</p>",
+  "glossary": [
+    "tls",
+    "tls-extension",
+    "tls-handshake",
+    "certificate-authority",
+    "x509-certificate",
+    "digital-signature"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Delegate Credentials",
+      "content": "<p>Server operators often run (D)TLS termination in places such as remote data centers or Content Delivery Networks (CDNs), where it can be hard to notice that a private key was stolen. Short-lived certificates limit that exposure, but they need renewing more often. If the external <strong>Certification Authority</strong> (CA) cannot issue a replacement in time, the server has no valid certificate to present and the service goes down.</p><p>The CA relationship also limits the operator in other ways: every new certificate means contacting the CA, and the CA may only issue certain key types, which restricts the signature schemes the server can use. <a href='/rfc8446'>RFC 8446</a> and <a href='/rfc5280'>RFC 5280</a> describe the normal arrangement.</p><p>This RFC adds a limited delegation mechanism. A peer issues its own <strong>delegated credential</strong> (DC) within the scope of a certificate from an external CA. The credential only lets the holder terminate connections for names the CA already authorized. It also lets a server use modern algorithms such as Ed25519 even when its CA does not support them.</p>",
+      "eli5": "<p>Normally you have to ask the pass office for every new badge, and they only make a few kinds. Here the owner can make short-lived badges on their own, but only for doors their main pass already opens.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "3",
+      "title": "How Delegation Fits Together",
+      "content": "<p>A delegated credential is a digitally signed data structure with two meaningful fields: a validity interval and a public key with its signature algorithm. The signature comes from the private key matching the public key of the peer's X.509 end-entity certificate. In the intended deployment, a back-end service holds that private key and distributes credentials to front-end servers, such as a CDN, that talk to clients.</p><p>A handshake that uses a DC differs from a standard one in four ways:</p><ul><li>The initiating peer sends an extension in its ClientHello or CertificateRequest saying it supports the mechanism.</li><li>The peer sending the Certificate message provides both its certificate chain and the delegated credential.</li><li>The initiator verifies the credential against the peer's certificate and checks the expected identity.</li><li>The accepted credential's key is used as the certificate key for the rest of the handshake.</li></ul><p>Delegated credentials are only for (D)TLS 1.3 or later; use in earlier versions is not allowed.</p><p>The RFC argues that DCs beat proxy certificates (<a href='/rfc3820'>RFC 3820</a>) because they need no change to PKI certificate validation, have deliberately narrow semantics, are cryptographically bound to the whole certificate rather than relying on path building, and are bound to one signature algorithm. It also compares them with server-side remote signing, which adds latency to each handshake because the front-end must call the back-end. DC distribution happens offline, so there is no per-transaction latency. The two approaches can be combined, using DCs for supporting clients and remote signing for legacy ones.</p>",
+      "eli5": "<p>The owner keeps the master pass in a safe room and hands the front desk a short-lived badge. Visitors check the badge against the master pass, so nobody has to run to the safe room each time.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "The Credential Structures",
+      "content": "<p>The <code>Credential</code> structure holds three fields. <code>valid_time</code> is a time in seconds relative to the delegation certificate's <code>notBefore</code> value, after which the credential is no longer valid. <code>dc_cert_verify_algorithm</code> is the signature algorithm of the credential's key pair. The third is the credential's public key, a DER-encoded <code>SubjectPublicKeyInfo</code>.</p><p>The <code>DelegatedCredential</code> wraps that with an <code>algorithm</code> (the scheme used to sign) and the <code>signature</code> itself. The signature covers, in order: 64 repetitions of octet 32 (0x20), a context string, a single 0x00 octet, the DER-encoded end-entity certificate, the <code>cred</code> and the <code>algorithm</code>. The context string is <code>TLS, server delegated credentials</code> for server authentication and <code>TLS, client delegated credentials</code> for client authentication. Binding in the whole certificate means a credential only works with the certificate and algorithm the delegator chose.</p><p>When RSA is used, the public key MUST NOT use the <code>rsaEncryption</code> OID. As a result, <code>rsa_pss_rsae_sha256</code>, <code>rsa_pss_rsae_sha384</code> and <code>rsa_pss_rsae_sha512</code> are not allowed with delegated credentials.</p><p>By default the maximum validity period is 7 days, unless an application profile says otherwise. Peers MUST NOT issue a credential valid longer than that, or beyond the delegation certificate's own validity.</p>",
+      "eli5": "<p>The badge says who it is for, how long it works and what kind of lock it fits, and it carries the owner's signature over all of that. Change anything and the signature no longer matches.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Negotiation and Validation",
+      "content": "<p>For server authentication, a client willing to use DCs sends a <code>delegated_credential</code> extension (code point 34) in its ClientHello. The body is a list of signature schemes it accepts. A server MAY then send a credential, and MUST NOT send one if the extension is absent. If the negotiated version is below 1.3, the server MUST ignore the extension. The server carries the DC as an extension in the CertificateEntry of its end-entity certificate. If a client gets a DC it never asked for, it MUST abort with an <code>unexpected_message</code> alert.</p><p>Client authentication mirrors this: a server that supports DCs sends the extension in its CertificateRequest, and the client MAY then send a credential in its own certificate entry.</p><p>On receipt, the peer first validates the certificate chain and identity as usual. Then it checks that:</p><ol><li>the current time is within the credential's validity interval;</li><li>the remaining validity is no more than the maximum (7 days by default) and the expiry is before the certificate's expiry;</li><li><code>dc_cert_verify_algorithm</code> matches the scheme in the peer's CertificateVerify and is allowed for DCs;</li><li>the end-entity certificate meets the requirements below;</li><li>the signature verifies under the certificate's public key.</li></ol><p>If any check fails, or the credential uses an algorithm the receiver did not advertise, the receiver MUST terminate the connection with an <code>illegal_parameter</code> alert. If all pass, the credential's public key is used to verify the peer's CertificateVerify message.</p>",
+      "eli5": "<p>The visitor says 'I can show a short badge.' The guard checks the badge is fresh, matches the door, and carries the owner's real signature. If anything looks wrong, the visitor is turned away.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "6",
+      "title": "Certificate Requirements",
+      "content": "<p>X.509 forbids end-entity certificates from issuing other certificates, but they may sign other objects if they carry the <code>digitalSignature</code> KeyUsage. All certificates compatible with TLS 1.3 are required to have it.</p><p>The RFC defines a new non-critical X.509 extension, <strong>DelegationUsage</strong>, whose value is <code>NULL</code>. An endpoint MUST NOT accept a delegated credential unless the end-entity certificate has the DelegationUsage extension and the <code>digitalSignature</code> KeyUsage. The extension acts as an explicit opt-in by the certificate owner.</p><p>A new extension was chosen over a new Extended Key Usage so it works with deployed (D)TLS and PKI software and CAs do not need to issue new intermediate certificates. The OID is under Cloudflare's private enterprise arc (44363, value 44). The motivation for requiring an opt-in is a known cross-protocol risk: certificates used by servers that support outdated protocols such as SSLv2 can be used to forge signatures for certificates with the <code>keyEncipherment</code> KeyUsage.</p>",
+      "eli5": "<p>The owner has to write on the master pass 'I allow visitor badges.' Without that note, nobody should trust a badge made from it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and Operational Notes",
+      "content": "<p>A stolen DC private key cannot mint new credentials, but the thief can impersonate the owner until the credential expires. So DCs should only go to parties with a trust relationship, and the key should be protected with file system controls, physical security or hardware security modules. A credential cannot serve both client and server roles because the signed context strings differ.</p><p><strong>Revocation:</strong> there is no early revocation for a DC. Expiry revokes it, and revoking the long-term certificate key also implicitly revokes it. If a peer caches a certificate chain for session resumption and revalidates it, it SHOULD cache and revalidate the DC too.</p><p><strong>Clock skew:</strong> if a client's clock is far ahead of or behind the server's, it will reject credentials that are valid from the server's view. Lifetimes should account for skew at both ends of the validity period.</p><p><strong>Privacy:</strong> a service could create several credentials with different expiry times and see which the client accepts, learning the client's clock skew. Privacy-sensitive clients, such as browsers in incognito mode, might not advertise support or might limit probes.</p><p><strong>Signature forgery:</strong> the certificate that signs a DC may also be used with (D)TLS 1.2, where RSA key exchange servers may be exposed to RSA signature forgery attacks. A forged credential could act like an on-path attacker for up to 7 days at a time, and repeated forgeries could cover the whole certificate lifetime. Operators can reduce this by using DC-enabled certificates only for signing credentials, or by using elliptic curve certificates for DC traffic and RSA certificates without DelegationUsage for other traffic.</p>",
+      "eli5": "<p>A lost visitor badge only works until it expires, and it cannot make more badges. But you should still keep it locked up and only give it to people you trust.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "IANA Registrations",
+      "content": "<p>IANA registered the <code>delegated_credential</code> extension in the TLS ExtensionType Values registry with value 34. It is listed as Recommended and may appear in the ClientHello, CertificateRequest or Certificate messages in (D)TLS 1.3 (<a href='/rfc8446'>RFC 8446</a>, <a href='/rfc9147'>RFC 9147</a>). The DTLS-Only column is N.</p><p>The RFC also gives an ASN.1 module for the DelegationUsage extension in an appendix, registered as value 95 for <code>id-mod-delegated-credential-extn</code> in the SMI Security for PKIX Module Identifier registry. No new OID was needed for the extension itself, since it already sits in Cloudflare's private enterprise arc.</p>",
+      "eli5": "<p>The number 34 was written in the official list of handshake add-ons so everyone uses the same one for this feature.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "DC DEPLOYMENT AND HANDSHAKE (RFC 9345, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "front-end",
+            "label": "Front-End"
+          },
+          {
+            "key": "back-end",
+            "label": "Back-End"
+          }
+        ],
+        "messages": [
+          {
+            "from": "back-end",
+            "to": "front-end",
+            "label": "DC distribution",
+            "color": "neutral",
+            "note": "Done ahead of time, not per connection."
+          },
+          {
+            "from": "client",
+            "to": "front-end",
+            "label": "ClientHello",
+            "color": "blue"
+          },
+          {
+            "from": "front-end",
+            "to": "client",
+            "label": "ServerHello",
+            "color": "green"
+          },
+          {
+            "from": "front-end",
+            "to": "client",
+            "label": "Certificate",
+            "color": "green",
+            "note": "Includes the delegated credential."
+          },
+          {
+            "from": "front-end",
+            "to": "client",
+            "label": "CertificateVerify",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE TWO STRUCTURES (RFC 9345, SECTION 4)",
+      "data": {
+        "title": "Credential and DelegatedCredential",
+        "lang": "text",
+        "code": "struct {\n  uint32 valid_time;\n  SignatureScheme dc_cert_verify_algorithm;\n  opaque ASN1_subjectPublicKeyInfo<1..2^24-1>;\n} Credential;\n\nstruct {\n  Credential cred;\n  SignatureScheme algorithm;\n  opaque signature<1..2^16-1>;\n} DelegatedCredential;"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "THE FIVE CHECKS ON A RECEIVED CREDENTIAL",
+      "data": {
+        "items": [
+          {
+            "title": "Time window",
+            "text": "Current time must not exceed the credential's expiry."
+          },
+          {
+            "title": "Maximum lifetime",
+            "text": "Expiry within 7 days by default and before the certificate's expiry."
+          },
+          {
+            "title": "Algorithm match",
+            "text": "dc_cert_verify_algorithm matches CertificateVerify and is allowed."
+          },
+          {
+            "title": "Certificate flags",
+            "text": "DelegationUsage extension and digitalSignature KeyUsage present."
+          },
+          {
+            "title": "Signature",
+            "text": "Verifies under the end-entity certificate's public key."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[RFC9147]",
+      "text": "Rescorla, E., Tschofenig, H., and N. Modadugu, \"The Datagram Transport Layer Security (DTLS) Protocol Version 1.3\", RFC 9147, April 2022.",
+      "rfc": 9147
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC3820]",
+      "text": "Tuecke, S., et al., \"Internet X.509 Public Key Infrastructure (PKI) Proxy Certificate Profile\", RFC 3820, June 2004.",
+      "rfc": 3820
+    },
+    {
+      "number": "[RFC8555]",
+      "text": "Barnes, R., et al., \"Automatic Certificate Management Environment (ACME)\", RFC 8555, March 2019.",
+      "rfc": 8555
+    },
+    {
+      "number": "[RFC8032]",
+      "text": "Josefsson, S. and I. Liusvaara, \"Edwards-Curve Digital Signature Algorithm (EdDSA)\", RFC 8032, January 2017.",
+      "rfc": 8032
+    },
+    {
+      "number": "[RFC5246]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.2\", RFC 5246, August 2008.",
+      "rfc": 5246
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

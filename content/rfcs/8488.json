@@ -1,0 +1,175 @@
+{
+  "number": 8488,
+  "shortTitle": null,
+  "category": "routing",
+  "categoryReviewed": false,
+  "summary": "<p>Describes an approach to validating the RPKI certificate tree as implemented in the RIPE NCC RPKI Validator. It is independent of how objects are retrieved, so it works with repositories over rsync or other methods.</p>",
+  "eli5": {
+    "summary": "<p>To check a chain of permission slips, you follow each one back to the top. This describes how one validator does it.</p>"
+  },
+  "questions": [
+    "ripe ncc rpki validator",
+    "rpki certificate tree validation",
+    "how does rpki tree validation work",
+    "what is a trust anchor locator",
+    "what does an rpki manifest do",
+    "rpki rsync vs rrdp"
+  ],
+  "tags": [
+    "RPKI",
+    "Routing Security",
+    "Validation"
+  ],
+  "subtitle": "How one RPKI validator walks the certificate tree from the trust anchor down, and what it does with messy repositories.",
+  "tldr": {
+    "problem": "Relying parties must fetch and validate RPKI certificates, manifests, CRLs and signed objects, but repositories can be inconsistent and can be reached by different protocols.",
+    "mechanism": "The RIPE NCC RPKI Validator puts every downloaded object in a local store, then validates top-down from the trust anchor certificate, finding each CA's manifest and CRL by Authority Key Identifier and its other objects by the hashes on the manifest.",
+    "outcome": "The RFC documents the algorithm for transparency. It is Informational and describes one implementation, version 2.25, not a standard.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Software version described",
+      "value": "RIPE NCC RPKI Validator 2.25"
+    },
+    {
+      "label": "Retrieval methods",
+      "value": "rsync and RRDP"
+    },
+    {
+      "label": "Object file extensions",
+      "value": ".cer, .mft, .crl, .roa, .gbr"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 8488 is Informational and has not been obsoleted or updated. It documents one implementation, RIPE NCC RPKI Validator version 2.25, rather than setting a standard.</p>",
+  "glossary": [
+    "rpki",
+    "rpki-manifest",
+    "trust-anchor",
+    "crl",
+    "certificate-authority",
+    "x509-certificate"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What the Validator Does",
+      "content": "<p>This RFC describes how the <strong>RIPE NCC RPKI Validator</strong> version 2.25 is implemented. Its stated purpose is transparency for users and contributors of the tool.</p><p>Relying Parties (RPs) must retrieve and validate certificates, Certificate Revocation Lists (CRLs) and other signed objects published in RPKI repositories. An object is only valid if every certificate in the chain up to the Trust Anchor (TA) is valid, so validation runs top-down from the TA certificate. The result is a list of all encountered objects, each with a validity status.</p><p>Repositories are traditionally reached over rsync, and <a href='/rfc8182'>RFC 8182</a> adds RRDP as another way to fetch and update a local copy. The algorithm here does not depend on which is used: downloaded objects go into an object store where each can be found by URI, content hash, Authority Key Identifier (AKI), or a combination.</p>",
+      "eli5": "<p>A validator checks a stack of signed papers. It starts with the one paper everyone trusts and checks each paper below it, no matter how the papers were delivered.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "Design Choices for Discovery",
+      "content": "<p>The algorithm relies on the collision resistance of the hash algorithm from <a href='/rfc7935'>RFC 7935</a> and assumes that two objects with the same hash are identical.</p><p>The RFC lists three ways to find the objects a CA issued: use everything in the publication point directory, use only objects named on the manifest, or use all known objects whose AKI matches the CA certificate's Subject Key Identifier (SKI). For a consistent publication point they should agree. For an inconsistent one <a href='/rfc6486'>RFC 6486</a> leaves the choice to local policy.</p><p>This implementation ignores directory contents. It uses the AKI of a manifest and a CRL to find them in the object store, then uses the hashes in the manifest's fileList entries to find the other objects. It also requires strict consistency between the publication point and the manifest, which is stricter than RFC 6486. Objects not matching any manifest entry are not processed, and warnings are issued so operators can fix the mismatch.</p>",
+      "eli5": "<p>Instead of trusting what is lying in a folder, the validator trusts the signed checklist and looks for items that match the checklist exactly.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Top-Down Tree Validation",
+      "content": "<p>Each configured Trust Anchor is validated concurrently and independently. The TA certificate is fetched using the Trust Anchor Locator (TAL) and validated per <a href='/rfc6487'>RFC 6487</a> and <a href='/rfc7730'>RFC 7730</a>. If it cannot be retrieved or is invalid, validation of that tree is aborted with an error. Otherwise its subordinate objects are validated, validation timestamps are updated, and outdated objects are removed from the store.</p><p>For each CA certificate the validator first picks a repository pointer (caRepository or id-ad-rpkiNotify) by local policy if both are present. It then finds the current manifest and CRL, and warns if the manifest URI differs from the one in the certificate. Next it validates the resource certificates, <a href='/rfc6482'>ROAs</a> and Ghostbusters Records listed on the manifest, and recurses into each valid CA certificate not already validated in this run.</p><p>The manifest chosen is the one with the highest manifestNumber that meets all of these conditions: exactly one CRL entry matches, the manifest's AKI equals the CRL's AKI, the CRL is valid, and the manifest is valid with its EE certificate absent from that CRL. An error is reported for every manifest with a higher number.</p><div class='callout callout-note'><p>An operator option selects strict validation per RFC 6487, or path validation per <a href='/rfc8360'>RFC 8360</a>. The choice applies to all resource certificates.</p></div>",
+      "eli5": "<p>Start with the top paper. For each paper, find its newest checklist, check every item on it, and then repeat for every sub-paper that passes.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Manifest Entries, Fetcher and Store",
+      "content": "<p>For every manifest entry the validator builds the entry URI, then gets all stored objects whose hash equals the entry hash. If none exist it issues an error and moves on. If an object is found at a different URI, or no object is found at the listed URI, it issues a warning but still uses the found objects. A hash match is enough.</p><p>The <strong>fetcher</strong> downloads from rsync or RRDP repositories, skipping a URI fetched recently according to local policy. If an <code>https</code> download fails it warns and retries with <code>http</code>. Object type is determined from the file extension (<code>.cer</code>, <code>.mft</code>, <code>.crl</code>, <code>.roa</code>, <code>.gbr</code>) and each object is syntax-checked before it is stored.</p><p>The <strong>object store</strong> offers a few operations: store an object, get by hash, get certificates by URI, get manifests by AKI, delete by URI, delete outdated objects, and update validation time. After each tree run, the store drops objects replaced by newer versions at the same URI, objects not seen on a valid manifest for a long time, and recently downloaded objects never used. The intervals come from local policy.</p>",
+      "eli5": "<p>A helper goes to fetch papers and puts them in a filing cabinet. Afterwards the validator throws out old copies and papers nobody ever used.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>The RFC lists the trade-offs openly. The implementation will not detect hash collisions, and it supports only the hash algorithms and key sizes in <a href='/rfc7935'>RFC 7935</a>; algorithm agility from <a href='/rfc6916'>RFC 6916</a> is not supported.</p><p>It does not reject an object merely because its location or filename differs from what the manifest says. The reason given is that an rsync location has no cryptographic security and RRDP has only transport-layer security with a fallback to unsecured transport, whereas the manifest is a signed object. Objects in a publication point that are not on the manifest are ignored, which <a href='/rfc6486'>RFC 6486</a> allows.</p><p>A man-in-the-middle could flood the fetcher with many syntactically valid objects, causing out-of-memory or out-of-disk-space conditions and denial of service. Lengthening the cleanup interval for never-used objects increases this risk.</p>",
+      "eli5": "<p>The validator trusts the signed checklist more than where a paper was found. A trickster could still pile junk papers on its desk until it runs out of room.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THREE WAYS TO FIND A CA'S OBJECTS",
+      "data": {
+        "columns": [
+          "Approach",
+          "Source of the object list"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Directory",
+              "All objects at the CA's publication point"
+            ]
+          },
+          {
+            "cells": [
+              "Manifest",
+              "Only objects named on the manifest"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "AKI match",
+              "All known objects whose AKI matches the CA certificate's SKI"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6481]",
+      "text": "Huston, G., Loomans, R., and G. Michaelson, \"A Profile for Resource Certificate Repository Structure\", RFC 6481, February 2012.",
+      "rfc": 6481
+    },
+    {
+      "number": "[RFC6486]",
+      "text": "Austein, R., Huston, G., Kent, S., and M. Lepinski, \"Manifests for the Resource Public Key Infrastructure (RPKI)\", RFC 6486, February 2012.",
+      "rfc": 6486
+    },
+    {
+      "number": "[RFC6487]",
+      "text": "Huston, G., Michaelson, G., and R. Loomans, \"A Profile for X.509 PKIX Resource Certificates\", RFC 6487, February 2012.",
+      "rfc": 6487
+    },
+    {
+      "number": "[RFC7730]",
+      "text": "Huston, G., Weiler, S., Michaelson, G., and S. Kent, \"Resource Public Key Infrastructure (RPKI) Trust Anchor Locator\", RFC 7730, January 2016.",
+      "rfc": 7730
+    },
+    {
+      "number": "[RFC7935]",
+      "text": "Huston, G. and G. Michaelson, Ed., \"The Profile for Algorithms and Key Sizes for Use in the Resource Public Key Infrastructure\", RFC 7935, August 2016.",
+      "rfc": 7935
+    },
+    {
+      "number": "[RFC8182]",
+      "text": "Bruijnzeels, T., Muravskiy, O., Weber, B., and R. Austein, \"The RPKI Repository Delta Protocol (RRDP)\", RFC 8182, July 2017.",
+      "rfc": 8182
+    },
+    {
+      "number": "[RFC8360]",
+      "text": "Huston, G., Michaelson, G., Martinez, C., Bruijnzeels, T., Newton, A., and D. Shaw, \"Resource Public Key Infrastructure (RPKI) Validation Reconsidered\", RFC 8360, April 2018.",
+      "rfc": 8360
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

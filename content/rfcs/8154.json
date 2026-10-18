@@ -1,0 +1,275 @@
+{
+  "number": 8154,
+  "shortTitle": "pNFS SCSI Layout",
+  "category": "applications",
+  "categoryReviewed": false,
+  "summary": "<p>Defines a SCSI layout type for parallel NFS (pNFS). pNFS separates file metadata, kept on a metadata server, from data on storage devices, and this layout lets clients use SCSI-based block storage for the data.</p>",
+  "eli5": {
+    "summary": "<p>A librarian knows where each book is kept, but you walk straight to the shelf to fetch it. This lets the shelf be a SCSI disk.</p>"
+  },
+  "questions": [
+    "pnfs scsi layout",
+    "parallel nfs block storage",
+    "what is the pnfs scsi layout",
+    "how does pnfs fence a client",
+    "what are pnfs extent states",
+    "why use scsi persistent reservations in nfs"
+  ],
+  "tags": [
+    "NFS",
+    "Storage",
+    "SCSI"
+  ],
+  "subtitle": "How pNFS clients read and write SCSI disks directly, with persistent reservations to fence off misbehaving clients.",
+  "tldr": {
+    "problem": "pNFS lets clients bypass the metadata server and reach storage directly, but the existing block layout needed device probing and a separate disk-protection scheme to keep clients safe.",
+    "mechanism": "The SCSI layout identifies disks by their SCSI device identifiers, lists file data as extents on those volumes, and uses SCSI persistent reservations to fence a client off from a logical unit when the server must revoke its layouts.",
+    "outcome": "Clients get reliable discovery and mandatory disk protection, but SCSI storage cannot enforce file-level rules, so the client must be trusted to respect its layouts.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Layout type value",
+      "value": "LAYOUT4_SCSI = 5"
+    },
+    {
+      "label": "Reservation type",
+      "value": "8h, Exclusive Access - Registrants Only"
+    },
+    {
+      "label": "Device Identification VPD page code",
+      "value": "0x83"
+    },
+    {
+      "label": "Typical logical block sizes",
+      "value": "512 or 4096 bytes"
+    },
+    {
+      "label": "Extent states",
+      "value": "4"
+    },
+    {
+      "label": "Volume types",
+      "value": "4"
+    }
+  ],
+  "today": "<p>RFC 8154 is a Standards Track document published in May 2017 with the status Proposed Standard, and the metadata lists no RFC that obsoletes or updates it. It registers <code>LAYOUT4_SCSI</code> in the pNFS Layout Types Registry.</p>",
+  "glossary": [],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a SCSI Layout",
+      "content": "<p>In <strong>parallel NFS</strong> (pNFS), clients get enough information from the server to reach the underlying storage directly. The server that hands out this information is the <strong>metadata server</strong> (MDS). This document covers access from pNFS clients to storage over block protocols based on the SCSI Architecture Model, such as Fibre Channel Protocol, iSCSI or Serial Attached SCSI. Only block-based SCSI command sets are supported.</p><p>The design builds on <a href='/rfc5663'>RFC 5663</a> and changes the block layout type. Where <a href='/rfc5663'>RFC 5663</a> relied on probing devices and on a separate scheme (<a href='/rfc6688'>RFC 6688</a>) for disk protection, the SCSI layout uses SCSI device identifiers for reliable discovery and SCSI persistent reservations for reliable fencing. It also shrinks the LAYOUTCOMMIT payload. The protocol between the server and the storage system, the Control Protocol, is not a matter of interoperability.</p>",
+      "eli5": "<p>Normally every file request goes through the librarian. Here the librarian just hands you a map and you go to the shelf yourself, using a special kind of disk called SCSI.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2.1",
+      "title": "Storage Model and Layout Type",
+      "content": "<p>The SCSI storage model is a <strong>logical unit</strong> (LU) made of a sequence of fixed-size blocks. The LUs used for NFS SCSI layouts, and the SCSI initiators used for the metadata server and clients, MUST support SCSI persistent reservations.</p><p>A layout maps an NFS file, or part of one, onto blocks expressed as extents with 64-bit offsets and lengths. Extents MUST be aligned to the logical block size of the underlying LU (typically 512 or 4096 bytes), so that client I/O never touches neighbouring areas. A read-only layout may contain holes that read as zero, while a read-write layout contains allocated but uninitialized storage in those holes.</p><p>The document adds a new layout type value, <code>LAYOUT4_SCSI</code>, which is 5. The layout body stays opaque to the generic pNFS client layers and is interpreted only by the layout type implementation.</p>",
+      "eli5": "<p>A disk is a long row of equal-sized boxes. The map always points at whole boxes, never half a box, so nobody can accidentally mess up the box next door.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "2.3",
+      "title": "Identifying Volumes",
+      "content": "<p>Clients learn about storage through the GETDEVICEINFO operation. A LU is identified by a designator from the SCSI Device Identification VPD page (page code 0x83). The <code>ASSOCIATION</code> MUST be 0, and the designator type MUST be one of four values: <code>PS_DESIGNATOR_T10</code>, <code>PS_DESIGNATOR_EUI64</code>, <code>PS_DESIGNATOR_NAA</code> or <code>PS_DESIGNATOR_NAME</code>. Use of T10 vendor IDs is discouraged when another type can be used. Clients MUST check all descriptors on the page for a match.</p><p>The device address describes a volume topology as an array of volumes. A volume is a <code>BASE</code> volume (one LU, carrying the designator and a persistent reservation key in <code>sbv_pr_key</code>), a <code>SLICE</code> of another volume, a <code>CONCAT</code> of several volumes or a <code>STRIPE</code> across several volumes. The array is ordered so the root of the hierarchy is the last element, and every non-base volume refers only to lower-indexed elements. Everything resolves to base volumes. Such addresses can reach several kilobytes, so the client SHOULD be prepared to allocate a large buffer, and retry with at least <code>gdir_mincount_bytes</code> after an <code>NFS4ERR_TOOSMALL</code> reply.</p>",
+      "eli5": "<p>Each disk has a serial number printed on it, so the client can find the right one without poking at every disk. Bigger disks can be built by gluing, slicing or interleaving smaller ones.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "2.4",
+      "title": "Extents and Layouts",
+      "content": "<p>A layout is a list of extents. Each extent names a volume (<code>se_vol_id</code>), a file offset, a length, a storage offset on the volume and a state. The state tells the client what it may do:</p><ul><li><code>PNFS_SCSI_READ_WRITE_DATA</code>: valid data, readable and writable.</li><li><code>PNFS_SCSI_READ_DATA</code>: valid data, read only.</li><li><code>PNFS_SCSI_INVALID_DATA</code>: allocated but uninitialized. Reads MUST return zeros (unless covered by a read extent of a copy-on-write file system), and writes MUST cover whole server-sized blocks, with unwritten bytes zero-filled.</li><li><code>PNFS_SCSI_NONE_DATA</code>: a hole in the file. It is never returned for a writable request.</li></ul><p>Extents are the only permission a client has to do direct I/O, and it MUST NOT perform I/O that no held extent allows. A readable request returns only read or none extents. A writable request returns read-write or invalid extents, plus read extents where an invalid extent allows client-side copy-on-write. When a client writes into an invalid extent, it reports the change with LAYOUTCOMMIT, listing the written ranges, which MUST be disjoint and sorted. A LAYOUTRETURN carries no SCSI-specific data.</p><p>To avoid corruption from read-modify-write cycles by several clients on one block, the server MUST enforce single writer XOR multiple readers per data block. If a request conflicts with an existing layout, the server replies <code>NFS4ERR_LAYOUTTRYLATER</code> and SHOULD recall the conflicting layout. Copy-on-write by clients is mandatory to support: partial-block writes are merged with data fetched from the read extent before being stored through the invalid extent.</p>",
+      "eli5": "<p>Each part of a file comes with a sticker: read and write, read only, empty but yours to fill, or a hole. You may only do what the sticker says, and only one person at a time may write on a page.</p>"
+    },
+    {
+      "id": "management",
+      "number": "2.4.10",
+      "title": "Fencing with Persistent Reservations",
+      "content": "<p>If a client fails to answer a layout recall or its lease expires, the server can revoke its layouts unilaterally. The SCSI layout does this by <strong>fencing</strong>: using persistent reservations (PRs) of type 8h, Exclusive Access - Registrants Only, on each exported LU. Only holders of a registered key can access the LU, and the MDS can remove a key at any time.</p><ol><li><strong>Keys:</strong> The MDS generates a unique key for itself before exporting a volume, and a key for each client that accesses SCSI layout volumes.</li><li><strong>MDS setup:</strong> Before returning a base volume, the MDS issues <code>PERSISTENT RESERVE OUT</code> with service action <code>REGISTER</code>, then <code>RESERVE</code> with type 8h. It SHOULD set the <code>ALL_TG_PT</code> bit and MUST register each initiator port.</li><li><strong>Client registration:</strong> Before first I/O, the client registers the key from <code>sbv_pr_key</code>. When it stops using the device it MUST unregister.</li><li><strong>Fencing:</strong> The MDS issues <code>PREEMPT</code> or <code>PREEMPT AND ABORT</code> against the client's key. All the client's I/O to the LU then fails, with SCSI status <code>RESERVATION CONFLICT</code>.</li></ol><p>Fencing works only at the host and LU level, so revoking one layout effectively disables all of that client's layouts on those storage units. A client that sees <code>RESERVATION CONFLICT</code> MUST commit its layouts through the MDS, return all layouts for the device, forget the device ID and unregister its key.</p>",
+      "eli5": "<p>Every client gets a secret key to the disk room. If one stops answering, the librarian cancels that key, and the door no longer opens for them.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "2.5",
+      "title": "Recovery, Recalls and Errors",
+      "content": "<p>If the server crashes while a client holds a writable layout whose blocks are still invalid, the client can rewrite the data over NFSv4 if it still has it cached. Otherwise it MUST NOT try to source the data from the data servers, and SHOULD send LAYOUTCOMMIT with <code>loca_reclaim</code> set to true during the grace period.</p><p>When the server runs short of resources it can recall layouts, or send CB_RECALL_ANY with the <code>RCA4_TYPE_MASK_BLK_LAYOUT</code> bit. The client SHOULD answer <code>NFS4_OK</code> at once and then return whole file layouts asynchronously. Error handling for LAYOUTGET covers <code>NFS4ERR_RECALLCONFLICT</code>, <code>NFS4ERR_TRYLATER</code> (wait several milliseconds, track retries and give up to the MDS if there is no progress) and <code>NFS4ERR_LAYOUTUNAVAILABLE</code> (fall back to READ and WRITE through the MDS). If a device has a volatile write cache, the server MUST commit it to stable storage with a SYNCHRONIZE CACHE command before LAYOUTCOMMIT returns. Truncation requires the server to recall layouts that refer to blocks it will free or write first, and layout hints are not supported.</p>",
+      "eli5": "<p>If the librarian falls over mid-job, you tell them again what you wrote. If the shelf is busy, you wait a moment and ask again, or just ask the librarian to fetch it for you.</p>"
+    },
+    {
+      "id": "conformance",
+      "number": "3",
+      "title": "Enforcing NFSv4 Semantics",
+      "content": "<p>SCSI persistent reservations control access per client machine and per LU, but finer-grained access control is not generally available. The storage cannot tell which principal or lock owner an I/O is for. Responsibility for NFSv4 security and locking therefore moves to the pNFS client, which must stay within the extents it holds.</p><p>A client MUST NOT issue SCSI I/O without both a valid open stateid for the right access and a valid layout stateid covering the byte range. I/O that would use an anonymous or write-bypass stateid MUST NOT use the SCSI layout and may be sent to the MDS. If open stateids are revoked, the server MUST recall the related layouts, and the client MUST be fenced if it fails to return them. If I/O is done by a principal other than the one who opened the file, the client SHOULD send it through the metadata server.</p><p>Mandatory byte-range locks are hard to honor, because layouts go to clients and not to lock owners. The MDS needs to recall all overlapping layouts before answering a LOCK, and SHOULD answer layout requests over locked areas with <code>NFS4ERR_LAYOUTUNAVAILABLE</code>. Servers that support mandatory byte-range locks may find it difficult to also support SCSI layouts, and can use advisory locks instead.</p>",
+      "eli5": "<p>The disk cannot tell who is who, so each client has to follow the rules by itself. Without the right pass, the client asks the librarian to do the job.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "4",
+      "title": "Security Considerations",
+      "content": "<p>SCSI storage access sits below NFSv4, so NFSv4 security does not apply directly. Depending on the storage protocol, features such as encryption and integrity protection may be unavailable. At one end, Serial Attached SCSI provides essentially no security functionality. At the other, iSCSI can provide significant security. Administrators must make sure the storage protocol is properly protected, with physical security a common means for protocols not based on IP, and IPsec should be used for IP-based storage as outlined in <a href='/rfc3723'>RFC 3723</a> and updated in <a href='/rfc7146'>RFC 7146</a>.</p><p>Storage security uses a different granularity and identity than NFSv4 (NFSv4 controls user access to files, iSCSI controls initiator access to volumes), and the pNFS client has to enforce the correspondence. Where the client cannot be trusted to do so, or the storage protocol's requirements cannot be met, pNFS SCSI layouts SHOULD NOT be used.</p>",
+      "eli5": "<p>Some disks have a strong lock and some have none at all. If you cannot trust the people walking to the shelves, do not let them.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "EXTENT STATES (RFC 8154)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "PNFS_SCSI_READ_WRITE_DATA",
+            "desc": "Valid data, readable and writable."
+          },
+          {
+            "code": "1",
+            "label": "PNFS_SCSI_READ_DATA",
+            "desc": "Valid data, read only; writes are prohibited."
+          },
+          {
+            "code": "2",
+            "label": "PNFS_SCSI_INVALID_DATA",
+            "desc": "Allocated but uninitialized; reads give zeros, a write makes it read-write.",
+            "highlight": true
+          },
+          {
+            "code": "3",
+            "label": "PNFS_SCSI_NONE_DATA",
+            "desc": "A hole in the file; never returned for a writable request."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "VOLUME TYPES (RFC 8154)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "PNFS_SCSI_VOLUME_SLICE",
+            "desc": "A slice of another volume."
+          },
+          {
+            "code": "2",
+            "label": "PNFS_SCSI_VOLUME_CONCAT",
+            "desc": "A concatenation of multiple volumes."
+          },
+          {
+            "code": "3",
+            "label": "PNFS_SCSI_VOLUME_STRIPE",
+            "desc": "Striped across multiple volumes."
+          },
+          {
+            "code": "4",
+            "label": "PNFS_SCSI_VOLUME_BASE",
+            "desc": "Maps to a single logical unit.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "management",
+      "position": "after",
+      "caption": "FENCING A NON-RESPONDING CLIENT (SIMPLIFIED FROM RFC 8154)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "mds",
+            "label": "Metadata server"
+          },
+          {
+            "key": "lu",
+            "label": "SCSI logical unit"
+          }
+        ],
+        "messages": [
+          {
+            "from": "mds",
+            "to": "lu",
+            "label": "REGISTER, RESERVE (type 8h)",
+            "color": "blue",
+            "note": "MDS registers its own key and reserves the LU."
+          },
+          {
+            "from": "client",
+            "to": "lu",
+            "label": "REGISTER (sbv_pr_key)",
+            "color": "blue",
+            "note": "Client registers its key before first I/O."
+          },
+          {
+            "from": "mds",
+            "to": "client",
+            "label": "CB_LAYOUTRECALL",
+            "color": "neutral",
+            "note": "The client does not respond."
+          },
+          {
+            "from": "mds",
+            "to": "lu",
+            "label": "PREEMPT client key",
+            "color": "green",
+            "note": "Further I/O from the client fails."
+          },
+          {
+            "from": "lu",
+            "to": "client",
+            "label": "RESERVATION CONFLICT",
+            "color": "neutral",
+            "note": "The client then commits, returns layouts and unregisters."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5661]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[RFC5663]",
+      "text": "Black, D., Fridella, S., and J. Glasgow, \"Parallel NFS (pNFS) Block/Volume Layout\", RFC 5663, January 2010.",
+      "rfc": 5663
+    },
+    {
+      "number": "[RFC6688]",
+      "text": "Black, D., Ed., Glasgow, J., and S. Faibish, \"Parallel NFS (pNFS) Block Disk Protection\", RFC 6688, July 2012.",
+      "rfc": 6688
+    },
+    {
+      "number": "[RFC3723]",
+      "text": "Aboba, B., Tseng, J., Walker, J., Rangan, V., and F. Travostino, \"Securing Block Storage Protocols over IP\", RFC 3723, April 2004.",
+      "rfc": 3723
+    },
+    {
+      "number": "[RFC4506]",
+      "text": "Eisler, M., Ed., \"XDR: External Data Representation Standard\", STD 67, RFC 4506, May 2006.",
+      "rfc": 4506
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

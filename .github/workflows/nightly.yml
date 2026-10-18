@@ -1,0 +1,76 @@
+name: Nightly build and deploy
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+# contents: write lets the job commit the refreshed RFC index snapshot to trunk (see docs/cloudflare.md).
+permissions:
+  contents: write
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'package-lock.json') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 5G
+
+      # The tsx scripts below (refresh-index, coverage-diff) import npm packages.
+      - name: Install npm dependencies
+        run: nix develop -c npm ci
+
+      # The only networked step of the build: fetch the RFC Editor index into data/rfc-index.xml.
+      - name: Refresh RFC index snapshot
+        run: nix run .#refresh-index
+
+      # Fetch the original texts of RFCs that appeared in the refreshed index into data/rfc-text/.
+      - name: Refresh RFC text snapshot
+        run: nix develop -c npm run rfc-text:refresh
+
+      # Commit the snapshots so the deployed site is exactly what a checkout of trunk builds.
+      # Only on trunk: manual runs of other branches never push.
+      - name: Commit refreshed snapshot
+        if: github.ref == 'refs/heads/trunk'
+        run: |
+          git add -N data/rfc-text
+          if git diff --quiet -- data/rfc-index.xml data/rfc-text; then
+            echo "RFC index and texts unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/rfc-index.xml data/rfc-text
+          git commit -m "chore(data): refresh RFC Editor index and texts"
+          if ! git push origin HEAD:trunk; then
+            echo "::error title=Cannot push the refreshed RFC index::The push to trunk was rejected. If trunk is protected, allow github-actions[bot] to bypass the rules (or the 'contents: write' token to push); see docs/cloudflare.md, 'Nightly index refresh'."
+            exit 1
+          fi
+
+      - name: Coverage diff vs deployed site
+        run: |
+          nix build -L --out-link result
+          if curl -fsS --max-time 30 https://rfc.akl.run/data/coverage.json -o "$RUNNER_TEMP/old-coverage.json"; then
+            :
+          else
+            echo "deployed coverage.json unavailable; skipping baseline"
+            rm -f "$RUNNER_TEMP/old-coverage.json"
+          fi
+          nix develop -c node --import tsx scripts/coverage-diff.ts "$RUNNER_TEMP/old-coverage.json" result/data/coverage.json
+
+      - run: nix flake check -L
+
+      # Deploy only from trunk (scheduled runs use the default branch; manual runs may pick another).
+      # The site is built from the working tree: trunk including the snapshot commit above.
+      - name: Deploy
+        if: github.ref == 'refs/heads/trunk'
+        run: nix run .#deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

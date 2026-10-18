@@ -1,0 +1,204 @@
+{
+  "number": 5663,
+  "shortTitle": "pNFS block layout",
+  "category": "transport",
+  "categoryReviewed": false,
+  "summary": "<p>Describes the pNFS block or volume layout, which lets clients directly access file data on block storage, bypassing the NFSv4 server for data transfers to increase performance and parallelism.</p>",
+  "eli5": {
+    "summary": "<p>Instead of asking a librarian to fetch every book, you get to walk to the shelves yourself while the librarian just tells you where they are.</p>"
+  },
+  "questions": [
+    "pnfs block layout",
+    "parallel nfs block volume",
+    "what is the pnfs block layout",
+    "what is an extent in pnfs",
+    "how does pnfs fence a client",
+    "what is copy on write in pnfs"
+  ],
+  "tags": [
+    "NFS",
+    "Storage",
+    "Parallel I/O"
+  ],
+  "subtitle": "How NFS clients read and write file data straight on SAN block storage, with the server only handing out maps.",
+  "tldr": {
+    "problem": "In plain NFS every read and write passes through the server. Parallel NFS (pNFS) lets clients skip it, but each class of storage needs its own way to describe where file data lives.",
+    "mechanism": "The server hands the client a layout: a list of extents that map file ranges to byte offsets on a volume. The client identifies the volume by content signatures and performs block I/O on the extents it holds.",
+    "outcome": "Clients get direct, parallel access to block storage, but they also take on security and safety duties, such as timed-lease fencing and enforcing locks themselves. RFC 6688 later updated this specification.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Minimum extent alignment",
+      "value": "512 bytes"
+    },
+    {
+      "label": "Max signature components",
+      "value": "16 (PNFS_BLOCK_MAX_SIG_COMP)"
+    },
+    {
+      "label": "Extent states",
+      "value": "4 (READ_WRITE, READ, INVALID, NONE)"
+    },
+    {
+      "label": "Volume types",
+      "value": "4 (simple, slice, concat, stripe)"
+    },
+    {
+      "label": "Server wait before moving a layout",
+      "value": "lease_time plus blh_maximum_io_time"
+    }
+  ],
+  "today": "<p>RFC 5663 is a Proposed Standard published in January 2010, and it has been updated by <a href='/rfc6688'>RFC 6688</a>. It defines the block/volume layout on top of the NFSv4.1 pNFS operations in <a href='/rfc5661'>RFC 5661</a>.</p>",
+  "glossary": [
+    "pnfs",
+    "lease"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction: Skipping the Server for Data",
+      "content": "<p>Parallel NFS (<strong>pNFS</strong>) extends NFSv4 so that clients can reach file data on the underlying storage directly, bypassing the NFS server. The main pNFS document, <a href='/rfc5661'>RFC 5661</a>, defines the parts that do not depend on the kind of storage. This RFC adds what is needed for <strong>block/volume storage</strong>, meaning storage reached through protocols from the SCSI family, such as Fibre Channel Protocol, iSCSI, Serial Attached SCSI and Fibre Channel over Ethernet.</p><p>The overall picture has three parties: clients that speak NFSv4.1 with pNFS to the server, storage systems that clients reach over a storage protocol, and a control protocol between server and storage. The control protocol is not a matter of interoperability here. The RFC includes XDR definitions of the data structures, in a form that can be extracted by a script.</p>",
+      "eli5": "<p>Normally the librarian carries every book to you. With pNFS the librarian just gives you a map and you fetch the books yourself.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Volumes, Blocks and Alignment",
+      "content": "<p>Block storage offers a <strong>volume</strong>: a sequence of fixed-size blocks, like a logical disk. It may be a real disk, part of one, or something more complex such as concatenation, striping or RAID across several disks.</p><p>A block layout maps an NFS file, or part of one, to <strong>extents</strong> on such volumes, using 64-bit offsets and lengths. Because a client must be able to do I/O to an extent without disturbing neighbouring storage, extents <strong>MUST</strong> be aligned to 512-byte boundaries. Writable extents <strong>MUST</strong> also be aligned to the block size the server uses, available as the NFSv4.1 <code>layout_blksize</code> attribute (4 and 8 kilobytes are named as common sizes). Readable extents <strong>SHOULD</strong> match it too, but 512-byte alignment is acceptable for legacy file systems with fragments.</p><p>A layout request says whether the layout is for read-only or read-write use. A read-only layout may contain holes that read as zero. A read-write layout holds allocated but uninitialized storage in those holes.</p>",
+      "eli5": "<p>A volume is like a huge shelf with equally sized boxes. Your map says which boxes hold which part of your file, and you must always pick up whole boxes so you do not knock over the next one.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Identifying Volumes and Their Topology",
+      "content": "<p>A storage array can have several ports on different networks, even different technologies, such as iSCSI and Fibre Channel to the same volume. Network addresses are therefore a poor way to name a volume, so this layout identifies volumes <strong>by content</strong>. A signature is an array of up to 16 components (<code>PNFS_BLOCK_MAX_SIG_COMP</code>), each an opaque byte string expected at a given byte offset on the volume. A negative offset counts from the end of the volume. The client matches signatures to find its local view of the right LUN.</p><p>The server describes the layout of volumes in the <code>GETDEVICEINFO</code> result as an array of building blocks: simple volumes, slices of another volume, concatenations and stripes. Components refer to each other by array index, and the root of the hierarchy is the last element. Everything eventually resolves to simple volumes. The result can run to several kilobytes, so the client <strong>SHOULD</strong> be ready with a large buffer, and retry with at least <code>gdir_mincount_bytes</code> if the server answers <code>NFS4ERR_TOOSMALL</code>.</p><p>Usually <code>GETDEVICELIST</code> returns a single <code>deviceid4</code>, a shorthand for the whole topology. A copy-on-write file system may return two: one read-only and one writable.</p>",
+      "eli5": "<p>Because a shelf might be reached through different doors, you recognise it by what is written on it, not by the door. A big shelf can be built from smaller ones that are glued together or sliced apart.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "Extents and Extent Lists",
+      "content": "<p>Each extent says which volume (<code>bex_vol_id</code>), where in the file it starts and how long it is (<code>bex_file_offset</code>, <code>bex_length</code>), where on the volume the data sits (<code>bex_storage_offset</code>), and its state (<code>bex_state</code>). A layout is a list of extents in increasing file offset order, with ties broken by state.</p><p>The state decides what a client may do. <code>PNFS_BLOCK_READ_WRITE_DATA</code> is valid for reading and writing. <code>PNFS_BLOCK_READ_DATA</code> may be read only. <code>PNFS_BLOCK_INVALID_DATA</code> is allocated space whose contents are not valid, so a read must return zeros, and any write turns the written part into read-write data. <code>PNFS_BLOCK_NONE_DATA</code> is a hole with no space and no valid storage offset.</p><p>A read request returns only read or none extents. A write request returns read-write or invalid extents, plus read extents only where invalid extents cover the same range. The first extent <strong>MUST</strong> contain the requested start offset, and the extents <strong>MUST</strong> cover at least the minimum size requested, except when only readable extents were asked for and end-of-file is reached.</p>",
+      "eli5": "<p>Each part of your map is a stamp saying read-only, read and write, newly cleared space, or nothing there. The stamp tells you what you are allowed to do on that part.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Writing, Committing and Copy-on-Write",
+      "content": "<p>When a client writes to an invalid extent, it must write whole server-sized blocks and fill any bytes the user did not supply with zeros. It then reports the change with <code>LAYOUTCOMMIT</code>, listing the extents that now hold valid data. Those extents <strong>MUST</strong> be disjoint, sorted, and aligned to the server block size. If the client has moved end-of-file into the middle of a block being committed, it <strong>MUST</strong> write zeros from end-of-file to the end of that block first.</p><p><strong>Copy-on-write</strong> supports snapshots, and every block/volume pNFS client <strong>MUST</strong> support it. For a range covered by a read extent in a writable layout, the server includes invalid extents over the same range. For a partial-block write the client reads the old data from the read extent, merges its changes and writes the result to the invalid extent. Whole-block writes need no read. After that, reads of this range must come from the now read-write extent.</p><p>The RFC calls this principle <strong>extents are permissions</strong>. A client <strong>MUST NOT</strong> do direct I/O that its extents do not permit. Because block devices need not make reads and writes atomic, the server <strong>MUST</strong> use a single-writer-XOR-multiple-readers policy when the storage does not give atomicity. The server also <strong>MUST NOT</strong> grant layouts that conflict with mandatory locks or share reservations, and it <strong>MUST</strong> recall the conflicting part of a layout before granting a conflicting lock or open.</p>",
+      "eli5": "<p>When you change a page that others still read, you copy the page, write your changes on the copy, and from then on read the copy. The map's stamps let you do this by yourself.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Leases, Hints and Client Fencing",
+      "content": "<p>If a client stops responding, the server may need to take its extents away and give them to someone else, and the old client must not be able to keep writing. The RFC calls this <strong>fencing</strong>. One approach is LUN masking at the storage systems. If that is not available, the server relies on <strong>timed-lease fencing</strong> by the client, and because the client cannot know which method the server uses, it <strong>MUST</strong> always implement timed-lease fencing.</p><p>Two times matter: the server's <code>lease_time</code> and the client's maximum I/O time, sent as <code>blh_maximum_io_time</code> in a layout hint (type <code>LAYOUT4_BLOCK_VOLUME</code>). The text says this value is often 30 or 60 seconds. If it cannot be bounded the client uses all ones. A client <strong>MUST</strong> set the hint with <code>SETATTR</code> after a new client ID is established, before its first <code>LAYOUTGET</code>. A server that does not fence by LUN masking can answer <code>NFS4ERR_INVAL</code>, after which the client must not use <code>LAYOUTGET</code>.</p><p>A layout is valid for at most <code>lease_time</code> seconds, renewed by any successful <code>SEQUENCE</code> operation. After expiry the client <strong>MUST</strong> stop using it and fall back to ordinary READ and WRITE. Without known two-way communication, the server must wait <code>lease_time</code> plus <code>blh_maximum_io_time</code> before moving layouts to another client. Fencing works only at the host and logical-unit level, so revoking one layout can make all of a client's layouts on that volume useless.</p>",
+      "eli5": "<p>Your map expires after a set time unless you check in. If you go silent, the librarian waits long enough for anything you were doing to finish, then gives the shelf to someone else.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "7",
+      "title": "Recalls, Crashes and Errors",
+      "content": "<p>Changing the end of a file can make layouts wrong. Before a truncate, the server <strong>MUST</strong> recall layout portions that refer to blocks it will free or write. If that takes long, it <strong>SHOULD</strong> reply with <code>NFS4ERR_DELAY</code>. Extending a file needs no recall.</p><p>If the server crashes while a client has written to blocks still in the invalid state, the client can rewrite the data over NFSv4 if it is still cached. Otherwise it <strong>MUST NOT</strong> try to read it back from the data servers, and should commit those blocks during the grace period with <code>LAYOUTCOMMIT</code> and <code>loca_reclaim</code> set to true.</p><p>A server short on resources can recall layouts with <code>CB_LAYOUTRECALL</code> or ask for any back with <code>CB_RECALL_ANY</code>. For layout errors, the transient ones <code>NFS4ERR_RECALLCONFLICT</code> and <code>NFS4ERR_TRYLATER</code> mean wait several milliseconds and retry, then fall back to READ and WRITE sent to the server if no progress is made. <code>NFS4ERR_LAYOUTUNAVAILABLE</code> means send I/O to the server for now.</p>",
+      "eli5": "<p>If the file gets shorter, the librarian takes back the part of your map that pointed at the removed shelves. If you get told to wait, you wait a moment and ask again, and if it keeps failing you ask the librarian to fetch the book.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations: Trusting the Client",
+      "content": "<p>SAN arrays control access per host, not per block or per file. The server can fence a whole client from a disk, but it cannot stop a client holding one layout from touching other parts of the disk, or touching blocks again after returning a layout. That <strong>block-level protection must come from client software</strong>.</p><p>The same holds for file rules. Block storage cannot check NFS locks, access control lists or file open modes, so the client must enforce them before sending I/O. The RFC repeats that in environments where clients cannot be trusted to do so, or where the storage protocol's security cannot be met, pNFS block/volume layouts <strong>SHOULD NOT</strong> be used. NFSv4 security does not apply directly: parallel SCSI offers essentially none, while iSCSI can provide a lot, and the administrator is responsible for protecting the storage protocol. The RFC points to a physically isolated SAN in one data center under a few administrators as a setting where client-side protection may suffice.</p>",
+      "eli5": "<p>The shelf has a lock that opens for you, not just for your book, so you must promise to touch only the books on your map. If you cannot trust everyone, do not hand out maps.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "design",
+      "position": "after",
+      "caption": "BLOCK EXTENT STATES (RFC 5663, SECTION 2.3)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "PNFS_BLOCK_READ_WRITE_DATA",
+            "desc": "Valid data, may be read and written."
+          },
+          {
+            "code": "1",
+            "label": "PNFS_BLOCK_READ_DATA",
+            "desc": "Valid data, read only."
+          },
+          {
+            "code": "2",
+            "label": "PNFS_BLOCK_INVALID_DATA",
+            "desc": "Space is allocated but contents are invalid; reads return zeros and a write makes it read-write.",
+            "highlight": true
+          },
+          {
+            "code": "3",
+            "label": "PNFS_BLOCK_NONE_DATA",
+            "desc": "A hole in the file with no physical space."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "VOLUME TYPES IN A DEVICE ADDRESS",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "PNFS_BLOCK_VOLUME_SIMPLE",
+            "desc": "The volume maps to a single logical unit."
+          },
+          {
+            "code": "1",
+            "label": "PNFS_BLOCK_VOLUME_SLICE",
+            "desc": "The volume is a slice of another volume."
+          },
+          {
+            "code": "2",
+            "label": "PNFS_BLOCK_VOLUME_CONCAT",
+            "desc": "The volume is a concatenation of multiple volumes."
+          },
+          {
+            "code": "3",
+            "label": "PNFS_BLOCK_VOLUME_STRIPE",
+            "desc": "The volume is striped across multiple volumes of the same size."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[NFSv4.1]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[XDR]",
+      "text": "Eisler, M., Ed., \"XDR: External Data Representation Standard\", STD 67, RFC 4506, May 2006.",
+      "rfc": 4506
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

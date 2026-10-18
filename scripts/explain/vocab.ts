@@ -1,0 +1,66 @@
+/** The fixed section-id vocabulary: generated section ids come from here (or the `section-<k>` escape hatch). */
+export const SECTION_IDS = [
+  'introduction',
+  'motivation',
+  'background',
+  'overview',
+  'scope',
+  'terminology',
+  'concepts',
+  'architecture',
+  'design',
+  'requirements',
+  'message-format',
+  'packet-format',
+  'header-format',
+  'data-model',
+  'encoding',
+  'syntax',
+  'operation',
+  'procedures',
+  'state-machine',
+  'negotiation',
+  'connection-management',
+  'data-transfer',
+  'addressing',
+  'routing',
+  'naming',
+  'resolution',
+  'authentication',
+  'key-management',
+  'cryptography',
+  'error-handling',
+  'extensibility',
+  'options',
+  'algorithms',
+  'parameters',
+  'management',
+  'security-considerations',
+  'privacy-considerations',
+  'iana-considerations',
+  'deployment',
+  'operational-considerations',
+  'performance',
+  'interoperability',
+  'compatibility',
+  'migration',
+  'implementation-notes',
+  'conformance',
+  'history',
+  'changes',
+  'status',
+  'examples',
+  'test-vectors',
+  'discussion',
+  'related-work',
+  'summary',
+] as const;
+
+export const ESCAPE_ID = /^section-[1-9][0-9]*$/;
+export const isSectionId = (id: string): boolean => (SECTION_IDS as readonly string[]).includes(id) || ESCAPE_ID.test(id);
+
+/** Glossary ids: kebab-case, singular by convention. */
+export const GLOSSARY_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const MAX_NEW_TERMS = 5;
+export const MAX_GLOSSARY_IDS = 12;
+export const MAX_QUESTIONS = 6;

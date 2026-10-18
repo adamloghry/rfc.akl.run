@@ -1,0 +1,395 @@
+{
+  "number": 9420,
+  "shortTitle": "MLS",
+  "category": "security",
+  "categoryReviewed": false,
+  "summary": "<p>Specifies Messaging Layer Security, a protocol for efficient asynchronous group key establishment so group chats can have end-to-end encryption even if members are not online at the same time. Servers delivering messages cannot read them.</p>",
+  "eli5": {
+    "summary": "<p>A group of friends shares a secret code for their chat, and can add or remove people, even when some are asleep.</p>"
+  },
+  "questions": [
+    "what is messaging layer security",
+    "how does end-to-end encrypted group chat work",
+    "mls group key agreement",
+    "how does mls group key agreement work",
+    "what is a ratchet tree in mls",
+    "what is an epoch in mls"
+  ],
+  "tags": [
+    "Security",
+    "Messaging",
+    "Encryption"
+  ],
+  "subtitle": "How a group chat, from two people to thousands, agrees on encryption keys even when members are not online together.",
+  "tldr": {
+    "problem": "Group chats that want end-to-end encryption need every member to share keys, but members come and go and are rarely online at the same time. Per-sender keys make recovery from a compromise cost work that grows with the group.",
+    "mechanism": "MLS arranges members as leaves of a ratchet tree, so a key update or removal costs a number of encryptions that scales as the log of the group size. Groups move through numbered epochs, and each Commit message advances to a fresh shared secret.",
+    "outcome": "The result is asynchronous group key establishment with forward secrecy and post-compromise security, for groups from two to thousands of members, where the delivery server only needs to deliver messages. It is a Proposed Standard.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Mandatory cipher suite",
+      "value": "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519"
+    },
+    {
+      "label": "Cipher suites registered",
+      "value": "7 (0x0001 to 0x0007)"
+    },
+    {
+      "label": "Protocol version",
+      "value": "mls10 (MLS 1.0)"
+    },
+    {
+      "label": "Reuse guard",
+      "value": "fresh random 4 bytes"
+    },
+    {
+      "label": "Epoch number",
+      "value": "8 octets, starting at 0"
+    },
+    {
+      "label": "Length header encoding",
+      "value": "1, 2 or 4 bytes"
+    }
+  ],
+  "today": "<p>RFC 9420 is a Proposed Standard published in July 2023. It is not obsoleted and has no later updates listed, so it remains the definition of the MLS protocol.</p>",
+  "glossary": [
+    "epoch",
+    "key-package",
+    "forward-secrecy",
+    "hpke",
+    "aead",
+    "cipher-suite",
+    "grease",
+    "hkdf",
+    "digital-signature"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Group Keys Are Hard",
+      "content": "<p>For two parties, the Double Ratchet is a well-studied way to derive encryption keys with fine-grained forward secrecy and post-compromise security. For a group of more than two, a common strategy is to hand out symmetric <strong>sender keys</strong> over existing one-to-one secure channels, and have each member encrypt with their own sender key.</p><p>Sender keys are efficient and, with a hash ratchet added, give forward secrecy. But post-compromise security is hard: it needs a number of key update messages that scales as the square of the group size, and an attacker who learns a sender key can often eavesdrop on that member indefinitely. Replacing one member's sender key costs resources that scale linearly with the group size.</p><p>RFC 9420 specifies the <strong>Messaging Layer Security</strong> (MLS) protocol, which uses tree structures instead. Building on earlier work on asynchronous ratcheting trees, it uses an asynchronous key-encapsulation mechanism for trees, so members can derive and update shared keys with costs that scale as the log of the group size.</p>",
+      "eli5": "<p>If everyone had to send a new secret to every other person each time something changed, a big group would drown in mail. MLS uses a tree so only a few messages are needed.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "3",
+      "title": "Protocol Overview",
+      "content": "<p>MLS assumes two services around it: an <strong>Authentication Service</strong> (AS) that lets members check each other's credentials, and a <strong>Delivery Service</strong> (DS) that routes MLS messages. The AS is trusted, but the DS is largely untrusted: MLS aims to protect confidentiality and integrity of group data even if the DS is compromised, and the DS is only expected to deliver messages reliably.</p><p>The core job is continuous group authenticated key exchange. History is split into a linear sequence of <strong>epochs</strong>. In each epoch, a set of authenticated members share an <em>epoch secret</em> known only to them, and members derive further secrets from it. The group's creator makes the first epoch alone, with no protocol interaction. After that, four message types drive the protocol:</p><ul><li><strong>KeyPackage</strong>: describes a client's capabilities and provides keys so it can be added to a group.</li><li><strong>Proposal</strong>: proposes a change for the next epoch, such as adding or removing a member.</li><li><strong>Commit</strong>: starts a new epoch by telling members to apply a set of proposals.</li><li><strong>Welcome</strong>: gives a new member what it needs to initialize its state.</li></ul><p>Nothing changes until a Commit supplies fresh entropy. A new member can also join with an <em>external Commit</em>, built from a published GroupInfo object, which helps for an open group where existing members hold no KeyPackage for the joiner. Members can inject pre-shared keys to link epochs, and two operations tie a new group to an old one: reinitialization (same members, different parameters) and branching (a subset of members).</p>",
+      "eli5": "<p>Imagine a clubhouse where the lock changes every time the member list changes. Someone suggests a change, then someone else \"commits\" it, and everyone gets the new key. New members get a welcome note with the key inside.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "4",
+      "title": "The Ratchet Tree",
+      "content": "<p>A <strong>ratchet tree</strong> arranges secrets and key pairs among the members. Every tree is a perfect binary tree, with 2^d leaves all at the same depth d, and each member sits at a leaf. Each node is either blank or holds an HPKE public key, and leaves also hold a credential. A tree with 2^d leaves has 2^(d+1) - 1 nodes.</p><p>The central rule is the <strong>tree invariant</strong>: the private key for a node is known to a member only if that node's subtree contains the member's leaf. That lets someone encrypt to everyone except one member using about log(N) encryptions to subtrees, instead of N-1 individual encryptions, where N is the number of members. This efficient removal is how MLS achieves post-compromise security: an old, possibly compromised, representation of a member is replaced by a fresh one.</p><p>Some vocabulary matters for the mechanics. The <em>direct path</em> of a leaf is its ancestors up to the root, and the <em>copath</em> is the siblings along that path. The <em>resolution</em> of a node is the list of non-blank nodes that together cover everything below it. A newly added leaf is <em>unmerged</em> at its ancestors, because adding it does not give it their private keys.</p>",
+      "eli5": "<p>Picture a family tree where each branch has its own lock. Everyone below a branch holds that branch's key. To lock out one person, you only need to re-key the branches above them, not every single person.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "Message Framing",
+      "content": "<p>Handshake messages (Proposal and Commit) and application messages share one framing structure. The content is first wrapped as an <code>AuthenticatedContent</code> object that carries the message plus a signature, and then protected as either a <strong>PublicMessage</strong> or a <strong>PrivateMessage</strong>.</p><p>A <code>PublicMessage</code> is signed but not encrypted. A <code>PrivateMessage</code> is signed and encrypted so that only members of that epoch can read it. Applications MUST use <code>PrivateMessage</code> for application messages and SHOULD use it for handshake messages, but MAY send handshake messages as <code>PublicMessage</code> where the Delivery Service needs to examine them. Messages from senders outside the group are sent as <code>PublicMessage</code>.</p><p>Each encryption uses one key and nonce from a ratchet, and the nonce is XORed with a fresh random four-byte <strong>reuse guard</strong> to avoid nonce reuse if a client loses state. Information about the sender is itself encrypted with a key derived from a sample of the ciphertext. A sender may add zero padding inside the encrypted content, and receivers MUST reject padding that contains non-zero bytes. Length fields use a variable-size integer encoding that takes 1, 2 or 4 bytes and must use the smallest form.</p>",
+      "eli5": "<p>A PublicMessage is a signed postcard anyone could read. A PrivateMessage is a signed letter in a locked box that only group members can open, and even the sender's name is tucked inside.</p>"
+    },
+    {
+      "id": "cryptography",
+      "number": "8",
+      "title": "Key Schedule and Secret Tree",
+      "content": "<p>Each epoch has a <strong>key schedule</strong>, a chain of key derivations that turns inputs into the epoch's secrets. The inputs are the previous epoch's <code>init_secret</code>, the new <code>commit_secret</code> (fresh entropy from the Commit's tree update), an optional pre-shared key input and the <code>GroupContext</code>. Out comes an <code>epoch_secret</code>, from which the schedule derives separate secrets for sender data, message encryption, exporters, external joins, confirmation and membership MACs, resumption and an <code>epoch_authenticator</code>.</p><p>The <code>GroupContext</code> summarizes shared public state: protocol version, cipher suite, group ID, epoch number, tree hash, confirmed transcript hash and extensions. The <strong>transcript hashes</strong> are a running hash over all Commits, so that members can confirm they hold the same history. A confirmation tag in each Commit confirms the members arrived at the same state.</p><p>The <code>encryption_secret</code> seeds a <strong>secret tree</strong> with the same shape as the ratchet tree. Each leaf starts two hash ratchets, one for handshake and one for application messages. Every step is a numbered <em>generation</em> that yields a single-use key and nonce, and each key/nonce pair MUST NOT encrypt more than one message.</p><p>Forward secrecy depends on deletion: as soon as a value is consumed, members MUST immediately delete it. Unconsumed values may be kept for a reasonable time to handle out-of-order delivery.</p>",
+      "eli5": "<p>The key schedule is like a machine that turns last round's secret plus a new random ingredient into this round's secret. After using a one-time key, you shred it so nobody can find it later.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "12",
+      "title": "Evolving a Group with Proposals and Commits",
+      "content": "<p>Every change takes two steps. A <strong>Proposal</strong> is broadcast, then a member sends a <strong>Commit</strong> that makes one or more proposals take effect. If the same member sends both, the proposals can ride inside the Commit. Each epoch is identified by an eight-octet number that starts at 0 for a new group and increases by one with every Commit.</p><p>There are seven proposal types in the base protocol: Add, Update, Remove, PreSharedKey, ReInit, ExternalInit and GroupContextExtensions. Add places the new member in the leftmost empty leaf, extending the tree to the right if needed. Update replaces the sender's own leaf. Remove blanks a leaf, and the tree is truncated when its right subtree has no non-blank nodes. External senders can submit some proposal types (add, remove, psk, reinit and group_context_extensions) if the group allows it.</p><p>A Commit normally carries an <code>UpdatePath</code>: new public keys for the committer's leaf and its filtered direct path, plus path secrets encrypted to the resolution of each copath node. Update and Remove proposals require a path, and so does an empty Commit. A path may be left out only when the Commit covers at least one proposal and all of them are Add, PreSharedKey or ReInit. Everyone else uses the path secrets to derive the same new keys, and the root's path secret feeds the key schedule.</p><p>A new member joins either through a <strong>Welcome</strong> message from the committer, which carries the epoch's joiner secret encrypted to the newcomer's KeyPackage, or through an <strong>external Commit</strong> built from a GroupInfo that includes an external public key. Applications MUST have a way to resolve conflicting Commits for the same epoch, and a member that has seen valid proposals MUST send a Commit before sending application data.</p>",
+      "eli5": "<p>To change the group, someone says \"let's add Sam,\" and then someone presses the big \"do it\" button, the Commit. Everybody switches to the new secret code together, and Sam gets a welcome note with the code.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "16",
+      "title": "Security Considerations",
+      "content": "<p>RFC 9420 explains how the protocol meets its goals at a high level and says a complete analysis is out of scope. <strong>Forward secrecy</strong> means messages stay safe if a member is compromised later. <strong>Post-compromise security</strong> means messages become safe again after a compromise once the member refreshes its keys. Between epochs, forward secrecy comes from deleting old private keys. Within an epoch, it comes from deleting message keys once used. Because group secrets are shared, a member that stays offline for a long time is a risk, so applications SHOULD have a way to evict long-offline members.</p><p>Not everything is hidden. KeyPackages, GroupInfo messages, the unencrypted part of Welcome messages, any handshake messages sent as PublicMessage, header fields of PrivateMessage and message lengths are not confidential. An observer may infer the group ID, epoch changes, message frequency, extensions and membership.</p><p>A compromised Delivery Service cannot forge messages but can delay or drop them, and can collude with an attacker to block the updates that would lock the attacker out. A compromised Authentication Service is much more serious, since it can bind a key to any identity and so impersonate users. KeyPackages are meant to be used once because reuse can allow replay attacks, though a \"last resort\" KeyPackage may be reused to resist denial of service. A malicious insider can also craft an invalid UpdatePath to fragment the group, so applications SHOULD provide a way to report failed Commits.</p>",
+      "eli5": "<p>MLS locks the contents of your messages, but some outside details, like who is in the chat and how often it talks, can still be seen. The mail carrier can lose letters but cannot forge them.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "17",
+      "title": "Cipher Suites, Registries and Extensibility",
+      "content": "<p>Each group uses a single <strong>cipher suite</strong>, a bundle naming the HPKE key encapsulation, key derivation and AEAD algorithms, a hash, a MAC and a signature algorithm. RFC 9420 registers seven, numbered 0x0001 to 0x0007, covering two security levels (roughly 128-bit and 256-bit), X25519/X448 or NIST curves, and AES-GCM or ChaCha20Poly1305. The mandatory-to-implement suite for MLS 1.0 is <code>MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519</code>.</p><p>IANA created registries for cipher suites, wire formats, extension types, proposal types, credential types, signature labels, public key encryption labels and exporter labels, all assigned via Specification Required. Setting a suite's Recommended flag needs Standards Action.</p><p>The protocol is built to be extended. Clients advertise supported features in their LeafNode capabilities, must ignore unknown values, and every extension in the GroupContext must be supported by all members. To make sure implementations really ignore unknown values, senders SHOULD include random <strong>GREASE</strong> values in certain fields; the RFC reserves values such as 0x0A0A and 0x1A1A for this in each registry.</p>",
+      "eli5": "<p>A cipher suite is a recipe card listing which locks and scramblers to use. Everyone must know at least one common recipe, and the doors are left open so new recipes can be added later.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THE THREE PARTS OF MLS CRYPTOGRAPHIC STATE (RFC 9420, SECTION 3.1)",
+      "data": {
+        "items": [
+          {
+            "title": "Ratchet tree",
+            "text": "Represents group membership and lets members efficiently encrypt to subsets of the group. Each epoch has its own tree."
+          },
+          {
+            "title": "Key schedule",
+            "text": "The chain of key derivations from epoch to epoch, producing the epoch secret and the secrets derived from it."
+          },
+          {
+            "title": "Secret tree",
+            "text": "Derived from the key schedule; holds the shared secrets used to encrypt and authenticate messages."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "SIMPLIFIED FROM RFC 9420 FIGURES 2 AND 3: ADDING A MEMBER",
+      "data": {
+        "lanes": [
+          {
+            "key": "a",
+            "label": "Member A"
+          },
+          {
+            "key": "b",
+            "label": "New client B"
+          },
+          {
+            "key": "ds",
+            "label": "Delivery Service"
+          }
+        ],
+        "messages": [
+          {
+            "from": "b",
+            "to": "ds",
+            "label": "KeyPackage B",
+            "color": "neutral",
+            "note": "B publishes its KeyPackage before any group exists."
+          },
+          {
+            "from": "ds",
+            "to": "a",
+            "label": "KeyPackage B",
+            "color": "neutral",
+            "note": "A downloads it to add B."
+          },
+          {
+            "from": "a",
+            "to": "ds",
+            "label": "Add + Commit",
+            "color": "blue",
+            "note": "Broadcast to the group."
+          },
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Welcome",
+            "color": "green",
+            "note": "Sent directly to the new member."
+          },
+          {
+            "from": "ds",
+            "to": "a",
+            "label": "Commit",
+            "color": "neutral",
+            "note": "A updates its state only after receiving its own Commit back."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "A FOUR-MEMBER RATCHET TREE WITH A BLANK NODE (RFC 9420, SECTION 4.2)",
+      "data": {
+        "root": {
+          "label": "pk(ABCD)",
+          "note": "Private key known to all four members",
+          "children": [
+            {
+              "label": "pk(AB)",
+              "note": "Known only to A and B",
+              "children": [
+                {
+                  "label": "A"
+                },
+                {
+                  "label": "B"
+                }
+              ]
+            },
+            {
+              "label": "blank",
+              "note": "No key here",
+              "children": [
+                {
+                  "label": "C"
+                },
+                {
+                  "label": "D"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE SEVEN BASE PROPOSAL TYPES (RFC 9420, SECTION 7.2)",
+      "data": {
+        "items": [
+          {
+            "code": "0x0001",
+            "label": "add",
+            "desc": "Add a client with a given KeyPackage."
+          },
+          {
+            "code": "0x0002",
+            "label": "update",
+            "desc": "Replace the sender's own LeafNode."
+          },
+          {
+            "code": "0x0003",
+            "label": "remove",
+            "desc": "Remove the member at a given leaf."
+          },
+          {
+            "code": "0x0004",
+            "label": "psk",
+            "desc": "Inject a pre-shared key into the key schedule."
+          },
+          {
+            "code": "0x0005",
+            "label": "reinit",
+            "desc": "Close this group and start a new one with different parameters."
+          },
+          {
+            "code": "0x0006",
+            "label": "external_init",
+            "desc": "Used by a new member joining by external Commit."
+          },
+          {
+            "code": "0x0007",
+            "label": "group_context_extensions",
+            "desc": "Replace the extensions in the GroupContext."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "MLS 1.0 CIPHER SUITES (RFC 9420, SECTION 17.1)",
+      "data": {
+        "columns": [
+          "Value",
+          "Suite name"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0x0001",
+              "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "0x0002",
+              "MLS_128_DHKEMP256_AES128GCM_SHA256_P256"
+            ]
+          },
+          {
+            "cells": [
+              "0x0003",
+              "MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519"
+            ]
+          },
+          {
+            "cells": [
+              "0x0004",
+              "MLS_256_DHKEMX448_AES256GCM_SHA512_Ed448"
+            ]
+          },
+          {
+            "cells": [
+              "0x0005",
+              "MLS_256_DHKEMP521_AES256GCM_SHA512_P521"
+            ]
+          },
+          {
+            "cells": [
+              "0x0006",
+              "MLS_256_DHKEMX448_CHACHA20POLY1305_SHA512_Ed448"
+            ]
+          },
+          {
+            "cells": [
+              "0x0007",
+              "MLS_256_DHKEMP384_AES256GCM_SHA384_P384"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9180]",
+      "text": "Barnes, R., Bhargavan, K., Lipp, B., and C. Wood, \"Hybrid Public Key Encryption\", RFC 9180, February 2022.",
+      "rfc": 9180
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[RFC9000]",
+      "text": "Iyengar, J., Ed. and M. Thomson, Ed., \"QUIC: A UDP-Based Multiplexed and Secure Transport\", RFC 9000, May 2021.",
+      "rfc": 9000
+    },
+    {
+      "number": "[RFC8032]",
+      "text": "Josefsson, S. and I. Liusvaara, \"Edwards-Curve Digital Signature Algorithm (EdDSA)\", RFC 8032, January 2017.",
+      "rfc": 8032
+    },
+    {
+      "number": "[RFC8701]",
+      "text": "Benjamin, D., \"Applying Generate Random Extensions And Sustain Extensibility (GREASE) to TLS Extensibility\", RFC 8701, January 2020.",
+      "rfc": 8701
+    },
+    {
+      "number": "[RFC5116]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[RFC8126]",
+      "text": "Cotton, M., Leiba, B., and T. Narten, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 8126, June 2017.",
+      "rfc": 8126
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-16",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-16"
+}

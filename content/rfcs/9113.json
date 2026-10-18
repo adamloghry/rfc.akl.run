@@ -1,0 +1,641 @@
+{
+  "number": 9113,
+  "title": "HTTP/2",
+  "shortTitle": "HTTP/2",
+  "authors": [
+    "M. Thomson",
+    "C. Benfield"
+  ],
+  "organization": "Mozilla",
+  "date": "June 2022",
+  "status": "Proposed Standard",
+  "category": "http",
+  "featured": false,
+  "obsoletedBy": null,
+  "obsoletes": "RFC 7540",
+  "tags": [
+    "HTTP",
+    "Web",
+    "Multiplexing"
+  ],
+  "subtitle": "One connection, many conversations: HTTP's meaning carried in binary frames.",
+  "summary": "<p>HTTP/2 is a way of carrying the same HTTP requests and responses as HTTP/1.1 over a TCP connection, but cut into small binary frames that belong to independent streams. That lets a browser fetch many things at once over a single connection, and it compresses the repetitive header fields. This revision, published in 2022, replaces RFC 7540 and RFC 8740.</p>",
+  "eli5": {
+    "summary": "<p>Instead of opening a new phone line for every question, HTTP/2 keeps one line open and lets you ask many questions at the same time, each with a label so the answers do not get mixed up.</p>"
+  },
+  "questions": [
+    "what is http/2",
+    "how does http/2 multiplexing work",
+    "what is the difference between http/1.1 and http/2",
+    "what is an http/2 frame",
+    "what does alpn h2 mean",
+    "does http/2 still use server push",
+    "how does http/2 flow control work"
+  ],
+  "tldr": {
+    "problem": "HTTP/1.1 handles one request at a time per connection, so browsers opened many connections, and repeated verbose header fields wasted bytes.",
+    "mechanism": "Every message is split into binary frames tagged with a stream number, so many requests and responses interleave on one TCP connection, with compressed header fields and per-stream flow control.",
+    "outcome": "It is the version of HTTP most browsers and large sites use over TLS today, though TCP-level head-of-line blocking remains and HTTP/3 addresses it.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "ALPN identifier",
+      "value": "h2"
+    },
+    {
+      "label": "Frame header",
+      "value": "9 octets"
+    },
+    {
+      "label": "Default max frame",
+      "value": "16,384 octets"
+    },
+    {
+      "label": "Initial window",
+      "value": "65,535 octets"
+    },
+    {
+      "label": "Obsoletes",
+      "value": "RFC 7540, RFC 8740"
+    }
+  ],
+  "lineage": {
+    "title": "How HTTP got faster",
+    "rfcs": [
+      1945,
+      7540,
+      9113,
+      9114
+    ]
+  },
+  "today": "<p>HTTP/2 is what a browser speaks to most large websites over HTTPS. It is also the transport underneath gRPC. The newer HTTP/3 (<a href=\"/rfc9114\">RFC 9114</a>) keeps the same ideas but runs over QUIC (<a href=\"/rfc9000\">RFC 9000</a>) instead of TCP, which avoids the TCP head-of-line blocking that this RFC says it does not address. Server push, the optional feature in which a server sends responses nobody asked for yet, turned out to be hard to use well, and the RFC itself says so.</p>",
+  "implementations": [
+    {
+      "name": "nghttp2",
+      "url": "https://github.com/nghttp2/nghttp2",
+      "note": "C library and tools implementing HTTP/2; used by curl and other software."
+    },
+    {
+      "name": "h2 (Python)",
+      "url": "https://github.com/python-hyper/h2",
+      "note": "A pure-Python, I/O-free HTTP/2 protocol implementation."
+    },
+    {
+      "name": "Wireshark",
+      "note": "Decodes HTTP/2 frames when the TLS keys are available."
+    }
+  ],
+  "glossary": [
+    "http",
+    "header-field",
+    "tls",
+    "http2-frame",
+    "http2-stream",
+    "stream-multiplexing",
+    "hpack",
+    "alpn",
+    "connection-preface",
+    "flow-control",
+    "head-of-line-blocking",
+    "server-push",
+    "pseudo-header-field"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>HTTP/2 does not change what HTTP means. A GET is still a GET, a 404 is still a 404, and headers still carry the same information. What changes is how those messages are written onto the wire. The meaning of HTTP lives in <a href=\"/rfc9110\">RFC 9110</a>, and the older text-based way of sending it is in <a href=\"/rfc9112\">RFC 9112</a> (HTTP/1.1). This RFC defines \"an optimized expression of the semantics\" of HTTP, as its abstract puts it.</p><p>The two big ideas are in the abstract: field compression, and \"multiple concurrent exchanges on the same connection\". HTTP/2 also replaces the line-oriented text of HTTP/1.1 with binary framing, which is simpler for programs to process reliably.</p><div class=\"callout callout-note\"><p>This document is the 2022 revision. It obsoletes <a href=\"/rfc7540\">RFC 7540</a>, the original HTTP/2 specification from 2015, and <a href=\"/rfc8740\">RFC 8740</a>, which had added rules for using TLS 1.3. Its Appendix B lists the notable changes.</p></div><p>The RFC is honest about a limit: it says that TCP head-of-line blocking is not addressed by this protocol. HTTP/2 still runs on one TCP connection, and a lost TCP segment holds up every stream behind it.</p>",
+      "eli5": "<p>HTTP/2 is a new way of packing and sending the same questions and answers that web browsers and servers already use. The words are the same; the envelopes are better.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "2",
+      "title": "Motivation",
+      "content": "<p>The RFC's introduction explains the problem in terms of connections. HTTP/1.0 allowed only one request to be outstanding at a time on a given TCP connection. HTTP/1.1 added request pipelining, but this \"only partially addressed request concurrency and still suffers from application-layer head-of-line blocking\". So clients used multiple connections to a server to make concurrent requests.</p><p>A second problem was repetition. HTTP fields are \"often repetitive and verbose\", and sending the same long headers on every request fills the initial TCP congestion window quickly. On a new connection that means extra round trips before a page can finish loading.</p><p>HTTP/2 answers both: it interleaves messages on one connection and uses an efficient coding for fields. The RFC notes that fewer TCP connections is also friendlier to the network, since there is less competition with other flows and connections live longer.</p>",
+      "eli5": "<p>Imagine ordering lunch from a shop that only lets you ask for one item at a time, and you have to repeat your name and address each time. Kids would open many lines at once. HTTP/2 lets you ask for everything on one line and say your name only once.</p>"
+    },
+    {
+      "id": "starting-http2",
+      "number": "3",
+      "title": "Starting HTTP/2",
+      "content": "<p>A client has to find out that a server speaks HTTP/2. For an <code>https</code> URI it uses TLS with the ALPN extension, and the protocol identifier is the string <code>h2</code>, sent in ALPN as the two octets 0x68, 0x32. The older <code>h2c</code> token, used with the HTTP Upgrade mechanism, was never widely deployed and is deprecated by this document. A client MUST NOT send <code>h2c</code> over TLS.</p><p>For plain <code>http</code> URIs there is no discovery. A client can only use HTTP/2 if it already knows the server supports it, which the RFC calls prior knowledge.</p><p>Either way, each side then sends a <strong>connection preface</strong>. The client's starts with a fixed sequence of 24 octets, the text <code>PRI * HTTP/2.0</code> followed by CRLF, CRLF, <code>SM</code>, CRLF, CRLF, and then a SETTINGS frame. The server's preface is just a SETTINGS frame, which MUST be the first frame it sends. The odd text is chosen so that most HTTP/1.x servers do not try to process further frames.</p><div class=\"callout callout-info\"><p>Clients may send more frames right after their preface without waiting for the server's. Each side must acknowledge the other's SETTINGS frame.</p></div><p>The diagram shows a typical start and one request.</p>",
+      "eli5": "<p>Before talking, both sides send each other a fixed, agreed greeting and say how they like to be talked to. Only then do they begin asking questions.</p>"
+    },
+    {
+      "id": "frame-format",
+      "number": "4",
+      "title": "Frames",
+      "content": "<p>The basic protocol unit is the frame. Every frame begins with a fixed 9-octet header: a 24-bit payload Length, an 8-bit Type, 8 bits of Flags, one Reserved bit, and a 31-bit Stream Identifier. The payload follows. The Length does not count the header itself.</p><p>The payload is limited to 2<sup>14</sup> (16,384) octets unless the receiver advertises a larger SETTINGS_MAX_FRAME_SIZE, up to 2<sup>24</sup>-1. Receivers must ignore and discard frames of unknown types, which is how extensions can add new ones. Stream identifier 0 is reserved for frames about the connection as a whole.</p><p>The RFC defines ten frame types, shown in the table below. HEADERS and DATA carry requests and responses. The rest manage the connection: SETTINGS, PING, GOAWAY and WINDOW_UPDATE, or manage streams: RST_STREAM, PUSH_PROMISE and CONTINUATION. PRIORITY is retained for compatibility but deprecated.</p><p>Header fields do not appear as text inside HEADERS. They are compressed with HPACK (<a href=\"/rfc7541\">RFC 7541</a>) into a field block, which can be split across a HEADERS or PUSH_PROMISE frame and CONTINUATION frames. The RFC requires field blocks to be sent as a contiguous sequence of frames, because compression state is shared across the whole connection.</p>",
+      "eli5": "<p>Every message is cut into little packages. Each package has a label on the front that says how big it is, what kind it is, and which conversation it belongs to.</p>"
+    },
+    {
+      "id": "streams",
+      "number": "5",
+      "title": "Streams and multiplexing",
+      "content": "<p>A stream is \"an independent, bidirectional sequence of frames exchanged between the client and server within an HTTP/2 connection\". One HTTP request and its response normally use one stream. Many streams can be open at once, and either side can interleave their frames. Because streams are largely independent, a blocked or stalled request does not stop the others.</p><p>Streams are identified by a 31-bit integer. Client-initiated streams use odd numbers, server-initiated streams use even numbers, and each new identifier must be higher than any the endpoint has used before. Identifiers cannot be reused, so a long-lived connection can eventually run out and needs a new connection.</p><p>Each stream moves through a lifecycle: idle, open, one of the half-closed states, and finally closed. The two reserved states exist only for server push. An END_STREAM flag on a frame moves a stream toward closed, and a RST_STREAM frame closes it immediately. A peer can limit parallelism with SETTINGS_MAX_CONCURRENT_STREAMS, and the RFC recommends that it be no smaller than 100.</p><p>Errors are of two kinds. A stream error affects only one stream and is reported with RST_STREAM. A connection error is serious enough that the endpoint SHOULD first send a GOAWAY frame and then close the TCP connection.</p>",
+      "eli5": "<p>Each question and its answer get their own lane, like lanes in a swimming pool. Swimmers in different lanes do not bump into each other, and each lane has a number so everyone knows whose answer is whose.</p>"
+    },
+    {
+      "id": "flow-control",
+      "number": "6",
+      "title": "Flow control and priority",
+      "content": "<p>Multiplexing creates contention for one TCP connection, so HTTP/2 adds its own flow control. It is credit-based. A receiver advertises how many octets it is ready to receive, and a sender MUST respect that. The initial window is 65,535 octets for each new stream and for the connection as a whole, and the receiver grants more with WINDOW_UPDATE frames, whose increment must be between 1 and 2<sup>31</sup>-1.</p><p>Flow control is hop by hop, not end to end, so proxies do not forward WINDOW_UPDATE frames. Of the frames this RFC defines, only DATA frames are subject to it, so important control frames are never stuck behind a full window. A deployment that does not need the feature can advertise the maximum window and keep it topped up.</p><div class=\"callout callout-warning\"><p>Window size matters for speed. If a peer's window is smaller than the bandwidth-delay product of the connection, throughput is limited by HTTP/2 flow control, not by the network.</p></div><p>The 2015 specification also defined a rich priority scheme. This revision deprecates it: the RFC calls the scheme \"not successful\", because it was complex and implemented unevenly. The PRIORITY frame and the priority fields in HEADERS are kept so that peers stay interoperable, and the RFC points to <a href=\"/rfc9218\">RFC 9218</a> as a simpler alternative.</p>",
+      "eli5": "<p>The receiver hands the sender a bucket of tokens, and the sender spends one for each piece of data. When the bucket is empty it must wait until the receiver hands over more.</p>"
+    },
+    {
+      "id": "http-mapping",
+      "number": "7",
+      "title": "Carrying HTTP messages",
+      "content": "<p>HTTP/2 translates each HTTP message into frames. A request or response header section becomes a HEADERS frame, plus CONTINUATION frames if it does not fit. Any message body follows in DATA frames, and the last frame of the message carries END_STREAM. Trailers, if any, go in a final HEADERS frame.</p><p>The old request line and status line are replaced with <strong>pseudo-header fields</strong> that start with a colon. Requests use <code>:method</code>, <code>:scheme</code>, <code>:authority</code> and <code>:path</code>, and responses use <code>:status</code>. Pseudo-header fields must come before regular fields. Field names are lowercase, and connection-specific headers such as <code>Connection</code>, <code>Keep-Alive</code> and <code>Transfer-Encoding</code> must not appear; a message with them is malformed. The only exception is <code>TE</code>, and only with the value <code>trailers</code>.</p><p>The example below is the RFC's own, showing a GET request as a single HEADERS frame.</p><p><strong>Server push</strong> is an optional extra: a server can send a PUSH_PROMISE frame that announces a synthetic request, then send the response on a new, server-initiated stream. A client can switch it off with SETTINGS_ENABLE_PUSH set to 0. The RFC notes that in practice \"server push is difficult to use effectively\" because the server has to predict what the client needs.</p>",
+      "eli5": "<p>The old way wrote a request like a letter. The new way fills in a form with labeled boxes, and the labels starting with a colon are the special boxes for the basics, such as where to go and what to get.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and TLS",
+      "content": "<p>HTTP/2 over TLS MUST use TLS 1.2 or higher. The TLS implementation MUST support Server Name Indication, and clients MUST send it when the server is identified by a domain name. For TLS 1.2 the RFC adds restrictions: compression and renegotiation MUST be disabled, ephemeral key exchange sizes have minimums, and a list of prohibited cipher suites is in Appendix A. An endpoint that sees a weak connection can use the INADEQUATE_SECURITY error code.</p><p>Section 10 of the RFC covers risks. Connection reuse requires that the server is authoritative for the host, which for https depends on a valid certificate. A server that does not want a reused connection can send 421 (Misdirected Request).</p><p>The longest discussion is denial of service. HTTP/2 connections demand more state than HTTP/1.1 ones, and a peer can cause large amounts of work cheaply: tiny WINDOW_UPDATE increments, endless PINGs or SETTINGS that each demand an answer, or invalid requests that trigger RST_STREAM frames. The RFC tells implementers to bound queued frames and to limit field block size. The ENHANCE_YOUR_CALM error code lets an endpoint tell a peer that it is generating excessive load.</p><div class=\"callout callout-info\"><p>Padding in DATA and HEADERS frames can hide message sizes, but the RFC warns that it gives less protection than it appears, and that turning off compression may be a better defense against attacks like BREACH.</p></div>",
+      "eli5": "<p>The doors need good locks, and the rules say which locks are good enough. The rules also warn that a sneaky visitor can ask for tiny favors again and again until you are worn out, so a good host sets limits.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "motivation",
+      "position": "after",
+      "caption": "HTTP/1.1 and HTTP/2 on the wire",
+      "data": {
+        "columns": [
+          "",
+          "HTTP/1.1 (RFC 9112)",
+          "HTTP/2 (this RFC)"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Message format",
+              "Text lines",
+              "Binary frames"
+            ]
+          },
+          {
+            "cells": [
+              "Concurrency",
+              "One request at a time per connection, pipelining only partly helps; clients open several connections",
+              "Many streams interleaved on one connection"
+            ]
+          },
+          {
+            "cells": [
+              "Header fields",
+              "Sent in full each time",
+              "Compressed with HPACK (RFC 7541)"
+            ]
+          },
+          {
+            "cells": [
+              "Flow control",
+              "Left to TCP",
+              "Per-stream and per-connection, plus TCP"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "starting-http2",
+      "position": "after",
+      "caption": "CONNECTION START AND ONE REQUEST",
+      "data": {
+        "lanes": [
+          {
+            "key": "c",
+            "label": "Client"
+          },
+          {
+            "key": "s",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "c",
+            "to": "s",
+            "label": "TLS handshake, ALPN offers h2",
+            "color": "neutral",
+            "note": "For https URIs the protocol is chosen during TLS."
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "TLS handshake, ALPN selects h2",
+            "color": "neutral"
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "Preface: 24-octet magic + SETTINGS",
+            "color": "blue",
+            "note": "The magic text is PRI * HTTP/2.0 CRLF CRLF SM CRLF CRLF."
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "Preface: SETTINGS",
+            "color": "green",
+            "note": "Must be the first frame the server sends."
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "SETTINGS with ACK flag",
+            "color": "blue",
+            "note": "Acknowledges the server's SETTINGS."
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "SETTINGS with ACK flag",
+            "color": "green",
+            "note": "Acknowledges the client's SETTINGS."
+          },
+          {
+            "from": "c",
+            "to": "s",
+            "label": "HEADERS, stream 1, END_HEADERS + END_STREAM",
+            "color": "blue",
+            "note": "A GET request with no body. Clients may send this without waiting for the server's preface."
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "HEADERS, stream 1, :status 200",
+            "color": "green"
+          },
+          {
+            "from": "s",
+            "to": "c",
+            "label": "DATA, stream 1, END_STREAM",
+            "color": "green",
+            "note": "Stream 1 is now closed."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "id": "frame-header-fig",
+      "anchor": "frame-format",
+      "position": "after",
+      "caption": "FIG 1 · HTTP/2 FRAME HEADER · 9 OCTETS",
+      "data": {
+        "title": "HTTP/2 frame header",
+        "bytes": 9,
+        "width": 32,
+        "fields": [
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 24,
+            "desc": "Size of the frame payload in octets. Does not include the 9-octet header. Must not exceed 16,384 unless the receiver has advertised a larger SETTINGS_MAX_FRAME_SIZE."
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "Frame type: 0x00 DATA, 0x01 HEADERS, 0x02 PRIORITY, 0x03 RST_STREAM, 0x04 SETTINGS, 0x05 PUSH_PROMISE, 0x06 PING, 0x07 GOAWAY, 0x08 WINDOW_UPDATE, 0x09 CONTINUATION. Unknown types are ignored."
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 8,
+            "desc": "Boolean flags whose meaning depends on the frame type, such as END_STREAM (0x01) and END_HEADERS (0x04). Unused flags are sent as 0 and ignored on receipt."
+          },
+          {
+            "key": "r",
+            "name": "Reserved",
+            "bits": 1,
+            "desc": "Reserved bit. Must be sent as 0 and ignored when received.",
+            "value": "0"
+          },
+          {
+            "key": "stream-id",
+            "name": "Stream Identifier",
+            "bits": 31,
+            "desc": "The stream this frame belongs to. 0x00 means the frame applies to the connection as a whole."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "frame-format",
+      "position": "after",
+      "caption": "Frame types defined in the RFC",
+      "data": {
+        "columns": [
+          "Type",
+          "Code",
+          "Purpose"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "DATA",
+              "0x00",
+              "Carries message body octets for a stream. Subject to flow control."
+            ]
+          },
+          {
+            "cells": [
+              "HEADERS",
+              "0x01",
+              "Opens a stream and carries a field block fragment."
+            ]
+          },
+          {
+            "cells": [
+              "PRIORITY",
+              "0x02",
+              "Deprecated priority signal, kept for interoperability."
+            ]
+          },
+          {
+            "cells": [
+              "RST_STREAM",
+              "0x03",
+              "Terminates one stream immediately."
+            ]
+          },
+          {
+            "cells": [
+              "SETTINGS",
+              "0x04",
+              "Sends configuration parameters and acknowledges them."
+            ]
+          },
+          {
+            "cells": [
+              "PUSH_PROMISE",
+              "0x05",
+              "Announces a server-pushed request and reserves a stream."
+            ]
+          },
+          {
+            "cells": [
+              "PING",
+              "0x06",
+              "Measures round-trip time and checks that the connection is alive."
+            ]
+          },
+          {
+            "cells": [
+              "GOAWAY",
+              "0x07",
+              "Starts shutdown of the connection or reports a serious error."
+            ]
+          },
+          {
+            "cells": [
+              "WINDOW_UPDATE",
+              "0x08",
+              "Grants more flow-control credit for a stream or the connection."
+            ]
+          },
+          {
+            "cells": [
+              "CONTINUATION",
+              "0x09",
+              "Continues a field block that did not fit in HEADERS or PUSH_PROMISE."
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "streams",
+      "position": "after",
+      "caption": "STREAM LIFECYCLE · FIG 2 IN THE RFC",
+      "data": {
+        "states": [
+          {
+            "key": "idle",
+            "label": "idle",
+            "initial": true
+          },
+          {
+            "key": "reserved-local",
+            "label": "reserved (local)"
+          },
+          {
+            "key": "reserved-remote",
+            "label": "reserved (remote)"
+          },
+          {
+            "key": "open",
+            "label": "open"
+          },
+          {
+            "key": "half-closed-local",
+            "label": "half-closed (local)"
+          },
+          {
+            "key": "half-closed-remote",
+            "label": "half-closed (remote)"
+          },
+          {
+            "key": "closed",
+            "label": "closed",
+            "final": true
+          }
+        ],
+        "transitions": [
+          {
+            "from": "idle",
+            "to": "open",
+            "label": "send or receive HEADERS"
+          },
+          {
+            "from": "idle",
+            "to": "reserved-local",
+            "label": "send PUSH_PROMISE"
+          },
+          {
+            "from": "idle",
+            "to": "reserved-remote",
+            "label": "receive PUSH_PROMISE"
+          },
+          {
+            "from": "reserved-local",
+            "to": "half-closed-remote",
+            "label": "send HEADERS"
+          },
+          {
+            "from": "reserved-remote",
+            "to": "half-closed-local",
+            "label": "receive HEADERS"
+          },
+          {
+            "from": "reserved-local",
+            "to": "closed",
+            "label": "send or receive RST_STREAM"
+          },
+          {
+            "from": "reserved-remote",
+            "to": "closed",
+            "label": "send or receive RST_STREAM"
+          },
+          {
+            "from": "open",
+            "to": "half-closed-local",
+            "label": "send END_STREAM"
+          },
+          {
+            "from": "open",
+            "to": "half-closed-remote",
+            "label": "receive END_STREAM"
+          },
+          {
+            "from": "open",
+            "to": "closed",
+            "label": "send or receive RST_STREAM"
+          },
+          {
+            "from": "half-closed-local",
+            "to": "closed",
+            "label": "receive END_STREAM, or send or receive RST_STREAM"
+          },
+          {
+            "from": "half-closed-remote",
+            "to": "closed",
+            "label": "send END_STREAM, or send or receive RST_STREAM"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "flow-control",
+      "position": "after",
+      "caption": "Settings that shape a connection",
+      "data": {
+        "items": [
+          {
+            "title": "SETTINGS_HEADER_TABLE_SIZE (0x01)",
+            "text": "Maximum size of the compression table used to decode field blocks. Initial value 4,096 octets."
+          },
+          {
+            "title": "SETTINGS_ENABLE_PUSH (0x02)",
+            "text": "Set to 0 to disable server push. A server must never set it to 1."
+          },
+          {
+            "title": "SETTINGS_MAX_CONCURRENT_STREAMS (0x03)",
+            "text": "How many streams the sender allows its peer to open. Initially unlimited; 100 or more is recommended."
+          },
+          {
+            "title": "SETTINGS_INITIAL_WINDOW_SIZE (0x04)",
+            "text": "Starting flow-control window for each stream. Initial value 65,535 octets."
+          },
+          {
+            "title": "SETTINGS_MAX_FRAME_SIZE (0x05)",
+            "text": "Largest frame payload the sender will accept: 16,384 to 16,777,215 octets."
+          },
+          {
+            "title": "SETTINGS_MAX_HEADER_LIST_SIZE (0x06)",
+            "text": "Advisory limit on the uncompressed size of a field section. Initially unlimited."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "http-mapping",
+      "position": "after",
+      "caption": "RFC 9113 §8.8.1 · A SIMPLE REQUEST",
+      "data": {
+        "title": "HTTP/1.1 request and its HTTP/2 equivalent",
+        "lang": "text",
+        "code": "GET /resource HTTP/1.1           HEADERS\nHost: example.org          ==>     + END_STREAM\nAccept: image/jpeg                 + END_HEADERS\n                                     :method = GET\n                                     :scheme = https\n                                     :authority = example.org\n                                     :path = /resource\n                                     host = example.org\n                                     accept = image/jpeg"
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "security-considerations",
+      "position": "before",
+      "caption": "Where HTTP/2 sits",
+      "data": {
+        "layers": [
+          {
+            "label": "HTTP semantics",
+            "detail": "Methods, status codes and fields (RFC 9110)"
+          },
+          {
+            "label": "HTTP/2",
+            "detail": "Frames, streams, flow control (this RFC), with HPACK field compression (RFC 7541)",
+            "highlight": true
+          },
+          {
+            "label": "TLS 1.2 or higher",
+            "detail": "Negotiates h2 with ALPN for https URIs"
+          },
+          {
+            "label": "TCP",
+            "detail": "One connection per origin; client is the initiator"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[HTTP]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP Semantics\", STD 97, RFC 9110, June 2022.",
+      "rfc": 9110
+    },
+    {
+      "number": "[COMPRESSION]",
+      "text": "Peon, R. and H. Ruellan, \"HPACK: Header Compression for HTTP/2\", RFC 7541, May 2015.",
+      "rfc": 7541
+    },
+    {
+      "number": "[HTTP/1.1]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP/1.1\", STD 99, RFC 9112, June 2022.",
+      "rfc": 9112
+    },
+    {
+      "number": "[QUIC]",
+      "text": "Iyengar, J., Ed. and M. Thomson, Ed., \"QUIC: A UDP-Based Multiplexed and Secure Transport\", RFC 9000, May 2021.",
+      "rfc": 9000
+    },
+    {
+      "number": "See also",
+      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol Version 2 (HTTP/2)\", RFC 7540, May 2015.",
+      "rfc": 7540
+    },
+    {
+      "number": "See also",
+      "text": "Benjamin, D., \"Using TLS 1.3 with HTTP/2\", RFC 8740, February 2020.",
+      "rfc": 8740
+    },
+    {
+      "number": "See also",
+      "text": "Oku, K. and L. Pardue, \"Extensible Prioritization Scheme for HTTP\", RFC 9218, June 2022.",
+      "rfc": 9218
+    },
+    {
+      "number": "See also",
+      "text": "Bishop, M., Ed., \"HTTP/3\", RFC 9114, June 2022.",
+      "rfc": 9114
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-15",
+    "reviewedBy": null
+  },
+  "updated": "2026-10-15"
+}

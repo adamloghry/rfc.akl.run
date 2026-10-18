@@ -1,0 +1,237 @@
+{
+  "number": 4951,
+  "shortTitle": "L2TP Failover",
+  "category": "routing",
+  "categoryReviewed": false,
+  "summary": "<p>Layer 2 Tunneling Protocol keeps some shared state between its two ends, such as sequence numbers on the control connection. When one side fails, a new control connection is created, and this extension lets the endpoints exchange information so the new one can be tied to the old one. It is not a full replacement for mirrored state, just an aid to recovery.</p>",
+  "eli5": {
+    "summary": "<p>If a phone call drops, this helps both people quickly remember where they left off when they call back, instead of starting from scratch.</p>"
+  },
+  "questions": [
+    "l2tp failover",
+    "how does l2tp recover from a control connection failure",
+    "what is l2tp failover",
+    "how does l2tp recover after a failure",
+    "what is the l2tp tunnel recovery avp",
+    "what is an l2tp failover session query"
+  ],
+  "tags": [
+    "Tunneling",
+    "Resiliency",
+    "L2TP"
+  ],
+  "subtitle": "How an L2TP tunnel can be picked back up after one end crashes, instead of being torn down and rebuilt.",
+  "tldr": {
+    "problem": "When an L2TP endpoint fails and a backup takes over, the control connection's sequence numbers are lost. Without them the whole tunnel can be terminated, and mirroring every sequence number to a backup is costly.",
+    "mechanism": "The backup opens a short-lived recovery tunnel that names the old tunnel, authenticates the peer and agrees on fresh sequence numbers. Then the two ends compare which sessions still exist and clear the ones that disagree.",
+    "outcome": "Tunnels and the sessions that were established can resume without being rebuilt from scratch. It is an aid to recovery, not a replacement for fully mirrored state.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New AVP types",
+      "value": "76, 77, 78, 79"
+    },
+    {
+      "label": "New message types",
+      "value": "FSQ 21, FSR 22"
+    },
+    {
+      "label": "Recovery Time unit",
+      "value": "milliseconds"
+    },
+    {
+      "label": "Spoof success odds (L2TPv2)",
+      "value": "1 in (2^16 - 1)"
+    },
+    {
+      "label": "Spoof success odds (L2TPv3)",
+      "value": "1 in (2^32 - 1)"
+    }
+  ],
+  "today": "<p>RFC 4951 is a Proposed Standard. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "sequence-number",
+    "nonce",
+    "control-connection"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "The Problem After a Failover",
+      "content": "<p>L2TP is connection-oriented and the two ends share state. Most of it is configured and still correct after a failure. The part that changes as packets flow is the <strong>sequence numbers</strong> (<code>Ns</code> and <code>Nr</code>), and the RFC says this is currently the only dynamic state that is essential to a tunnel.</p><p>If the control channel's sequence numbers become inconsistent, the entire tunnel can be terminated. If a session's sequence numbers become inconsistent, significant data loss can follow, which the end user sees as a service loss.</p><p>The RFC names two existing options and their drawbacks. Keeping the backup fully synchronized adds significant performance and complexity cost, especially as tunnel and session aggregation grows. Re-establishing every tunnel and session after a failover increases the service loss time as the architecture scales. This document adds a third path that brings the stateful information back to a consistent state for tunnels and sessions that were established before the failure. It extends <a href='/rfc2661'>RFC 2661</a> (L2TPv2) and <a href='/rfc3931'>RFC 3931</a> (L2TPv3).</p>",
+      "eli5": "<p>Two friends are passing notes numbered 1, 2, 3. If one forgets the count, the notes get mixed up. This RFC is a way to agree on the count again without starting the whole friendship over.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "Roles and the Three Phases",
+      "content": "<p>The RFC uses a picture with a remote endpoint (R) peering with an active endpoint (A), with a backup endpoint (B) standing by. When A fails, A is the <strong>failed endpoint</strong>. B becomes the <strong>recovery endpoint</strong> and the new active endpoint. If there is no B, A can become the recovery endpoint after it restarts, provided it saved information about its active tunnels and sessions in persistent storage. R does not start recovery. It waits for the recovery endpoint to signal.</p><p>Failure detection is left to the implementation. The RFC assumes the backup detects failure faster than the L2TP control channel timeout between the active and remote endpoints. It also notes that a protocol such as BFD for multihop paths may be needed when the active and backup are in separate devices.</p><p>A device can suffer a control channel failure, a data channel failure, or both. This document specifies recovery for the control channel failure and for the combined failure, because not much stateful information could be recovered through a control exchange when only the data channel fails.</p><p>The protocol has three phases: <strong>failover capability negotiation</strong> before any failure, <strong>failover recovery</strong> afterwards, and <strong>session state synchronization</strong>.</p>",
+      "eli5": "<p>There is a player, a substitute and a teammate. When the player gets hurt the substitute steps in. The teammate just waits for the substitute to say \"I am taking over.\"</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "3.1",
+      "title": "Advertising Failover Capability",
+      "content": "<p>During normal control connection setup, before any failure, the endpoints exchange a <strong>Failover Capability AVP</strong> in the SCCRQ and SCCRP messages. It says whether the sender can recover its control channel (the <code>C</code> bit), whether it can reset the <code>Nr</code> value of data channels that use sequence numbers (the <code>D</code> bit), and how much recovery time it asks the peer to allow.</p><p>The AVP MUST NOT be sent with both bits cleared. If <code>C</code> is clear, <code>D</code> MUST be set, and a control channel failure would then be fatal for the tunnel and all its data channels. The AVP is not mandatory (the M-bit MUST be 0) and may be hidden.</p><p>The <strong>Recovery Time</strong> applies only when <code>C</code> is set. It is the number of milliseconds an endpoint asks its peer to wait before assuming recovery has failed. The timer starts when the control channel timeout starts and is not stopped until the peer is successfully authenticated during recovery. A value of zero does not mean failover will not occur. It means no additional time is requested.</p><p>This AVP MUST NOT appear in any message other than SCCRQ and SCCRP.</p>",
+      "eli5": "<p>Before anything goes wrong, each side tells the other, \"If I crash, I know how to pick up again, and please wait this long for me.\"</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3.2",
+      "title": "The Recovery Tunnel",
+      "content": "<p>The recovery endpoint builds a new control connection, the <strong>recovery tunnel</strong>, for each old tunnel it wants to recover. There is a one-to-one relationship between them. It follows the normal L2TPv2 or L2TPv3 setup procedure, MUST use the same L2TP version as the old tunnel, and MUST NOT reuse an old Tunnel ID. Its SCCRQ MUST carry a <strong>Tunnel Recovery AVP</strong> naming the old tunnel by Recover Tunnel ID and Recover Remote Tunnel ID. It MUST NOT carry the Failover Capability AVP. Apart from the setup messages, an endpoint SHOULD only send StopCCN, HELLO, ZLB and (L2TPv3 only) ACK on it.</p><p>The peer MUST terminate the recovery tunnel if either ID is unknown, if the old tunnel was not marked failover capable, or if the L2TP version differs. If it accepts, it SHOULD include a <strong>Suggested Control Sequence AVP</strong> in its SCCRP.</p><p>Authentication uses the usual L2TP procedure with the same secret as the old tunnel. For L2TPv3 tunnels configured for control message authentication, the recovery tunnel MUST use it too, and both ends reset their nonce values to the ones exchanged there. If the recovery tunnel cannot be established, the recovery endpoint MUST silently clear the old tunnel and its sessions.</p><p>If both ends fail at once, the <strong>Tie Breaker AVP</strong> makes sure only one recovery tunnel survives for a given old tunnel. The loser resets its sequence numbers as if it were the remote endpoint. Tie breakers for recovery tunnels and ordinary tunnels are scoped independently, so losing a tie against an ordinary tunnel MUST NOT terminate a recovery tunnel.</p>",
+      "eli5": "<p>The substitute makes a brand-new phone call just to say which old call it is replacing. Both sides check a secret password so nobody can fake it. Once they agree, the new call can hang up.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "3.2.2",
+      "title": "Resetting the Control and Data Channels",
+      "content": "<p>The <strong>control channel reset</strong> lets the recovered tunnel carry control messages again. An endpoint SHOULD flush its transmit and receive windows and reset <code>Ns</code> and <code>Nr</code>. The recovery endpoint resets on getting a valid SCCRP, and the remote endpoint resets on getting a valid SCCCN. If no Suggested Control Sequence AVP was sent or received, <code>Ns</code> and <code>Nr</code> are reset to zero. Either side can then tear down the recovery tunnel. Control packets received on the recovered tunnel before the reset MUST be silently discarded, and new sessions MUST NOT be set up until non-established sessions have been cleared.</p><p>The <strong>data channel reset</strong> applies only to sessions using sequence numbers. The recovery endpoint sets <code>Ns</code> to zero, while the remote endpoint keeps using its previous <code>Ns</code> values. To rebuild <code>Nr</code>, an endpoint that receives <code>n</code> out-of-order but in-sequence packets MUST set <code>Nr</code> from the incoming <code>Ns</code>, as suggested in Appendix C of RFC 3931. The value of <code>n</code> SHOULD be configurable.</p><p>If either endpoint lacks the <code>D</code> capability, sequenced data channels are not recoverable, and the recovery endpoint SHOULD tear those sessions down with a CDN.</p>",
+      "eli5": "<p>After the new call connects, both sides agree on a fresh page number to start counting from, so their notes line up again.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "3.3",
+      "title": "Synchronizing Session State",
+      "content": "<p>A failure in the middle of setting up or tearing down a session can leave one end thinking a session is established while its peer thinks it does not exist. This happens if a CDN or ICCN sent just before the failure never arrived.</p><p>The mandatory fix has steps. First, each endpoint MUST silently clear (no CDN) sessions that were not established. Next, endpoints MAY pick sessions that might be inconsistent, for example from data channel inactivity. Then an endpoint sends a <strong>Failover Session Query (FSQ)</strong> with at least one <strong>Failover Session State (FSS) AVP</strong> per session it wants to check. It may send further FSQs before the first is answered.</p><p>The peer answers with a <strong>Failover Session Response (FSR)</strong> that includes an FSS AVP for every one received, in any order, and may use several FSRs for one FSQ. If a queried session does not exist or is paired with a different Remote Session ID, the Session ID in the response FSS is set to zero. A session paired with a mismatching ID is not cleared but marked stale, to be queried again later. On receiving an FSR, an endpoint silently clears any session whose returned Session ID is zero. Otherwise it treats the session as established and recovered.</p><p>Until sessions are synchronized, an ICRQ for a session an endpoint thinks is established MUST be answered with a CDN, which sets the Assigned or Local Session ID AVP to its local Session ID and clears that session. Using a least recently used Session ID for new sessions can reduce this problem.</p>",
+      "eli5": "<p>Afterwards each side reads out a list of the games it thinks are still going. Any game the other side does not know about gets quietly erased.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "New Messages and AVPs",
+      "content": "<p>Two new control messages are defined, both sent over an established or recovered control connection. FSQ is message type 21 and FSR is message type 22. Each MUST contain the Message Type and Failover Session State AVPs, and MAY contain Random Vector and, for L2TPv3 tunnels only, Message digest. Other AVPs MUST NOT be sent and SHOULD be ignored. The M-bit on the Message Type AVP MUST be 0.</p><p>Four new AVPs are defined:</p><ul><li><strong>Failover Capability</strong> (76): the <code>C</code> and <code>D</code> bits and Recovery Time in milliseconds. Not mandatory.</li><li><strong>Tunnel Recovery</strong> (77): Recover Tunnel ID and Recover Remote Tunnel ID. Mandatory (M-bit 1) and MUST NOT be hidden. Only allowed in the SCCRQ of a recovery tunnel.</li><li><strong>Suggested Control Sequence</strong> (78): Suggested Ns and Suggested Nr. Not mandatory, may be hidden. Only allowed in the SCCRP of a recovery tunnel. If present, the recovery endpoint MUST use these values.</li><li><strong>Failover Session State</strong> (79): a Session ID and a Remote Session ID. Mandatory, may be hidden. Only allowed in FSQ and FSR.</li></ul><p>The Tunnel Recovery and FSS AVPs have separate layouts for L2TPv2 and L2TPv3. The L2TPv3 form uses 32-bit ID fields. The L2TPv2 form uses 16-bit IDs with a reserved field before each.</p>",
+      "eli5": "<p>The RFC adds two new kinds of letters (a question and an answer) and four new forms to fill in, each with its own number so everyone recognizes them.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and Status",
+      "content": "<p>A spoofed failover request (an SCCRQ with a Tunnel Recovery AVP) could cause a control channel termination if the authentication measures are not used. Even when they are used, an attacker who sends spoofed requests that fail authentication can still learn the identity of an operational tunnel. The RFC gives the chance of a spoofed request succeeding as 1 in (2^16 - 1) for L2TPv2 and 1 in (2^32 - 1) for L2TPv3.</p><p>A discovered tunnel identity could be misused to send control messages. Normally messages outside the receive window are discarded, but if the Suggested Control Sequence AVP is not used the sequence numbers may reset to zero, which makes the window predictable. To improve security an endpoint may be configured with the set of endpoints allowed to recover a tunnel, and should use the Suggested Control Sequence AVP.</p><p>Implementations MAY expose the C bit, D bit and recovery time as configuration. The RFC expects they will be set through a command line interface or another proprietary mechanism. IANA assigned the four AVP values and the two message types listed above.</p>",
+      "eli5": "<p>A trickster could pretend to be the substitute and cause trouble. A secret password and starting at a hard-to-guess page number make that much harder.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "RECOVERY TUNNEL SETUP (RFC 4951 APPENDIX A)",
+      "data": {
+        "lanes": [
+          {
+            "key": "recovery",
+            "label": "Recovery endpoint"
+          },
+          {
+            "key": "peer",
+            "label": "Peer"
+          }
+        ],
+        "messages": [
+          {
+            "from": "recovery",
+            "to": "peer",
+            "label": "SCCRQ + Tunnel Recovery AVP",
+            "color": "blue",
+            "note": "Names the old tunnel by its two Tunnel IDs."
+          },
+          {
+            "from": "peer",
+            "to": "recovery",
+            "label": "SCCRP + Suggested Control Sequence AVP",
+            "color": "green",
+            "note": "Recovery endpoint resets Ns and Nr to the suggested values."
+          },
+          {
+            "from": "recovery",
+            "to": "peer",
+            "label": "SCCCN",
+            "color": "blue",
+            "note": "Peer validates and resets its Ns and Nr."
+          },
+          {
+            "from": "recovery",
+            "to": "peer",
+            "label": "StopCCN",
+            "color": "neutral",
+            "note": "The recovery tunnel is torn down."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "VALUES ASSIGNED BY RFC 4951",
+      "data": {
+        "items": [
+          {
+            "code": "76",
+            "label": "Failover Capability AVP",
+            "desc": "C and D bits plus Recovery Time."
+          },
+          {
+            "code": "77",
+            "label": "Tunnel Recovery AVP",
+            "desc": "Identifies the old tunnel being recovered."
+          },
+          {
+            "code": "78",
+            "label": "Suggested Control Sequence AVP",
+            "desc": "Suggested Ns and Nr for the recovered tunnel."
+          },
+          {
+            "code": "79",
+            "label": "Failover Session State AVP",
+            "desc": "Session ID and Remote Session ID being queried."
+          },
+          {
+            "code": "21",
+            "label": "Failover Session Query (message type)",
+            "desc": "Asks the peer about its view of sessions."
+          },
+          {
+            "code": "22",
+            "label": "Failover Session Response (message type)",
+            "desc": "Answers with the local state of sessions."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[L2TPv2]",
+      "text": "Townsley, W., et al., \"Layer Two Tunneling Protocol 'L2TP'\", RFC 2661, August 1999.",
+      "rfc": 2661
+    },
+    {
+      "number": "[L2TPv3]",
+      "text": "Lau, J., Townsley, M., and I. Goyret, \"Layer Two Tunneling Protocol - Version 3 (L2TPv3)\", RFC 3931, March 2005.",
+      "rfc": 3931
+    },
+    {
+      "number": "[L2TPv2-MIB]",
+      "text": "Caves, E., Calhoun, P., and R. Wheeler, \"Layer Two Tunneling Protocol 'L2TP' Management Information Base\", RFC 3371, August 2002.",
+      "rfc": 3371
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}

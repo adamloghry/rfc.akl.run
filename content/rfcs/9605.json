@@ -1,0 +1,294 @@
+{
+  "number": 9605,
+  "shortTitle": "SFrame",
+  "category": "security",
+  "categoryReviewed": false,
+  "summary": "<p>Describes SFrame, end-to-end encryption and authentication of media frames in multiparty calls. Central media servers (SFUs) can read the metadata needed for forwarding without seeing the media. It differs from SRTP by being independent of RTP.</p>",
+  "eli5": {
+    "summary": "<p>In a group video call, the middle server passes along packages without being able to look inside. SFrame locks the packages so only participants can.</p>"
+  },
+  "questions": [
+    "what is sframe",
+    "end-to-end encryption video conference",
+    "sfu encrypted media",
+    "sframe vs srtp",
+    "how does sframe encrypt video calls",
+    "what is the sframe header format"
+  ],
+  "tags": [
+    "Security",
+    "Real-Time Media",
+    "Encryption"
+  ],
+  "subtitle": "End-to-end encryption for group video calls, built so a middle server can still forward media without seeing it.",
+  "tldr": {
+    "problem": "In group calls, a Selective Forwarding Unit (SFU) must read some metadata to route media, yet the media itself should be hidden from it. SRTP double encryption is inefficient, complex and tied to RTP.",
+    "mechanism": "SFrame wraps each media frame (or packet) in a small header with a Key ID and a counter, then encrypts and authenticates it with an AEAD cipher. Keys come from a separate key management system.",
+    "outcome": "SFrame adds only a few bytes of overhead per frame, works with RTP and non-RTP transports, and leaves key distribution, replay handling and metadata choices to the application.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Config byte",
+      "value": "1 byte (X 1 bit, K 3 bits, Y 1 bit, C 3 bits)"
+    },
+    {
+      "label": "Cipher suites defined",
+      "value": "5"
+    },
+    {
+      "label": "Cipher suite field",
+      "value": "2 bytes (0x0000 to 0xFFFF)"
+    },
+    {
+      "label": "Tag lengths",
+      "value": "32, 64, 80 or 128 bits"
+    },
+    {
+      "label": "Assumed overhead",
+      "value": "22 bytes per encryption"
+    },
+    {
+      "label": "KID in key derivation",
+      "value": "8-byte big-endian integer"
+    }
+  ],
+  "today": "<p>RFC 9605 is a Proposed Standard published in August 2024, and the unit metadata lists no RFC that obsoletes or updates it. Key management, anti-replay and metadata handling are left to the applications that use it.</p>",
+  "glossary": [
+    "srtp",
+    "rtp",
+    "aead",
+    "hkdf",
+    "nonce",
+    "forward-secrecy",
+    "replay-attack",
+    "end-to-end-principle"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why SFrame Exists",
+      "content": "<p>Modern multiparty video calls use <strong>Selective Forwarding Unit</strong> (SFU) servers to route media streams to participants based on bandwidth, desired video size, codec support and similar factors. An SFU does not need the media content, so the media can be encrypted end to end (E2E). But the SFU does need some RTP metadata and RTCP feedback, which it cannot read if everything is end-to-end encrypted.</p><p>That leads to two layers of protection: hop-by-hop (HBH) encryption between each endpoint and the SFU, and E2E encryption between the endpoints. SRTP (<a href='/rfc3711'>RFC 3711</a>) is already widely used for the HBH layer, and <a href='/rfc8723'>RFC 8723</a> defines a double-encryption scheme for E2E use in SRTP. The RFC says that scheme has poor efficiency and high complexity, and its entanglement with RTP makes it unworkable in several realistic SFU scenarios.</p><p>SFrame is the replacement proposal: a general encryption framing that protects media payloads and is agnostic of transport. It is meant to sit as an E2EE layer over an HBH-encrypted transport such as SRTP or QUIC.</p><div class='callout callout-info'><p>SFrame can be applied per frame (more efficient, but integration is more complex) or per packet (simpler, but more bandwidth). The sender and receivers must agree on what the encrypted object means; SFrame does not arrange that agreement.</p></div>",
+      "eli5": "<p>On a group call, a helper server hands out video to everyone. The helper needs to see the label on each package but should not peek inside. SFrame puts a lock on the inside while leaving the label readable.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "Design Goals",
+      "content": "<p>The RFC lists eight goals. Together they describe a scheme that is cheap, transport-independent and easy to retrofit:</p><ul><li>Secure E2E audio and video that works with arbitrary SFU servers.</li><li>Media encryption decoupled from key management, so any key management system can be used.</li><li>Minimal packet expansion, so conferencing works in as many network conditions as possible.</li><li>Independence from the transport, allowing non-RTP uses such as WebTransport.</li><li>No special handling for RTX and Forward Error Correction (FEC) packets when used with RTP.</li><li>Minimal changes in SFU servers and in endpoints.</li><li>Compatibility with the most popular conferencing audio and video codecs.</li></ul><p>The terms SFU and media stream are used in a looser sense than in <a href='/rfc7656'>RFC 7656</a>: an SFU is a selective switching function for media payloads, and a media stream is a sequence of media payloads whether carried over RTP or something else.</p>",
+      "eli5": "<p>The goals are: keep the secret safe, add as little extra weight as possible, and make it easy for existing apps and servers to adopt.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "4.3",
+      "title": "The SFrame Header and Ciphertext",
+      "content": "<p>An <strong>SFrame ciphertext</strong> is an SFrame header followed by the output of an AEAD encryption of the plaintext (<a href='/rfc5116'>RFC 5116</a>), with the header supplied as additional authenticated data. The header is therefore integrity protected but not hidden. When SFrame is applied per frame, the ciphertext spans several packets: the header is in the first packet and the authentication tag in the last. The application must reassemble the frame, handling loss and reordering.</p><p>The header carries two values: a <strong>Key ID</strong> (KID) that selects the key, and a <strong>Counter</strong> (CTR) used to build the nonce. The first byte is a config byte with four fields: <code>X</code> (1 bit, extended KID flag), <code>K</code> (3 bits, the KID or its length), <code>Y</code> (1 bit, extended CTR flag) and <code>C</code> (3 bits, the CTR or its length).</p><p>KID and CTR are compact unsigned integers in big-endian order. If a value is in the range 0-7, it fits directly in the config byte and its flag is 0. Otherwise the value MUST be encoded in the minimum number of bytes and appended after the config byte (KID first, then CTR), and the field holds the byte count minus one, so 3 bits can express lengths 1 to 8. Applications MUST ensure each (KID, CTR) combination is used for exactly one encryption operation.</p>",
+      "eli5": "<p>The header is a small sticker on the package. It says which key to use and which number in the sequence this package is. Small numbers fit right in the sticker, and bigger ones get extra room.</p>"
+    },
+    {
+      "id": "cryptography",
+      "number": "4.4",
+      "title": "Encryption Schema and Cipher Suites",
+      "content": "<p>Each operation starts from a secret <code>base_key</code> labeled by a KID. A key and a salt are derived from it with HKDF (<a href='/rfc5869'>RFC 5869</a>), using labels that start with <code>SFrame 1.0 Secret key</code> and <code>SFrame 1.0 Secret salt</code> plus the KID and cipher suite. In that derivation the KID is an 8-byte big-endian integer and the cipher suite is a 2-byte big-endian integer.</p><p>To encrypt, the nonce is the salt XORed with the current CTR, encoded as a big-endian integer of the AEAD's nonce length. The encoded header, together with application-provided metadata, is passed as AAD. The result is the header followed by the ciphertext. To decrypt, the receiver uses the KID in the header to find the key and the CTR to rebuild the nonce. If no key exists yet for that KID, the client MAY buffer the ciphertext and retry later. For any other failure the client MUST discard it, and SHOULD do so in a way that is indistinguishable from processing a valid ciphertext, taking the same time either way.</p><p>A given <code>base_key</code> MUST NOT be used for encryption by multiple senders, because that would reuse (key, nonce) pairs. Implementations MUST mark each key as usable for encryption or decryption, never both.</p><p>Each session uses a single <strong>cipher suite</strong>, naming a hash function and an AEAD algorithm, possibly with a truncated tag. The final number in a suite name is the tag length in bits. Different media streams may use different suites, for example an 80-bit tag for video and a 32-bit tag for audio. The AES-CTR suites use a synthetic AEAD built as encrypt-then-MAC with AES counter mode and HMAC, as in SRTP, truncating the MAC to the suite's tag size.</p>",
+      "eli5": "<p>From one master secret, SFrame makes a lock key and a scrambler number for each sender. Every package gets scrambled with a different number, so no two packages are locked the same way.</p>"
+    },
+    {
+      "id": "key-management",
+      "number": "5",
+      "title": "Key Management",
+      "content": "<p>SFrame does not say how keys are exchanged. It needs an E2E key management framework that provisions KID to <code>base_key</code> mappings to clients and updates them as clients join or leave. The application must supply this framework. The RFC describes two example schemes.</p><p><strong>Sender keys.</strong> If participants already have an E2E-secure channel, each one generates a fresh <code>base_key</code> and sends it to the others over that channel. The KID has two parts: a key generation, incremented when a new key is distributed, and a ratchet step, incremented each time the sender hashes its key forward for forward secrecy. Only the low-order R bits of the ratchet step are sent, with the remaining 64 - R bits carrying the key generation. Ratcheting is useful when adding a receiver, since the newcomer cannot decrypt earlier media. To keep a removed receiver out, the sender must distribute a new sender key.</p><p><strong>MLS.</strong> With the Messaging Layer Security protocol (<a href='/rfc9420'>RFC 9420</a>), the <code>base_key</code> comes from the MLS exporter for each epoch. The KID packs a context value, the sender's member index (S bits) and the low-order E bits of the epoch number. Receivers MUST drop an old epoch when a new epoch with the same low-order E bits is introduced.</p>",
+      "eli5": "<p>SFrame does not hand out keys. Something else must do that, like a teacher giving each kid a secret code. Whenever someone joins or leaves, the codes should change.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Working With SFUs and Video",
+      "content": "<p>Because SFrame leaves forwarding metadata outside the encrypted payload, SFUs keep working, but a few media behaviors need care.</p><ul><li><strong>Stream reuse:</strong> an SFU may reuse one transport stream for different participants. Each participant uses a different key, so the receiver attributes media using the authenticated KID. SFrame does not protect against impersonation by a malicious participant; that would need digital signatures.</li><li><strong>Simulcast:</strong> each simulcast layer is a separate encoded frame, encrypted independently with its own CTR value.</li><li><strong>Scalable video coding:</strong> so the SFU can drop layers, the sender MUST put each layer in a different SFrame ciphertext.</li><li><strong>Key frames:</strong> when keys change as someone joins, a key frame sent under an old key cannot be decrypted. Sending a key frame after the new key is in use minimizes the time before the newcomer sees video. Audio is unaffected because each frame decodes alone.</li><li><strong>Partial decoding:</strong> applying SFrame per frame rules it out, since the decoder gets nothing until the whole frame has arrived and been decrypted.</li></ul>",
+      "eli5": "<p>The helper server can still decide who gets which video, because it reads the labels. It just cannot see the pictures. When someone new joins, the sender should send a fresh full picture so they are not stuck waiting.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The RFC lists several limits. The header has integrity protection but no confidentiality, so observers can learn which parties send (from KIDs) and at what rate (from CTRs); hop-by-hop protection such as SRTP hides this between hops. SFrame offers <strong>no per-sender authentication</strong>: it uses symmetric keys, so any receiver holds the keys needed to send as another sender.</p><p>Every client SHOULD change keys when clients join or leave, for forward secrecy and post-compromise security. Replay handling is out of scope, but senders MUST reject requests to encrypt more than once with the same key and nonce. Receiver-side anti-replay is optional.</p><p>Short tags raise the risk of forgery by brute force. The success rate is roughly attempts per second divided by <code>2^(8*Nt)</code>. The RFC's example is a gigabit Ethernet link carrying roughly 2^20 packets per second against a 32-bit tag, which would succeed about once an hour on average. Mitigations include accepting ciphertexts only over HBH-secure channels, watching for elevated packet rates, and anti-replay checks. The RFC adds that it is often simpler to use full-size tags and accept slightly more bandwidth.</p><div class='callout callout-warning'><p>Metadata passed to SFrame MUST NOT be used by a receiver until decryption has authenticated it, except to prepare the ciphertext for decryption.</p></div>",
+      "eli5": "<p>The lock hides the picture, but the label on the outside is visible. Also, everyone on the call has the same kind of key, so a mean participant could pretend to be someone else.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "8",
+      "title": "Overhead and Application Duties",
+      "content": "<p>The appendix estimates overhead as <code>(1 + |CTR| + |KID| + |TAG|) * 8 * CTPerSecond / 1024</code> kbps. It assumes a 1-byte config byte, a 2-byte KID, a 3-byte CTR and a 16-byte tag, for 22 bytes per encryption. For audio, the overhead is sizable in percentage terms (17.9% for narrow-band speech at 8 kbps, 26.9% for full-band speech at 32 kbps). For video it depends on how SFrame is applied: per frame it falls toward zero as quality rises, while per packet it approaches the ratio of 22 bytes to an assumed 1200-byte MTU, about 1.8%. In a two-person conference example, total overhead at the SFU is around 1%.</p><p>The RFC also lists what the application must do: decide when SFrame applies and which cipher suite is used, guarantee that each (base_key, KID, CTR) combination is used at most once, define a key rotation schedule, handle anti-replay, and define the metadata input. If the counter is stored persistently, write the next CTR value back before using it, so a storage failure cannot cause reuse. Applications might extend negotiation protocols such as SDP to carry SFrame parameters.</p>",
+      "eli5": "<p>The lock adds a little extra weight to every package. For big video it is tiny, but for small audio packages it is a larger share. The app using SFrame must keep the numbering and key rules tidy.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "SFRAME CONFIG BYTE (RFC 9605)",
+      "data": {
+        "title": "SFrame config byte (first byte of the header)",
+        "bytes": 1,
+        "width": 8,
+        "fields": [
+          {
+            "key": "x",
+            "name": "X",
+            "bits": 1,
+            "desc": "Extended KID flag: K holds the KID (0) or the KID length minus one (1)."
+          },
+          {
+            "key": "k",
+            "name": "K",
+            "bits": 3,
+            "desc": "The KID, or its length in bytes minus one."
+          },
+          {
+            "key": "y",
+            "name": "Y",
+            "bits": 1,
+            "desc": "Extended CTR flag: C holds the CTR (0) or the CTR length minus one (1)."
+          },
+          {
+            "key": "c",
+            "name": "C",
+            "bits": 3,
+            "desc": "The CTR, or its length in bytes minus one."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "cryptography",
+      "position": "after",
+      "caption": "SFRAME CIPHER SUITE IDS (IANA REGISTRY, INITIAL CONTENTS)",
+      "data": {
+        "items": [
+          {
+            "code": "0x0001",
+            "label": "AES_128_CTR_HMAC_SHA256_80",
+            "desc": "80-bit tag (Nt = 10 bytes)."
+          },
+          {
+            "code": "0x0002",
+            "label": "AES_128_CTR_HMAC_SHA256_64",
+            "desc": "64-bit tag (Nt = 8 bytes)."
+          },
+          {
+            "code": "0x0003",
+            "label": "AES_128_CTR_HMAC_SHA256_32",
+            "desc": "32-bit tag (Nt = 4 bytes)."
+          },
+          {
+            "code": "0x0004",
+            "label": "AES_128_GCM_SHA256_128",
+            "desc": "128-bit tag (Nt = 16 bytes).",
+            "highlight": true
+          },
+          {
+            "code": "0x0005",
+            "label": "AES_256_GCM_SHA512_128",
+            "desc": "128-bit tag (Nt = 16 bytes), 32-byte key."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "VIDEO OVERHEAD: PER FRAME VS PER PACKET (RFC 9605 TABLES 5 AND 6)",
+      "data": {
+        "columns": [
+          "Video scenario",
+          "Per frame",
+          "Per packet"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "426 x 240, 7.5 fps",
+              "2.9%",
+              "2.9%"
+            ]
+          },
+          {
+            "cells": [
+              "640 x 360, 30 fps",
+              "1.3%",
+              "2.6%"
+            ]
+          },
+          {
+            "cells": [
+              "1280 x 720, 30 fps",
+              "0.3%",
+              "2.1%"
+            ]
+          },
+          {
+            "cells": [
+              "1920 x 1080, 60 fps",
+              "0.1%",
+              "1.9%"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[MLS-PROTO]",
+      "text": "Barnes, R., et al., \"The Messaging Layer Security (MLS) Protocol\", RFC 9420, July 2023.",
+      "rfc": 9420
+    },
+    {
+      "number": "[RFC3711]",
+      "text": "Baugher, M., et al., \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
+      "rfc": 3711
+    },
+    {
+      "number": "[RFC5116]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[RFC5869]",
+      "text": "Krawczyk, H. and P. Eronen, \"HMAC-based Extract-and-Expand Key Derivation Function (HKDF)\", RFC 5869, May 2010.",
+      "rfc": 5869
+    },
+    {
+      "number": "[RFC7656]",
+      "text": "Lennox, J., et al., \"A Taxonomy of Semantics and Mechanisms for Real-Time Transport Protocol (RTP) Sources\", RFC 7656, November 2015.",
+      "rfc": 7656
+    },
+    {
+      "number": "[RFC7667]",
+      "text": "Westerlund, M. and S. Wenger, \"RTP Topologies\", RFC 7667, November 2015.",
+      "rfc": 7667
+    },
+    {
+      "number": "[RFC8723]",
+      "text": "Jennings, C., et al., \"Double Encryption Procedures for the Secure Real-Time Transport Protocol (SRTP)\", RFC 8723, April 2020.",
+      "rfc": 8723
+    },
+    {
+      "number": "[RFC8866]",
+      "text": "Begen, A., et al., \"SDP: Session Description Protocol\", RFC 8866, January 2021.",
+      "rfc": 8866
+    }
+  ],
+  "provenance": {
+    "source": "llm-draft",
+    "model": "claude-sonnet-5-5",
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
+  },
+  "updated": "2026-10-17"
+}
