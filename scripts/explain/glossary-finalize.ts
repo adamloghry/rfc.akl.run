@@ -17,7 +17,7 @@ interface Draft {
   id: string;
   term: string;
   definition: string;
-  eli5?: string;
+  plainLanguage?: string;
 }
 export interface FinalizeReport {
   created: number;
@@ -94,7 +94,7 @@ export function finalizeGlossary(opts: { paths?: Paths; dryRun?: boolean } = {})
       if (new Set(list.map((d) => d.definition)).size > 1 && !existing.has(id)) report.deduped.push(id);
       for (const n of contributors) {
         const entry: Draft = { id, term: best.term, definition: best.definition };
-        if (best.eli5) entry.eli5 = best.eli5;
+        if (best.plainLanguage) entry.plainLanguage = best.plainLanguage;
         staged.set(n, [...(staged.get(n) ?? []), entry]);
       }
     }

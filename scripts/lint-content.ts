@@ -268,8 +268,8 @@ function lintRfc(
   }
 
   const hasSummary = typeof data.summary === 'string' && data.summary.trim();
-  if ((hasSummary || ids.length) && !data.eli5?.summary) {
-    warnings.push(`${label}: missing eli5.summary`);
+  if ((hasSummary || ids.length) && !data.plainLanguage?.summary) {
+    warnings.push(`${label}: missing plainLanguage.summary`);
   }
 }
 

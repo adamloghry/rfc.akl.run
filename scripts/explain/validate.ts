@@ -137,8 +137,8 @@ function checkSections(out: Obj, tier: TierName, env: Env, err: Errors): Set<str
     const p = `sections[${i}]`;
     if (!isObj(s)) return err.add(p, 'must be an object');
     for (const k of Object.keys(s))
-      if (!['id', 'number', 'title', 'content', 'eli5'].includes(k))
-        err.add(p, `unexpected key "${k}" (allowed: id, number, title, content, eli5)`);
+      if (!['id', 'number', 'title', 'content', 'plainLanguage'].includes(k))
+        err.add(p, `unexpected key "${k}" (allowed: id, number, title, content, plainLanguage)`);
     if (typeof s.id !== 'string' || !isSectionId(s.id))
       err.add(
         `${p}.id`,
@@ -150,7 +150,7 @@ function checkSections(out: Obj, tier: TierName, env: Env, err: Errors): Set<str
       err.add(`${p}.number`, 'must be a string such as "1" or "2" (the RFC\'s own section number when there is one, else a running count)');
     plainText(s.title, `${p}.title`, err, 3, 90);
     htmlText(s.content, `${p}.content`, err, 100, 9000, env, ids);
-    htmlText(s.eli5, `${p}.eli5`, err, 20, 800, env, ids);
+    htmlText(s.plainLanguage, `${p}.plainLanguage`, err, 20, 800, env, ids);
   });
   return ids;
 }
@@ -212,12 +212,11 @@ function checkSmall(out: Obj, env: Env, sectionIds: Set<string>, err: Errors) {
       plainText(out.tldr.outcomeLabel, 'tldr.outcomeLabel', err, 3, 32);
     }
   }
-  if (out.eli5 !== undefined) {
-    if (!isObj(out.eli5)) err.add('eli5', 'must be an object {summary}');
-    else {
-      for (const k of Object.keys(out.eli5)) if (k !== 'summary') err.add('eli5', `unexpected key "${k}" (only "summary")`);
-      htmlText(out.eli5.summary, 'eli5.summary', err, 20, 800, env, sectionIds);
-    }
+  // Required: the output's plainLanguage.summary replaces the content file's (see apply.ts).
+  if (!isObj(out.plainLanguage)) err.add('plainLanguage', 'must be an object {summary}');
+  else {
+    for (const k of Object.keys(out.plainLanguage)) if (k !== 'summary') err.add('plainLanguage', `unexpected key "${k}" (only "summary")`);
+    htmlText(out.plainLanguage.summary, 'plainLanguage.summary', err, 20, 800, env, sectionIds);
   }
   if (out.today !== undefined) htmlText(out.today, 'today', err, 40, 2500, env, sectionIds);
 
@@ -280,9 +279,10 @@ function checkGlossary(n: number, out: Obj, env: Env, err: Errors) {
       err.add('glossaryTerms', `at most ${MAX_NEW_TERMS} new terms (has ${terms.length}); reuse existing ids from content/glossary/`);
     each(terms, (t, i) => {
       const p = `glossaryTerms[${i}]`;
-      if (!isObj(t)) return err.add(p, 'must be an object {id, term, definition, eli5}');
+      if (!isObj(t)) return err.add(p, 'must be an object {id, term, definition, plainLanguage}');
       for (const k of Object.keys(t))
-        if (!['id', 'term', 'definition', 'eli5'].includes(k)) err.add(p, `unexpected key "${k}" (allowed: id, term, definition, eli5)`);
+        if (!['id', 'term', 'definition', 'plainLanguage'].includes(k))
+          err.add(p, `unexpected key "${k}" (allowed: id, term, definition, plainLanguage)`);
       if (typeof t.id !== 'string' || !GLOSSARY_ID.test(t.id) || t.id.length > 48)
         err.add(`${p}.id`, `${JSON.stringify(t.id)} must be kebab-case, lowercase, singular (for example "path-mtu")`);
       else {
@@ -292,8 +292,14 @@ function checkGlossary(n: number, out: Obj, env: Env, err: Errors) {
           err.add(`${p}.id`, `"${t.id}" already exists in content/glossary: remove it from glossaryTerms and keep the id in "glossary"`);
       }
       plainText(t.term, `${p}.term`, err, 1, 60);
-      plainText(t.eli5, `${p}.eli5`, err, 10, 300);
-      const parsed = glossarySchema.safeParse({ id: t.id, term: t.term, definition: t.definition, eli5: t.eli5, rfcs: [n] });
+      plainText(t.plainLanguage, `${p}.plainLanguage`, err, 10, 300);
+      const parsed = glossarySchema.safeParse({
+        id: t.id,
+        term: t.term,
+        definition: t.definition,
+        plainLanguage: t.plainLanguage,
+        rfcs: [n],
+      });
       if (!parsed.success) for (const issue of parsed.error.issues) err.add(`${p}.${issue.path.join('.')}`, issue.message);
       if (typeof t.definition === 'string') {
         if (t.definition.length < 30 || t.definition.length > 700)

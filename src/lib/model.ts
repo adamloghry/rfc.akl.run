@@ -74,7 +74,7 @@ export interface Term {
   id: string;
   term: string;
   definition: string;
-  eli5?: string;
+  plainLanguage?: string;
   rfcs: number[];
   usedBy: number[];
   // biome-ignore lint/suspicious/noExplicitAny: content files are looseObjects; extra keys pass through to the pages
@@ -134,7 +134,7 @@ export interface GlossaryInput {
   id: string;
   term: string;
   definition: string;
-  eli5?: string;
+  plainLanguage?: string;
   rfcs?: number[];
   [k: string]: unknown;
 }

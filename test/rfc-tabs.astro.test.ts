@@ -27,19 +27,21 @@ const page = (rfc: RfcRecord, file?: ReturnType<typeof parseRfcFile> | null) =>
 const notice = (rfc: RfcRecord) => container.renderToString(AiNotice, { props: { rfc } });
 
 describe('RFC page tabs', () => {
-  test('tab list, tabs and panels are wired together; RFC text first, then AI ELI5', async () => {
+  test('tab list, tabs and panels are wired together; RFC text first, then ISO Plain Language', async () => {
     const h = await page(r903);
     expect(h).toMatch(/<div class="tablist" role="tablist"[^>]* hidden>/);
     expect(h).toMatch(/<button[^>]*role="tab"[^>]*id="tab-text"[^>]*aria-controls="rfc-text"[^>]*aria-selected="true"/);
-    expect(h).toMatch(/<button[^>]*role="tab"[^>]*id="tab-eli5"[^>]*aria-controls="eli5"[^>]*aria-selected="false"[^>]*tabindex="-1"/);
+    expect(h).toMatch(
+      /<button[^>]*role="tab"[^>]*id="tab-plain-language"[^>]*aria-controls="plain-language"[^>]*aria-selected="false"[^>]*tabindex="-1"/,
+    );
     expect(h).toContain('>RFC text<');
-    expect(h).toContain('>AI ELI5<');
+    expect(h).toContain('>ISO Plain Language<');
     expect(h).toMatch(/<section id="rfc-text"[^>]*role="tabpanel"[^>]*aria-labelledby="tab-text"/);
-    expect(h).toMatch(/<section id="eli5"[^>]*role="tabpanel"[^>]*aria-labelledby="tab-eli5"/);
-    expect(h.indexOf('id="rfc-text"')).toBeLessThan(h.indexOf('id="eli5"'));
+    expect(h).toMatch(/<section id="plain-language"[^>]*role="tabpanel"[^>]*aria-labelledby="tab-plain-language"/);
+    expect(h.indexOf('id="rfc-text"')).toBeLessThan(h.indexOf('id="plain-language"'));
     // no-JS: both panels are in the page, each with its h2
     expect(h).toMatch(/<h2 class="panel-h">RFC text<\/h2>/);
-    expect(h).toMatch(/<h2 class="panel-h">AI ELI5<\/h2>/);
+    expect(h).toMatch(/<h2 class="panel-h">ISO Plain Language<\/h2>/);
     // the datasheet band stays on top of the tabs
     expect(h.indexOf('class="band"')).toBeLessThan(h.indexOf('role="tablist"'));
   });
@@ -62,14 +64,14 @@ describe('RFC page tabs', () => {
 
   test('level switch is renamed', async () => {
     const h = await page(r903);
-    expect(h).toContain("Like I'm 5<span>story</span>");
+    expect(h).toContain('Plain language<span>simpler</span>');
     expect(h).toContain('In depth<span>default</span>');
     expect(h).not.toContain('Explained');
   });
 
   test('the AI panel starts with the notice, before the TL;DR and the sections', async () => {
     const h = await page(r903);
-    const ai = h.slice(h.indexOf('id="eli5"'));
+    const ai = h.slice(h.indexOf('id="plain-language"'));
     expect(ai.indexOf('class="ai-note"')).toBeGreaterThan(-1);
     if (ai.includes('class="tldr"')) expect(ai.indexOf('class="ai-note"')).toBeLessThan(ai.indexOf('class="tldr"'));
     expect(ai.indexOf('class="ai-note"')).toBeLessThan(ai.indexOf('class="sec"'));
@@ -143,7 +145,7 @@ describe('meta description leads with the RFC', () => {
     expect(d).toContain('This RFC suggests a method');
     expect(d.length).toBeLessThanOrEqual(200);
     expect(describeRfc({ ...r903, abstract: 'x '.repeat(200) })).toMatch(/…$/);
-    expect(describeRfc({ ...r903, abstract: null })).toContain('The original RFC text, with an optional AI ELI5 explainer.');
+    expect(describeRfc({ ...r903, abstract: null })).toContain('The original RFC text, with an optional ISO Plain Language explainer.');
     expect(describeRfc({ ...r903, abstract: null, content: null })).toMatch(/The original RFC text\.$/);
   });
 });

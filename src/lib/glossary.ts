@@ -15,7 +15,7 @@ export interface GlossaryEntry {
   id: string;
   term: string;
   definition: string;
-  eli5?: string;
+  plainLanguage?: string;
   used: number[];
   more: number;
 }
@@ -63,7 +63,7 @@ export function glossaryHref(slug: string, id: string): string {
   return `/glossary/${slug}#${id}`;
 }
 
-type TermIn = Pick<Term, 'id' | 'term' | 'definition' | 'eli5' | 'rfcs' | 'usedBy'>;
+type TermIn = Pick<Term, 'id' | 'term' | 'definition' | 'plainLanguage' | 'rfcs' | 'usedBy'>;
 
 export function buildGlossaryModel(terms: Iterable<TermIn>, pageMax = GLOSSARY_PAGE_MAX): GlossaryModel {
   const byKey = new Map<string, GlossaryEntry[]>();
@@ -78,7 +78,7 @@ export function buildGlossaryModel(terms: Iterable<TermIn>, pageMax = GLOSSARY_P
       id: t.id,
       term: t.term,
       definition: t.definition || '',
-      eli5: t.eli5,
+      plainLanguage: t.plainLanguage,
       used: used.slice(0, USED_IN_MAX),
       more: Math.max(0, used.length - USED_IN_MAX),
     });

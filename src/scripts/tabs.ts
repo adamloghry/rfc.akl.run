@@ -1,13 +1,13 @@
 /**
- * RFC page tabs ("RFC text" / "AI ELI5"). Progressive enhancement: without JS both panels are in the page, in
- * order. With JS they become an ARIA tabs widget (arrow keys, Home/End). The URL hash picks the tab: `#eli5` and any
- * anchor that lives inside the AI panel (#packet-format, #field-oper, #step-3) open AI ELI5; `#section-3`, no
- * hash and unknown hashes open RFC text. Switching tabs rewrites the hash with replaceState (`#eli5`, or none).
+ * RFC page tabs ("RFC text" / "ISO Plain Language"). Progressive enhancement: without JS both panels are in the page, in
+ * order. With JS they become an ARIA tabs widget (arrow keys, Home/End). The URL hash picks the tab: `#plain-language` and any
+ * anchor that lives inside the AI panel (#packet-format, #field-oper, #step-3) open ISO Plain Language; `#section-3`, no
+ * hash and unknown hashes open RFC text. Switching tabs rewrites the hash with replaceState (`#plain-language`, or none).
  * The default is always RFC text; nothing is persisted.
  */
 import { disposer, listen, ownerDoc, qs, qsa } from './dom';
 
-type Name = 'text' | 'eli5';
+type Name = 'text' | 'plain-language';
 
 /** Which tab the hash belongs to. */
 export function tabForHash(doc: Document, hash: string): Name {
@@ -20,7 +20,7 @@ export function tabForHash(doc: Document, hash: string): Name {
   if (!id) return 'text';
   const el = doc.getElementById(id);
   const panel = el?.closest('[data-tab-panel]');
-  return panel?.getAttribute('data-tab-panel') === 'eli5' ? 'eli5' : 'text';
+  return panel?.getAttribute('data-tab-panel') === 'plain-language' ? 'plain-language' : 'text';
 }
 
 /** Wire the tabs under `root`. Returns a function that removes the listeners. */
@@ -54,7 +54,7 @@ export function init(root: ParentNode = document): () => void {
   function setHash(name: Name): void {
     try {
       const u = new URL(location.href);
-      u.hash = name === 'eli5' ? '#eli5' : '';
+      u.hash = name === 'plain-language' ? '#plain-language' : '';
       history.replaceState(null, '', u.pathname + u.search + u.hash);
     } catch {
       /* history unavailable */
@@ -71,12 +71,12 @@ export function init(root: ParentNode = document): () => void {
     show(tabForHash(doc, location.hash));
     const id = decodeURIComponent(location.hash.replace(/^#/, ''));
     if (!id) return;
-    if (id === 'eli5') bringTabsIntoView();
+    if (id === 'plain-language') bringTabsIntoView();
     else doc.getElementById(id)?.scrollIntoView();
   }
 
   tabs.forEach((t, i) => {
-    off.add(listen(t, 'click', () => choose(t.getAttribute('data-tab') === 'eli5' ? 'eli5' : 'text', false)));
+    off.add(listen(t, 'click', () => choose(t.getAttribute('data-tab') === 'plain-language' ? 'plain-language' : 'text', false)));
     off.add(
       listen(t, 'keydown', (e) => {
         const k = (e as KeyboardEvent).key;
@@ -84,7 +84,7 @@ export function init(root: ParentNode = document): () => void {
         if (to === null) return;
         e.preventDefault();
         const next = tabs[(to + tabs.length) % tabs.length];
-        choose(next?.getAttribute('data-tab') === 'eli5' ? 'eli5' : 'text', true);
+        choose(next?.getAttribute('data-tab') === 'plain-language' ? 'plain-language' : 'text', true);
       }),
     );
   });

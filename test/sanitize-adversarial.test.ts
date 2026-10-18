@@ -335,19 +335,19 @@ describe('checkContent and walkStrings', () => {
       title: '<script>not rendered as html</script>',
       summary: '<script>x</script>',
       today: '<p onclick=x>t</p>',
-      eli5: { summary: '<iframe></iframe>' },
-      sections: [{ title: '<b>escaped</b>', content: '<p>ok</p>', eli5: '<style></style>' }, { content: '<img src=x>' }],
+      plainLanguage: { summary: '<iframe></iframe>' },
+      sections: [{ title: '<b>escaped</b>', content: '<p>ok</p>', plainLanguage: '<style></style>' }, { content: '<img src=x>' }],
       references: [{ text: '<script>escaped on render</script>' }],
     };
     const out = checkContent(doc, 'rfc');
     assert.deepEqual(
       [...new Set(out.map((o) => o.ptr))].sort(),
-      ['/eli5/summary', '/sections/0/eli5', '/sections/1/content', '/summary', '/today'].sort(),
+      ['/plainLanguage/summary', '/sections/0/plainLanguage', '/sections/1/content', '/summary', '/today'].sort(),
     );
   });
 
   test('glossary checks the definition only; journeys check nothing; the default kind is rfc', () => {
-    const g = { id: 'x', term: '<script>', definition: '<script>', eli5: '<script>' };
+    const g = { id: 'x', term: '<script>', definition: '<script>', plainLanguage: '<script>' };
     assert.deepEqual(
       checkContent(g, 'glossary').map((o) => o.ptr),
       ['/definition'],

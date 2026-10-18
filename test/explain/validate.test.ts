@@ -46,6 +46,11 @@ describe('validate', () => {
     expect(e[0]).toMatch(/^1\. /);
   });
 
+  test('plainLanguage.summary is required (it replaces the old one)', () => {
+    expect(errorsFor((o) => delete o.plainLanguage).some((e) => e.includes('plainLanguage'))).toBe(true);
+    expect(errorsFor((o) => (o.plainLanguage = {})).some((e) => e.includes('plainLanguage.summary'))).toBe(true);
+  });
+
   test('extra keys inside nested objects are rejected', () => {
     has(
       errorsFor((o) => (o.sections[0].extra = 1)),
@@ -205,7 +210,7 @@ describe('validate', () => {
       id: `new-term-${i}`,
       term: `T${i}`,
       definition: '<p>A definition that is long enough to pass.</p>',
-      eli5: 'Simple words.',
+      plainLanguage: 'Simple words.',
     });
     has(
       errorsFor((o) => {

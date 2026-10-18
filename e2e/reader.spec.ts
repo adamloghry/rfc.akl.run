@@ -1,35 +1,35 @@
 import { expect, test } from './fixtures';
 
 test.describe('reading level', () => {
-  test('switch toggles eli5 and persists', async ({ page }) => {
-    await page.goto('/rfc903#eli5');
+  test('switch toggles plainLanguage and persists', async ({ page }) => {
+    await page.goto('/rfc903#plain-language');
     const html = page.locator('html');
-    const eli5 = page.locator('[data-set-level="eli5"]');
+    const plainLanguage = page.locator('[data-set-level="plain-language"]');
     const std = page.locator('[data-set-level="std"]');
-    await expect(eli5).toHaveAttribute('aria-pressed', 'false');
-    await expect(html).not.toHaveAttribute('data-level', 'eli5');
-    await eli5.click();
-    await expect(html).toHaveAttribute('data-level', 'eli5');
-    await expect(eli5).toHaveAttribute('aria-pressed', 'true');
+    await expect(plainLanguage).toHaveAttribute('aria-pressed', 'false');
+    await expect(html).not.toHaveAttribute('data-level', 'plain-language');
+    await plainLanguage.click();
+    await expect(html).toHaveAttribute('data-level', 'plain-language');
+    await expect(plainLanguage).toHaveAttribute('aria-pressed', 'true');
     await page.reload();
-    await expect(html).toHaveAttribute('data-level', 'eli5');
-    await expect(page.locator('[data-set-level="eli5"]')).toHaveAttribute('aria-pressed', 'true');
+    await expect(html).toHaveAttribute('data-level', 'plain-language');
+    await expect(page.locator('[data-set-level="plain-language"]')).toHaveAttribute('aria-pressed', 'true');
     await std.click();
-    await expect(html).not.toHaveAttribute('data-level', 'eli5');
+    await expect(html).not.toHaveAttribute('data-level', 'plain-language');
     await page.reload();
-    await expect(html).not.toHaveAttribute('data-level', 'eli5');
+    await expect(html).not.toHaveAttribute('data-level', 'plain-language');
   });
 
-  test('?level=eli5 works (before first paint)', async ({ page }) => {
-    await page.goto('/rfc903?level=eli5#eli5');
-    await expect(page.locator('html')).toHaveAttribute('data-level', 'eli5');
-    await expect(page.locator('[data-set-level="eli5"]')).toHaveAttribute('aria-pressed', 'true');
+  test('?level=plain-language works (before first paint)', async ({ page }) => {
+    await page.goto('/rfc903?level=plain-language#plain-language');
+    await expect(page.locator('html')).toHaveAttribute('data-level', 'plain-language');
+    await expect(page.locator('[data-set-level="plain-language"]')).toHaveAttribute('aria-pressed', 'true');
   });
 });
 
 test.describe('packet viewer', () => {
   test('inspector follows hover and focus', async ({ page }) => {
-    await page.goto('/rfc903#eli5');
+    await page.goto('/rfc903#plain-language');
     const fig = page.locator('figure[data-viz="packet"]').first();
     const name = fig.locator('.pk-i-name');
     await expect(fig.locator('.pk-inspector')).toBeVisible();
@@ -48,7 +48,7 @@ test.describe('packet viewer', () => {
   });
 
   test('Request/Reply toggle swaps values and tints changed fields', async ({ page }) => {
-    await page.goto('/rfc903#eli5');
+    await page.goto('/rfc903#plain-language');
     const fig = page.locator('figure[data-viz="packet"]').first();
     const body = fig.locator('.pk-body');
     const req = fig.locator('button[data-mode="req"]');
@@ -80,7 +80,7 @@ test.describe('packet viewer', () => {
 
 test.describe('sequence simulator', () => {
   test('steps update the permalink and #step-N deep links work', async ({ page }) => {
-    await page.goto('/rfc903#eli5');
+    await page.goto('/rfc903#plain-language');
     const fig = page.locator('figure[data-viz="sequence-sim"]');
     const chip = fig.locator('.sim-permalink');
     const primary = fig.locator('.sim-primary');
@@ -128,7 +128,7 @@ test.describe('sequence simulator', () => {
 
 test('copy link shows "Link copied" and writes the permalink', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.goto('/rfc903#eli5');
+  await page.goto('/rfc903#plain-language');
   const btn = page.locator('[data-copy]').first();
   const url = await btn.getAttribute('data-copy');
   expect(url).toBe('https://rfc.akl.run/rfc903');

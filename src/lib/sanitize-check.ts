@@ -191,12 +191,12 @@ export function walkStrings(v: unknown, fn: (s: string, ptr: string) => void, pt
  * JSON pointers whose strings are inserted with set:html. Everything else is
  * escaped on render (plain text may legitimately contain "<qname>" etc.), so it is
  * not checked here. KEEP IN SYNC with the set:html content sites, enforced by
- * test/set-html-allowlist.test.ts: components/rfc/Section.astro (section content/eli5),
- * RightRail.astro (eli5.summary, today), IndexTier.astro (summary, eli5.summary),
+ * test/set-html-allowlist.test.ts: components/rfc/Section.astro (section content/plainLanguage),
+ * RightRail.astro (plainLanguage.summary, today), IndexTier.astro (summary, plainLanguage.summary),
  * pages/glossary/index.astro (definition).
  */
 export const HTML_FIELDS: Record<string, RegExp> = {
-  rfc: /^\/(summary|today|eli5\/summary|sections\/\d+\/(content|eli5))$/,
+  rfc: /^\/(summary|today|plainLanguage\/summary|sections\/\d+\/(content|plainLanguage))$/,
   glossary: /^\/definition$/,
   journey: /^$\b/, // journeys render every string escaped
 };

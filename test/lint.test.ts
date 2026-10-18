@@ -123,7 +123,7 @@ test('scoped lock: an unlocked llm-draft explainer is neither warned about nor l
 
 test('content number missing from the index is an error', () => {
   const dir = baseline();
-  fs.writeFileSync(rfcPath(dir, 4242), JSON.stringify({ number: 4242, summary: '<p>x</p>', eli5: { summary: '<p>y</p>' } }));
+  fs.writeFileSync(rfcPath(dir, 4242), JSON.stringify({ number: 4242, summary: '<p>x</p>', plainLanguage: { summary: '<p>y</p>' } }));
   assert.ok(has(lint(dir, index, {}).errors, /4242/));
 });
 
@@ -133,17 +133,17 @@ test('filename must match number', () => {
   assert.ok(has(lint(dir, index, {}).errors, /5953\.json.*number/i));
 });
 
-test('missing eli5 on summary+ tiers is a warning', () => {
+test('missing plainLanguage on summary+ tiers is a warning', () => {
   const dir = baseline();
   let r = lint(dir, index, {});
-  assert.ok(has(r.warnings, /5952.*eli5/i));
-  assert.ok(has(r.warnings, /826.*eli5/i));
-  assert.ok(!has(r.warnings, /903.*eli5/i));
+  assert.ok(has(r.warnings, /5952.*plainLanguage/i));
+  assert.ok(has(r.warnings, /826.*plainLanguage/i));
+  assert.ok(!has(r.warnings, /903.*plainLanguage/i));
   edit(dir, 5952, (j: Doc) => {
-    j.eli5 = { summary: '<p>ok</p>' };
+    j.plainLanguage = { summary: '<p>ok</p>' };
   });
   r = lint(dir, index, {});
-  assert.ok(!has(r.warnings, /5952.*eli5/i));
+  assert.ok(!has(r.warnings, /5952.*plainLanguage/i));
 });
 
 test('internal link above max is an error; legacy #rfc link is an error', () => {

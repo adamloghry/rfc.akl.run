@@ -1,6 +1,6 @@
 /**
  * Merges LLM-drafted glossary entries (.work/glossary/<n>.json (zero-padded <n> also accepted), each an
- * array of {id, term, definition, eli5}) into content/glossary/<id>.json.
+ * array of {id, term, definition, plainLanguage}) into content/glossary/<id>.json.
  * Existing files are kept and only get their `rfcs` unioned; new terms take the
  * longest definition among duplicates. Definitions failing checkHtml are
  * reported and not written.
@@ -15,13 +15,13 @@ interface Draft {
   n: number;
   term: string;
   definition: string;
-  eli5?: string;
+  plainLanguage?: string;
 }
 interface GlossaryOut {
   id: string;
   term: string;
   definition: string;
-  eli5?: string;
+  plainLanguage?: string;
   rfcs?: number[];
 }
 interface Rejection {
@@ -74,7 +74,7 @@ export function mergeGlossary({ workDir = '.work/glossary', outDir = 'content/gl
       }
       const list = groups.get(e.id) ?? [];
       groups.set(e.id, list);
-      list.push({ n, term: e.term, definition: e.definition, eli5: e.eli5 });
+      list.push({ n, term: e.term, definition: e.definition, plainLanguage: e.plainLanguage });
     }
   }
   fs.mkdirSync(outDir, { recursive: true });
@@ -93,13 +93,13 @@ export function mergeGlossary({ workDir = '.work/glossary', outDir = 'content/gl
       continue;
     }
     const best = list.reduce((a, b) => (b.definition.length > a.definition.length ? b : a));
-    const problems = checkHtml(best.definition).concat(best.eli5 ? checkHtml(best.eli5) : []);
+    const problems = checkHtml(best.definition).concat(best.plainLanguage ? checkHtml(best.plainLanguage) : []);
     if (problems.length) {
       res.rejected.push({ id, reason: problems.join('; ') });
       continue;
     }
     const out: GlossaryOut = { id, term: best.term, definition: best.definition };
-    if (best.eli5) out.eli5 = best.eli5;
+    if (best.plainLanguage) out.plainLanguage = best.plainLanguage;
     out.rfcs = [...new Set(contributors)].sort((a, b) => a - b);
     writeAtomic(target, out);
     res.created++;

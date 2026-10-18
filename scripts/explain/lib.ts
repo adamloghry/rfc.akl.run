@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadIndex, SNAPSHOT_PATH } from '../../src/lib/rfc-index';
 
-export const PROMPT_VERSION = 'explain-v1';
+export const PROMPT_VERSION = 'explain-v2';
 export const SCHEMA_VERSION = 'rfc-datasheet-v1';
 export const MODEL = 'claude-sonnet-5-5';
 /** RFCs whose .txt is a 404 at the RFC Editor; agents read the PDF instead. */
@@ -131,6 +131,13 @@ export function readContent(paths: Paths, n: number): Content | null {
 }
 
 export const hasSections = (c: Content | null): boolean => Array.isArray(c?.sections) && c.sections.length > 0;
+
+/**
+ * True when an RFC needs no (re)generation: it has an explainer from before this pipeline (no `promptVersion`) or one
+ * generated under the current PROMPT_VERSION. Output of an older prompt version is stale: plan queues it and merge replaces it.
+ */
+export const isExplained = (c: Content | null): boolean =>
+  hasSections(c) && (!c?.provenance?.promptVersion || c.provenance.promptVersion === PROMPT_VERSION);
 
 export function aprilFools(paths: Paths): Set<number> {
   const list = readJsonOr<{ rfcs: { number: number }[] }>(paths.aprilFile, { rfcs: [] });

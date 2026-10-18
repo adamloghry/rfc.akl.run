@@ -1,8 +1,8 @@
 /**
  * Applies valid outputs (.work/explain/out/<n>.json) to content/rfcs/<n>.json.
  *
- * - Skips any content file that already has non-empty `sections` (never overwrites an explainer).
- * - Preserves summary, eli5.summary, category, shortTitle (unless absent) and questions (union, max 6); sets provenance and `updated`.
+ * - Skips any content file whose explainer is current (see isExplained): it replaces only explainers from an older prompt version.
+ * - Takes plainLanguage.summary from the output; preserves summary, category, shortTitle (unless absent) and questions (union, max 6); sets provenance and `updated`.
  * - Moves `glossaryTerms` to .work/glossary/<n>.json (the input format of scripts/merge-glossary.ts).
  * - Re-validates the merged file with the site's Zod schema before writing; writes atomically; idempotent.
  *
@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { rfcSchema } from '../../src/lib/schemas';
 import { applyOutput } from './apply';
-import { defaultPaths, hasSections, isMain, outFile, type Paths, parseNumbers, readContent, today, writeJson } from './lib';
+import { defaultPaths, isExplained, isMain, outFile, type Paths, parseNumbers, readContent, today, writeJson } from './lib';
 import { type Env, loadEnv, validateOutput } from './validate';
 
 export interface MergeReport {
@@ -43,7 +43,7 @@ export function mergeOutputs(opts: { paths?: Paths; env?: Env; numbers?: number[
 
   for (const n of opts.numbers ?? listOutputs(paths)) {
     const content = readContent(paths, n);
-    if (hasSections(content)) {
+    if (isExplained(content)) {
       report.skippedExisting.push(n);
       continue;
     }

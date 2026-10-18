@@ -83,7 +83,7 @@ export function summaryOnly(n: number): Content {
     category: 'core',
     categoryReviewed: false,
     summary: `<p>Summary of RFC ${n}.</p>`,
-    eli5: { summary: `<p>Kid summary of RFC ${n}.</p>` },
+    plainLanguage: { summary: `<p>Old plain-language summary of RFC ${n}.</p>` },
     questions: ['existing question one', 'existing question two'],
     provenance: { source: 'llm-draft', model: 'claude-sonnet-5-5', drafted: '2026-10-15', reviewedBy: null },
     updated: '2026-10-15',

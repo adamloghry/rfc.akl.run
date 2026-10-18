@@ -16,7 +16,9 @@ export const upper = (s: unknown): string => String(s).toUpperCase();
 export function describe(rfc: RfcRecord): string {
   const head = `RFC ${rfc.number}: ${displayTitle(rfc)}. ${rfc.statusLabel}, ${rfc.dateLabel}.`;
   const abs = plain(rfc.abstract);
-  const text = abs ? `${head} ${abs}` : `${head} The original RFC text${rfc.content ? ', with an optional AI ELI5 explainer' : ''}.`;
+  const text = abs
+    ? `${head} ${abs}`
+    : `${head} The original RFC text${rfc.content ? ', with an optional ISO Plain Language explainer' : ''}.`;
   return text.length > 200 ? `${text.slice(0, 197).replace(/\s+\S*$/, '')}…` : text;
 }
 
@@ -67,14 +69,14 @@ export const isDupFact = (f: { label?: unknown } | null, rfc?: RfcRecord): boole
 export const uniq = <T>(a: T[]): T[] => [...new Set(a)];
 
 /** A section is worth rendering when it has prose (either level) or a diagram; a bare heading would dangle. */
-export const sectionHasBody = (s: { content?: unknown; eli5?: unknown }, hasViz: boolean): boolean =>
-  hasViz || plain(s.content).length > 0 || plain(s.eli5).length > 0;
+export const sectionHasBody = (s: { content?: unknown; plainLanguage?: unknown }, hasViz: boolean): boolean =>
+  hasViz || plain(s.content).length > 0 || plain(s.plainLanguage).length > 0;
 
 /** Whether the right rail would hold anything (so thin explainers do not render an empty column). */
 export function hasRightRail(rfc: RfcRecord, site: Site): boolean {
   const c = rfc.content || {};
   return !!(
-    plain(c.eli5?.summary) ||
+    plain(c.plainLanguage?.summary) ||
     plain(c.today) ||
     (c.glossary || []).some((id: string) => site.glossary.has(id)) ||
     rfc.journeys.some((slug) => site.journeys.some((j) => j.slug === slug)) ||

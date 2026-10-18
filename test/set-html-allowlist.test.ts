@@ -12,11 +12,11 @@ import { test } from 'vitest';
 const ALLOWED = [
   // content fields (HTML_FIELDS)
   "components/rfc/Section.astro :: s.content || ''",
-  'components/rfc/Section.astro :: s.eli5',
-  'components/rfc/RightRail.astro :: c.eli5.summary',
+  'components/rfc/Section.astro :: s.plainLanguage',
+  'components/rfc/RightRail.astro :: c.plainLanguage.summary',
   'components/rfc/RightRail.astro :: c.today',
   'components/rfc/IndexTier.astro :: summary',
-  'components/rfc/IndexTier.astro :: eli5',
+  'components/rfc/IndexTier.astro :: plainLanguage',
   'components/pages/GlossaryLetter.astro :: t.definition',
   // generated / static / escaped by their builders
   'components/rfc/MetaList.astro :: factValueHtml(f.value, site)',

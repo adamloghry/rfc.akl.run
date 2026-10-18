@@ -6,7 +6,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { defaultPaths, hasSections, isMain, loadSummary, type Paths, PDF_ONLY, readContent, writeAtomic } from './lib';
+import { defaultPaths, isExplained, isMain, loadSummary, type Paths, PDF_ONLY, readContent, writeAtomic } from './lib';
 
 export const BASE_URL = 'https://www.rfc-editor.org/rfc';
 
@@ -34,7 +34,7 @@ export interface FetchReport {
 
 /** Issued RFCs that still need a text: no `sections` in content. */
 export function targets(paths: Paths, issued: number[]): number[] {
-  return issued.filter((n) => !hasSections(readContent(paths, n)));
+  return issued.filter((n) => !isExplained(readContent(paths, n)));
 }
 
 const STUB_BYTES = 1500;

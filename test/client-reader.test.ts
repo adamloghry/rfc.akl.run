@@ -21,24 +21,24 @@ describe('reading level', () => {
     dispose = init();
     expect(el('.level-ctl').hidden).toBe(false);
     expect(el('[data-set-level="std"]').getAttribute('aria-pressed')).toBe('true');
-    expect(el('[data-set-level="eli5"]').getAttribute('aria-pressed')).toBe('false');
+    expect(el('[data-set-level="plain-language"]').getAttribute('aria-pressed')).toBe('false');
   });
 
-  test('a pre-set eli5 level (from the pre-paint script) is reflected in the buttons', () => {
-    document.documentElement.setAttribute('data-level', 'eli5');
+  test('a pre-set plainLanguage level (from the pre-paint script) is reflected in the buttons', () => {
+    document.documentElement.setAttribute('data-level', 'plain-language');
     dispose = init();
-    expect(el('[data-set-level="eli5"]').getAttribute('aria-pressed')).toBe('true');
+    expect(el('[data-set-level="plain-language"]').getAttribute('aria-pressed')).toBe('true');
     expect(el('[data-set-level="std"]').getAttribute('aria-pressed')).toBe('false');
     expect(localStorage.getItem('rfc-level')).toBeNull();
   });
 
   test('switching levels sets data-level, aria-pressed and persists the choice', () => {
     dispose = init();
-    click(el('[data-set-level="eli5"]'));
-    expect(document.documentElement.getAttribute('data-level')).toBe('eli5');
-    expect(el('[data-set-level="eli5"]').getAttribute('aria-pressed')).toBe('true');
+    click(el('[data-set-level="plain-language"]'));
+    expect(document.documentElement.getAttribute('data-level')).toBe('plain-language');
+    expect(el('[data-set-level="plain-language"]').getAttribute('aria-pressed')).toBe('true');
     expect(el('[data-set-level="std"]').getAttribute('aria-pressed')).toBe('false');
-    expect(localStorage.getItem('rfc-level')).toBe('eli5');
+    expect(localStorage.getItem('rfc-level')).toBe('plain-language');
     click(el('[data-set-level="std"]'));
     expect(document.documentElement.hasAttribute('data-level')).toBe(false);
     expect(localStorage.getItem('rfc-level')).toBe('std');
@@ -47,13 +47,13 @@ describe('reading level', () => {
   test('?level in the URL is rewritten to follow the choice; a URL without it is untouched', () => {
     setUrl('https://rfc.akl.run/rfc903?level=std&x=1#introduction');
     dispose = init();
-    click(el('[data-set-level="eli5"]'));
-    expect(location.search).toBe('?level=eli5&x=1');
+    click(el('[data-set-level="plain-language"]'));
+    expect(location.search).toBe('?level=plain-language&x=1');
     expect(location.hash).toBe('#introduction');
     dispose();
     setUrl('https://rfc.akl.run/rfc903');
     dispose = init();
-    click(el('[data-set-level="eli5"]'));
+    click(el('[data-set-level="plain-language"]'));
     expect(location.search).toBe('');
   });
 
@@ -66,8 +66,8 @@ describe('reading level', () => {
       throw new Error('denied');
     });
     dispose = init();
-    click(el('[data-set-level="eli5"]'));
-    expect(document.documentElement.getAttribute('data-level')).toBe('eli5');
+    click(el('[data-set-level="plain-language"]'));
+    expect(document.documentElement.getAttribute('data-level')).toBe('plain-language');
   });
 
   test('without the control nothing is wired', () => {

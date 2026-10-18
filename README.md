@@ -1,12 +1,12 @@
 # rfc.akl.run
 
-A statically generated showcase of the Internet's RFCs. Every RFC number from 1 to the latest gets a permanent page at `rfc.akl.run/rfc<n>` (for example `https://rfc.akl.run/rfc903`; no zero-padding). The point of the site is the **original RFC text** (committed at `data/rfc-text/<n>.txt`, typeset on the page with page-break noise removed, linked RFC and Section references and a contents rail). Every issued RFC also has an **AI ELI5** tab: a Claude-generated, unreviewed explainer with diagrams and interactive packet and sequence viewers, clearly labelled as a bonus. Everything is pre-rendered HTML: no server code, no runtime services, no third-party requests.
+A statically generated showcase of the Internet's RFCs. Every RFC number from 1 to the latest gets a permanent page at `rfc.akl.run/rfc<n>` (for example `https://rfc.akl.run/rfc903`; no zero-padding). The point of the site is the **original RFC text** (committed at `data/rfc-text/<n>.txt`, typeset on the page with page-break noise removed, linked RFC and Section references and a contents rail). Every issued RFC also has an **ISO Plain Language** tab: an AI-generated explainer written to ISO 24495-1 plain language and not deeply reviewed with diagrams and interactive packet and sequence viewers, clearly labelled as a bonus. Everything is pre-rendered HTML: no server code, no runtime services, no third-party requests.
 
 The nightly build refreshes the committed RFC Editor index snapshot (`data/rfc-index.xml`), merges it with the hand-written JSON in `content/`, and renders about 10,000 RFC pages (plus a static search index) into `dist/` in about a minute with Astro 7. Each RFC page carries its full text (`dist/` is about 430 MB; the largest page, RFC 9980, is 533 KB gzipped).
 
 ## Page tiers
 
-Every RFC page has two tabs, **RFC text** (default) and **AI ELI5** (`#eli5`; any anchor inside it, such as `#packet-format`, opens it; both panels render in order without JS). Under the datasheet band, the AI tab states its tier: **Index** (title, authors, status, abstract, lineage; generated from the RFC Editor index), **Summary** (plain-language summary and ELI5 from a small JSON file in `content/rfcs/`), **Explainer** (sections, glossary terms, diagrams) and **Interactive** (packet inspector or sequence simulator from the viz library).
+Every RFC page has two tabs, **RFC text** (default) and **ISO Plain Language** (`#plain-language`; any anchor inside it, such as `#packet-format`, opens it; both panels render in order without JS). Under the datasheet band, the AI tab states its tier: **Index** (title, authors, status, abstract, lineage; generated from the RFC Editor index), **Summary** (plain-language summary and a shorter plain-language version from a small JSON file in `content/rfcs/`), **Explainer** (sections, glossary terms, diagrams) and **Interactive** (packet inspector or sequence simulator from the viz library).
 
 ## Local development
 
@@ -93,7 +93,7 @@ Content lives in `content/` as JSON and is loaded through Astro content collecti
 - Journeys: `content/journeys/<slug>.json`. Glossary terms: `content/glossary/<term-id>.json`.
 - Optional signal: `content/signals/traffic.json` (per-RFC traffic counts that feed the priority score).
 - **Permalink lock:** section ids become URL anchors (`/rfc903#how-it-works`). `content/section-ids.lock.json` records every published id, and lint fails if one disappears. After adding sections, run `node --import tsx scripts/lint-content.ts --update-lock` and commit the lock. Never rename a published id.
-- **Sanitizer:** every HTML field (`summary`, `today`, `eli5`, section `content`/`eli5`, glossary `definition`) is checked against an allowlist of tags and attributes (`src/lib/sanitize-check.ts`). Both lint and the build run the check and fail on violations.
+- **Sanitizer:** every HTML field (`summary`, `today`, `plainLanguage`, section `content`/`plainLanguage`, glossary `definition`) is checked against an allowlist of tags and attributes (`src/lib/sanitize-check.ts`). Both lint and the build run the check and fail on violations.
 - **Provenance policy:** LLM-drafted content is always labeled. A machine-drafted file carries `provenance.source = "llm-draft"` and `provenance.reviewedBy = null`, and its page shows "Draft · machine-assisted, not yet reviewed". A human must review the content against the RFC text before `reviewedBy` is set. Nothing is generated at request time.
 
 ## Project structure

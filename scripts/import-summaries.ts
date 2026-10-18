@@ -10,8 +10,8 @@ const ROOT = process.cwd();
 const CATEGORY_KEYS = new Set(CATEGORIES.map((c) => c.key));
 const PART_SIZE = 25;
 const MODEL = 'claude-sonnet-5-5';
-const ITEM_KEYS = ['number', 'shortTitle', 'category', 'summary', 'eli5', 'questions'];
-const LIMITS = { summaryWords: 90, summaryParas: 2, eli5Words: 50, shortTitle: 24, maxQuestions: 3 };
+const ITEM_KEYS = ['number', 'shortTitle', 'category', 'summary', 'plainLanguage', 'questions'];
+const LIMITS = { summaryWords: 90, summaryParas: 2, plainLanguageWords: 50, shortTitle: 24, maxQuestions: 3 };
 
 /** A draft item as the drafting agents emit it. Fields stay `unknown` until validateItem has accepted them. */
 export interface DraftItem {
@@ -19,7 +19,7 @@ export interface DraftItem {
   shortTitle: string | null;
   category: string;
   summary: string;
-  eli5: string;
+  plainLanguage: string;
   questions: string[];
 }
 interface InputItem {
@@ -122,9 +122,10 @@ export function validateItem(
   if (s.error) p.push(`summary: ${s.error}`);
   else if (wordCount(it.summary as string) > LIMITS.summaryWords)
     p.push(`summary: ${wordCount(it.summary as string)} words (max ${LIMITS.summaryWords})`);
-  const e = checkHtml(it.eli5, 1);
-  if (e.error) p.push(`eli5: ${e.error}`);
-  else if (wordCount(it.eli5 as string) > LIMITS.eli5Words) p.push(`eli5: ${wordCount(it.eli5 as string)} words (max ${LIMITS.eli5Words})`);
+  const e = checkHtml(it.plainLanguage, 1);
+  if (e.error) p.push(`plainLanguage: ${e.error}`);
+  else if (wordCount(it.plainLanguage as string) > LIMITS.plainLanguageWords)
+    p.push(`plainLanguage: ${wordCount(it.plainLanguage as string)} words (max ${LIMITS.plainLanguageWords})`);
 
   if (!Array.isArray(it.questions) || it.questions.length < 1 || it.questions.length > LIMITS.maxQuestions)
     p.push('questions must be an array of 1-3 strings');
@@ -137,7 +138,7 @@ export function validateItem(
     }
   }
   if (index) {
-    for (const field of ['summary', 'eli5'] as const) {
+    for (const field of ['summary', 'plainLanguage'] as const) {
       const text = it[field];
       if (typeof text !== 'string') continue;
       for (const n of rfcMentions(text)) if (!index.entries.has(n)) p.push(`${field}: RFC ${n} is not an issued RFC`);
@@ -231,7 +232,7 @@ function mergeItem(contentDir: string, it: DraftItem, date: string): MergeResult
     shortTitle: it.shortTitle,
     category: it.category,
     summary: it.summary,
-    eli5: { summary: it.eli5 },
+    plainLanguage: { summary: it.plainLanguage },
     questions: it.questions,
     provenance: { source: 'llm-draft', model: MODEL, drafted: date, reviewedBy: null },
     updated: date,
@@ -239,7 +240,7 @@ function mergeItem(contentDir: string, it: DraftItem, date: string): MergeResult
   for (let attempt = 0; attempt < 3; attempt++) {
     if (!fs.existsSync(file)) {
       const out: JsonObject = { number: it.number, shortTitle: fresh.shortTitle, category: fresh.category, categoryReviewed: false };
-      for (const k of ['summary', 'eli5', 'questions', 'provenance', 'updated']) out[k] = fresh[k];
+      for (const k of ['summary', 'plainLanguage', 'questions', 'provenance', 'updated']) out[k] = fresh[k];
       try {
         createExclusive(file, stringify(out));
         return { file, status: 'created', finalCategory: out.category };
@@ -260,10 +261,16 @@ function mergeItem(contentDir: string, it: DraftItem, date: string): MergeResult
     if ('sections' in cur) return { file, status: 'skipped' };
     const out: JsonObject = { ...(cur as JsonObject) };
     const fillsSummary = !('summary' in out);
-    for (const k of ['shortTitle', 'category', 'summary', 'eli5', 'questions']) {
+    for (const k of ['shortTitle', 'category', 'summary', 'plainLanguage', 'questions']) {
       if (!(k in out)) out[k] = fresh[k];
-      else if (k === 'eli5' && out.eli5 && typeof out.eli5 === 'object' && !Array.isArray(out.eli5) && !('summary' in out.eli5))
-        out.eli5 = { ...(out.eli5 as JsonObject), summary: it.eli5 };
+      else if (
+        k === 'plainLanguage' &&
+        out.plainLanguage &&
+        typeof out.plainLanguage === 'object' &&
+        !Array.isArray(out.plainLanguage) &&
+        !('summary' in out.plainLanguage)
+      )
+        out.plainLanguage = { ...(out.plainLanguage as JsonObject), summary: it.plainLanguage };
     }
     // Only claim llm-draft provenance when this import actually supplied the summary.
     if (fillsSummary) for (const k of ['provenance', 'updated']) if (!(k in out)) out[k] = fresh[k];

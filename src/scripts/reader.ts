@@ -61,7 +61,7 @@ export function init(root: ParentNode = document): () => void {
   // Reading level
   const ctl = qs('.level-ctl', root);
   function setLevel(l: string, persist: boolean): void {
-    if (l === 'eli5') html.setAttribute('data-level', 'eli5');
+    if (l === 'plain-language') html.setAttribute('data-level', 'plain-language');
     else html.removeAttribute('data-level');
     for (const b of qsa('[data-set-level]', root)) b.setAttribute('aria-pressed', String(b.getAttribute('data-set-level') === l));
     if (persist) {
@@ -79,7 +79,7 @@ export function init(root: ParentNode = document): () => void {
   }
   if (ctl) {
     ctl.hidden = false;
-    setLevel(html.getAttribute('data-level') === 'eli5' ? 'eli5' : 'std', false);
+    setLevel(html.getAttribute('data-level') === 'plain-language' ? 'plain-language' : 'std', false);
     for (const b of qsa('[data-set-level]', root)) {
       off.add(listen(b, 'click', () => setLevel(b.getAttribute('data-set-level') ?? 'std', true)));
     }

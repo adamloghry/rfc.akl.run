@@ -1,7 +1,7 @@
 # Explainer generation spec
 
 <!-- BEGIN GENERATED version -->
-**Spec version:** `promptVersion: "explain-v1"` (schema `rfc-datasheet-v1`, model `claude-sonnet-5-5`). The merge records both versions in each file's `provenance`.
+**Spec version:** `promptVersion: "explain-v2"` (schema `rfc-datasheet-v1`, model `claude-sonnet-5-5`). The merge records both versions in each file's `provenance`.
 <!-- END GENERATED version -->
 
 You write plain-language explainers for RFCs on rfc.akl.run. Each RFC in your work unit gets one JSON file. A validator checks the file's structure; you run it yourself and fix every error before you finish. **Nobody fact-checks the content afterwards, so accuracy is your job.** Only write what the RFC text supports.
@@ -12,7 +12,7 @@ Parts of this file are generated from the validator's own code (marked `GENERATE
 
 Your work unit looks like `{id, tier, rfcs: [{number, title, pages, textPath, contentPath, ...}]}`. For each RFC in it:
 
-1. Read the existing content file at `contentPath` (JSON). It holds a short `summary`, an `eli5.summary`, `category`, `shortTitle` and some `questions`. These are kept as they are. Your explainer must agree with them.
+1. Read the existing content file at `contentPath` (JSON). It holds a short `summary`, `category`, `shortTitle` and some `questions`; these are kept as they are, and your explainer must agree with them. It may also hold an explainer from an older prompt version (`sections`, `plainLanguage` and so on, with an older `provenance.promptVersion`). Your output replaces that explainer, including `plainLanguage.summary`. Use the old text only as a hint; do not copy it, and rewrite all `plainLanguage` text to the rules in section 8. The RFC text is still the only source.
 2. Read the RFC text at `textPath` (see "Reading the RFC" below). Nothing outside the text is a source, except the metadata on your unit entry (`status`, `published`, `obsoletes`, `obsoletedBy`, `updates`, `updatedBy`).
 3. Write `.work/explain/out/<number>.json`, using the Write tool. Use the plain RFC number, never zero-padded (`.work/explain/out/793.json`, not `0793.json`).
 4. Run `node --import tsx scripts/explain/validate.ts <number>` (several numbers are fine). It prints `ok <number>` or a numbered list of errors. Fix the file and run it again until it prints `ok` for every RFC in your unit. **Do not finish until it passes.**
@@ -42,9 +42,9 @@ One JSON object with exactly these keys. All are required except `shortTitle`. N
     "outcome": "What resulted or why it matters, including if it was replaced (plain text).",
     "outcomeLabel": "Why it matters"
   },
-  "eli5": { "summary": "<p>Two or three sentences a 10-year-old can follow.</p>" },
+  "plainLanguage": { "summary": "<p>Two or three plain-language sentences: what the RFC does and why it matters.</p>" },
   "sections": [
-    { "id": "introduction", "number": "1", "title": "Introduction", "content": "<p>...</p>", "eli5": "<p>...</p>" }
+    { "id": "introduction", "number": "1", "title": "Introduction", "content": "<p>...</p>", "plainLanguage": "<p>...</p>" }
   ],
   "viz": [],
   "references": [{ "number": "[RFC768]", "text": "Postel, J., \"User Datagram Protocol\", STD 6, RFC 768, August 1980.", "rfc": 768 }],
@@ -61,8 +61,8 @@ Field rules:
 - `shortTitle`: optional, at most 28 characters (a common name such as `TCP`, `HTTP/2`). Omit it when the content file already has one; it is kept anyway.
 - `subtitle`: plain text. `tags`: 1 to 4 short topic words in Title Case.
 - `tldr`: four plain-text strings, no HTML. `outcomeLabel` is a short label such as `Why it matters`, `Why it faded`, `Status today` or `The catch`.
-- `eli5.summary`: HTML. The content file's own `eli5.summary` is kept; still write a good one.
-- `sections`: see sections 4 and 8. Each has `id` (from the fixed vocabulary), `number` (a string such as `"1"` or `"3.2"`; use the RFC's own section number when a section maps to one RFC section, otherwise a running count), `title` (plain text, 3 to 90 characters), `content` (HTML, at least 100 characters) and `eli5` (HTML, a 10-year-old's version).
+- `plainLanguage.summary`: HTML, required. It replaces the content file's existing `plainLanguage.summary`.
+- `sections`: see sections 4 and 8. Each has `id` (from the fixed vocabulary), `number` (a string such as `"1"` or `"3.2"`; use the RFC's own section number when a section maps to one RFC section, otherwise a running count), `title` (plain text, 3 to 90 characters), `content` (HTML, at least 100 characters) and `plainLanguage` (HTML, the section's main point in plain language; see section 8).
 - `viz`: see section 6. Use `[]` when nothing in the RFC is naturally visual.
 - `references`: the RFC's most useful references (at most 20; `[]` is fine). `number` is the tag as the RFC prints it, `text` is the citation in plain text, and `rfc` is the plain issued RFC number when the reference is an RFC (omit `rfc` for anything else; never guess a number).
 - `facts`: at most 6 `{label, value}` pairs of hard facts (sizes, ports, codes, limits). Every value must be in the RFC text. `[]` is fine.
@@ -86,7 +86,7 @@ Escape hatch: `section-<k>` where k is a positive whole number (`section-1`, `se
 
 ## 5. HTML
 
-`content`, section `eli5`, `eli5.summary`, `today` and glossary `definition` are HTML. Everything else is plain text and is escaped on the page, so write `<` and `&` as plain characters there and use no tags.
+`content`, section `plainLanguage`, `plainLanguage.summary`, `today` and glossary `definition` are HTML. Everything else is plain text and is escaped on the page, so write `<` and `&` as plain characters there and use no tags.
 
 Write HTML inside a JSON string with **single quotes for attributes** (`<a href='/rfc793'>`), so you do not have to escape double quotes. Escape newlines as `\n` or avoid them.
 
@@ -483,7 +483,13 @@ Your unit's `tier` sets how much to write. The validator enforces the section co
 ## 8. Writing rules
 
 - **Audience:** a curious engineer who has not read the RFC. Plain language; define a term the first time you use it; prefer concrete examples over abstractions. Short sentences.
-- **ELI5** (`eli5` on each section and `eli5.summary`): write for a 10-year-old. One everyday analogy, no jargon, two or three short sentences. It must still be true to the section it sits beside.
+- **Plain language** (`plainLanguage` on each section, `plainLanguage.summary` and glossary `plainLanguage`): follow ISO 24495-1:2023 (Plain language, Part 1: Governing principles and guidelines). The site labels this text "ISO Plain Language", so it must meet the standard's three tests: readers can **find** what they need, **understand** it, and **use** it.
+  - **Reader:** an intelligent adult who does not work in networking (a student, a manager, an engineer from another field). Do not write for children and do not talk down.
+  - **Most important point first.** Open with what the section does or decides, then the reason. One idea per paragraph; two or three short sentences per section.
+  - **Familiar words.** Prefer common words to jargon. When a technical term is needed (a protocol name, "packet", "header"), keep it and say what it means in the same sentence. Spell out an abbreviation on first use.
+  - **Clear sentences.** Active voice, a clear subject ("The server replies", not "A reply is sent"), concrete verbs, about 20 words or fewer.
+  - **Concrete over figurative.** Describe the real mechanism. Use a comparison only when it is accurate and helps; never use a metaphor that hides how the protocol actually behaves.
+  - **Accurate and complete for its purpose.** It must agree with the section it sits beside and with the RFC text; every number in it follows the rules below. Leaving out detail is fine; changing the meaning is not.
 - **Every number, size, constant, port, code and date must appear in the RFC text** (or the unit metadata). If you are not sure, leave it out. Do not round, convert or compute new figures.
 - **Do not invent** implementations, products, deployments, adoption statistics, history or later events that the RFC text does not state. "Where this stands now" comes from `status`, `obsoletedBy`, `updatedBy` and what the text says.
 - **Status, stated plainly:** if the RFC is Historic, obsoleted or updated, say so in `today` and in `tldr.outcome`, and link the newer RFC (`/<number>/`). Do not present an obsoleted protocol as current.
@@ -495,11 +501,11 @@ Your unit's `tier` sets how much to write. The validator enforces the section co
 ## 9. Glossary
 
 - `glossary` lists the glossary term ids this explainer uses, at most 12. **Reuse existing ids first.** The existing terms are the files in `content/glossary/` (`ls content/glossary`, or `ls content/glossary | grep -i checksum`). An id is the file name without `.json`. Look before you invent: `udp`, `port-number`, `internet-checksum`, `datagram` and about 550 others exist.
-- `glossaryTerms` defines **new** terms: at most 5, each `{ "id", "term", "definition", "eli5" }`. Only add a term the reader needs, that the RFC defines or depends on, and that is not already covered. A new id must also appear in `glossary`.
+- `glossaryTerms` defines **new** terms: at most 5, each `{ "id", "term", "definition", "plainLanguage" }`. Only add a term the reader needs, that the RFC defines or depends on, and that is not already covered. A new id must also appear in `glossary`.
   - `id`: lowercase kebab-case and **singular** (`pseudo-header`, not `pseudo-headers`; `three-way-handshake`). It must not already exist in `content/glossary/`.
   - `term`: the display name (`Pseudo-header`).
   - `definition`: HTML in `<p>...</p>`, 30 to 700 characters, 1 to 3 sentences, complete sentences ending in a full stop.
-  - `eli5`: plain text, one or two sentences.
+  - `plainLanguage`: plain text, one or two sentences that follow the plain-language rules in section 8.
 - Every id in `glossary` must be an existing id or one you define in `glossaryTerms`.
 - Terms that only one RFC ever uses are dropped later, so keep new terms general.
 
@@ -520,8 +526,8 @@ Your unit's `tier` sets how much to write. The validator enforces the section co
     "outcome": "Delivery and duplicate protection are not guaranteed, so applications that need ordered, reliable delivery should use TCP instead.",
     "outcomeLabel": "The trade-off"
   },
-  "eli5": {
-    "summary": "<p>UDP is like dropping a postcard in the mailbox: it is quick and simple, but nobody promises it arrives or that postcards arrive in order.</p>"
+  "plainLanguage": {
+    "summary": "<p>UDP (User Datagram Protocol) lets one program send a short message to another program over the Internet with very little setup. It is fast and simple, but it does not check that messages arrive or that they arrive in order.</p>"
   },
   "sections": [
     {
@@ -529,21 +535,21 @@ Your unit's `tier` sets how much to write. The validator enforces the section co
       "number": "1",
       "title": "Introduction",
       "content": "<p>RFC 768 defines the <strong>User Datagram Protocol</strong> (UDP), a datagram mode of communication that assumes the Internet Protocol (IP) underneath. It lets application programs send messages to other programs with a minimum of protocol mechanism.</p><p>The RFC is blunt about the trade-off: the protocol is transaction oriented, and delivery and duplicate protection are not guaranteed. Applications that need ordered, reliable delivery of streams of data should use TCP.</p>",
-      "eli5": "<p>UDP lets one program toss a short message to another with almost no fuss. It does not promise the message gets there, so important things should use TCP instead.</p>"
+      "plainLanguage": "<p>UDP sends single messages between programs with as little extra work as possible. It does not guarantee delivery, so programs that need every byte to arrive in order should use TCP instead.</p>"
     },
     {
       "id": "header-format",
       "number": "2",
       "title": "The UDP Header",
       "content": "<p>Every UDP message starts with a header of four 16-bit fields: <strong>Source Port</strong>, <strong>Destination Port</strong>, <strong>Length</strong> and <strong>Checksum</strong>, followed by the data octets. That makes the header 8 bytes.</p><p>The source port is optional: when it is not used, a value of zero is inserted. Length counts the header and the data in octets, so its minimum value is eight.</p><p>The checksum covers a pseudo header taken from the IP header (the source address, the destination address, the protocol and the UDP length), the UDP header and the data. If the computed checksum is zero it is sent as all ones, and a transmitted checksum of all zeros means the sender did not compute one.</p>",
-      "eli5": "<p>The header is the address label on the postcard: who sent it, who it is for, how big it is, and a quick check number to spot if it got scrambled.</p>"
+      "plainLanguage": "<p>Each message starts with an 8-byte header. It names the sending and receiving ports, gives the message length, and carries a checksum: a number the receiver uses to detect damaged data.</p>"
     },
     {
       "id": "operation",
       "number": "3",
       "title": "Ports, Interfaces and Uses",
       "content": "<p>A user interface should let a program create receive ports, receive data together with the source port and source address, and send a datagram by giving the data, the ports and the addresses. The UDP module must be able to read the source and destination addresses and the protocol field from the IP header.</p><p>UDP is protocol number 17 (21 octal) in the Internet Protocol. The RFC names two major uses of the protocol: the Internet Name Server and the Trivial File Transfer protocol.</p>",
-      "eli5": "<p>Programs pick a numbered mailbox (a port) to listen on, and UDP hands each arriving postcard to the right mailbox.</p>"
+      "plainLanguage": "<p>A program listens on a numbered port. When a message arrives, UDP reads its destination port and passes it to the program listening there.</p>"
     }
   ],
   "viz": [
@@ -582,7 +588,7 @@ Your unit's `tier` sets how much to write. The validator enforces the section co
       "id": "demultiplexing",
       "term": "Demultiplexing",
       "definition": "<p>Sorting arriving data to the right receiver, for example by looking at the destination port.</p>",
-      "eli5": "Sorting the mail into the right mailbox when it arrives."
+      "plainLanguage": "Passing each piece of arriving data to the program it is meant for."
     }
   ],
   "glossary": ["udp", "port-number", "datagram", "connectionless", "internet-checksum", "pseudo-header", "demultiplexing"],

@@ -33,7 +33,7 @@ describe('secondary pages', () => {
     expect(h).toContain('href="/areas/core"');
     expect(h).toContain('4 RFCs');
     expect(h).not.toContain('cov-bar');
-    expect(h).toContain('2 with AI ELI5 · 1 summaries');
+    expect(h).toContain('2 with ISO Plain Language · 1 summaries');
   });
 
   test('index list: flat under 300, <details> per 1000 block above', async () => {

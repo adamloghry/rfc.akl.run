@@ -11,7 +11,7 @@ beforeEach(() => {
 afterEach(() => fx.cleanup());
 
 const work = (n: number, terms: unknown[]) => fs.writeFileSync(path.join(fx.paths.glossaryWorkDir, `${n}.json`), JSON.stringify(terms));
-const term = (id: string, definition: string, eli5 = 'Simple.') => ({ id, term: id.toUpperCase(), definition, eli5 });
+const term = (id: string, definition: string, plainLanguage = 'Simple.') => ({ id, term: id.toUpperCase(), definition, plainLanguage });
 const glossaryFile = (id: string) => path.join(fx.paths.glossaryContentDir, `${id}.json`);
 
 describe('definition choice', () => {

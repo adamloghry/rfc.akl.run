@@ -17,7 +17,10 @@ const t = (id: string, term: string, extra: Record<string, unknown> = {}) => ({
 const container = await AstroContainer.create();
 
 describe('glossary pages', () => {
-  const model = buildGlossaryModel([t('arp', 'ARP', { usedBy: [826, 903] }), t('mac', 'MAC address', { eli5: "A device's name tag." })]);
+  const model = buildGlossaryModel([
+    t('arp', 'ARP', { usedBy: [826, 903] }),
+    t('mac', 'MAC address', { plainLanguage: "A device's name tag." }),
+  ]);
   test('letter page: terms carry id anchors, nav marks the current letter, links point at RFC pages', async () => {
     const page = must(model.pages.find((p) => p.slug === 'm'));
     const h = await container.renderToString(GlossaryLetter, { props: { page, letters: model.letters } });
@@ -51,7 +54,7 @@ describe('glossary pages', () => {
     const terms = Array.from({ length: 20000 }, (_, i) =>
       t(`term-${i}`, `${letters[Math.floor(rnd() * letters.length)]}${sentence(2)}`, {
         definition: `<p>${sentence(50)}</p><p>${sentence(30)}</p>`,
-        eli5: sentence(25),
+        plainLanguage: sentence(25),
         usedBy: Array.from({ length: Math.floor(rnd() * 2000) }, (_, k) => k + 1),
       }),
     );

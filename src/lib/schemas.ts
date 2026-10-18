@@ -53,7 +53,7 @@ const section = z.strictObject({
   number: strOrNum.optional(),
   title: z.string(),
   content: z.string(),
-  eli5: z.string().optional(),
+  plainLanguage: z.string().optional(),
 });
 
 export const rfcSchema = z
@@ -69,7 +69,7 @@ export const rfcSchema = z
     tags: z.array(z.string()).optional(),
     subtitle: z.string().optional(),
     summary: z.string().optional(),
-    eli5: z.looseObject({ summary: z.string().optional() }).optional(),
+    plainLanguage: z.looseObject({ summary: z.string().optional() }).optional(),
     questions: z.array(z.string().regex(/^[^?]*$/)).optional(),
     tldr: z
       .strictObject({
@@ -113,7 +113,7 @@ export const glossarySchema = z
     id: z.string().regex(slugRe),
     term: z.string().min(1),
     definition: z.string(),
-    eli5: z.string().optional(),
+    plainLanguage: z.string().optional(),
     rfcs: z.array(posInt).optional(),
   })
   .superRefine((data, ctx) => htmlIssues(data, 'glossary', ctx));

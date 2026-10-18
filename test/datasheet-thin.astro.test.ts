@@ -52,8 +52,8 @@ const standard = bare({
   number: 5952,
   summary: '<p>Describes a thing.</p>',
   tldr: { problem: 'P', mechanism: 'M', outcome: 'O' },
-  eli5: { summary: '<p>Like a mailbox.</p>' },
-  sections: [1, 2, 3, 4, 5].map((i) => ({ ...sec(`part-${i}`, `Part ${i}`, `Body of part ${i}.`), eli5: `<p>Story ${i}.</p>` })),
+  plainLanguage: { summary: '<p>Like a mailbox.</p>' },
+  sections: [1, 2, 3, 4, 5].map((i) => ({ ...sec(`part-${i}`, `Part ${i}`, `Body of part ${i}.`), plainLanguage: `<p>Story ${i}.</p>` })),
   references: [{ number: '[1]', text: 'Postel, J., "Internet Protocol", RFC 791.', rfc: 791 }],
   glossary: ['mac-address', 'no-such-term'],
   provenance: draft,
@@ -71,8 +71,8 @@ function bodies(html: string): [string, string][] {
       .trim(),
   ]);
 }
-// The AI ELI5 panel (the RFC text panel has its own contents rail).
-const aiPanel = (html: string) => html.slice(html.indexOf('id="eli5"'));
+// The ISO Plain Language panel (the RFC text panel has its own contents rail).
+const aiPanel = (html: string) => html.slice(html.indexOf('id="plain-language"'));
 const tocOf = (html: string, cls: string) =>
   [
     ...(new RegExp(`<nav class="${cls}"[^>]*>([\\s\\S]*?)</nav>`).exec(html)?.[1] ?? '').matchAll(

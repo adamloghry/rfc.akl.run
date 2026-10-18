@@ -8,13 +8,14 @@ import fs from 'node:fs';
 import {
   aprilFools,
   defaultPaths,
-  hasSections,
   type IndexSummary,
+  isExplained,
   isMain,
   loadSummary,
   outFile,
   type Paths,
   PDF_ONLY,
+  PROMPT_VERSION,
   readContent,
   readJsonOr,
   TIERS,
@@ -57,8 +58,8 @@ export function status(opts: { paths?: Paths; summary?: IndexSummary; next?: num
     const t = tiers[tier];
     t.total++;
     const content = readContent(paths, n);
-    if (hasSections(content)) {
-      if (content?.provenance?.promptVersion) t.merged++;
+    if (isExplained(content)) {
+      if (content?.provenance?.promptVersion === PROMPT_VERSION) t.merged++;
       else t.existing++;
       continue;
     }
@@ -82,7 +83,7 @@ export function status(opts: { paths?: Paths; summary?: IndexSummary; next?: num
 
   const queue = readJsonOr<Queue | null>(paths.queueFile, null);
   const nextUnits = (queue?.units ?? [])
-    .filter((u) => u.rfcs.some((r) => !done.has(r.number) && !failed.has(r.number) && !hasSections(readContent(paths, r.number))))
+    .filter((u) => u.rfcs.some((r) => !done.has(r.number) && !failed.has(r.number) && !isExplained(readContent(paths, r.number))))
     .slice(0, opts.next ?? 5)
     .map((u) => u.id);
   return { tiers, totals, nextUnits, text };

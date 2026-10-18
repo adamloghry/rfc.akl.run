@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { aprilFools, tierOf, UNIT_SIZE, writeJson } from '../../scripts/explain/lib';
+import { aprilFools, PROMPT_VERSION, tierOf, UNIT_SIZE, writeJson } from '../../scripts/explain/lib';
 import { type Candidate, groupUnits, plan } from '../../scripts/explain/plan';
 import { type Fixture, makeFixture } from './helpers';
 
@@ -94,6 +94,17 @@ describe('plan', () => {
     expect(q.counts.total.rfcs).toBe(fx.summary.issued.length - 3);
     const retry = plan({ paths: fx.paths, summary: fx.summary, priority, isValid: (n) => n === 903, retryFailed: true });
     expect(retry.units.flatMap((u) => u.rfcs).some((r) => r.number === 905)).toBe(true);
+  });
+
+  test('queues explainers from an older prompt version, not current or pre-pipeline ones', () => {
+    const secs = [{ id: 'introduction', title: 'x', content: '<p>x</p>' }];
+    fx.writeContent(768, { ...fx.readContent(768), sections: secs, provenance: { source: 'llm-draft', promptVersion: 'explain-v1' } });
+    fx.writeContent(900, { ...fx.readContent(900), sections: secs, provenance: { source: 'llm-draft', promptVersion: PROMPT_VERSION } });
+    fx.writeContent(901, { ...fx.readContent(901), sections: secs });
+    const all = new Set(base().units.flatMap((u) => u.rfcs.map((r) => r.number)));
+    expect(all.has(768)).toBe(true);
+    expect(all.has(900)).toBe(false);
+    expect(all.has(901)).toBe(false);
   });
 
   test('an invalid output file does not count as done', () => {

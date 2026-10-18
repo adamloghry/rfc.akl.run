@@ -62,9 +62,9 @@ describe('Datasheet', () => {
     expect(await ds(r5952())).not.toContain('class="container container-reader lineage"');
   });
 
-  test('reading level control only when eli5 exists', async () => {
+  test('reading level control only when plainLanguage exists', async () => {
     const h = await ds(r903);
-    expect(h).toContain('data-level="eli5"');
+    expect(h).toContain('data-level="plain-language"');
     expect(h).toContain('data-level="std"');
     expect(h).toMatch(/class="rail-block level-ctl"/);
     const p826 = await ds(site.rfcs.get(826));
@@ -88,13 +88,13 @@ describe('Datasheet', () => {
     expect(h).toContain('https://www.rfc-editor.org/rfc/rfc903.html');
   });
 
-  test('right rail: eli5, glossary, journeys; unknown glossary ids skipped', async () => {
+  test('right rail: plainLanguage, glossary, journeys; unknown glossary ids skipped', async () => {
     const h = await ds(r903);
     expect(h).toContain('A computer shouts its name tag number');
     expect(h).toContain('href="/glossary/m#mac-address"');
     expect(h).toContain('MAC address');
     expect(h).toContain('href="/journeys/diskless-boot"');
-    expect(await ds(withContent(r903, { eli5: undefined }))).not.toContain('class="pullquote"');
+    expect(await ds(withContent(r903, { plainLanguage: undefined }))).not.toContain('class="pullquote"');
     const g = await ds(withContent(r903, { glossary: ['mac-address', 'no-such-term'] }));
     expect(g).toContain('href="/glossary/m#mac-address"');
     expect(g).not.toContain('no-such-term');
@@ -232,16 +232,19 @@ describe('IndexTier', () => {
     expect(out).not.toContain('Abstract from the RFC Editor index');
   });
 
-  test('eli5 block, draft note', async () => {
+  test('plainLanguage block, draft note', async () => {
     const out = await it(
-      withContent(r5952(), { eli5: { summary: '<p>Write it one way.</p>' }, provenance: { source: 'llm-draft', reviewedBy: null } }),
+      withContent(r5952(), {
+        plainLanguage: { summary: '<p>Write it one way.</p>' },
+        provenance: { source: 'llm-draft', reviewedBy: null },
+      }),
     );
-    expect(out).toContain("Like I'm 5");
+    expect(out).toContain('PLAIN LANGUAGE');
     expect(out).toContain('Write it one way.');
     expect(out).toContain('Draft · machine-assisted, not yet reviewed');
     const plain = await it(r5952());
     expect(plain).not.toContain('machine-assisted');
-    expect(plain).not.toContain("Like I'm 5");
+    expect(plain).not.toContain('PLAIN LANGUAGE');
   });
 
   test('dl: facts, guessed area, doi', async () => {
@@ -261,12 +264,12 @@ describe('IndexTier', () => {
     expect(out).toContain('class="it-lin"');
     expect(out).toContain('None — current');
     expect(out).toContain('UPDATED / OBSOLETED BY');
-    expect(out).not.toContain(' · AI ELI5');
+    expect(out).not.toContain(' · ISO Plain Language');
     const s2 = { ...site, rfcs: new Map(site.rfcs) };
     s2.rfcs.set(4291, { ...r5952(), number: 4291, tier: 'explainer', title: 'IPv6 Addressing Architecture' });
     const out2 = await it(r5952(), s2);
     expect(out2).toContain('IPv6 Addressing Architecture');
-    expect(out2).toContain(' · AI ELI5');
+    expect(out2).toContain(' · ISO Plain Language');
     const ob = await it({ ...r5952(), obsoletedBy: [9999] });
     expect(ob).not.toContain('None — current');
     expect(ob).toContain('class="it-warn"');

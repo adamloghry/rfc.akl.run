@@ -31,7 +31,7 @@ const item = (n: number, over: Record<string, unknown> = {}) => ({
   shortTitle: 'Short',
   category: 'core',
   summary: '<p>This RFC does a thing. It exists for a reason.</p>',
-  eli5: '<p>It is like a note passed in class.</p>',
+  plainLanguage: '<p>It is like a note passed in class.</p>',
   questions: ['what is this thing'],
   ...over,
 });
@@ -56,13 +56,13 @@ test('creates new files with provenance and key order', async () => {
     'category',
     'categoryReviewed',
     'summary',
-    'eli5',
+    'plainLanguage',
     'questions',
     'provenance',
     'updated',
   ]);
   assert.equal(j.categoryReviewed, false);
-  assert.deepEqual(j.eli5, { summary: '<p>It is like a note passed in class.</p>' });
+  assert.deepEqual(j.plainLanguage, { summary: '<p>It is like a note passed in class.</p>' });
   assert.deepEqual(j.provenance, { source: 'llm-draft', model: 'claude-sonnet-5-5', drafted: '2026-10-15', reviewedBy: null });
   assert.equal(j.updated, '2026-10-15');
   assert.ok(rawRead(s, 903).endsWith('}\n'));
@@ -102,7 +102,7 @@ test('legacy file keeps category/shortTitle/categoryReviewed and key order, gain
     'featured',
     'obsoletedBy',
     'summary',
-    'eli5',
+    'plainLanguage',
     'questions',
     'provenance',
     'updated',
@@ -118,18 +118,21 @@ test('legacy file without categoryReviewed does not gain one', async () => {
   assert.equal(read(s, 1).shortTitle, 'Short');
 });
 
-test('skips files that have sections; deep-merges eli5; never overwrites', async () => {
+test('skips files that have sections; deep-merges plainLanguage; never overwrites', async () => {
   const s = setup([1, 903]);
   const withSections = { number: 1, sections: [{ id: 'a', title: 'A', content: '<p>x</p>' }] };
   fs.writeFileSync(path.join(s.content, 'rfcs', '1.json'), JSON.stringify(withSections));
-  fs.writeFileSync(path.join(s.content, 'rfcs', '903.json'), JSON.stringify({ number: 903, summary: '<p>mine</p>', eli5: { other: 'x' } }));
+  fs.writeFileSync(
+    path.join(s.content, 'rfcs', '903.json'),
+    JSON.stringify({ number: 903, summary: '<p>mine</p>', plainLanguage: { other: 'x' } }),
+  );
   part(s.work, 1, [item(1), item(903)]);
   const r = await run(s);
   assert.deepEqual(read(s, 1), withSections);
   assert.equal(r.skipped.length, 1);
   const j = read(s, 903);
   assert.equal(j.summary, '<p>mine</p>');
-  assert.deepEqual(j.eli5, { other: 'x', summary: '<p>It is like a note passed in class.</p>' });
+  assert.deepEqual(j.plainLanguage, { other: 'x', summary: '<p>It is like a note passed in class.</p>' });
 });
 
 test('rejects bad items, merges good ones, writes rejects.json', async () => {
@@ -163,9 +166,9 @@ test('validateItem limits', () => {
   assert.ok(!ok({ summary: 'no tags' }));
   assert.ok(!ok({ summary: '<p>unclosed' }));
   assert.ok(!ok({ summary: '<p><a href="x">l</a></p>' }));
-  assert.ok(!ok({ eli5: '<p>a</p><p>b</p>' }));
-  assert.ok(!ok({ eli5: `<p>${'w '.repeat(51)}</p>` }));
-  assert.ok(ok({ eli5: `<p>${'w '.repeat(50)}</p>` }));
+  assert.ok(!ok({ plainLanguage: '<p>a</p><p>b</p>' }));
+  assert.ok(!ok({ plainLanguage: `<p>${'w '.repeat(51)}</p>` }));
+  assert.ok(ok({ plainLanguage: `<p>${'w '.repeat(50)}</p>` }));
   assert.ok(!ok({ questions: [] }));
   assert.ok(!ok({ questions: ['a', 'b', 'c', 'd'] }));
   assert.ok(!ok({ questions: ['what is it?'] }));
@@ -175,7 +178,7 @@ test('validateItem limits', () => {
   assert.ok(!ok({ extra: 1 }));
   assert.ok(ok({ summary: '<p>See RFC 826 and RFCs 903, 5952.</p>' }));
   assert.ok(!ok({ summary: '<p>See RFC 9999.</p>' }));
-  assert.ok(!ok({ eli5: '<p>Like RFC 4242.</p>' }));
+  assert.ok(!ok({ plainLanguage: '<p>Like RFC 4242.</p>' }));
 });
 
 test('idempotent second run', async () => {

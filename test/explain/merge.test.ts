@@ -30,7 +30,7 @@ describe('merge', () => {
     const c = fx.readContent(768);
     expect(rfcSchema.safeParse(c).success).toBe(true);
     expect(c.summary).toBe('<p>Summary of RFC 768.</p>');
-    expect(c.eli5.summary).toBe('<p>Kid summary of RFC 768.</p>'); // existing wins over the generated one
+    expect(c.plainLanguage.summary).toBe(validOutput().plainLanguage.summary); // the generated one replaces the existing one
     expect(c.category).toBe('transport');
     expect(c.shortTitle).toBe('UDP');
     // existing questions first, generated ones appended, deduped, max 6
@@ -70,6 +70,21 @@ describe('merge', () => {
     expect(r.merged).toEqual([]);
     expect(fs.readFileSync(path.join(fx.paths.contentDir, '768.json'), 'utf8')).toBe(before);
     expect(fs.existsSync(path.join(fx.paths.glossaryWorkDir, '768.json'))).toBe(false);
+  });
+
+  test('replaces an explainer from an older prompt version; skips one from the current version', () => {
+    const stale = {
+      ...fx.readContent(768),
+      sections: [{ id: 'introduction', title: 'Intro', content: '<p>Old.</p>' }],
+      provenance: { source: 'llm-draft', promptVersion: 'explain-v1' },
+    };
+    fx.writeContent(768, stale);
+    fx.writeOut(768, validOutput());
+    expect(run().merged).toEqual([768]);
+    expect(fx.readContent(768).provenance.promptVersion).toBe(PROMPT_VERSION);
+    fx.writeOut(768, { ...validOutput(), subtitle: 'Changed' });
+    expect(run().skippedExisting).toEqual([768]);
+    expect(fx.readContent(768).subtitle).not.toBe('Changed');
   });
 
   test('is idempotent', () => {

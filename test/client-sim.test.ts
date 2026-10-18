@@ -60,7 +60,7 @@ describe('structure', () => {
     ]);
     expect(segs().length).toBe(6);
     expect(segs()[2]?.getAttribute('aria-label')).toBe('Go to step 3: Ordinary hosts ignore it');
-    expect(els('.sim-lens button', fig()).map((b) => b.getAttribute('data-lens'))).toEqual(['eli5', 'std', 'orig']);
+    expect(els('.sim-lens button', fig()).map((b) => b.getAttribute('data-lens'))).toEqual(['plain-language', 'std', 'orig']);
     expect(els('.sim-row', fig()).length).toBe(9);
     expect(el('.sim-lookup-h b', fig()).textContent).toBe("Server's lookup table");
     expect(els('.sim-lrow', fig()).length).toBe(4);
@@ -310,7 +310,7 @@ describe('explanation lens', () => {
   test('defaults to the engineer lens', () => {
     dispose = init();
     expect(lensBody('std').hidden).toBe(false);
-    expect(lensBody('eli5').hidden).toBe(true);
+    expect(lensBody('plain-language').hidden).toBe(true);
     expect(lensBody('orig').hidden).toBe(true);
     expect(el('.sim-lens button[data-lens="std"]', fig()).getAttribute('aria-pressed')).toBe('true');
     expect(lensBody('std').textContent).toContain('48-bit Ethernet address');
@@ -318,29 +318,29 @@ describe('explanation lens', () => {
 
   test('buttons switch the lens, persist it, and the text follows', () => {
     dispose = init();
-    click(el('.sim-lens button[data-lens="eli5"]', fig()));
-    expect(lensBody('eli5').hidden).toBe(false);
+    click(el('.sim-lens button[data-lens="plain-language"]', fig()));
+    expect(lensBody('plain-language').hidden).toBe(false);
     expect(lensBody('std').hidden).toBe(true);
-    expect(lensBody('eli5').textContent).toContain('The computer wakes up');
-    expect(localStorage.getItem('rfc-lens')).toBe('eli5');
+    expect(lensBody('plain-language').textContent).toContain('The computer wakes up');
+    expect(localStorage.getItem('rfc-lens')).toBe('plain-language');
     click(el('.sim-lens button[data-lens="orig"]', fig()));
     expect(lensBody('orig').textContent).toContain('Network hosts such as diskless workstations');
     click(primary());
     expect(lensBody('orig').textContent).toContain('Read in RFC 903');
     expect(el('.sim-lens button[data-lens="orig"]', fig()).getAttribute('aria-pressed')).toBe('true');
-    expect(el('.sim-lens button[data-lens="eli5"]', fig()).getAttribute('aria-pressed')).toBe('false');
+    expect(el('.sim-lens button[data-lens="plain-language"]', fig()).getAttribute('aria-pressed')).toBe('false');
   });
 
   test('a stored lens wins; otherwise the page reading level decides', () => {
     localStorage.setItem('rfc-lens', 'orig');
-    localStorage.setItem('rfc-level', 'eli5');
+    localStorage.setItem('rfc-level', 'plain-language');
     dispose = init();
     expect(lensBody('orig').hidden).toBe(false);
     dispose();
     localStorage.setItem('rfc-lens', 'bogus');
     mount(fixture('rfc-903.html'));
     dispose = init();
-    expect(lensBody('eli5').hidden).toBe(false);
+    expect(lensBody('plain-language').hidden).toBe(false);
     dispose();
     localStorage.clear();
     mount(fixture('rfc-903.html'));
@@ -357,8 +357,8 @@ describe('explanation lens', () => {
     });
     dispose = init();
     expect(lensBody('std').hidden).toBe(false);
-    click(el('.sim-lens button[data-lens="eli5"]', fig()));
-    expect(lensBody('eli5').hidden).toBe(false);
+    click(el('.sim-lens button[data-lens="plain-language"]', fig()));
+    expect(lensBody('plain-language').hidden).toBe(false);
   });
 });
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { writeJson } from '../../scripts/explain/lib';
+import { PROMPT_VERSION, writeJson } from '../../scripts/explain/lib';
 import { plan } from '../../scripts/explain/plan';
 import { format, status } from '../../scripts/explain/status';
 import { type Fixture, makeFixture, validOutput } from './helpers';
@@ -19,7 +19,7 @@ describe('status', () => {
     fx.writeContent(902, {
       ...fx.readContent(902),
       sections: [{ id: 'introduction', title: 'x', content: '<p>x</p>' }],
-      provenance: { source: 'llm-draft', promptVersion: 'explain-v1' },
+      provenance: { source: 'llm-draft', promptVersion: PROMPT_VERSION },
     });
     fx.writeOut(768, validOutput());
     fx.writeOut(900, { nope: true });

@@ -22,7 +22,7 @@ test.describe('Atlas (home)', () => {
 
   test('hero flows into the map: no coverage or just-published panels, no GitHub in the site chrome, no feed', async ({ page }) => {
     await page.goto('/');
-    await expect(page).toHaveTitle('rfc.akl.run — the documents that built the Internet');
+    await expect(page).toHaveTitle('rfc.akl.run — how the Internet is engineered');
     await expect(page.locator('.at-goal, .at-fresh, .at-cov')).toHaveCount(0);
     const body = await page.locator('body').innerText();
     expect(body).not.toMatch(/GOAL ·|JUST PUBLISHED|Coverage report|Follow \(RSS\)|Contribute an explainer|github/i);

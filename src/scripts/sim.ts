@@ -1,7 +1,7 @@
 // Sequence simulator client script; self-initializes on all matching figures.
 import { disposer, listen, onReady, qs, qsa, storageGet, storageSet } from './dom';
 
-type Lens = 'eli5' | 'std' | 'orig';
+type Lens = 'plain-language' | 'std' | 'orig';
 type NodeKind = 'client' | 'host' | 'server' | 'router';
 type NodeStateInfo = { state?: string; label?: string };
 
@@ -23,7 +23,7 @@ interface SimRouter {
 interface SimStep {
   tag?: string;
   title: string;
-  eli5?: string;
+  plainLanguage?: string;
   spec?: string;
   orig?: string;
   why?: string;
@@ -50,7 +50,7 @@ interface SimData {
 }
 
 const LENSES: Array<[Lens, string]> = [
-  ['eli5', 'Like I’m 5'],
+  ['plain-language', 'Plain language'],
   ['std', 'Engineer'],
   ['orig', 'RFC text'],
 ];
@@ -93,7 +93,12 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
   const state: { step: number; router: boolean; lens: Lens } = { step: 0, router: false, lens: 'std' };
 
   const stored = storageGet('rfc-lens');
-  state.lens = stored === 'eli5' || stored === 'std' || stored === 'orig' ? stored : storageGet('rfc-level') === 'eli5' ? 'eli5' : 'std';
+  state.lens =
+    stored === 'plain-language' || stored === 'std' || stored === 'orig'
+      ? stored
+      : storageGet('rfc-level') === 'plain-language'
+        ? 'plain-language'
+        : 'std';
 
   const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)');
   const applyMotion = (): void => {
@@ -195,15 +200,15 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
   });
   top.append(eyebrow, lensBox);
   const title = h('h3', 'sim-step-title');
-  const eli5Body = h('p');
+  const plainLanguageBody = h('p');
   const stdBody = h('p');
   const origText = document.createTextNode('');
   const lensWraps: Record<Lens, HTMLElement> = {
-    eli5: h('div', 'sim-lensbody'),
+    'plain-language': h('div', 'sim-lensbody'),
     std: h('div', 'sim-lensbody'),
     orig: h('div', 'sim-lensbody'),
   };
-  for (const k of ['eli5', 'std', 'orig'] as const) {
+  for (const k of ['plain-language', 'std', 'orig'] as const) {
     const d = lensWraps[k];
     d.setAttribute('data-level', k);
     if (k === 'orig') {
@@ -216,7 +221,7 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
         box.appendChild(a);
       }
       d.appendChild(box);
-    } else d.appendChild(k === 'eli5' ? eli5Body : stdBody);
+    } else d.appendChild(k === 'plain-language' ? plainLanguageBody : stdBody);
     narr.appendChild(d);
   }
   // order: top, title, bodies, why
@@ -376,10 +381,10 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
     // narrative
     eyebrow.textContent = `step ${i + 1} of ${total}${s.tag ? ` · ${s.tag}` : ''}`;
     title.textContent = s.title;
-    eli5Body.textContent = s.eli5 || '';
+    plainLanguageBody.textContent = s.plainLanguage || '';
     stdBody.textContent = s.spec || '';
     origText.nodeValue = s.orig || '';
-    for (const k of ['eli5', 'std', 'orig'] as const) lensWraps[k].hidden = state.lens !== k;
+    for (const k of ['plain-language', 'std', 'orig'] as const) lensWraps[k].hidden = state.lens !== k;
     for (const b of lensBtns) b.setAttribute('aria-pressed', b.getAttribute('data-lens') === state.lens ? 'true' : 'false');
     whyText.textContent = s.why || '';
     whyRow.hidden = !s.why;

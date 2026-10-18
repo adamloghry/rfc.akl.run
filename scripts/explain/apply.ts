@@ -8,7 +8,7 @@ export const OUTPUT_KEYS = [
   'subtitle',
   'tags',
   'tldr',
-  'eli5',
+  'plainLanguage',
   'sections',
   'viz',
   'references',
@@ -49,7 +49,7 @@ export function provenanceFor(drafted: string) {
 }
 
 /**
- * Preserves summary, eli5.summary, category (and everything else already in the file), shortTitle unless absent, and the
+ * Takes plainLanguage.summary from the output (falling back to the file's). Preserves summary, category (and everything else already in the file), shortTitle unless absent, and the
  * union of questions (existing first, deduped, at most 6). glossaryTerms is not stored here (merge writes it to .work/glossary).
  */
 export function applyOutput(content: Content, out: Content, drafted: string): Content {
@@ -58,8 +58,7 @@ export function applyOutput(content: Content, out: Content, drafted: string): Co
   if (!next.shortTitle && out.shortTitle) next.shortTitle = out.shortTitle;
   next.tags = out.tags;
   next.subtitle = out.subtitle;
-  next.eli5 = { ...(out.eli5 ?? {}), ...(content.eli5 ?? {}) };
-  if (!content.eli5?.summary && out.eli5?.summary) next.eli5.summary = out.eli5.summary;
+  next.plainLanguage = { ...(content.plainLanguage ?? {}), ...(out.plainLanguage ?? {}) };
   next.questions = unionQuestions(content.questions, out.questions);
   next.tldr = out.tldr;
   next.facts = out.facts;

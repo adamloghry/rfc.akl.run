@@ -1,5 +1,5 @@
 /**
- * Builds .work/explain/queue.json: every issued RFC that has no `sections` yet, in C9 priority order, grouped into agent work units.
+ * Builds .work/explain/queue.json: every issued RFC without a current explainer (no `sections`, or generated under an older PROMPT_VERSION), in C9 priority order, grouped into agent work units.
  * Units: large 1 RFC, full 2, standard 3, compact 6. RFCs that already have a valid output file (or are merged) are skipped, so reruns resume.
  *
  * CLI: node --import tsx scripts/explain/plan.ts [--retry-failed]
@@ -11,8 +11,8 @@ import { loadIndex } from '../../src/lib/rfc-index';
 import {
   aprilFools,
   defaultPaths,
-  hasSections,
   type IndexSummary,
+  isExplained,
   isMain,
   loadSummary,
   outFile,
@@ -119,7 +119,7 @@ export function plan(input: PlanInput): Queue {
   const rel = (p: string) => path.relative(paths.root, p);
   for (const n of summary.issued) {
     const content = readContent(paths, n);
-    if (hasSections(content)) {
+    if (isExplained(content)) {
       skipped.merged++;
       continue;
     }
