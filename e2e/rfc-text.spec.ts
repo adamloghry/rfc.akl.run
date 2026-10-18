@@ -156,7 +156,9 @@ test.describe('framing copy', () => {
   test('home copy', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('h1').first()).toHaveText('How the Internet is engineered.');
-    await expect(page.locator('.at-lead')).toHaveText('Every RFC, from the first in 1969 to today, with the original text and a plain-language explainer. Each has a permanent page at rfc.akl.run/rfc<number>.');
+    await expect(page.locator('.at-lead')).toHaveText(
+      'Every RFC, from the first in 1969 to today, with the original text and a plain-language explainer. Each has a permanent page at rfc.akl.run/rfc<number>.',
+    );
     await expect(page.locator('.site-nav a[aria-current="page"]')).toHaveText('Home');
     await expect(page.locator('.site-nav')).not.toContainText('Atlas');
     await expect(page.locator('.at-map .at-eyebrow')).toHaveText('EVERY RFC');
