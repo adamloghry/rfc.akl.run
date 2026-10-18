@@ -303,7 +303,7 @@ function main(argv: string[]): void {
     else if (a === '--context') context = Number(argv[++i]);
     else if (a === '--limit') limit = Number(argv[++i]);
     else if (a === '--full') limit = Infinity;
-    else paths.push(/^\d+$/.test(a) ? `/${a}/` : a.startsWith('/') ? a : `/${a}`);
+    else paths.push(/^\d+$/.test(a) ? `/rfc${a}` : a.startsWith('/') ? a : `/${a}`);
   }
   const reports = (paths.length ? paths : DEFAULT_PATHS).map((p) => comparePage(goldenDir, distDir, p, { context, limit }));
   for (const r of reports) {

@@ -5,7 +5,7 @@ import { click, el, els, fixture, mount, resetDocument, setUrl, stubClipboard, s
 
 let dispose: () => void = () => {};
 beforeEach(() => {
-  resetDocument('https://rfc.akl.run/903/');
+  resetDocument('https://rfc.akl.run/rfc903');
   mount(fixture('rfc-903.html'));
 });
 afterEach(() => {
@@ -45,20 +45,20 @@ describe('reading level', () => {
   });
 
   test('?level in the URL is rewritten to follow the choice; a URL without it is untouched', () => {
-    setUrl('https://rfc.akl.run/903/?level=std&x=1#introduction');
+    setUrl('https://rfc.akl.run/rfc903?level=std&x=1#introduction');
     dispose = init();
     click(el('[data-set-level="eli5"]'));
     expect(location.search).toBe('?level=eli5&x=1');
     expect(location.hash).toBe('#introduction');
     dispose();
-    setUrl('https://rfc.akl.run/903/');
+    setUrl('https://rfc.akl.run/rfc903');
     dispose = init();
     click(el('[data-set-level="eli5"]'));
     expect(location.search).toBe('');
   });
 
   test('storage and history failures are swallowed', () => {
-    setUrl('https://rfc.akl.run/903/?level=std');
+    setUrl('https://rfc.akl.run/rfc903?level=std');
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new Error('quota');
     });
@@ -86,7 +86,7 @@ describe('copy link', () => {
     expect(btn.textContent).toBe('Copy link');
     click(btn);
     await vi.advanceTimersByTimeAsync(0);
-    expect(written).toEqual(['https://rfc.akl.run/903/']);
+    expect(written).toEqual(['https://rfc.akl.run/rfc903']);
     expect(btn.textContent).toBe('Link copied');
     // a second click inside the window keeps the original label as the one to restore
     click(btn);

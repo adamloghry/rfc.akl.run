@@ -165,7 +165,7 @@ export function init(root: ParentNode = document): () => void {
       return;
     }
     capLabel.textContent = `RFC ${n}`;
-    capDetail.textContent = `— rfc.akl.run/${n}/`;
+    capDetail.textContent = `— rfc.akl.run/rfc${n}`;
     void shard(n).then((sh) => {
       if (hover !== n && !(kbd && cursor === n && !hover)) return;
       const t = sh[String(n)];
@@ -197,7 +197,7 @@ export function init(root: ParentNode = document): () => void {
   cv.addEventListener('mouseleave', () => setHover(0));
   cv.addEventListener('click', (e) => {
     const n = numAt(e);
-    if (n) nav.to(`/${n}/`);
+    if (n) nav.to(`/rfc${n}`);
   });
   cv.addEventListener('focus', () => {
     kbd = true;
@@ -221,7 +221,7 @@ export function init(root: ParentNode = document): () => void {
       draw();
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      nav.to(`/${cursor}/`);
+      nav.to(`/rfc${cursor}`);
     }
   });
 

@@ -79,9 +79,9 @@ function buildFewer(n: number) {
 
 test('doc table rows are [url, number|null, title, shortTitle, tier]', () => {
   const row = must(docs.find((d) => d[1] === 903));
-  assert.equal(row[0], '/903/');
+  assert.equal(row[0], '/rfc903');
   assert.equal(typeof row[2], 'string');
-  const j = must(docs.find((d) => d[0] === '/journeys/diskless-boot/'));
+  const j = must(docs.find((d) => d[0] === '/journeys/diskless-boot'));
   assert.equal(j[1], null);
   assert.equal(j[4], 'journey');
 });
@@ -98,13 +98,13 @@ withCore('RFC 903 is found by name, title words, question text and number', () =
   ]) {
     const hits = query(q);
     assert.ok(
-      hits.some((h) => h.href === '/903/'),
+      hits.some((h) => h.href === '/rfc903'),
       `"${q}" should find /903/, got ${JSON.stringify(hits.map((h) => h.href))}`,
     );
   }
-  assert.equal(must(query('903')[0]).href, '/903/');
-  assert.equal(must(query('rarp')[0]).href, '/903/');
-  assert.ok(query('diskless').some((h) => h.href === '/903/'));
+  assert.equal(must(query('903')[0]).href, '/rfc903');
+  assert.equal(must(query('rarp')[0]).href, '/rfc903');
+  assert.ok(query('diskless').some((h) => h.href === '/rfc903'));
 });
 
 withCore('an RFC is found through a word that appears only in its question (questions.json no longer lists them)', () => {
@@ -119,12 +119,12 @@ withCore('an RFC is found through a word that appears only in its question (ques
   const postings: core.Postings = {};
   for (const k of core.shardsOf(p, meta.shards)) Object.assign(postings, m.get(`data/search/t-${String(k).padStart(2, '0')}.json`));
   const hits = core.rank(p, postings, 10).map((x) => core.docRow(must(d2[x.id])));
-  assert.equal(must(hits[0]).href, '/903/');
+  assert.equal(must(hits[0]).href, '/rfc903');
 });
 
 withCore('journeys are found by their questions', () => {
   const hits = query('diskless computer ip address');
-  assert.ok(hits.some((h) => h.href === '/journeys/diskless-boot/' && h.label === 'JOURNEY' && h.tag === 'JOURNEY'));
+  assert.ok(hits.some((h) => h.href === '/journeys/diskless-boot' && h.label === 'JOURNEY' && h.tag === 'JOURNEY'));
 });
 
 withCore('AND ranking, no junk for unmatched terms, empty query', () => {
@@ -196,12 +196,12 @@ withCore('rank: AND first, then best partial; prefix expands the last token only
 });
 
 withCore('docRow formats like the old Pagefind rows', () => {
-  assert.deepEqual(core.docRow(['/903/', 903, 'A Reverse Address Resolution Protocol', 'RARP', 'interactive']), {
+  assert.deepEqual(core.docRow(['/rfc903', 903, 'A Reverse Address Resolution Protocol', 'RARP', 'interactive']), {
     label: 'RFC 903',
     title: 'RARP: A Reverse Address Resolution Protocol',
     tag: 'INTERACTIVE',
     tier: 'interactive',
-    href: '/903/',
+    href: '/rfc903',
   });
-  assert.equal(core.docRow(['/journeys/x/', null, 'T', null, 'journey']).label, 'JOURNEY');
+  assert.equal(core.docRow(['/journeys/x', null, 'T', null, 'journey']).label, 'JOURNEY');
 });

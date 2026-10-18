@@ -14,7 +14,7 @@ export function byDate(a: Dated, b: Dated): number {
 }
 
 const RFC_RE = /\bRFC\s?(\d{1,5})\b/g;
-const HREF_RE = /href="\/(\d+)\/"/g;
+const HREF_RE = /href="\/rfc(\d+)(?=["#])/g;
 
 function scan(text: unknown, out: Set<number>) {
   if (typeof text !== 'string') return;

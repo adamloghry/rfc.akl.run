@@ -3,7 +3,7 @@ import { statusClass } from '../../lib/data-files';
 import type { Site } from '../../lib/model';
 
 export const SUGGESTIONS = ['How does email get delivered?', 'Why is the padlock there?', 'TLS 1.3', '2119'];
-export const HASH_FORWARDER = "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/'+(+m[1])+'/');";
+export const HASH_FORWARDER = "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/rfc'+(+m[1]));";
 
 export const fmt = (n: number) => Number(n).toLocaleString('en-US');
 export const w = (n: number, d: number) => `${d ? ((n / d) * 100).toFixed(2) : '0'}%`;

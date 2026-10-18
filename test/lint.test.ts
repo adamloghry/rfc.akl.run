@@ -149,7 +149,7 @@ test('missing eli5 on summary+ tiers is a warning', () => {
 test('internal link above max is an error; legacy #rfc link is an error', () => {
   const dir = baseline();
   edit(dir, 826, (j: Doc) => {
-    j.sections[0].content = '<p><a href="/99999/">x</a></p>';
+    j.sections[0].content = '<p><a href="/rfc99999">x</a></p>';
   });
   assert.ok(has(lint(dir, index, {}).errors, /826.*99999/));
   edit(dir, 826, (j: Doc) => {
@@ -157,7 +157,21 @@ test('internal link above max is an error; legacy #rfc link is an error', () => 
   });
   assert.ok(has(lint(dir, index, {}).errors, /826.*#rfc903/));
   edit(dir, 826, (j: Doc) => {
-    j.sections[0].content = '<p><a href="/903/">fine</a></p>';
+    j.sections[0].content = '<p><a href="/rfc903">fine</a></p>';
+  });
+  assert.deepEqual(lint(dir, index, {}).errors, []);
+});
+
+test('old-style /<n>/ links and trailing slashes are errors; /rfc<n>#section is fine', () => {
+  const dir = baseline();
+  for (const bad of ['/903/', '/903/#intro', '/903', '/rfc903/', '/areas/core/']) {
+    edit(dir, 826, (j: Doc) => {
+      j.sections[0].content = `<p><a href="${bad}">x</a></p>`;
+    });
+    assert.ok(has(lint(dir, index, {}).errors, /826.*(old-style|trailing slash)/), bad);
+  }
+  edit(dir, 826, (j: Doc) => {
+    j.sections[0].content = '<p><a href="/rfc903#packet-format">x</a> <a href="/areas/core">y</a> <a href="/">z</a></p>';
   });
   assert.deepEqual(lint(dir, index, {}).errors, []);
 });
@@ -192,7 +206,7 @@ const ACCEPT = [
   '<div class="callout callout-info"><p>Note <code>x</code></p></div>',
   '<div class="key-points"><div class="key-point"><strong>a</strong> b</div></div>',
   '<table class="comparison"><thead><tr><th colspan="2">A</th></tr></thead><tbody><tr class="comparison-row"><td>1</td><td>2</td></tr></tbody></table>',
-  '<p><a href="/903/">RFC 903</a> and <a href="https://www.rfc-editor.org/rfc/rfc903">the text</a> <a href="#x" aria-label="y">z</a></p>',
+  '<p><a href="/rfc903">RFC 903</a> and <a href="https://www.rfc-editor.org/rfc/rfc903">the text</a> <a href="#x" aria-label="y">z</a></p>',
   '<p>1 < 2 and 3 <= 4 and x<5, plain text</p>',
   '<a href="mailto:a@example.org">m</a>',
   '<br/><hr>',
@@ -281,7 +295,7 @@ test('index summary shape works as the index argument', () => {
   const summary = { max: 6000, issued: [826, 903, 5952, 1, 951, 1542, 2131], notIssued: [2] };
   assert.deepEqual(lint(dir, summary, { only: [rfcPath(dir, 903)] }).errors, []);
   edit(dir, 903, (j: Doc) => {
-    j.sections[0].content = '<a href="/7000/">x</a>';
+    j.sections[0].content = '<a href="/rfc7000">x</a>';
   });
   assert.ok(has(lint(dir, summary, { only: [rfcPath(dir, 903)] }).errors, /7000/));
 });

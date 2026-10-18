@@ -58,7 +58,7 @@ export default defineConfig({
     ? undefined
     : {
         command: `${wrangler} dev --local --port ${PORT}`,
-        url: `http://localhost:${PORT}/903/`,
+        url: `http://localhost:${PORT}/rfc903`,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
         stdout: 'ignore',

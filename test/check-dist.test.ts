@@ -9,7 +9,7 @@ import { checkDist, forbiddenStrings, headersRuleStats, parseJsonc, redirectsSyn
 
 const zlibGz = (str: string) => zlib.gzipSync(str, { level: 6 }).length;
 
-const REQUIRED = { '404.html': '<!doctype html>err', '404/index.html': '<!doctype html>rfc 404', _redirects: '', _headers: '' };
+const REQUIRED = { '404.html': '<!doctype html>err', 'rfc404.html': '<!doctype html>rfc 404', _redirects: '', _headers: '' };
 
 /** A dist/ with the required files present (so tests exercise one thing at a time). */
 function dist(files: Record<string, string>, { bare = false } = {}) {
@@ -25,10 +25,10 @@ const page = (body: string, tier = 'explainer') => `<!doctype html><meta name="r
 
 test('broken link and missing anchor are errors', () => {
   const d = dist({
-    '1/index.html': page(
-      '<a href="/2/">ok</a><a href="/nope/">bad</a><a href="/2/#missing">bad anchor</a><a href="/2/#here">good</a><a href="#self">s</a><h1 id="self">x</h1>',
+    'rfc1.html': page(
+      '<a href="/rfc2">ok</a><a href="/nope">bad</a><a href="/rfc2#missing">bad anchor</a><a href="/rfc2#here">good</a><a href="#self">s</a><h1 id="self">x</h1>',
     ),
-    '2/index.html': page('<h2 id="here">h</h2>'),
+    'rfc2.html': page('<h2 id="here">h</h2>'),
   });
   const r = checkDist(d);
   assert.equal(r.errors.length, 2, JSON.stringify(r.errors));
@@ -36,8 +36,8 @@ test('broken link and missing anchor are errors', () => {
 
 test('clean dist has 0 errors', () => {
   const d = dist({
-    '1/index.html': page('<a href="/2/#here">x</a><link href="/assets/a.css" rel="stylesheet">'),
-    '2/index.html': page('<h2 id="here">h</h2>'),
+    'rfc1.html': page('<a href="/rfc2#here">x</a><link href="/assets/a.css" rel="stylesheet">'),
+    'rfc2.html': page('<h2 id="here">h</h2>'),
     'assets/a.css': 'body{}',
   });
   const r = checkDist(d);
@@ -77,37 +77,37 @@ test('forbidden strings: github outside <main>, repo slug anywhere, Contribute, 
   assert.deepEqual(forbiddenStrings('Request an explainer'), ['Request an explainer']);
   assert.deepEqual(forbiddenStrings('<link href="/feed.xml">'), ['feed.xml']);
   const d = dist({
-    '1/index.html': page('<nav><a href="https://github.com/a/b">src</a></nav><main>ok</main>'),
-    '2/index.html': page('<main><a href="https://github.com/a/b">impl</a></main>'),
+    'rfc1.html': page('<nav><a href="https://github.com/a/b">src</a></nav><main>ok</main>'),
+    'rfc2.html': page('<main><a href="https://github.com/a/b">impl</a></main>'),
   });
-  assert.deepEqual(checkDist(d).errors, ['1/index.html: contains forbidden string "github"']);
+  assert.deepEqual(checkDist(d).errors, ['rfc1.html: contains forbidden string "github"']);
 });
 
 test('budgets: index-tier page over 8 KB gz is an error', () => {
   const noise = Array.from({ length: 4000 }, (_, i) => `<p>${Math.random().toString(36)}${i}</p>`).join('');
   const d = dist({
-    '1/index.html': page(noise, 'index'),
+    'rfc1.html': page(noise, 'index'),
   });
   const r = checkDist(d);
   assert.equal(r.errors.length, 1);
-  assert.match(r.errors[0], /1\/index\.html/);
+  assert.match(r.errors[0], /rfc1\.html/);
 });
 
 test('fragments on hash-route pages are not checked', () => {
   const d = dist({
-    '1/index.html': page('<a href="/graph/#1">g</a>'),
-    'graph/index.html': page('<meta name="rfc-hash-route" content="1">router'),
+    'rfc1.html': page('<a href="/graph#1">g</a>'),
+    'graph.html': page('<meta name="rfc-hash-route" content="1">router'),
   });
   assert.deepEqual(checkDist(d).errors, []);
 });
 
 test('sitemap URLs that do not resolve to a file are errors', () => {
   const d = dist({
-    '1/index.html': page('x'),
-    'sitemap.xml': '<urlset><url><loc>https://rfc.akl.run/1/</loc></url><url><loc>https://rfc.akl.run/gone/</loc></url></urlset>',
+    'rfc1.html': page('x'),
+    'sitemap.xml': '<urlset><url><loc>https://rfc.akl.run/rfc1</loc></url><url><loc>https://rfc.akl.run/gone</loc></url></urlset>',
   });
   const r = checkDist(d);
-  assert.deepEqual(r.errors, ['sitemap.xml: /gone/ does not resolve to a file in dist/']);
+  assert.deepEqual(r.errors, ['sitemap.xml: /gone does not resolve to a file in dist/']);
   assert.equal(r.stats.sitemapUrls, 2);
 });
 
@@ -136,11 +136,11 @@ test('_redirects rule limits: 2000 static, 100 dynamic', () => {
   assert.equal(bad.errors.length, 2);
 });
 
-test('missing 404.html, 404/index.html, _redirects or _headers is an error', () => {
-  const ok = dist({ '1/index.html': page('x') });
+test('missing 404.html, rfc404.html, _redirects or _headers is an error', () => {
+  const ok = dist({ 'rfc1.html': page('x') });
   assert.deepEqual(checkDist(ok).errors, []);
   for (const f of Object.keys(REQUIRED)) {
-    const d = dist({ '1/index.html': page('x'), ...REQUIRED }, { bare: true });
+    const d = dist({ 'rfc1.html': page('x'), ...REQUIRED }, { bare: true });
     fs.rmSync(path.join(d, f));
     const r = checkDist(d);
     assert.ok(
@@ -151,7 +151,7 @@ test('missing 404.html, 404/index.html, _redirects or _headers is an error', () 
 });
 
 test('a not-found/ directory in dist is an error', () => {
-  const d = dist({ '1/index.html': page('x'), 'not-found/index.html': page('x') });
+  const d = dist({ 'rfc1.html': page('x'), 'not-found/index.html': page('x') });
   const r = checkDist(d);
   assert.equal(r.errors.length, 1);
   assert.match(r.errors[0], /not-found\//);
@@ -161,7 +161,7 @@ test('JS budget follows static imports recursively, deduped per page', () => {
   const noise = Array.from({ length: 6000 }, () => Math.random().toString(36).slice(2)).join(',');
   const big = `export const x="${noise}";`;
   const d = dist({
-    '1/index.html': page('<script type="module" src="/assets/entry.js"></script>'),
+    'rfc1.html': page('<script type="module" src="/assets/entry.js"></script>'),
     'assets/entry.js': 'import"./mid.js";console.log(1)',
     'assets/mid.js': 'import { a } from "./big.js";import"./entry2.js";export{a}',
     'assets/entry2.js': 'import{b}from"./big.js";export const c=b',
@@ -169,11 +169,11 @@ test('JS budget follows static imports recursively, deduped per page', () => {
   });
   const r = checkDist(d);
   assert.equal(r.errors.length, 1, JSON.stringify(r.errors));
-  assert.match(r.errors[0], /^1\/index\.html: JS .* exceeds 25 KB/);
+  assert.match(r.errors[0], /^rfc1\.html: JS .* exceeds 25 KB/);
   const small = zlibGz(big);
   assert.ok(r.stats.maxJsGz.bytes >= small && r.stats.maxJsGz.bytes < small * 1.5, 'big chunk counted once');
   // the entry alone is tiny: without following imports this page would pass
-  const d2 = dist({ '1/index.html': page('<script src="/assets/e.js"></script>'), 'assets/e.js': 'console.log(1)' });
+  const d2 = dist({ 'rfc1.html': page('<script src="/assets/e.js"></script>'), 'assets/e.js': 'console.log(1)' });
   assert.deepEqual(checkDist(d2).errors, []);
 });
 
@@ -189,7 +189,7 @@ test('_headers: 100 rules pass, 101 fail; overlong lines fail', () => {
 });
 
 test('_redirects syntax: valid placeholders pass; malformed rules are errors', () => {
-  const ok = '# c\n/404 /404/ 301\n/rfc:num /:num/ 301\n/old/* /new/:splat 302\n/x https://example.com/y 308\n';
+  const ok = '# c\n/tcp /rfc793 301\n/rfc:num /rfc:num 301\n/old/* /new/:splat 302\n/x https://example.com/y 308\n';
   assert.deepEqual(redirectsSyntaxErrors(ok), []);
   assert.deepEqual(checkDist(dist({ _redirects: ok })).errors, []);
   assert.match(redirectsSyntaxErrors('/a')[0], /expected "source target/);
@@ -203,7 +203,7 @@ test('_redirects syntax: valid placeholders pass; malformed rules are errors', (
 });
 
 test('files over 25 MiB are errors', () => {
-  const d = dist({ '1/index.html': page('x') });
+  const d = dist({ 'rfc1.html': page('x') });
   fs.writeFileSync(path.join(d, 'big.bin'), Buffer.alloc(25 * 1024 * 1024 + 1));
   fs.writeFileSync(path.join(d, 'ok.bin'), Buffer.alloc(25 * 1024 * 1024));
   const r = checkDist(d);
@@ -212,7 +212,7 @@ test('files over 25 MiB are errors', () => {
 });
 
 test('wrangler.jsonc assets.directory must equal the checked dist dir', () => {
-  const d = dist({ '1/index.html': page('x') });
+  const d = dist({ 'rfc1.html': page('x') });
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'rfc-wr-'));
   const cfg = path.join(root, 'wrangler.jsonc');
   const write = (directory: string) =>
@@ -246,8 +246,8 @@ test('inline scripts must be covered by the _headers CSP', () => {
   const hash = `'sha256-${createHash('sha256').update(code).digest('base64')}'`;
   const pg = page(`<script>${code}</script><script type="application/json">{"a":1}</script><script src="/assets/a.js"></script>`);
   const csp = (s: string) => `/*\n  Content-Security-Policy: default-src 'self'; script-src 'self' ${s}\n`;
-  assert.deepEqual(checkDist(dist({ '1/index.html': pg, 'assets/a.js': '', _headers: csp(hash) })).errors, []);
-  const bad = checkDist(dist({ '1/index.html': pg, 'assets/a.js': '', _headers: csp('') }));
+  assert.deepEqual(checkDist(dist({ 'rfc1.html': pg, 'assets/a.js': '', _headers: csp(hash) })).errors, []);
+  const bad = checkDist(dist({ 'rfc1.html': pg, 'assets/a.js': '', _headers: csp('') }));
   assert.equal(bad.errors.length, 1);
   assert.match(bad.errors[0], /inline script 'sha256-.*' is not allowed/);
 });
@@ -257,8 +257,8 @@ test('inline <style> elements must be covered by the _headers CSP style-src', ()
   const hash = `'sha256-${createHash('sha256').update(css).digest('base64')}'`;
   const pg = page(`<style>${css}</style>`);
   const csp = (s: string) => `/*\n  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' ${s}\n`;
-  assert.deepEqual(checkDist(dist({ '1/index.html': pg, _headers: csp(hash) })).errors, []);
-  const bad = checkDist(dist({ '1/index.html': pg, _headers: csp('') }));
+  assert.deepEqual(checkDist(dist({ 'rfc1.html': pg, _headers: csp(hash) })).errors, []);
+  const bad = checkDist(dist({ 'rfc1.html': pg, _headers: csp('') }));
   assert.equal(bad.errors.length, 1);
   assert.match(bad.errors[0], /inline style 'sha256-.*' is not allowed/);
 });
@@ -275,6 +275,37 @@ test('budgets: data/questions.json over 30 KB gz is an error; glossary letter pa
   // a 60 KB+ letter page is fine (glossary budget), but the same size on an unlisted page is not
   const body = Array.from({ length: 12000 }, (_, i) => `<p>${Math.random().toString(36)}${i}</p>`).join('');
   assert.ok(zlibGz(body) > 60 * 1024 && zlibGz(body) < 200 * 1024);
-  assert.deepEqual(checkDist(dist({ 'glossary/m/index.html': `<!doctype html><body>${body}` })).errors, []);
-  assert.equal(checkDist(dist({ 'other/index.html': `<!doctype html><body>${body}` })).errors.length, 1);
+  assert.deepEqual(checkDist(dist({ 'glossary/m.html': `<!doctype html><body>${body}` })).errors, []);
+  assert.equal(checkDist(dist({ 'other.html': `<!doctype html><body>${body}` })).errors.length, 1);
+});
+
+test('URL scheme: a trailing slash or an old-style /<n>/ link is an error, "/" is fine', () => {
+  const d = dist({
+    'rfc1.html': page(
+      '<a href="/">home</a><a href="/rfc2">ok</a><a href="/areas/">trail</a><a href="/2/">old</a><a href="/2/#x">old2</a><a href="/2">old3</a>',
+    ),
+    'rfc2.html': page('x'),
+    'areas.html': page('x'),
+    'index.html': page('x'),
+  });
+  const msgs = checkDist(d).errors.join('\n');
+  assert.match(msgs, /internal link with a trailing slash \/areas\//);
+  assert.match(msgs, /internal link with a trailing slash \/2\/ \(x2\)/);
+  assert.match(msgs, /old-style RFC link \/2\/ \(use \/rfc<n>\) \(x2\)/);
+  assert.match(msgs, /old-style RFC link \/2 /);
+  assert.ok(!/href="\/"|link \/ /.test(msgs));
+});
+
+test('resolves /rfc903 -> rfc903.html, /areas/core -> areas/core.html and / -> index.html', () => {
+  const d = dist({
+    'index.html': page(
+      '<a href="/rfc903#top-x">a</a><a href="/areas/core">b</a><a href="/">c</a><a href="/rfc903#intro">d</a><a href="/areas">e</a>',
+    ),
+    'rfc903.html': page('<h2 id="intro">x</h2><h2 id="top-x">y</h2>'),
+    'areas/core.html': page('x'),
+    'areas.html': page('x'),
+    'sitemap.xml':
+      '<urlset><url><loc>https://rfc.akl.run/</loc></url><url><loc>https://rfc.akl.run/rfc903</loc></url><url><loc>https://rfc.akl.run/areas/core</loc></url></urlset>',
+  });
+  assert.deepEqual(checkDist(d).errors, []);
 });

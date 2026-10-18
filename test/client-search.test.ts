@@ -128,7 +128,7 @@ describe('number jump', () => {
     dispose = init();
     await search(header(), '903');
     const first = rowText(must(rows(header())[0]));
-    expect(first.href).toBe('/903/');
+    expect(first.href).toBe('/rfc903');
     expect(first.label).toBe('RFC 903');
     expect(first.title).toMatch(/Reverse Address Resolution/);
     expect(first.tag).toBe('EXPLAINER');
@@ -178,7 +178,7 @@ describe('number jump', () => {
     header().dispatchEvent(new Event('input'));
     await waitFor(() => !popOf(header()).hidden);
     await new Promise((r) => setTimeout(r, 20));
-    expect(rows(header()).every((r) => r.getAttribute('href') !== '/99999/')).toBe(true);
+    expect(rows(header()).every((r) => r.getAttribute('href') !== '/rfc99999')).toBe(true);
     expect(el('.search-empty', popOf(header())).hidden).toBe(false);
   });
 
@@ -187,7 +187,7 @@ describe('number jump', () => {
     dispose = init();
     await search(header(), '903');
     const hrefs = rows(header()).map((r) => r.getAttribute('href'));
-    expect(hrefs).toContain('/903/');
+    expect(hrefs).toContain('/rfc903');
     expect(rowText(must(rows(header())[0])).label).toBe('RFC 903'); // from the full-text index, not the number jump
   });
 
@@ -195,7 +195,7 @@ describe('number jump', () => {
     stubFetch({ ...routes, '/data/titles/0.json': null });
     dispose = init();
     await search(header(), '903');
-    expect(rowText(must(rows(header())[0]))).toMatchObject({ href: '/903/', title: '' });
+    expect(rowText(must(rows(header())[0]))).toMatchObject({ href: '/rfc903', title: '' });
   });
 });
 
@@ -207,14 +207,14 @@ describe('questions and full text', () => {
     const texts = rows(header()).map(rowText);
     const q = texts.find((t) => t.tag === 'QUESTION');
     expect(q).toBeDefined();
-    expect(texts.some((t) => t.href === '/journeys/diskless-boot/')).toBe(true);
+    expect(texts.some((t) => t.href === '/journeys/diskless-boot')).toBe(true);
   });
 
   test('full-text hits come from the term shards of the query words only, ranked best first', async () => {
     const { calls } = stubFetch(routes);
     dispose = init();
     await search(header(), 'rarp');
-    expect(rowText(must(rows(header())[0])).href).toBe('/903/');
+    expect(rowText(must(rows(header())[0])).href).toBe('/rfc903');
     const shardCalls = calls.filter((c) => /\/data\/search\/t-\d\d\.json$/.test(c));
     expect(shardCalls.length).toBeGreaterThan(0);
     expect(shardCalls.length).toBeLessThanOrEqual(2);
@@ -234,14 +234,14 @@ describe('questions and full text', () => {
     stubFetch(routes);
     dispose = init();
     await search(header(), 'reverse addr');
-    expect(rows(header()).map((r) => r.getAttribute('href'))).toContain('/903/');
+    expect(rows(header()).map((r) => r.getAttribute('href'))).toContain('/rfc903');
   });
 
   test('a trailing space turns prefix expansion off', async () => {
     stubFetch(routes);
     dispose = init();
     await search(header(), 'revers ');
-    expect(rows(header()).map((r) => r.getAttribute('href'))).not.toContain('/903/');
+    expect(rows(header()).map((r) => r.getAttribute('href'))).not.toContain('/rfc903');
   });
 
   test('results are capped at six rows without duplicates', async () => {
@@ -266,7 +266,7 @@ describe('questions and full text', () => {
     stubFetch({ ...routes, '/data/search/meta.json': null });
     dispose = init();
     await search(header(), '903');
-    expect(rowText(must(rows(header())[0])).href).toBe('/903/');
+    expect(rowText(must(rows(header())[0])).href).toBe('/rfc903');
     await search(header(), 'zzzzqqq');
     expect(el('.search-empty', popOf(header())).hidden).toBe(false);
   });
@@ -380,7 +380,7 @@ describe('keyboard', () => {
     const e = key(header(), 'Enter');
     expect(e.defaultPrevented).toBe(true);
     await waitFor(() => go.mock.calls.length > 0);
-    expect(go).toHaveBeenCalledWith('/903/');
+    expect(go).toHaveBeenCalledWith('/rfc903');
   });
 
   test('typing again cancels a pending Enter-to-open', async () => {
@@ -401,7 +401,7 @@ describe('keyboard', () => {
     header().value = '1918';
     const e = key(header(), 'Enter');
     expect(e.defaultPrevented).toBe(true);
-    expect(go).toHaveBeenCalledWith('/1918/');
+    expect(go).toHaveBeenCalledWith('/rfc1918');
   });
 
   test('Enter on non-numbers with the popup closed does nothing', () => {

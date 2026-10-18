@@ -126,7 +126,7 @@ describe('viz components', () => {
   });
 
   test('timeline links RFCs; tree nests; opcodes highlight; state machine lists transitions', async () => {
-    expect(await out(load('timeline'))).toMatch(/href="\/903\/"/);
+    expect(await out(load('timeline'))).toMatch(/href="\/rfc903"/);
     expect(await out(load('tree'))).toMatch(/<ul[\s\S]*<ul[\s\S]*<ul/);
     expect(((await out(load('opcodes'))).match(/is-hl/g) || []).length).toBe(2);
     const sm = await out(load('state-machine'));

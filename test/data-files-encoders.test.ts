@@ -116,7 +116,7 @@ describe('title shards, questions, graph', () => {
       ],
       journeys: [{ slug: 'trip', title: 'Trip', questions: ['journey question'], steps: [] }],
     });
-    assert.deepEqual(JSON.parse(questionsJson(s)), [{ q: 'journey question', href: '/journeys/trip/', label: 'JOURNEY', title: 'Trip' }]);
+    assert.deepEqual(JSON.parse(questionsJson(s)), [{ q: 'journey question', href: '/journeys/trip', label: 'JOURNEY', title: 'Trip' }]);
     const index = searchFiles(s);
     const all = Object.entries(index)
       .filter(([f]) => f.startsWith('t-'))
@@ -155,8 +155,8 @@ describe('sitemap, robots, redirects', () => {
     const s = siteOf([entry(10), entry(2), entry(100)], { journeys: [{ slug: 'trip', title: 'T', steps: [] }] });
     const urls = sitemapUrls(s);
     assert.equal(urls[0], '/');
-    assert.ok(urls.indexOf('/2/') < urls.indexOf('/10/') && urls.indexOf('/10/') < urls.indexOf('/100/'), 'numeric-aware order');
-    assert.ok(urls.includes('/journeys/trip/') && urls.includes('/areas/dns/') && urls.includes('/graph/'));
+    assert.ok(urls.indexOf('/rfc2') < urls.indexOf('/rfc10') && urls.indexOf('/rfc10') < urls.indexOf('/rfc100'), 'numeric-aware order');
+    assert.ok(urls.includes('/journeys/trip') && urls.includes('/areas/dns') && urls.includes('/graph'));
     assert.ok(!urls.includes('/contribute/') && !urls.includes('/coverage/'));
     assert.equal(new Set(urls).size, urls.length);
   });
@@ -176,17 +176,17 @@ describe('sitemap, robots, redirects', () => {
     assert.equal(xmlEsc(12), '12');
   });
 
-  test('redirects: one rule per slug (from the record or its content), then the generic /rfcN rule last', () => {
+  test('redirects: one rule per slug (from the record or its content), and no generic /rfcN rule', () => {
     const s = siteOf([entry(1), entry(2), entry(3)], { contents: [{ number: 2, slug: 'two' }] });
     const body = redirectsFile(s);
-    assert.ok(body.includes('/two /2/ 301\n'));
-    assert.ok(body.endsWith('/rfc:num /:num/ 301\n'));
+    assert.ok(body.includes('/two /rfc2 301\n'));
+    assert.ok(!body.includes('rfc:num'));
     assert.ok(!body.includes('/one'));
     assert.equal(
       redirectsFile(siteOf([entry(1)]))
         .split('\n')
         .filter((l) => l.endsWith('301')).length,
-      2,
+      0,
     );
     assert.ok(rec(s, 2).slug === 'two');
   });

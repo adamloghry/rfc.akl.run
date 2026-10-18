@@ -182,6 +182,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     links: 0,
     broken: 0,
     badAnchors: 0,
+    badUrls: 0,
     overBudget: 0,
     byTier: {},
     maxGz: { path: '', bytes: 0 },
@@ -249,12 +250,15 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     return seen;
   };
 
-  // resolve a site-absolute path (no query/hash) to a file, or null
+  // Resolve a site-absolute path (no query/hash) to a file, or null, the way Cloudflare's
+  // "auto-trailing-slash" does for slash-less URLs: "/" -> index.html, "/rfc903" -> rfc903.html,
+  // "/areas/core" -> areas/core.html, "/assets/x.js" -> itself. A trailing slash (other than the root) never resolves.
   const resolve = (p: string) => {
-    let rel = decodeURIComponent(p.replace(/^\//, ''));
-    if (rel === '' || rel.endsWith('/')) rel += 'index.html';
+    const rel = decodeURIComponent(p.replace(/^\//, ''));
+    if (rel === '') return fileSet.has('index.html') ? 'index.html' : null;
+    if (rel.endsWith('/')) return null;
     if (fileSet.has(rel)) return rel;
-    if (!path.extname(rel) && fileSet.has(`${rel}/index.html`)) return `${rel}/index.html`;
+    if (!path.extname(rel) && fileSet.has(`${rel}.html`)) return `${rel}.html`;
     return null;
   };
 
@@ -299,7 +303,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
       }
     }
     for (const label of forbiddenStrings(html)) errors.push(`${rel}: contains forbidden string "${label}"`);
-    const pageUrl = rel === 'index.html' ? '/' : `/${rel.replace(/index\.html$/, '')}`;
+    const pageUrl = rel === 'index.html' ? '/' : `/${rel.replace(/\.html$/, '')}`;
     const broken = new Map(); // message -> count
     const bump = (m: string) => broken.set(m, (broken.get(m) || 0) + 1);
     const jsRefs = new Set<string>();
@@ -315,6 +319,14 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
       const frag = hashAt < 0 ? '' : raw.slice(hashAt + 1);
       const q = target.indexOf('?');
       if (q >= 0) target = target.slice(0, q);
+      if (target.length > 1 && target.endsWith('/')) {
+        stats.badUrls++;
+        bump(`internal link with a trailing slash ${target}`);
+      }
+      if (/^\/\d+(\/|$)/.test(target)) {
+        stats.badUrls++;
+        bump(`old-style RFC link ${target} (use /rfc<n>)`);
+      }
       let file: string | null | undefined = rel;
       if (target !== '') {
         file = resolve(target);
@@ -348,10 +360,10 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     const tm = TIER_RE.exec(html);
     const tier = tm ? tm[1] : null;
     let budget = tier && tier in BUDGET ? BUDGET[tier as keyof typeof BUDGET] : BUDGET.default;
-    if (!tier && rel.startsWith('areas/')) budget = BUDGET.areas;
-    if (!tier && /^glossary\/[^/]+\/index\.html$/.test(rel)) budget = BUDGET.glossary;
+    if (!tier && (rel === 'areas.html' || rel.startsWith('areas/'))) budget = BUDGET.areas;
+    if (!tier && /^glossary\/[^/]+\.html$/.test(rel)) budget = BUDGET.glossary;
     const gz = zlib.gzipSync(html, { level: 6 }).length;
-    const key = tier || (rel.startsWith('areas/') ? 'areas' : 'other');
+    const key = tier || (rel === 'areas.html' || rel.startsWith('areas/') ? 'areas' : 'other');
     stats.byTier[key] = (stats.byTier[key] || 0) + 1;
     if (gz > stats.maxGz.bytes) stats.maxGz = { path: rel, bytes: gz };
     if (gz > budget) {
@@ -373,7 +385,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     errors.push(`dist/ has ${totalFiles} files, at or over the Cloudflare Free limit of ${FILE_LIMIT} files per version`);
   else if (totalFiles >= FILE_WARN) warnings.push(`dist/ has ${totalFiles} files, approaching the Cloudflare Free limit of ${FILE_LIMIT}`);
 
-  for (const req of ['404.html', '404/index.html', '_redirects', '_headers']) {
+  for (const req of ['404.html', 'rfc404.html', '_redirects', '_headers']) {
     if (!fileSet.has(req)) errors.push(`${req} is missing from dist/`);
   }
   if (fs.existsSync(path.join(dir, 'not-found'))) errors.push('not-found/ must not exist in dist/ (the error page belongs at 404.html)');
@@ -461,7 +473,9 @@ export function main() {
   console.log(
     `check-dist: ${stats.pages} pages, ${stats.files} files, ${stats.links} internal links in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
   );
-  console.log(`  broken links ${stats.broken}, missing anchors ${stats.badAnchors}, budget violations ${stats.overBudget}`);
+  console.log(
+    `  broken links ${stats.broken}, missing anchors ${stats.badAnchors}, URL-scheme violations ${stats.badUrls}, budget violations ${stats.overBudget}`,
+  );
   console.log(
     '  pages by tier: ' +
       Object.entries(stats.byTier)

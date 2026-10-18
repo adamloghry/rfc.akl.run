@@ -12,7 +12,7 @@ let dispose: () => void = () => {};
 let go: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  resetDocument('https://rfc.akl.run/graph/');
+  resetDocument('https://rfc.akl.run/graph');
   mount(fixture('graph.html'));
   go = vi.spyOn(nav, 'to').mockImplementation(() => {});
 });
@@ -43,7 +43,7 @@ const G = {
 
 /** Open /graph/<hash> with the given graph.json and wait for the first graph render (or a message). */
 async function start(hash: string, graph: unknown = G): Promise<void> {
-  await navigateTo(`https://rfc.akl.run/graph/${hash}`);
+  await navigateTo(`https://rfc.akl.run/graph${hash}`);
   stubFetch({ '/data/graph.json': graph });
   dispose = init();
   await waitFor(() => msg() !== 'Loading graph…');
@@ -58,7 +58,7 @@ describe('what is shown', () => {
   });
 
   test('shows "Loading graph…" until the data arrives', async () => {
-    await navigateTo('https://rfc.akl.run/graph/#1542');
+    await navigateTo('https://rfc.akl.run/graph#1542');
     vi.stubGlobal('fetch', () => new Promise(() => {}));
     dispose = init();
     expect(msg()).toBe('Loading graph…');
@@ -83,7 +83,7 @@ describe('what is shown', () => {
     expect(el('svg', stage() as unknown as ParentNode).getAttribute('aria-label')).toBe('Graph around RFC 1542');
     expect(stage().textContent).toContain('← obsoleted / updated by this');
     expect(stage().textContent).toContain('obsoleted / updated by →');
-    expect(el<HTMLAnchorElement>('.graph-foot a').getAttribute('href')).toBe('/1542/');
+    expect(el<HTMLAnchorElement>('.graph-foot a').getAttribute('href')).toBe('/rfc1542');
     expect(el('.graph-foot a').textContent).toBe('Open RFC 1542');
     expect(el('.graph-foot').textContent).not.toContain('No obsoletes');
   });
@@ -163,12 +163,12 @@ describe('hash and query handling', () => {
 
   test('hashchange re-renders around the new number and updates the form', async () => {
     await start('#1542');
-    setUrl('https://rfc.akl.run/graph/#951');
+    setUrl('https://rfc.akl.run/graph#951');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(input().value).toBe('951');
     expect(nodeNums()).toContain('RFC 951');
     expect(el('g.is-center', stage() as unknown as ParentNode).getAttribute('aria-label')).toMatch(/^RFC 951/);
-    setUrl('https://rfc.akl.run/graph/#');
+    setUrl('https://rfc.akl.run/graph#');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(msg()).toBe('Enter an RFC number to see its neighborhood.');
     expect(input().value).toBe('951'); // an empty hash leaves the typed value alone
@@ -177,7 +177,7 @@ describe('hash and query handling', () => {
   test('dispose stops following the hash', async () => {
     await start('#1542');
     dispose();
-    setUrl('https://rfc.akl.run/graph/#951');
+    setUrl('https://rfc.akl.run/graph#951');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(el('g.is-center', stage() as unknown as ParentNode).getAttribute('aria-label')).toMatch(/^RFC 1542/);
   });
@@ -192,7 +192,7 @@ describe('form', () => {
     expect(ev.defaultPrevented).toBe(true);
     expect(location.hash).toBe('#1084');
     for (const bad of ['', '0', '-3', 'abc']) {
-      setUrl('https://rfc.akl.run/graph/');
+      setUrl('https://rfc.akl.run/graph');
       input().value = bad;
       el('#graph-form').dispatchEvent(new Event('submit', { cancelable: true }));
       expect(location.hash).toBe('');
@@ -213,7 +213,7 @@ describe('interaction', () => {
   test('double-click opens the RFC page', async () => {
     await start('#1542');
     nodes()[0]?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-    expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/\d+\/$/));
+    expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/rfc\d+$/));
   });
 
   test('Enter re-centres on a neighbour and opens the centre; other keys do nothing', async () => {
@@ -223,7 +223,7 @@ describe('interaction', () => {
     expect(location.hash).toBe('#2132');
     expect(go).not.toHaveBeenCalled();
     key(find('RFC 1542'), 'Enter');
-    expect(go).toHaveBeenCalledWith('/1542/');
+    expect(go).toHaveBeenCalledWith('/rfc1542');
     go.mockClear();
     key(find('RFC 1542'), ' ');
     expect(go).not.toHaveBeenCalled();
@@ -240,7 +240,7 @@ describe('interaction', () => {
 
 describe('failures', () => {
   test('an HTTP error shows a message instead of the graph', async () => {
-    await navigateTo('https://rfc.akl.run/graph/#1542');
+    await navigateTo('https://rfc.akl.run/graph#1542');
     stubFetch({});
     dispose = init();
     await waitFor(() => msg() === 'Could not load the graph data.');
@@ -248,7 +248,7 @@ describe('failures', () => {
   });
 
   test('a network error is reported the same way', async () => {
-    await navigateTo('https://rfc.akl.run/graph/#1542');
+    await navigateTo('https://rfc.akl.run/graph#1542');
     stubFetch({ '/data/graph.json': new Error('offline') });
     dispose = init();
     await waitFor(() => msg() === 'Could not load the graph data.');
@@ -260,7 +260,7 @@ describe('failures', () => {
     dispose = init();
     expect(calls).toEqual([]);
     mount('<div id="graph"></div>');
-    await navigateTo('https://rfc.akl.run/graph/#903');
+    await navigateTo('https://rfc.akl.run/graph#903');
     stubFetch({ '/data/graph.json': realGraph });
     dispose = init();
     await waitFor(() => stage().querySelector('svg') !== null);

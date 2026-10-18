@@ -163,7 +163,7 @@ describe('graph.lineage', () => {
       contents: [{ number: 1, shortTitle: 'One' }],
     });
     const l = graph.lineage(rec(s, 2), s);
-    assert.deepEqual(l.items[0], { number: 1, year: 1999, label: 'One', current: false, url: '/1/' });
+    assert.deepEqual(l.items[0], { number: 1, year: 1999, label: 'One', current: false, url: '/rfc1' });
     assert.equal(l.items[1]?.label, 'Title of RFC 2');
   });
 
@@ -193,8 +193,8 @@ describe('graph.contentMentions and mentions', () => {
   test('finds RFC n, RFCn and /n/ links across summary, today, sections and references', () => {
     const found = graph.contentMentions({
       summary: 'See RFC 791 and RFC826.',
-      today: '<a href="/903/">x</a>',
-      sections: [{ content: 'RFC 1 <a href="/2/">two</a>' }, { content: 42 }],
+      today: '<a href="/rfc903">x</a>',
+      sections: [{ content: 'RFC 1 <a href="/rfc2">two</a>' }, { content: 42 }],
       references: [{ text: 'RFC 3', rfc: 4 }, { text: 'plain', rfc: 'x' }, { rfc: 5.5 }],
     });
     assert.deepEqual(

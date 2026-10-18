@@ -281,7 +281,7 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
       rc.appendChild(h('b', '', 'What replaced it'));
       for (const r of data.replacedBy) {
         const a = h('a', 'sim-rep');
-        a.href = `/${r.number}/`;
+        a.href = `/rfc${r.number}`;
         a.append(h('span', '', r.label), h('span', '', `RFC ${r.number}`));
         rc.appendChild(a);
       }
@@ -315,7 +315,7 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
     const c = current();
     const s = c.s;
     const i = state.step;
-    chip.textContent = `rfc.akl.run/${rfc}/#step-${i + 1}`;
+    chip.textContent = `rfc.akl.run/rfc${rfc}#step-${i + 1}`;
     chip.href = `#step-${i + 1}`;
 
     // bus + boundary

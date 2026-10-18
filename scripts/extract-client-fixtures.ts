@@ -12,7 +12,7 @@ import path from 'node:path';
 const dist = path.resolve(process.argv[2] ?? 'dist');
 const out = path.join(process.cwd(), 'test', 'fixtures', 'html');
 
-const page = (rel: string): string => fs.readFileSync(path.join(dist, rel, 'index.html'), 'utf8');
+const page = (rel: string): string => fs.readFileSync(`${path.join(dist, rel === '.' ? 'index' : rel)}.html`, 'utf8');
 
 /** First match of `re` in `html`, or a loud failure naming the fixture. */
 function slice(name: string, html: string, re: RegExp): string {
@@ -32,9 +32,9 @@ export function bodyOf(html: string): string {
 const fixtures: Record<string, string> = {
   // Datasheet page with every reader feature: header search + theme toggle, level control, cite panel,
   // TOC, prose code, a packet figure and a sequence simulator (with a router failure branch).
-  'rfc-903.html': bodyOf(page('903')),
+  'rfc-903.html': bodyOf(page('rfc903')),
   // The standalone `code` viz figure.
-  'code-fig.html': slice('code-fig', bodyOf(page('1035')), /<figure[^>]*data-viz="code"[\s\S]*?<\/figure>/),
+  'code-fig.html': slice('code-fig', bodyOf(page('rfc1035')), /<figure[^>]*data-viz="code"[\s\S]*?<\/figure>/),
   // Atlas map: chips, canvas and caption.
   'atlas.html': slice('atlas', bodyOf(page('.')), /<div class="at-chips"[\s\S]*?<\/section>/),
   // Home-page hero search with the suggestion pills.

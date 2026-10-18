@@ -53,7 +53,7 @@ type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v);
 const nonEmpty = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
 const MARKDOWN = /\*\*[^*]+\*\*|^#{1,6}\s|```|^\s*[-*]\s+\S/m;
-const INTERNAL_LINK = /^\/(\d+)\/(?:#[\w-]+)?$/;
+const INTERNAL_LINK = /^\/rfc(\d+)(?:#[\w-]+)?$/;
 
 class Errors {
   list: string[] = [];
@@ -80,11 +80,11 @@ function htmlText(v: unknown, where: string, err: Errors, min: number, max: numb
     const href = m[2] ?? '';
     const n = href.match(INTERNAL_LINK);
     if (n) {
-      if (n[1].startsWith('0')) err.add(where, `link ${href} is zero-padded: use /${Number(n[1])}/`);
+      if (n[1].startsWith('0')) err.add(where, `link ${href} is zero-padded: use /rfc${Number(n[1])}`);
       else if (!env.issued.has(Number(n[1]))) err.add(where, `link ${href} is not an issued RFC: remove the link`);
     } else if (href.startsWith('#')) {
       if (!sectionIds.has(href.slice(1))) err.add(where, `link ${href} matches no section id`);
-    } else err.add(where, `link ${href} is not allowed: link only to other RFCs as /<number>/ (no external URLs)`);
+    } else err.add(where, `link ${href} is not allowed: link only to other RFCs as /rfc<number> (no external URLs)`);
   }
   mentions(v, where, err, env);
 }

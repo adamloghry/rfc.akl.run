@@ -97,7 +97,7 @@ test('merge: title from content, status/dates from index', () => {
   assert.equal(r.statusTone, 'green');
   assert.equal(r.year, 1984);
   assert.equal(r.dateLabel, 'June 1984');
-  assert.equal(r.url, '/903/');
+  assert.equal(r.url, '/rfc903');
   assert.equal(r.pageCount, 4);
   assert.deepEqual(r.isAlso, ['STD38']);
 });
@@ -215,7 +215,7 @@ test('lineage: curated list in order, current marked, unknown numbers skipped', 
     [false, true, false, false, false],
   );
   assert.equal(l.items[1].year, 1984);
-  assert.equal(l.items[1].url, '/903/');
+  assert.equal(l.items[1].url, '/rfc903');
   assert.equal(l.items[1].label, 'RARP');
 });
 

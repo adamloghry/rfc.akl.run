@@ -60,7 +60,7 @@ export function letterKey(term: string): string {
 export const defaultSlug = (id: string): string => (/^[a-z]/.test(id) ? id.charAt(0) : NON_LETTER);
 
 export function glossaryHref(slug: string, id: string): string {
-  return `/glossary/${slug}/#${id}`;
+  return `/glossary/${slug}#${id}`;
 }
 
 type TermIn = Pick<Term, 'id' | 'term' | 'definition' | 'eli5' | 'rfcs' | 'usedBy'>;
@@ -127,7 +127,7 @@ export function glossaryForwarder(exceptions: Record<string, string>): string {
   return (
     'try{var h=decodeURIComponent(location.hash.slice(1)),l=h.match(/^letter-(.)$/i),a=/^[a-z]/;' +
     `var x=${ex};` +
-    "if(l)location.replace('/glossary/'+(a.test(l[1].toLowerCase())?l[1].toLowerCase():'0-9')+'/');" +
-    "else if(h)location.replace('/glossary/'+(x[h]||(a.test(h)?h.charAt(0):'0-9'))+'/#'+encodeURIComponent(h))}catch(e){}"
+    "if(l)location.replace('/glossary/'+(a.test(l[1].toLowerCase())?l[1].toLowerCase():'0-9'));" +
+    "else if(h)location.replace('/glossary/'+(x[h]||(a.test(h)?h.charAt(0):'0-9'))+'#'+encodeURIComponent(h))}catch(e){}"
   );
 }

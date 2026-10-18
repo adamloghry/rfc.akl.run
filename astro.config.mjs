@@ -4,11 +4,11 @@ import siteBuildFiles from './src/integrations/build-files.ts';
 export default defineConfig({
   site: 'https://rfc.akl.run',
   output: 'static',
-  trailingSlash: 'always',
+  trailingSlash: 'never',
   outDir: 'dist',
   compressHTML: true,
   build: {
-    format: 'directory',
+    format: 'file',
     assets: 'assets',
   },
   integrations: [siteBuildFiles()],

@@ -139,7 +139,7 @@ describe('compact specifics', () => {
       expect(h, absent).not.toContain(absent);
     expect(h).toContain('Draft · machine-assisted, not yet reviewed');
     expect(h).toContain('<meta name="rfc-tier" content="explainer">');
-    expect(h).toContain('rfc.akl.run/5952/#what-it-is'); // permalink note points at the first section
+    expect(h).toContain('rfc.akl.run/rfc5952#what-it-is'); // permalink note points at the first section
   });
 
   test('without any rail content the right column is dropped and the grid collapses', async () => {
@@ -187,7 +187,7 @@ describe('standard specifics', () => {
     expect(h).toContain('id="references"');
     expect(h).toContain('level-ctl');
     expect(h).toContain('GLOSSARY ON THIS PAGE');
-    expect(h).toContain('href="/glossary/m/#mac-address"');
+    expect(h).toContain('href="/glossary/m#mac-address"');
     expect(h).not.toContain('no-such-term');
     expect(tocOf(h, 'toc').at(-1)).toEqual(['references', '6', 'References']);
   });

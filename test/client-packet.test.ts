@@ -7,7 +7,7 @@ let dispose: () => void = () => {};
 let scrolled: Element[] = [];
 
 beforeEach(() => {
-  resetDocument('https://rfc.akl.run/903/');
+  resetDocument('https://rfc.akl.run/rfc903');
   mount(fixture('rfc-903.html'));
   scrolled = [];
   Element.prototype.scrollIntoView = function (this: Element) {
@@ -139,7 +139,7 @@ describe('packet viewer', () => {
 
   describe('URL hash', () => {
     test('a #field-<key> hash wins over the default selection and scrolls to it', () => {
-      setUrl('https://rfc.akl.run/903/#field-tpa');
+      setUrl('https://rfc.akl.run/rfc903#field-tpa');
       dispose = init();
       expect(selectedKeys()).toEqual(['tpa']);
       expect(scrolled).toEqual([el('#field-tpa')]);
@@ -147,14 +147,14 @@ describe('packet viewer', () => {
 
     test('hashchange re-selects', () => {
       dispose = init();
-      setUrl('https://rfc.akl.run/903/#field-ptype');
+      setUrl('https://rfc.akl.run/rfc903#field-ptype');
       window.dispatchEvent(new HashChangeEvent('hashchange'));
       expect(selectedKeys()).toEqual(['ptype']);
     });
 
     test('unknown keys, undecodable hashes and ids outside the figure fall back to the default', () => {
       for (const hash of ['#field-nope', '#field-%E0%A4%A', '#field-', '#introduction', '#field-introduction']) {
-        setUrl(`https://rfc.akl.run/903/${hash}`);
+        setUrl(`https://rfc.akl.run/rfc903${hash}`);
         dispose();
         dispose = init();
         expect(selectedKeys()).toEqual(['oper']);
@@ -164,7 +164,7 @@ describe('packet viewer', () => {
 
     test('a field id that lives outside this figure does not select', () => {
       document.body.insertAdjacentHTML('beforeend', '<a id="field-elsewhere"></a>');
-      setUrl('https://rfc.akl.run/903/#field-elsewhere');
+      setUrl('https://rfc.akl.run/rfc903#field-elsewhere');
       dispose = init();
       expect(selectedKeys()).toEqual(['oper']);
     });
@@ -172,7 +172,7 @@ describe('packet viewer', () => {
     test('percent-encoded keys are decoded before lookup', () => {
       cell('hlen').setAttribute('data-key', 'h len');
       document.getElementById('field-hlen')?.setAttribute('id', 'field-h len');
-      setUrl('https://rfc.akl.run/903/#field-h%20len');
+      setUrl('https://rfc.akl.run/rfc903#field-h%20len');
       dispose = init();
       expect(selectedKeys()).toEqual(['h len']);
     });
@@ -187,7 +187,7 @@ describe('packet viewer', () => {
   test('dispose stops listening to hashchange', () => {
     dispose = init();
     dispose();
-    setUrl('https://rfc.akl.run/903/#field-ptype');
+    setUrl('https://rfc.akl.run/rfc903#field-ptype');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(selectedKeys()).toEqual(['oper']);
   });

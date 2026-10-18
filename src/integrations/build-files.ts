@@ -11,16 +11,6 @@ import { loadIndex } from '../lib/rfc-index';
 export const redirectsContent = (site: Parameters<typeof redirectsFile>[0]): string => redirectsFile(site);
 export const headersContent = (o: HeadersOptions = {}): string => headersFile(o);
 
-/**
- * The error page is authored at /not-found/ (the /404 route belongs to RFC 404 in [n].astro).
- * Cloudflare's `not_found_handling: "404-page"` serves /404.html, so move the built page there.
- */
-export function finalizeErrorPage(out: string): void {
-  const src = path.join(out, 'not-found', 'index.html');
-  fs.copyFileSync(src, path.join(out, '404.html'));
-  fs.rmSync(path.join(out, 'not-found'), { recursive: true, force: true });
-}
-
 const SCRIPT_RE = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi;
 const STYLE_RE = /<style(\s[^>]*)?>([\s\S]*?)<\/style>/gi;
 const JSON_TYPE_RE = /\btype\s*=\s*["']?(?:application\/(?:ld\+)?json|importmap)/i;
@@ -52,7 +42,7 @@ export function collectInlineHashes(dir: string): {
 }
 
 /**
- * Writes dist/_redirects, dist/_headers and dist/404.html after the build (Astro's router ignores
+ * Writes dist/_redirects and dist/_headers after the build (Astro's router ignores
  * _-prefixed page files). The hook cannot use astro:content, so the site model is built
  * straight from content/ on disk.
  */
@@ -76,7 +66,6 @@ export default function siteBuildFiles(): AstroIntegration {
             beaconToken: process.env.PUBLIC_CF_BEACON_TOKEN?.trim() || undefined,
           }),
         );
-        finalizeErrorPage(out);
       },
     },
   };

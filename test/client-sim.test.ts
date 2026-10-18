@@ -9,7 +9,7 @@ let dispose: () => void = () => {};
 let scrolled: Element[] = [];
 
 beforeEach(() => {
-  resetDocument('https://rfc.akl.run/903/');
+  resetDocument('https://rfc.akl.run/rfc903');
   mount(fixture('rfc-903.html'));
   scrolled = [];
   Element.prototype.scrollIntoView = function (this: Element) {
@@ -64,7 +64,7 @@ describe('structure', () => {
     expect(els('.sim-row', fig()).length).toBe(9);
     expect(el('.sim-lookup-h b', fig()).textContent).toBe("Server's lookup table");
     expect(els('.sim-lrow', fig()).length).toBe(4);
-    expect(els('.sim-rep', fig()).map((a) => a.getAttribute('href'))).toEqual(['/951/', '/2131/']);
+    expect(els('.sim-rep', fig()).map((a) => a.getAttribute('href'))).toEqual(['/rfc951', '/rfc2131']);
     expect(el('.sim-switch', fig()).textContent).toBe('Put the server behind a router');
     expect(el('.sim-lensbody[data-level="orig"] a', fig()).getAttribute('href')).toBe('https://www.rfc-editor.org/rfc/rfc903');
   });
@@ -150,7 +150,7 @@ describe('stepping', () => {
     expect(primary().textContent).toBe('Play step 1 →');
     expect(segs()[0]?.getAttribute('aria-current')).toBe('step');
     expect(segs().map((s) => s.classList.contains('is-on'))).toEqual([true, false, false, false, false, false]);
-    expect(el('.sim-permalink', fig()).textContent).toBe('rfc.akl.run/903/#step-1');
+    expect(el('.sim-permalink', fig()).textContent).toBe('rfc.akl.run/rfc903#step-1');
     expect(el('.sim-permalink', fig()).getAttribute('href')).toBe('#step-1');
   });
 
@@ -266,20 +266,20 @@ describe('stepping', () => {
 
 describe('URL hash', () => {
   test('#step-N opens at that step and scrolls the figure into view', () => {
-    setUrl('https://rfc.akl.run/903/#step-4');
+    setUrl('https://rfc.akl.run/rfc903#step-4');
     dispose = init();
     expect(eyebrow()).toMatch(/^step 4 of 6/);
     expect(scrolled).toEqual([fig()]);
   });
 
   test('out-of-range steps clamp to the last; zero and garbage are ignored', () => {
-    setUrl('https://rfc.akl.run/903/#step-99');
+    setUrl('https://rfc.akl.run/rfc903#step-99');
     dispose = init();
     expect(eyebrow()).toMatch(/^step 6 of 6/);
     for (const h of ['#step-0', '#step-x', '#other', '']) {
       dispose();
       mount(fixture('rfc-903.html'));
-      setUrl(`https://rfc.akl.run/903/${h}`);
+      setUrl(`https://rfc.akl.run/rfc903${h}`);
       scrolled = [];
       dispose = init();
       expect(eyebrow()).toMatch(/^step 1 of 6/);
@@ -289,10 +289,10 @@ describe('URL hash', () => {
 
   test('hashchange moves the simulator; an unrelated hash leaves it alone', () => {
     dispose = init();
-    setUrl('https://rfc.akl.run/903/#step-3');
+    setUrl('https://rfc.akl.run/rfc903#step-3');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(eyebrow()).toMatch(/^step 3/);
-    setUrl('https://rfc.akl.run/903/#elsewhere');
+    setUrl('https://rfc.akl.run/rfc903#elsewhere');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(eyebrow()).toMatch(/^step 3/);
   });
@@ -300,7 +300,7 @@ describe('URL hash', () => {
   test('dispose removes the hashchange listener', () => {
     dispose = init();
     dispose();
-    setUrl('https://rfc.akl.run/903/#step-3');
+    setUrl('https://rfc.akl.run/rfc903#step-3');
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(eyebrow()).toMatch(/^step 1/);
   });

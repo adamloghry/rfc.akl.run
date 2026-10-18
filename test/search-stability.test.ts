@@ -194,8 +194,8 @@ describe('building the index', () => {
     });
     const docs = JSON.parse(lib.buildSearchIndex(s).files.find((f) => f.path.endsWith('docs.json'))?.json ?? '[]');
     assert.deepEqual(docs, [
-      ['/1/', 1, 'Title of RFC 1', 'One', 'summary'],
-      ['/journeys/trip/', null, 'A trip', null, 'journey'],
+      ['/rfc1', 1, 'Title of RFC 1', 'One', 'summary'],
+      ['/journeys/trip', null, 'A trip', null, 'journey'],
     ]);
   });
 });

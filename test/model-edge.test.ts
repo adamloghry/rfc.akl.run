@@ -102,7 +102,7 @@ describe('merging index and content', () => {
     const r = rec(siteOf([entry(7, { month: 11, year: 2001 })]), 7);
     assert.deepEqual(r.editors, []);
     assert.equal(r.dateLabel, 'November 2001');
-    assert.equal(r.url, '/7/');
+    assert.equal(r.url, '/rfc7');
   });
 
   test('content for an RFC that is not in the index is rejected', () => {

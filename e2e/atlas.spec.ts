@@ -75,7 +75,7 @@ test.describe('Atlas (home)', () => {
     await page.mouse.move(x, y);
     await expect(page.locator('.at-cap-label')).toContainText('RFC 903');
     await page.mouse.click(x, y);
-    await page.waitForURL('**/903/');
+    await page.waitForURL('**/rfc903');
     await expect(page.locator('h1')).toContainText(/RARP|Reverse/i);
   });
 
@@ -87,12 +87,12 @@ test.describe('Atlas (home)', () => {
     await page.keyboard.press('ArrowRight');
     await expect(page.locator('.at-cap-label')).toContainText('RFC 2');
     await page.keyboard.press('Enter');
-    await page.waitForURL('**/2/');
+    await page.waitForURL('**/rfc2');
   });
 
-  test('legacy /#rfc903 forwards to /903/', async ({ page }) => {
+  test('legacy /#rfc903 forwards to /rfc903', async ({ page }) => {
     await page.goto('/#rfc903');
-    await page.waitForURL('**/903/');
+    await page.waitForURL('**/rfc903');
   });
 });
 
@@ -107,13 +107,13 @@ test.describe('theme', () => {
     expect(await page.evaluate(() => localStorage.getItem('rfc-theme'))).toBe('dark');
     await page.reload();
     await expect(html).toHaveAttribute('data-theme', 'dark');
-    await page.goto('/903/');
+    await page.goto('/rfc903');
     await expect(html).toHaveAttribute('data-theme', 'dark');
   });
 
   test('follows prefers-color-scheme until a choice is stored', async ({ page }) => {
     await page.emulateMedia({ colorScheme: 'dark' });
-    await page.goto('/glossary/');
+    await page.goto('/glossary');
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   });
 
@@ -129,7 +129,7 @@ test.describe('theme', () => {
       await gate;
       await route.continue();
     });
-    const nav = page.goto('/glossary/', { waitUntil: 'commit' });
+    const nav = page.goto('/glossary', { waitUntil: 'commit' });
     await page.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark', null, { timeout: 10_000 });
     const sheets = await page.evaluate(() => [...document.styleSheets].filter((s) => s.href).length);
     expect(sheets, 'external stylesheet must still be pending').toBe(0);

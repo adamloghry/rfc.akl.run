@@ -68,8 +68,11 @@ function lintContent(label: string, data: unknown, ctx: { max: number; errors: s
     const hrefRe = /href\s*=\s*(["'])(.*?)\1/gi;
     for (const m of s.matchAll(hrefRe)) {
       const href = m[2] ?? '';
-      if (/^#rfc\d+/i.test(href)) errors.push(`${label}: ${ptr} legacy link ${href} (use /NNN/)`);
-      const n = /^\/(\d+)\/?(?:[#?].*)?$/.exec(href);
+      if (/^#rfc\d+/i.test(href)) errors.push(`${label}: ${ptr} legacy link ${href} (use /rfc<n>)`);
+      if (/^\/\d+(?:[/#?]|$)/.test(href)) errors.push(`${label}: ${ptr} old-style RFC link ${href} (use /rfc<n>, no trailing slash)`);
+      else if (/^\/.*\/(?:[#?].*)?$/.test(href) && !/^\/(?:[#?].*)?$/.test(href))
+        errors.push(`${label}: ${ptr} internal link ${href} has a trailing slash (the site has none)`);
+      const n = /^\/rfc(\d+)(?:[#?].*)?$/.exec(href);
       if (n && (Number(n[1]) < 1 || Number(n[1]) > max)) errors.push(`${label}: ${ptr} internal link ${href} is outside 1..${max}`);
     }
   });
@@ -255,7 +258,7 @@ function lintRfc(
 
   // A malformed viz must be reported here, not as a TypeError (with no file name) mid-build.
   if (vizChecks.length) {
-    const stub = { number: n, content: data, url: `/${n}/` };
+    const stub = { number: n, content: data, url: `/rfc${n}` };
     for (const [i, v] of (data.viz || []).entries()) {
       for (const check of vizChecks) {
         const msg = check(v, stub);

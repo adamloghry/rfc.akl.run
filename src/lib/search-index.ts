@@ -107,7 +107,7 @@ export function buildSearchIndex(
   }
   for (const j of site.journeys || []) {
     add(
-      [`/journeys/${j.slug}/`, null, j.title, null, 'journey'],
+      [`/journeys/${j.slug}`, null, j.title, null, 'journey'],
       [
         [W.title, [j.title]],
         [W.question, j.questions || []],

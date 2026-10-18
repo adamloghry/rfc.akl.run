@@ -83,7 +83,7 @@ export function generateBlocks(): Record<string, string> {
     '',
     `- **Tags:** ${code(tags)}`,
     `- **Attributes:** ${code(attrs)}, and any \`aria-*\``,
-    '- **`href`:** the sanitizer accepts `http:`, `https:`, `mailto:`, `/` and `#` targets, but for these explainers only links of the form `/<rfc number>/` are accepted (see House style). No `style` attributes, no scripts, no HTML comments, no `<img>`, no `<h1>`/`<h2>` (the page supplies the headings; use `<h3>` inside a section only if you must).',
+    '- **`href`:** the sanitizer accepts `http:`, `https:`, `mailto:`, `/` and `#` targets, but for these explainers only links of the form `/rfc<number>` (for example `/rfc793`, optionally followed by `#section-id`) are accepted (see House style). No `style` attributes, no scripts, no HTML comments, no `<img>`, no `<h1>`/`<h2>` (the page supplies the headings; use `<h3>` inside a section only if you must).',
   ].join('\n');
 
   const vizParts = [

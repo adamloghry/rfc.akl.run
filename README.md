@@ -1,6 +1,6 @@
 # rfc.akl.run
 
-A statically generated explainer site for the Internet's RFCs. Every RFC number from 1 to the latest gets a permanent page at `rfc.akl.run/<n>/`; the ones that have been written up get plain-language summaries, diagrams and interactive packet and sequence viewers. Everything is pre-rendered HTML: no server code, no runtime services, no third-party requests.
+A statically generated explainer site for the Internet's RFCs. Every RFC number from 1 to the latest gets a permanent page at `rfc.akl.run/rfc<n>` (for example `https://rfc.akl.run/rfc903`; no zero-padding); the ones that have been written up get plain-language summaries, diagrams and interactive packet and sequence viewers. Everything is pre-rendered HTML: no server code, no runtime services, no third-party requests.
 
 The nightly build refreshes the committed RFC Editor index snapshot (`data/rfc-index.xml`), merges it with the hand-written JSON in `content/`, and renders about 10,000 RFC pages (plus a static search index) into `dist/` in under a minute with Astro 7.
 
@@ -28,7 +28,7 @@ Other commands:
 | `npm test` | Vitest: unit tests, happy-dom client-script tests and Astro component tests (Container API) |
 | `npm run test:coverage` | `npm test` with v8 coverage over `src/lib/**` and `src/scripts/**`; fails below the thresholds in `vitest.config.ts` |
 | `npm run lint` | Content lint (Zod schemas, cross-references, viz rendering and anchors, permalink lock, HTML sanitizer). `--only <file>` lints specific files |
-| `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), forbidden strings in built HTML (the repo slug `adamloghry/rfc.akl.run` and the solicitation copy "Contribute", "Request an explainer", feed.xml anywhere; GitHub only outside `<main>`, since RFC content may mention it), that `404.html`, `404/index.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), the Cloudflare file-count limit and `_redirects` rule limits |
+| `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), forbidden strings in built HTML (the repo slug `adamloghry/rfc.akl.run` and the solicitation copy "Contribute", "Request an explainer", feed.xml anywhere; GitHub only outside `<main>`, since RFC content may mention it), that `404.html`, `rfc404.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), that internal links resolve to files the way Cloudflare serves them (`/rfc903` to `rfc903.html`, `/areas/core` to `areas/core.html`, `/` to `index.html`) and that no internal link has a trailing slash or is an old-style `/<n>/` link, the Cloudflare file-count limit and `_redirects` rule limits |
 | `npm run check:types` | `astro check` (TypeScript and Astro diagnostics) |
 | `npm run parity` | Dev tool: structural comparison of `dist/` pages against a golden directory (see below) |
 | `npm run test:e2e` | Playwright (desktop and 390px mobile) against `wrangler dev --local` serving `dist/` (build first) |
@@ -92,7 +92,7 @@ Content lives in `content/` as JSON and is loaded through Astro content collecti
 - RFC files: `content/rfcs/<n>.json` (plain number, e.g. `content/rfcs/903.json`; no zero-padding). Start from an existing file of similar level.
 - Journeys: `content/journeys/<slug>.json`. Glossary terms: `content/glossary/<term-id>.json`.
 - Optional signal: `content/signals/traffic.json` (per-RFC traffic counts that feed the priority score).
-- **Permalink lock:** section ids become URL anchors (`/903/#how-it-works`). `content/section-ids.lock.json` records every published id, and lint fails if one disappears. After adding sections, run `node --import tsx scripts/lint-content.ts --update-lock` and commit the lock. Never rename a published id.
+- **Permalink lock:** section ids become URL anchors (`/rfc903#how-it-works`). `content/section-ids.lock.json` records every published id, and lint fails if one disappears. After adding sections, run `node --import tsx scripts/lint-content.ts --update-lock` and commit the lock. Never rename a published id.
 - **Sanitizer:** every HTML field (`summary`, `today`, `eli5`, section `content`/`eli5`, glossary `definition`) is checked against an allowlist of tags and attributes (`src/lib/sanitize-check.ts`). Both lint and the build run the check and fail on violations.
 - **Provenance policy:** LLM-drafted content is always labeled. A machine-drafted file carries `provenance.source = "llm-draft"` and `provenance.reviewedBy = null`, and its page shows "Draft · machine-assisted, not yet reviewed". A human must review the content against the RFC text before `reviewedBy` is set. Nothing is generated at request time.
 
@@ -102,8 +102,8 @@ Content lives in `content/` as JSON and is loaded through Astro content collecti
 content/              Hand-written JSON: rfcs/, journeys/, glossary/, signals/, section-ids.lock.json
 src/
   content.config.ts   Content collections (glob loaders + Zod schemas)
-  pages/              Routes: [n].astro (every RFC), index (Atlas), areas/, journeys/, glossary/, graph/,
-                      not-found.astro (built to dist/404.html), data/ and sitemap/robots endpoints
+  pages/              Routes: rfc[n].astro (every RFC, built to rfc<n>.html), index (Atlas), areas/, journeys/, glossary/, graph/,
+                      404.astro (built to dist/404.html), data/ and sitemap/robots endpoints
   components/         Astro components: chrome/, rfc/, atlas/, viz/ (packet and sequence viewers, diagrams)
   layouts/            BaseLayout.astro
   lib/                Site model, RFC index loader, schemas, sanitizer, search index, data-file builders
@@ -131,13 +131,14 @@ Hosting is Cloudflare Workers static assets (free plan; details in [docs/cloudfl
 
 ### Why file count matters
 
-The free plan allows 20,000 files per deployed version (100,000 on Paid) and 25 MiB per file. Every RFC is one `<n>/index.html`, so `dist/` is about 10.2k files today. To stay well under the limit, the build emits no per-RFC redirect stubs and no sharded search chunks; redirects live in a generated `_redirects` file and caching in a generated `_headers` file (both written by `src/integrations/build-files.ts`). RFCs grow by about 300 per year, so the headroom is decades. `scripts/check-dist.ts` fails the build at 20,000 files, warns at 18,000, and checks `_redirects` against the 2,000 static / 100 dynamic rule caps.
+The free plan allows 20,000 files per deployed version (100,000 on Paid) and 25 MiB per file. Every RFC is one `rfc<n>.html`, so `dist/` is about 10.2k files today. To stay well under the limit, the build emits no per-RFC redirect stubs and no sharded search chunks; redirects live in a generated `_redirects` file and caching in a generated `_headers` file (both written by `src/integrations/build-files.ts`). RFCs grow by about 300 per year, so the headroom is decades. `scripts/check-dist.ts` fails the build at 20,000 files, warns at 18,000, and checks `_redirects` against the 2,000 static / 100 dynamic rule caps.
 
 ### Redirects and caching
 
-- `/rfc903` -> `/903/` comes from `_redirects` (`/rfc:num /:num/ 301`). Verified against Cloudflare's local runtime (301); `/404` -> `/404/` (301) is listed before it. `/903` -> `/903/` is Cloudflare's own `auto-trailing-slash` (307). See [docs/cloudflare.md](docs/cloudflare.md) for the observed behaviour, header rules and CSP.
-- Legacy `/#rfcNNN` links are forwarded to `/NNN/` by the Atlas page's inline script.
-- Slug aliases for explainers (`/<slug>` -> `/<n>/`) are also in `_redirects`.
+- **URL scheme:** the site has no trailing slashes anywhere. RFC pages are `/rfc903` (file `rfc903.html`, built with `build.format: 'file'` and `trailingSlash: 'never'`), sections are `/rfc903#packet-format`, other pages are `/areas/core`, `/glossary/m`, `/journeys/request`, `/graph`; only the root is `/`. Numbers are never zero-padded. Not-issued and reserved numbers also live at `/rfc<n>` (so `/rfc404` is the RFC 404 page, and the error page is the ordinary `404.html`).
+- Cloudflare's `html_handling: "auto-trailing-slash"` serves `foo.html` at `/foo` with a 200 and redirects `/foo/` to `/foo` (307). No `_redirects` rule is needed for this; e2e checks it. The old `/<n>/` URLs were never deployed, so there are no redirects for them.
+- Legacy `/#rfcNNN` links are forwarded to `/rfcNNN` by the Atlas page's inline script.
+- Slug aliases for explainers (`/<slug>` -> `/rfc<n>`) are the only `_redirects` rules.
 - `_headers`: `/assets/*` is `public, max-age=31536000, immutable`; everything else (HTML, `data/`) is `public, max-age=300`; the static search index under `data/search/` is `max-age=60` since its file names are not hashed. Cloudflare handles edge caching for static assets itself.
 - `www` -> apex is a Cloudflare dashboard setting (Redirect Rule), not part of this repo.
 

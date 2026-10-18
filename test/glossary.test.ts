@@ -37,8 +37,8 @@ describe('glossary model', () => {
     ]);
     expect(m.pages.map((p) => p.slug)).toEqual(['a', 'b', '0-9']);
     expect(must(m.pages[1]).entries.map((e) => e.term)).toEqual(['Beta', 'Bravo']);
-    expect(m.hrefs.get('six')).toBe('/glossary/0-9/#six');
-    expect(m.hrefs.get('b1')).toBe('/glossary/b/#b1');
+    expect(m.hrefs.get('six')).toBe('/glossary/0-9#six');
+    expect(m.hrefs.get('b1')).toBe('/glossary/b#b1');
     expect(m.total).toBe(4);
   });
 
@@ -50,7 +50,7 @@ describe('glossary model', () => {
       ['s-2', 2, 3, 2],
       ['s-3', 3, 3, 1],
     ]);
-    expect(m.hrefs.get('s4')).toBe('/glossary/s-3/#s4');
+    expect(m.hrefs.get('s4')).toBe('/glossary/s-3#s4');
     expect(m.exceptions).toEqual({ s2: 's-2', s3: 's-2', s4: 's-3', zone: 'd', x: '0-9' });
   });
 
@@ -71,10 +71,10 @@ describe('glossary model', () => {
     });
     expect(glossaryModel(site)).toBe(glossaryModel(site));
     const urls = sitemapUrls(site);
-    expect(urls).toContain('/glossary/');
-    expect(urls).toContain('/glossary/a/');
-    expect(urls).toContain('/glossary/m/');
-    expect(urls).not.toContain('/glossary/b/');
+    expect(urls).toContain('/glossary');
+    expect(urls).toContain('/glossary/a');
+    expect(urls).toContain('/glossary/m');
+    expect(urls).not.toContain('/glossary/b');
   });
 });
 
@@ -85,11 +85,11 @@ describe('legacy #id forwarder', () => {
     return to;
   };
   test('forwards ids by first character, exceptions by map, and #letter-X anchors', () => {
-    expect(run('#mac-address')).toBe('/glossary/m/#mac-address');
-    expect(run('#6to4')).toBe('/glossary/0-9/#6to4');
-    expect(run('#dns-zone', { 'dns-zone': 'z' })).toBe('/glossary/z/#dns-zone');
-    expect(run('#letter-M')).toBe('/glossary/m/');
-    expect(run('#letter-#')).toBe('/glossary/0-9/');
+    expect(run('#mac-address')).toBe('/glossary/m#mac-address');
+    expect(run('#6to4')).toBe('/glossary/0-9#6to4');
+    expect(run('#dns-zone', { 'dns-zone': 'z' })).toBe('/glossary/z#dns-zone');
+    expect(run('#letter-M')).toBe('/glossary/m');
+    expect(run('#letter-#')).toBe('/glossary/0-9');
   });
   test('does nothing without a hash, and never throws on a malformed one', () => {
     expect(run('')).toBe('');

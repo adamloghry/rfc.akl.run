@@ -14,13 +14,13 @@ import {
 
 test('questions need every word >= 3 chars to match; numbers parse', () => {
   const qs = [
-    { q: 'how does email get delivered', href: '/journeys/email/', label: 'JOURNEY', title: 'Email' },
-    { q: 'why is the padlock there', href: '/journeys/padlock/', label: 'JOURNEY', title: 'Padlock' },
+    { q: 'how does email get delivered', href: '/journeys/email', label: 'JOURNEY', title: 'Email' },
+    { q: 'why is the padlock there', href: '/journeys/padlock', label: 'JOURNEY', title: 'Padlock' },
   ];
   expect(matchQuestions('email delivered', qs).length).toBe(1);
   expect(matchQuestions('email padlock', qs).length).toBe(0);
   expect(matchQuestions('is', qs).length).toBe(0);
-  expect(matchQuestions('PADLOCK', qs)[0].href).toBe('/journeys/padlock/');
+  expect(matchQuestions('PADLOCK', qs)[0].href).toBe('/journeys/padlock');
   expect(parseNumber('903', 10065)).toBe(903);
   expect(parseNumber('0903', 10065)).toBe(903);
   expect(parseNumber('10066', 10065)).toBe(null);
@@ -177,15 +177,21 @@ describe('docRow', () => {
       tier: 'page',
       href: '/about/',
     });
-    expect(docRow(['/journeys/x/', null, 'Trip', null, 'journey'])).toEqual({
+    expect(docRow(['/journeys/x', null, 'Trip', null, 'journey'])).toEqual({
       label: 'JOURNEY',
       title: 'Trip',
       tag: 'JOURNEY',
       tier: '',
-      href: '/journeys/x/',
+      href: '/journeys/x',
     });
-    expect(docRow(['/5/', 5, 'Five', null, 'index'])).toEqual({ label: 'RFC 5', title: 'Five', tag: 'INDEX', tier: 'index', href: '/5/' });
-    expect(docRow(['/6/', 6, 'Six', 'VI', ''])).toMatchObject({ title: 'VI: Six', tag: '', tier: '' });
+    expect(docRow(['/rfc5', 5, 'Five', null, 'index'])).toEqual({
+      label: 'RFC 5',
+      title: 'Five',
+      tag: 'INDEX',
+      tier: 'index',
+      href: '/rfc5',
+    });
+    expect(docRow(['/rfc6', 6, 'Six', 'VI', ''])).toMatchObject({ title: 'VI: Six', tag: '', tier: '' });
   });
 });
 

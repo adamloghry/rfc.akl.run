@@ -17,7 +17,7 @@ const site = buildSite({
 const withSite = (extra: Partial<Site>): Site => Object.assign(Object.create(Object.getPrototypeOf(site)), site, extra);
 
 test('hash forwarder and 4 suggestions', () => {
-  assert.equal(HASH_FORWARDER, "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/'+(+m[1])+'/');");
+  assert.equal(HASH_FORWARDER, "var m=location.hash.match(/^#rfc(\\d+)$/i);if(m)location.replace('/rfc'+(+m[1]));");
   assert.equal(SUGGESTIONS.length, 4);
 });
 
@@ -79,7 +79,7 @@ withDist('built index.html: cool palette, site header, inline forwarder in head,
   assert.ok(built.indexOf(HASH_FORWARDER) > 0 && built.indexOf(HASH_FORWARDER) < built.indexOf('</head>'));
   assert.ok(built.includes('search-box search-hero'));
   assert.equal((built.match(/class="at-pill"/g) || []).length, 4);
-  assert.ok(built.includes('<canvas') && /<noscript>[\s\S]*href="\/areas\/"[\s\S]*<\/noscript>/.test(built));
+  assert.ok(built.includes('<canvas') && /<noscript>[\s\S]*href="\/areas"[\s\S]*<\/noscript>/.test(built));
   assert.equal((built.match(/class="at-chip"/g) || []).length, 12);
   assert.ok(!built.includes('at-fresh') && !built.includes('at-goal') && !built.includes('at-ladder'));
   assert.ok(!/JUST PUBLISHED|GOAL ·|Coverage report|Follow \(RSS\)/.test(built));

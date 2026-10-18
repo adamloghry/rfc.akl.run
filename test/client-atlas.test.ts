@@ -230,7 +230,7 @@ describe('hover caption', () => {
     await started();
     canvas().dispatchEvent(mouseAt(903));
     expect(label()).toBe('RFC 903');
-    expect(detail()).toBe('— rfc.akl.run/903/');
+    expect(detail()).toBe('— rfc.akl.run/rfc903');
     await waitFor(() => label() !== 'RFC 903');
     expect(label()).toBe('RFC 903 · RARP');
     expect(detail()).toBe('— Internet Standard · Core Protocols · 1984');
@@ -339,7 +339,7 @@ describe('click and keyboard', () => {
   test('clicking a cell opens its page; clicking empty space does nothing', async () => {
     await started();
     canvas().dispatchEvent(mouseAt(903, 'click'));
-    expect(go).toHaveBeenCalledWith('/903/');
+    expect(go).toHaveBeenCalledWith('/rfc903');
     go.mockClear();
     canvas().dispatchEvent(new MouseEvent('click', { clientX: WIDTH + 20, clientY: 1 }));
     expect(go).not.toHaveBeenCalled();
@@ -374,11 +374,11 @@ describe('click and keyboard', () => {
     key(canvas(), 'ArrowLeft');
     expect(label()).toBe('RFC 1');
     key(canvas(), 'Enter');
-    expect(go).toHaveBeenLastCalledWith('/1/');
+    expect(go).toHaveBeenLastCalledWith('/rfc1');
     for (let i = 0; i < Math.ceil(max / COLS) + 2; i++) key(canvas(), 'ArrowDown');
     expect(label()).toBe(`RFC ${max}`);
     key(canvas(), 'Enter');
-    expect(go).toHaveBeenLastCalledWith(`/${max}/`);
+    expect(go).toHaveBeenLastCalledWith(`/rfc${max}`);
   });
 
   test('other keys are ignored', async () => {

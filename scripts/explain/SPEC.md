@@ -66,7 +66,7 @@ Field rules:
 - `viz`: see section 6. Use `[]` when nothing in the RFC is naturally visual.
 - `references`: the RFC's most useful references (at most 20; `[]` is fine). `number` is the tag as the RFC prints it, `text` is the citation in plain text, and `rfc` is the plain issued RFC number when the reference is an RFC (omit `rfc` for anything else; never guess a number).
 - `facts`: at most 6 `{label, value}` pairs of hard facts (sizes, ports, codes, limits). Every value must be in the RFC text. `[]` is fine.
-- `today`: HTML, 1 to 3 sentences. State status plainly: if the unit metadata says the RFC is Historic, obsoleted (`obsoletedBy`) or updated (`updatedBy`), say so in the first sentence and link the replacement as `<a href='/9293/'>RFC 9293</a>`. Do not claim deployments, products or usage that the RFC text does not state.
+- `today`: HTML, 1 to 3 sentences. State status plainly: if the unit metadata says the RFC is Historic, obsoleted (`obsoletedBy`) or updated (`updatedBy`), say so in the first sentence and link the replacement as `<a href='/rfc9293'>RFC 9293</a>`. Do not claim deployments, products or usage that the RFC text does not state.
 - `questions`: 3 to 6 lowercase, search-style phrases without a question mark (`what is udp`, not `What is UDP?`). The merge adds them to the file's existing questions (6 in total at most).
 - `glossary` and `glossaryTerms`: see section 9.
 
@@ -74,7 +74,7 @@ Do **not** include `provenance`, `status`, `date`, `obsoletes`, `obsoletedBy`, `
 
 ## 4. Section ids
 
-Every section `id` comes from a fixed vocabulary so that page URLs (`/793/#header-format`) are stable. Pick the closest match for what the section is about. Use each id at most once per RFC. When nothing fits, use the escape hatch `section-1`, `section-2`, and so on.
+Every section `id` comes from a fixed vocabulary so that page URLs (`/rfc793#header-format`) are stable. Pick the closest match for what the section is about. Use each id at most once per RFC. When nothing fits, use the escape hatch `section-1`, `section-2`, and so on.
 
 <!-- BEGIN GENERATED section-ids -->
 Allowed ids (54):
@@ -88,14 +88,14 @@ Escape hatch: `section-<k>` where k is a positive whole number (`section-1`, `se
 
 `content`, section `eli5`, `eli5.summary`, `today` and glossary `definition` are HTML. Everything else is plain text and is escaped on the page, so write `<` and `&` as plain characters there and use no tags.
 
-Write HTML inside a JSON string with **single quotes for attributes** (`<a href='/793/'>`), so you do not have to escape double quotes. Escape newlines as `\n` or avoid them.
+Write HTML inside a JSON string with **single quotes for attributes** (`<a href='/rfc793'>`), so you do not have to escape double quotes. Escape newlines as `\n` or avoid them.
 
 <!-- BEGIN GENERATED html-allowlist -->
 The sanitizer allows exactly these tags and attributes; anything else fails validation.
 
 - **Tags:** `p`, `a`, `em`, `strong`, `b`, `i`, `code`, `pre`, `ul`, `ol`, `li`, `br`, `sup`, `sub`, `abbr`, `kbd`, `blockquote`, `h3`, `h4`, `h5`, `span`, `div`, `table`, `thead`, `tbody`, `tr`, `th`, `td`, `caption`, `figure`, `figcaption`, `dl`, `dt`, `dd`, `hr`, `small`, `mark`
 - **Attributes:** `class`, `href`, `title`, `id`, `colspan`, `rowspan`, `lang`, and any `aria-*`
-- **`href`:** the sanitizer accepts `http:`, `https:`, `mailto:`, `/` and `#` targets, but for these explainers only links of the form `/<rfc number>/` are accepted (see House style). No `style` attributes, no scripts, no HTML comments, no `<img>`, no `<h1>`/`<h2>` (the page supplies the headings; use `<h3>` inside a section only if you must).
+- **`href`:** the sanitizer accepts `http:`, `https:`, `mailto:`, `/` and `#` targets, but for these explainers only links of the form `/rfc<number>` (for example `/rfc793`, optionally followed by `#section-id`) are accepted (see House style). No `style` attributes, no scripts, no HTML comments, no `<img>`, no `<h1>`/`<h2>` (the page supplies the headings; use `<h3>` inside a section only if you must).
 <!-- END GENERATED html-allowlist -->
 
 House style for HTML:
@@ -103,7 +103,7 @@ House style for HTML:
 - Wrap text in `<p>...</p>`. Use `<strong>` for the first mention of a key term, `<code>` for literals (field names, values, methods, opcodes).
 - Callouts: `<div class='callout callout-info'><p>...</p></div>` (also `callout-note` and `callout-warning`). At most one per section.
 - Key points: `<div class='key-points'><div class='key-point'><div class='key-point-title'>Title</div><div class='key-point-text'>Text</div></div></div>`. Use sparingly.
-- Links: only to other RFCs, as `<a href='/793/'>RFC 793</a>` (plain number, trailing slash, no zero-padding). No external URLs. Link an RFC only when it is issued; the validator checks.
+- Links: only to other RFCs, as `<a href='/rfc793'>RFC 793</a>` (the path is `/rfc` plus the plain number: no trailing slash, no zero-padding; a section anchor may follow, as in `/rfc793#header-format`). No external URLs. Link an RFC only when it is issued; the validator checks.
 - No Markdown (`**bold**`, `#` headings, backtick fences, `- ` bullets). Use `<ul><li>` for lists.
 - Write RFC numbers as `RFC 793`, never `RFC 0793`.
 

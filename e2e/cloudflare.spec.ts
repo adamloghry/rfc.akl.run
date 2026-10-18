@@ -11,50 +11,61 @@ import { expect, test } from './fixtures';
 const DIST = path.join(process.cwd(), 'dist');
 const noFollow = { maxRedirects: 0 };
 
-test.describe('redirects', () => {
-  test('/rfc903 -> 301 -> /903/ (placeholder-in-segment rule works)', async ({ request }) => {
+test.describe('URL scheme (html_handling auto-trailing-slash)', () => {
+  test('/rfc903 is served from rfc903.html: 200, no redirect', async ({ request }) => {
     const r = await request.get('/rfc903', noFollow);
-    expect(r.status()).toBe(301);
-    expect(r.headers().location).toBe('/903/');
-    const end = await request.get('/rfc903');
-    expect(end.url()).toMatch(/\/903\/$/);
-    expect(end.status()).toBe(200);
+    expect(r.status()).toBe(200);
+    expect(r.headers().location).toBeUndefined();
+    expect(await r.text()).toBe(fs.readFileSync(path.join(DIST, 'rfc903.html'), 'utf8'));
+    expect((await request.get('/rfc903')).url()).toMatch(/\/rfc903$/);
   });
 
-  test('/404 -> 301 -> /404/ and that is the RFC 404 page, not the error page', async ({ page, request }) => {
-    const r = await request.get('/404', noFollow);
-    expect(r.status()).toBe(301);
-    expect(r.headers().location).toBe('/404/');
-    const res = await page.goto('/404');
+  test('/rfc903/ redirects to /rfc903 (no rule in _redirects needed)', async ({ request }) => {
+    const r = await request.get('/rfc903/', noFollow);
+    expect([301, 302, 307, 308]).toContain(r.status());
+    expect(r.headers().location).toBe('/rfc903');
+    const end = await request.get('/rfc903/');
+    expect(end.status()).toBe(200);
+    expect(end.url()).toMatch(/\/rfc903$/);
+  });
+
+  test('other pages are slash-less too: /areas, /areas/core, /glossary/m, /graph, /journeys', async ({ request }) => {
+    for (const p of ['/areas', '/areas/core', '/glossary', '/glossary/m', '/graph', '/journeys', '/journeys/request']) {
+      const r = await request.get(p, noFollow);
+      expect(r.status(), p).toBe(200);
+      const slash = await request.get(`${p}/`, noFollow);
+      expect([301, 302, 307, 308], `${p}/`).toContain(slash.status());
+      expect(slash.headers().location, `${p}/`).toBe(p);
+    }
+  });
+
+  test('/rfc404 is the RFC 404 page (200), not the error page', async ({ page, request }) => {
+    const r = await request.get('/rfc404', noFollow);
+    expect(r.status()).toBe(200);
+    const res = await page.goto('/rfc404');
     expect(res?.status()).toBe(200);
-    expect(page.url()).toMatch(/\/404\/$/);
+    expect(page.url()).toMatch(/\/rfc404$/);
     await expect(page.getByRole('heading', { level: 1 })).not.toHaveText('No page here');
     await expect(page.locator('meta[name="rfc-tier"]')).toHaveCount(1);
   });
 
+  test('old-style /903 and /903/ are not pages (never deployed): 404', async ({ request }) => {
+    for (const p of ['/903', '/903/']) expect((await request.get(p, noFollow)).status(), p).toBe(404);
+  });
+
   test('every page names https://rfc.akl.run as canonical (workers.dev also serves production)', async ({ request }) => {
-    for (const p of ['/', '/903/', '/glossary/', '/graph/']) {
+    for (const p of ['/', '/rfc903', '/glossary', '/graph']) {
       const html = await (await request.get(p)).text();
       const canon = /<link rel="canonical" href="([^"]+)"/.exec(html)?.[1];
       expect(canon, p).toBe(`https://rfc.akl.run${p}`);
     }
   });
 
-  test('/903 (no slash) redirects to /903/', async ({ request }) => {
-    const r = await request.get('/903', noFollow);
-    // auto-trailing-slash answers with a redirect; the status is recorded in docs/cloudflare.md
-    expect([301, 302, 307, 308]).toContain(r.status());
-    expect(r.headers().location).toBe('/903/');
-    const end = await request.get('/903');
-    expect(end.status()).toBe(200);
-    expect(end.url()).toMatch(/\/903\/$/);
-  });
-
   test('every slug alias in _redirects redirects to its RFC', async ({ request }) => {
     const rules = fs
       .readFileSync(path.join(DIST, '_redirects'), 'utf8')
       .split('\n')
-      .filter((l) => l && !l.startsWith('#') && !/[:*]/.test(l.split(' ')[0]) && !l.startsWith('/404'));
+      .filter((l) => l && !l.startsWith('#') && !/[:*]/.test(l.split(' ')[0]));
     test.skip(rules.length === 0, 'no slug aliases in this build');
     for (const rule of rules.slice(0, 5)) {
       const [from, to] = rule.split(' ');
@@ -66,7 +77,7 @@ test.describe('redirects', () => {
 });
 
 test.describe('404 handling', () => {
-  for (const p of ['/definitely/not/here', '/nope', '/903/missing/', '/data/nothing.json']) {
+  for (const p of ['/definitely/not/here', '/nope', '/rfc903/missing', '/rfc99999', '/data/nothing.json']) {
     test(`unknown path ${p} serves 404.html with status 404`, async ({ request }) => {
       const r = await request.get(p, noFollow);
       expect(r.status()).toBe(404);
@@ -75,21 +86,27 @@ test.describe('404 handling', () => {
     });
   }
 
+  test('an unknown path returns the 404 page with status 404', async ({ request }) => {
+    const r = await request.get('/no-such-page', noFollow);
+    expect(r.status()).toBe(404);
+    expect(await r.text()).toBe(fs.readFileSync(path.join(DIST, '404.html'), 'utf8'));
+  });
+
   test('error page renders in a browser and shows the go-to-RFC form', async ({ page, allowedFailures }) => {
-    allowedFailures.push('/no/such/page/'); // an intentional 404 navigation
-    const res = await page.goto('/no/such/page/');
+    allowedFailures.push('/no/such/page'); // an intentional 404 navigation
+    const res = await page.goto('/no/such/page');
     expect(res?.status()).toBe(404);
     await expect(page.getByRole('heading', { level: 1, name: 'No page here' })).toBeVisible();
   });
 
-  for (const p of ['/contribute/', '/contribute/question/', '/coverage/', '/feed.xml']) {
+  for (const p of ['/contribute', '/contribute/question', '/coverage', '/feed.xml']) {
     test(`removed surface ${p} is a 404`, async ({ request }) => {
       expect((await request.get(p, noFollow)).status()).toBe(404);
     });
   }
 
-  test('/not-found/ is not a page (only 404.html exists)', async ({ request }) => {
-    expect((await request.get('/not-found/', noFollow)).status()).toBe(404);
+  test('/not-found is not a page (only 404.html exists)', async ({ request }) => {
+    expect((await request.get('/not-found', noFollow)).status()).toBe(404);
   });
 });
 
@@ -102,7 +119,7 @@ test.describe('_headers', () => {
     'permissions-policy': /camera=\(\).*geolocation=\(\).*microphone=\(\)/,
   };
 
-  for (const p of ['/', '/903/', '/glossary/', '/data/coverage.json', '/robots.txt']) {
+  for (const p of ['/', '/rfc903', '/glossary', '/data/coverage.json', '/robots.txt']) {
     test(`security headers on ${p}`, async ({ request }) => {
       const h = (await request.get(p)).headers();
       for (const [k, re] of Object.entries(SECURITY)) expect(h[k], k).toMatch(re);
@@ -124,9 +141,9 @@ test.describe('_headers', () => {
   }
 
   test('CSP style hashes cover every inline <style> on every sampled page (no drift)', async ({ request }) => {
-    const csp = (await request.get('/903/')).headers()['content-security-policy'];
+    const csp = (await request.get('/rfc903')).headers()['content-security-policy'];
     expect(csp).toMatch(/style-src 'self'/);
-    for (const p of ['/', '/903/', '/5952/', '/glossary/', '/graph/', '/404/', '/no-such-page/']) {
+    for (const p of ['/', '/rfc903', '/rfc5952', '/glossary', '/graph', '/rfc404', '/no-such-page']) {
       const html = await (await request.get(p)).text();
       for (const m of html.matchAll(/<style(\s[^>]*)?>([\s\S]*?)<\/style>/g)) {
         if (!m[2].trim()) continue;
@@ -137,8 +154,8 @@ test.describe('_headers', () => {
   });
 
   test('CSP script hashes cover every inline script on every sampled page (no drift)', async ({ request }) => {
-    const csp = (await request.get('/903/')).headers()['content-security-policy'];
-    for (const p of ['/', '/903/', '/5952/', '/glossary/', '/graph/', '/404/', '/no-such-page/']) {
+    const csp = (await request.get('/rfc903')).headers()['content-security-policy'];
+    for (const p of ['/', '/rfc903', '/rfc5952', '/glossary', '/graph', '/rfc404', '/no-such-page']) {
       const html = await (await request.get(p)).text();
       for (const m of html.matchAll(/<script(\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
         const attrs = m[1] || '';
@@ -150,7 +167,7 @@ test.describe('_headers', () => {
   });
 
   test('/assets/* is immutable for a year; no duplicated Cache-Control from /*', async ({ request }) => {
-    const css = (await (await request.get('/903/')).text()).match(/href="(\/assets\/[^"]+\.css)"/)![1];
+    const css = (await (await request.get('/rfc903')).text()).match(/href="(\/assets\/[^"]+\.css)"/)![1];
     const r = await request.get(css);
     expect(r.headers()['cache-control']).toBe('public, max-age=31536000, immutable');
     const font = (await (await request.get(css)).text()).match(/url\((\/assets\/[^)]+\.woff2)\)/)![1];
@@ -158,7 +175,7 @@ test.describe('_headers', () => {
   });
 
   test('short TTLs: HTML/data 300 s, search index 60 s', async ({ request }) => {
-    expect((await request.get('/903/')).headers()['cache-control']).toBe('public, max-age=300');
+    expect((await request.get('/rfc903')).headers()['cache-control']).toBe('public, max-age=300');
     expect((await request.get('/data/coverage.json')).headers()['cache-control']).toBe('public, max-age=300');
     expect((await request.get('/data/titles/0.json')).headers()['cache-control']).toBe('public, max-age=300');
     expect((await request.get('/data/search/meta.json')).headers()['cache-control']).toBe('public, max-age=60');

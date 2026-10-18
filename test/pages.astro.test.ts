@@ -2,8 +2,8 @@ import { experimental_AstroContainer as AstroContainer } from 'astro/container';
 import { describe, expect, test } from 'vitest';
 import AreaCard from '../src/components/pages/AreaCard.astro';
 import IndexList from '../src/components/pages/IndexList.astro';
+import NotFound from '../src/pages/404.astro';
 import Graph from '../src/pages/graph/index.astro';
-import NotFound from '../src/pages/not-found.astro';
 
 const container = await AstroContainer.create();
 const render = (c: Parameters<typeof container.renderToString>[0], props?: Record<string, unknown>) =>
@@ -15,7 +15,7 @@ describe('secondary pages', () => {
     const h = await render(NotFound);
     expect(h).toMatch(/<meta name="robots" content="noindex, follow">/);
     expect(h).toContain('id="goto-form"');
-    expect(h).toContain("location.href='/'+n+'/'");
+    expect(h).toContain("location.assign('/rfc'+n)");
     expect(h).toContain('class="pal-warm"');
   });
 
@@ -30,7 +30,7 @@ describe('secondary pages', () => {
   test('area card: counts and coverage bar', async () => {
     const list = [{ tier: 'index' }, { tier: 'summary' }, { tier: 'explainer' }, { tier: 'interactive' }];
     const h = await render(AreaCard, { cat: { key: 'core', name: 'Core' }, list });
-    expect(h).toContain('href="/areas/core/"');
+    expect(h).toContain('href="/areas/core"');
     expect(h).toContain('4 RFCs');
     expect(h).toContain('width:75%');
     expect(h).toContain('2 explainers · 1 summaries · 75% covered');

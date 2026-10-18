@@ -110,16 +110,17 @@ in `cloudflare.spec.ts` still read the local `dist/`). Compatibility date: wrang
 
 | Request | Result |
 |---|---|
-| `/rfc903` | 301, `Location: /903/` (the `/rfc:num /:num/ 301` placeholder-in-segment rule works), then 200 |
-| `/404` | 301, `Location: /404/`; `/404/` is the RFC 404 page (200), not the error page |
-| `/903` | **307** `Location: /903/` (auto-trailing-slash answers 307, not 301), then 200 |
-| `/definitely/not/here`, `/nope`, `/903/missing/`, `/data/nothing.json` | **404** with the body of `404.html` ("No page here"), `text/html` |
-| `/not-found/` | 404 (the error page lives only at `/404.html`) |
+| `/rfc903` | **200**, served from `rfc903.html`, no redirect |
+| `/rfc903/` | **307** `Location: /rfc903` (auto-trailing-slash), then 200; same for `/areas/` -> `/areas`, `/glossary/m/` -> `/glossary/m` etc. |
+| `/rfc404` | 200, the RFC 404 page (not the error page) |
+| `/903`, `/903/` (old scheme, never deployed) | **404** |
+| `/definitely/not/here`, `/nope`, `/rfc903/missing`, `/rfc99999`, `/data/nothing.json` | **404** with the body of `404.html` ("No page here"), `text/html` |
+| `/not-found` | 404 (the error page lives only at `/404.html`) |
 | `/assets/*` (css, woff2) | `Cache-Control: public, max-age=31536000, immutable` (single value, no duplicate from `/*`) |
-| `/`, `/903/`, `/data/coverage.json`, `/data/titles/*` | `Cache-Control: public, max-age=300` |
+| `/`, `/rfc903`, `/data/coverage.json`, `/data/titles/*` | `Cache-Control: public, max-age=300` |
 | `/data/search/*` | `Cache-Control: public, max-age=60` |
 | every response | nosniff, referrer-policy, permissions-policy, `X-Frame-Options: DENY`, HSTS, CSP |
 
-Notes: wrangler warns that static rules should come before placeholder rules, so the generated `_redirects` lists `/404` and slug aliases first and `/rfc:num` last.
+Notes: URL scheme is slash-less (`build.format: 'file'`, `trailingSlash: 'never'`): every page is `<path>.html`, so `html_handling: "auto-trailing-slash"` serves `/rfc903` from `rfc903.html` and redirects `/rfc903/` to `/rfc903` (per Cloudflare's HTML handling table: `/file` 200, `/file/` 307 to `/file`). `_redirects` therefore holds only explainer slug aliases (`/<slug> /rfc<n> 301`) and is empty of rules in the offline build.
 The local runtime is workerd, the same engine as production, but the final confirmation of production-only behaviour (HSTS on the real domain, `workers.dev` preview URLs) is a preview-URL smoke test: `E2E_BASE_URL=<preview url> npm run test:e2e`.
-Slug-alias redirects (`/<slug> -> /<n>/`) are exercised only when the build has aliases (the offline build has none, so that test skips).
+Slug-alias redirects (`/<slug> -> /rfc<n>`) are exercised only when the build has aliases (the offline build has none, so that test skips).

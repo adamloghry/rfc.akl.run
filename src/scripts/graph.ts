@@ -155,10 +155,10 @@ export function init(scope: ParentNode = document): () => void {
       g.addEventListener('click', () => {
         if (!center) location.hash = `#${k}`;
       });
-      g.addEventListener('dblclick', () => nav.to(`/${k}/`));
+      g.addEventListener('dblclick', () => nav.to(`/rfc${k}`));
       g.addEventListener('keydown', (ev) => {
         if ((ev as KeyboardEvent).key !== 'Enter') return;
-        if (center) nav.to(`/${k}/`);
+        if (center) nav.to(`/rfc${k}`);
         else location.hash = `#${k}`;
       });
       svg.appendChild(g);
@@ -177,7 +177,7 @@ export function init(scope: ParentNode = document): () => void {
     const foot = document.createElement('p');
     foot.className = 'graph-foot';
     const a = document.createElement('a');
-    a.href = `/${n}/`;
+    a.href = `/rfc${n}`;
     a.textContent = `Open RFC ${n}`;
     foot.appendChild(a);
     if (none) foot.appendChild(document.createTextNode(' · No obsoletes or updates relations recorded.'));

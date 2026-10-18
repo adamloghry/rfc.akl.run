@@ -215,7 +215,7 @@ export function buildSite(opts: BuildSiteOptions): Site {
       mentionedIn: [],
       journeys: [],
       priority: 0,
-      url: `/${number}/`,
+      url: `/rfc${number}`,
     });
   }
 

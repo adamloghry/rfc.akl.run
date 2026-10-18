@@ -1,7 +1,7 @@
 /** Accessibility smoke at phone width (390 px). Runs in the "mobile" project. */
 import { expect, test } from './fixtures';
 
-for (const p of ['/', '/903/', '/5952/', '/glossary/', '/glossary/m/']) {
+for (const p of ['/', '/rfc903', '/rfc5952', '/glossary', '/glossary/m']) {
   test.describe(p, () => {
     test('no horizontal scrollbar at 390px', async ({ page }) => {
       await page.goto(p);
@@ -61,7 +61,7 @@ for (const p of ['/', '/903/', '/5952/', '/glossary/', '/glossary/m/']) {
 }
 
 test('page has a lang, a main landmark and a skip link', async ({ page }) => {
-  await page.goto('/903/');
+  await page.goto('/rfc903');
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   await expect(page.locator('main#main')).toHaveCount(1);
   await expect(page.locator('a.skip-link[href="#main"]')).toHaveCount(1);

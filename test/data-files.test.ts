@@ -51,10 +51,10 @@ test('titles shards, questions and graph', () => {
 test('sitemap, robots, redirects', () => {
   const urls = sitemapUrls(site);
   assert.equal(urls[0], '/');
-  assert.ok(urls.includes('/903/') && urls.includes('/areas/core/') && urls.includes('/journeys/diskless-boot/'));
-  assert.match(sitemapXml(urls), /<loc>https:\/\/rfc.akl.run\/903\/<\/loc>/);
+  assert.ok(urls.includes('/rfc903') && urls.includes('/areas/core') && urls.includes('/journeys/diskless-boot'));
+  assert.match(sitemapXml(urls), /<loc>https:\/\/rfc.akl.run\/rfc903<\/loc>/);
   assert.equal(robotsTxt(), 'User-agent: *\nAllow: /\n\nSitemap: https://rfc.akl.run/sitemap.xml\n');
-  assert.match(redirectsFile(site), /^\/rfc:num \/:num\/ 301$/m);
+  assert.doesNotMatch(redirectsFile(site), /rfc:num|^\/404 /m);
 });
 
 test('dataFiles covers coverage, titles, questions, graph and the search index', () => {

@@ -7,8 +7,8 @@ const ctx = [
     input: '.search-hero .search-input',
   },
   {
-    name: 'reader header search on /903/',
-    path: '/903/',
+    name: 'reader header search on /rfc903',
+    path: '/rfc903',
     input: 'header .search-input',
   },
 ];
@@ -20,7 +20,7 @@ for (const c of ctx) {
       const input = page.locator(c.input).first();
       await input.focus();
       await input.fill('903');
-      const row = page.locator('.search-row[href="/903/"]').first();
+      const row = page.locator('.search-row[href="/rfc903"]').first();
       await expect(row).toBeVisible();
       await expect(row).toContainText('RFC 903');
     });
@@ -30,7 +30,7 @@ for (const c of ctx) {
       const input = page.locator(c.input).first();
       await input.focus();
       await input.fill('diskless');
-      await expect(page.locator('.search-row[href^="/journeys/"]').first()).toBeVisible();
+      await expect(page.locator('.search-row[href^="/journeys"]').first()).toBeVisible();
     });
 
     test('arrow keys move selection, Enter navigates, Escape closes', async ({ page }) => {
@@ -54,25 +54,25 @@ for (const c of ctx) {
       await expect(input).toHaveAttribute('aria-expanded', 'false');
       // reopen and navigate with Enter
       await input.fill('903');
-      await expect(page.locator('.search-row[href="/903/"]').first()).toBeVisible();
+      await expect(page.locator('.search-row[href="/rfc903"]').first()).toBeVisible();
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('Enter');
-      await page.waitForURL('**/903/');
+      await page.waitForURL('**/rfc903');
     });
   });
 }
 
 test('Enter on a bare number jumps without waiting for results', async ({ page }) => {
-  await page.goto('/glossary/');
+  await page.goto('/glossary');
   const input = page.locator('.search-input').first();
   await input.focus();
   await input.fill('2616');
   await page.keyboard.press('Enter');
-  await page.waitForURL('**/2616/');
+  await page.waitForURL('**/rfc2616');
 });
 
 test('"/" focuses search', async ({ page }) => {
-  await page.goto('/glossary/');
+  await page.goto('/glossary');
   await page.locator('body').click({ position: { x: 5, y: 300 } });
   await page.keyboard.press('/');
   await expect(page.locator('.search-input').first()).toBeFocused();

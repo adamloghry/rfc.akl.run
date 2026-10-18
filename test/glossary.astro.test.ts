@@ -24,14 +24,14 @@ describe('glossary pages', () => {
     expect(h).toContain('<dt id="mac">MAC address</dt>');
     expect(h).not.toContain('id="arp"');
     expect(h).toContain('A device&#39;s name tag.');
-    expect(h).toMatch(/<a href="\/glossary\/m\/" aria-current="page"/);
-    expect(h).toContain('href="/glossary/a/"');
-    expect(h).toContain('<link rel="canonical" href="https://rfc.akl.run/glossary/m/">');
+    expect(h).toMatch(/<a href="\/glossary\/m" aria-current="page"/);
+    expect(h).toContain('href="/glossary/a"');
+    expect(h).toContain('<link rel="canonical" href="https://rfc.akl.run/glossary/m">');
   });
   test('nav: letters without terms are not links', async () => {
     const h = await container.renderToString(GlossaryNav, { props: { letters: model.letters } });
-    expect(h).toContain('href="/glossary/a/"');
-    expect(h).not.toContain('href="/glossary/b/"');
+    expect(h).toContain('href="/glossary/a"');
+    expect(h).not.toContain('href="/glossary/b"');
   });
 
   test('scale: 20,000 terms stay within the 200 KB gz page budget', async () => {

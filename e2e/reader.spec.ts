@@ -2,7 +2,7 @@ import { expect, test } from './fixtures';
 
 test.describe('reading level', () => {
   test('switch toggles eli5 and persists', async ({ page }) => {
-    await page.goto('/903/');
+    await page.goto('/rfc903');
     const html = page.locator('html');
     const eli5 = page.locator('[data-set-level="eli5"]');
     const std = page.locator('[data-set-level="std"]');
@@ -21,7 +21,7 @@ test.describe('reading level', () => {
   });
 
   test('?level=eli5 works (before first paint)', async ({ page }) => {
-    await page.goto('/903/?level=eli5');
+    await page.goto('/rfc903?level=eli5');
     await expect(page.locator('html')).toHaveAttribute('data-level', 'eli5');
     await expect(page.locator('[data-set-level="eli5"]')).toHaveAttribute('aria-pressed', 'true');
   });
@@ -29,7 +29,7 @@ test.describe('reading level', () => {
 
 test.describe('packet viewer', () => {
   test('inspector follows hover and focus', async ({ page }) => {
-    await page.goto('/903/');
+    await page.goto('/rfc903');
     const fig = page.locator('figure[data-viz="packet"]').first();
     const name = fig.locator('.pk-i-name');
     await expect(fig.locator('.pk-inspector')).toBeVisible();
@@ -48,7 +48,7 @@ test.describe('packet viewer', () => {
   });
 
   test('Request/Reply toggle swaps values and tints changed fields', async ({ page }) => {
-    await page.goto('/903/');
+    await page.goto('/rfc903');
     const fig = page.locator('figure[data-viz="packet"]').first();
     const body = fig.locator('.pk-body');
     const req = fig.locator('button[data-mode="req"]');
@@ -80,15 +80,15 @@ test.describe('packet viewer', () => {
 
 test.describe('sequence simulator', () => {
   test('steps update the permalink and #step-N deep links work', async ({ page }) => {
-    await page.goto('/903/');
+    await page.goto('/rfc903');
     const fig = page.locator('figure[data-viz="sequence-sim"]');
     const chip = fig.locator('.sim-permalink');
     const primary = fig.locator('.sim-primary');
     await expect(primary).toHaveText('Play step 1 →');
-    await expect(chip).toHaveText('rfc.akl.run/903/#step-1');
+    await expect(chip).toHaveText('rfc.akl.run/rfc903#step-1');
     await primary.click();
     await expect(primary).toHaveText('Next step →');
-    await expect(chip).toHaveText('rfc.akl.run/903/#step-2');
+    await expect(chip).toHaveText('rfc.akl.run/rfc903#step-2');
     expect(new URL(page.url()).hash).toBe('#step-2');
     await primary.click();
     expect(new URL(page.url()).hash).toBe('#step-3');
@@ -96,20 +96,20 @@ test.describe('sequence simulator', () => {
     expect(new URL(page.url()).hash).toBe('#step-2');
   });
 
-  test('/903/#step-3 deep link opens at step 3', async ({ page }) => {
-    await page.goto('/903/#step-3');
+  test('/rfc903#step-3 deep link opens at step 3', async ({ page }) => {
+    await page.goto('/rfc903#step-3');
     const fig = page.locator('figure[data-viz="sequence-sim"]');
-    await expect(fig.locator('.sim-permalink')).toHaveText('rfc.akl.run/903/#step-3');
+    await expect(fig.locator('.sim-permalink')).toHaveText('rfc.akl.run/rfc903#step-3');
     await expect(fig.locator('.sim-seg').nth(2)).toBeVisible();
     await expect(fig.locator('button[aria-label="Previous step"]')).toBeEnabled();
     await page.evaluate(() => {
       location.hash = '#step-1';
     });
-    await expect(fig.locator('.sim-permalink')).toHaveText('rfc.akl.run/903/#step-1');
+    await expect(fig.locator('.sim-permalink')).toHaveText('rfc.akl.run/rfc903#step-1');
   });
 
   test('router toggle switches to the failure branch', async ({ page }) => {
-    await page.goto('/903/#step-2');
+    await page.goto('/rfc903#step-2');
     const fig = page.locator('figure[data-viz="sequence-sim"]');
     const sw = fig.locator('[role="switch"]');
     const title = fig.locator('.sim-step-title');
@@ -128,10 +128,10 @@ test.describe('sequence simulator', () => {
 
 test('copy link shows "Link copied" and writes the permalink', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.goto('/903/');
+  await page.goto('/rfc903');
   const btn = page.locator('[data-copy]').first();
   const url = await btn.getAttribute('data-copy');
-  expect(url).toBe('https://rfc.akl.run/903/');
+  expect(url).toBe('https://rfc.akl.run/rfc903');
   await btn.click();
   await expect(btn).toContainText('Link copied');
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(url);
@@ -141,7 +141,7 @@ test('copy link shows "Link copied" and writes the permalink', async ({ page, co
 test.describe('graph', () => {
   for (const n of [903, 2616]) {
     test(`renders the neighbourhood of RFC ${n}`, async ({ page }) => {
-      await page.goto(`/graph/#${n}`);
+      await page.goto(`/graph#${n}`);
       const svg = page.locator('#graph svg');
       await expect(svg).toBeVisible();
       await expect(page.locator('#graph')).toContainText(String(n));
@@ -157,6 +157,6 @@ test.describe('404 page form', () => {
     await page.goto('/this/is/not/a/page/');
     await page.locator('#goto-n').fill('903');
     await page.getByRole('button', { name: 'Go to RFC' }).click();
-    await page.waitForURL('**/903/');
+    await page.waitForURL('**/rfc903');
   });
 });

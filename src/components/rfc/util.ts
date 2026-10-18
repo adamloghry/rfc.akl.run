@@ -21,13 +21,13 @@ export function describe(rfc: RfcRecord): string {
 const ENT: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s: unknown): string => String(s ?? '').replace(/[&<>"']/g, (c) => ENT[c]);
 
-/** Fact value: "RFC n" becomes a link to /n/ (only numbers in the index); the rest is escaped text. */
+/** Fact value: "RFC n" becomes a link to /rfc<n> (only numbers in the index); the rest is escaped text. */
 export function factValueHtml(v: unknown, site: Site): string {
   return String(v)
     .split(/(\bRFC\s?\d+\b)/)
     .map((part) => {
       const m = /^RFC\s?(\d+)$/.exec(part);
-      if (m && site.rfcs.has(Number(m[1]))) return `<a href="/${Number(m[1])}/">${esc(part)}</a>`;
+      if (m && site.rfcs.has(Number(m[1]))) return `<a href="/rfc${Number(m[1])}">${esc(part)}</a>`;
       return esc(part);
     })
     .join('');

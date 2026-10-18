@@ -48,9 +48,9 @@ describe('Datasheet', () => {
     expect(h).toContain('PUBLISHED');
     expect(h).toContain('June 1984');
     expect(h).toContain('LINEAGE · HOW HOSTS LEARN THEIR ADDRESS');
-    for (const n of [826, 903, 951, 1542, 2131]) expect(h).toContain(`href="/${n}/"`);
-    expect(h).toMatch(/<a[^>]*href="\/903\/"[^>]*aria-current="page"|<a[^>]*aria-current="page"[^>]*href="\/903\/"/);
-    expect(h).toContain('href="/graph/#903"');
+    for (const n of [826, 903, 951, 1542, 2131]) expect(h).toContain(`href="/rfc${n}"`);
+    expect(h).toMatch(/<a[^>]*href="\/rfc903"[^>]*aria-current="page"|<a[^>]*aria-current="page"[^>]*href="\/rfc903"/);
+    expect(h).toContain('href="/graph#903"');
     for (const id of ['introduction', 'packet-format']) {
       expect(h).toContain(`href="#${id}"`);
       expect(h).toMatch(new RegExp(`<section[^>]*id="${id}"`));
@@ -84,27 +84,27 @@ describe('Datasheet', () => {
     expect(h).toContain(esc(cite.rfcEditor(r903)));
     expect(h).toMatch(/<pre[^>]*>@misc\{rfc903/);
     expect(h).toMatch(/aria-controls="cite"/);
-    expect(h).toContain('data-copy="https://rfc.akl.run/903/"');
+    expect(h).toContain('data-copy="https://rfc.akl.run/rfc903"');
     expect(h).toContain('https://www.rfc-editor.org/rfc/rfc903.html');
   });
 
   test('right rail: eli5, glossary, journeys; unknown glossary ids skipped', async () => {
     const h = await ds(r903);
     expect(h).toContain('A computer shouts its name tag number');
-    expect(h).toContain('href="/glossary/m/#mac-address"');
+    expect(h).toContain('href="/glossary/m#mac-address"');
     expect(h).toContain('MAC address');
-    expect(h).toContain('href="/journeys/diskless-boot/"');
+    expect(h).toContain('href="/journeys/diskless-boot"');
     expect(await ds(withContent(r903, { eli5: undefined }))).not.toContain('class="pullquote"');
     const g = await ds(withContent(r903, { glossary: ['mac-address', 'no-such-term'] }));
-    expect(g).toContain('href="/glossary/m/#mac-address"');
+    expect(g).toContain('href="/glossary/m#mac-address"');
     expect(g).not.toContain('no-such-term');
   });
 
   test('references link to RFC pages; footer prev/next; viz inside its section; reader script', async () => {
     const h = await ds(r903);
-    expect(h).toMatch(/<a[^>]*href="\/826\/"[^>]*class="ref-row"|<a[^>]*class="ref-row"[^>]*href="\/826\/"/);
-    expect(h).toContain('href="/902/"');
-    expect(h).toContain('href="/904/"');
+    expect(h).toMatch(/<a[^>]*href="\/rfc826"[^>]*class="ref-row"|<a[^>]*class="ref-row"[^>]*href="\/rfc826"/);
+    expect(h).toContain('href="/rfc902"');
+    expect(h).toContain('href="/rfc904"');
     const sec = h.slice(h.indexOf('id="packet-format"'));
     expect(sec.slice(0, sec.indexOf('</section>'))).toContain('data-viz=');
   });
@@ -113,9 +113,9 @@ describe('Datasheet', () => {
     const h = await ds({ ...r903, obsoletedBy: [2131] });
     expect(h).toMatch(/Obsoleted by[\s\S]*RFC 2131[\s\S]*Which version should I read\?/);
     expect(await ds(r903)).not.toContain('Which version should I read?');
-    const b = { ...must(site.rfcs.get(2131)), number: 9990, url: '/9990/' };
+    const b = { ...must(site.rfcs.get(2131)), number: 9990, url: '/rfc9990' };
     const s2 = { ...site, rfcs: new Map(site.rfcs).set(9990, b) };
-    expect(await ds({ ...r903, obsoletedBy: [9990, 2131] }, s2)).toMatch(/Start with <a href="\/2131\/">/);
+    expect(await ds({ ...r903, obsoletedBy: [9990, 2131] }, s2)).toMatch(/Start with <a href="\/rfc2131">/);
   });
 
   test('plain-text fields are HTML-escaped', async () => {
@@ -155,7 +155,7 @@ describe('Datasheet', () => {
         ],
       },
     };
-    expect(await ds(withContent(r903, { viz: [pk] }))).toContain('rfc.akl.run/903/#field-hrd');
+    expect(await ds(withContent(r903, { viz: [pk] }))).toContain('rfc.akl.run/rfc903#field-hrd');
   });
 
   test('facts: RFC n linkified only for known RFCs; long values not mono', async () => {
@@ -168,7 +168,7 @@ describe('Datasheet', () => {
         ],
       }),
     );
-    expect(h).toMatch(/<dd>[^<]*<a href="\/826\/">RFC 826<\/a> — ARP, RFC 99999 — nope<\/dd>/);
+    expect(h).toMatch(/<dd>[^<]*<a href="\/rfc826">RFC 826<\/a> — ARP, RFC 99999 — nope<\/dd>/);
     expect(h).toMatch(/<dd class="mono">0x8035<\/dd>/);
   });
 
@@ -219,7 +219,7 @@ describe('IndexTier', () => {
   test('summary tier (5952): head, badges, lede, buttons', async () => {
     const out = await it(r5952());
     expect(out).toContain('<meta name="rfc-tier" content="summary">');
-    expect(out).toContain('<link rel="canonical" href="https://rfc.akl.run/5952/">');
+    expect(out).toContain('<link rel="canonical" href="https://rfc.akl.run/rfc5952">');
     expect(out).toMatch(/badge-green[^>]*>PROPOSED STANDARD</);
     expect(out).toMatch(/badge-dashed[^>]*>SUMMARY</);
     expect(out).toContain('<h1 class="it-h1">A Recommendation for IPv6 Address Text Representation</h1>');
@@ -252,7 +252,7 @@ describe('IndexTier', () => {
     expect(out).toContain('AREA (GUESSED)');
     expect(out).toContain('from IETF area, unreviewed');
     expect(out).toContain('10.17487/RFC5952');
-    expect(out).toMatch(/<a href="\/4291\/">RFC 4291/);
+    expect(out).toMatch(/<a href="\/rfc4291">RFC 4291/);
     expect(await it({ ...r5952(), categoryReviewed: true })).not.toContain('AREA (GUESSED)');
   });
 
@@ -270,14 +270,14 @@ describe('IndexTier', () => {
     const ob = await it({ ...r5952(), obsoletedBy: [9999] });
     expect(ob).not.toContain('None — current');
     expect(ob).toContain('class="it-warn"');
-    expect(ob).toContain('href="/9999/"');
+    expect(ob).toContain('href="/rfc9999"');
   });
 
   test('mentioned in only if non-empty', async () => {
     expect(await it(r5952())).not.toContain('MENTIONED IN');
     const out = await it({ ...r5952(), mentionedIn: [826, 903] });
     expect(out).toContain('MENTIONED IN');
-    expect(out).toContain('href="/826/"');
+    expect(out).toContain('href="/rfc826"');
   });
 
   test('no solicitation: no ladder, help box, demand line or GitHub link', async () => {
@@ -308,15 +308,15 @@ describe('IndexTier', () => {
 
   test('prev/next footer and relation cap', async () => {
     const out = await it(r5952());
-    expect(out).toContain('rfc.akl.run/5952/');
-    expect(out).toContain('href="/5951/">← RFC 5951');
-    expect(out).toContain('href="/5953/">RFC 5953 →');
-    expect(await it(must(site.rfcs.get(1)))).not.toContain('href="/0/"');
-    expect(await it(must(site.rfcs.get(10055)))).not.toContain('href="/10056/"');
+    expect(out).toContain('rfc.akl.run/rfc5952');
+    expect(out).toContain('href="/rfc5951">← RFC 5951');
+    expect(out).toContain('href="/rfc5953">RFC 5953 →');
+    expect(await it(must(site.rfcs.get(1)))).not.toContain('href="/rfc0"');
+    expect(await it(must(site.rfcs.get(10055)))).not.toContain('href="/rfc10056"');
     const many = Array.from({ length: 40 }, (_, i) => 100 + i);
     const capped = await it({ ...r5952(), updatedBy: many });
     expect(capped).toContain('and 28 more');
-    expect(capped).toContain('href="/graph/#5952"');
+    expect(capped).toContain('href="/graph#5952"');
   });
 
   test('gzip budget < 8192 (fixtures)', async () => {
@@ -339,8 +339,8 @@ describe('NotIssued', () => {
     expect(a).toContain('RFC 14 was never issued');
     expect(a).toContain('NEVER ISSUED');
     expect(a).toContain('content="noindex, follow"');
-    expect(a).toContain('href="/13/" rel="prev"');
-    expect(a).toContain('href="/15/" rel="next"');
+    expect(a).toContain('href="/rfc13" rel="prev"');
+    expect(a).toContain('href="/rfc15" rel="next"');
     const r = await container.renderToString(NotIssued, { props: { number: 10055, kind: 'reserved', max: 10055 } });
     expect(r).toContain('NOT YET PUBLISHED');
     expect(r).not.toContain('rel="next"');

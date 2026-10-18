@@ -170,11 +170,11 @@ describe('validate', () => {
 
   test('links and references must point at issued RFCs', () => {
     has(
-      errorsFor((o) => (o.sections[0].content += "<p><a href='/4242/'>RFC 4242</a></p>")),
+      errorsFor((o) => (o.sections[0].content += "<p><a href='/rfc4242'>RFC 4242</a></p>")),
       'is not an issued RFC',
     );
     has(
-      errorsFor((o) => (o.sections[0].content += "<p><a href='/0768/'>x</a></p>")),
+      errorsFor((o) => (o.sections[0].content += "<p><a href='/rfc0768'>x</a></p>")),
       'zero-padded',
     );
     has(
@@ -197,7 +197,7 @@ describe('validate', () => {
       errorsFor((o) => (o.references[0].rfc = '0760')),
       'is not an issued RFC number',
     );
-    expect(errorsFor((o) => (o.sections[0].content += "<p><a href='/900/'>RFC 900</a></p>"))).toEqual([]);
+    expect(errorsFor((o) => (o.sections[0].content += "<p><a href='/rfc900'>RFC 900</a></p>"))).toEqual([]);
   });
 
   test('glossary: too many new terms, unknown ids, existing ids, id format', () => {

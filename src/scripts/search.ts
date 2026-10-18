@@ -96,7 +96,7 @@ function createLoader() {
   }
 
   async function numberRow(n: number, cov: Cov | null): Promise<Row> {
-    const row: Row = { label: `RFC ${n}`, title: '', tag: '', tier: '', href: `/${n}/` };
+    const row: Row = { label: `RFC ${n}`, title: '', tag: '', tier: '', href: `/rfc${n}` };
     // coverage.json state bits only distinguish not-issued (0) and reserved (1) from issued (2+); the tier comes from the titles shard.
     const st = cov ? (cov.states[n - 1] ?? 2) : 2;
     row.tag = 'INDEX';
@@ -301,7 +301,7 @@ function attach(input: SearchInput, ids: { n: number }, data: Loader, off: Retur
         const n = parseNumber(input.value.trim(), 99999);
         if (n) {
           e.preventDefault();
-          nav.to(`/${n}/`);
+          nav.to(`/rfc${n}`);
         }
       }
     } else if (e.key === 'Escape') {

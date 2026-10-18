@@ -111,7 +111,7 @@ describe('URL scheme smuggling in href', () => {
       a('mailto:me@example.org'),
       a('MAILTO:me@example.org'),
       a('/'),
-      a('/903/'),
+      a('/rfc903'),
       a('/a/b/?q=1#x'),
       a('#section-2'),
       a('#'),
