@@ -245,9 +245,13 @@ function lintRfc(
   }
   const locked: string[] = lock[String(n)] || [];
   for (const id of locked) if (!seen.has(id)) errors.push(`permalink break: ${n}#${id}`);
-  const fresh = ids.filter((id) => !locked.includes(id));
+  // Scoped lock: machine-generated explainers that aren't locked yet take their section ids from a fixed
+  // vocabulary (scripts/explain/SPEC.md), so regeneration reproduces them; locking ~55k such ids would only
+  // bloat the lock file. Ids that are already locked stay enforced above.
+  const generated = draft && locked.length === 0;
+  const fresh = generated ? [] : ids.filter((id) => !locked.includes(id));
   if (!updateLock) for (const id of fresh) warnings.push(`new section id ${n}#${id} (run with --update-lock to accept)`);
-  if (ids.length || locked.length) newLock[String(n)] = [...locked, ...fresh];
+  if (locked.length || fresh.length) newLock[String(n)] = [...locked, ...fresh];
 
   // A malformed viz must be reported here, not as a TypeError (with no file name) mid-build.
   if (vizChecks.length) {

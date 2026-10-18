@@ -149,7 +149,13 @@ export function tierOf(n: number, summary: IndexSummary, april: Set<number>): Ti
 export const outFile = (paths: Paths, n: number): string => path.join(paths.outDir, `${n}.json`);
 
 /** The source file agents read: the PDF for PDF-only RFCs and for RFCs whose .txt is only a pointer to a PDF, else the .txt. */
+/**
+ * Where an agent should read RFC n from: the plain-text conversion of a PDF edition (`pdf-<n>.txt`, made with
+ * pdftotext or OCR for scans) when present, else the PDF itself, else the RFC Editor's .txt.
+ */
 export function textPathFor(paths: Paths, n: number): string {
+  const converted = path.join(paths.textDir, `pdf-${n}.txt`);
+  if (fs.existsSync(converted)) return converted;
   const pdf = path.join(paths.textDir, `${n}.pdf`);
   return PDF_ONLY.includes(n) || fs.existsSync(pdf) ? pdf : path.join(paths.textDir, `${n}.txt`);
 }

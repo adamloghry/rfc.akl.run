@@ -103,6 +103,24 @@ test('new section id is a warning unless updateLock', () => {
   assert.ok(!has(lint(dir, index, {}).warnings, /826#extra/));
 });
 
+test('scoped lock: an unlocked llm-draft explainer is neither warned about nor locked; locked ids stay enforced', () => {
+  const dir = baseline();
+  const draft = { source: 'llm-draft', model: 'claude-haiku-4-5', drafted: '2026-10-18', reviewedBy: null };
+  edit(dir, 5952, (j: Doc) => {
+    j.sections = [{ id: 'introduction', number: '1', title: 'Intro', content: '<p>x</p>' }];
+    j.provenance = draft;
+  });
+  const r = lint(dir, index, { updateLock: true });
+  assert.ok(!has(r.warnings, /5952#/));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'section-ids.lock.json'), 'utf8'))['5952'], undefined);
+  // an already-locked explainer keeps its permalinks even when it is an llm-draft
+  edit(dir, 826, (j: Doc) => {
+    j.provenance = draft;
+    j.sections = j.sections.slice(1);
+  });
+  assert.ok(has(lint(dir, index, {}).errors, /permalink break: 826#/));
+});
+
 test('content number missing from the index is an error', () => {
   const dir = baseline();
   fs.writeFileSync(rfcPath(dir, 4242), JSON.stringify({ number: 4242, summary: '<p>x</p>', eli5: { summary: '<p>y</p>' } }));

@@ -87,6 +87,9 @@ describe('fetch-texts', () => {
     expect(textPathFor(fx.paths, 906)).toBe(path.join(fx.paths.textDir, '906.pdf'));
     expect(textPathFor(fx.paths, 907)).toBe(path.join(fx.paths.textDir, '907.txt'));
     expect(textPathFor(fx.paths, 418)).toBe(path.join(fx.paths.textDir, '418.pdf'));
+    // a pdftotext/OCR conversion of the PDF edition wins over the PDF itself
+    fs.writeFileSync(path.join(fx.paths.textDir, 'pdf-906.txt'), 'converted text');
+    expect(textPathFor(fx.paths, 906)).toBe(path.join(fx.paths.textDir, 'pdf-906.txt'));
     // a rerun neither refetches nor loses the stub report
     const again = await fetchTexts({ paths: fx.paths, numbers: [906], fetchImpl, backoffMs: 0 });
     expect(again.skipped).toBe(1);
