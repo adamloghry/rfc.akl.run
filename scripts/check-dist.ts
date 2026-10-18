@@ -53,10 +53,12 @@ function walk(dir: string, rel: string, out: string[]): string[] {
   return out;
 }
 
-/** Strings that must never appear in built HTML (site policy: no GitHub, no contribution or feed surfaces). */
+/**
+ * Strings that must never appear anywhere in built HTML (site policy: no contribution or feed surfaces, and the
+ * project's own repository is never named, not even inside RFC content).
+ */
 export const FORBIDDEN: { label: string; re: RegExp }[] = [
-  // links to GitHub and the project's own repository are forbidden everywhere
-  { label: 'github', re: /github\.com|adamloghry\/rfc/i },
+  { label: 'repo slug', re: /adamloghry\/rfc\.akl\.run/i },
   // RFC titles such as "How to Contribute Research Results" are legitimate, so only the site's own link is matched
   { label: 'Contribute', re: /Contribute an explainer|>\s*Contribute\s*<|href="[^"]*\/contribute\// },
   { label: 'Request an explainer', re: /Request an explainer/ },
@@ -64,19 +66,21 @@ export const FORBIDDEN: { label: string; re: RegExp }[] = [
 ];
 
 /**
- * Official RFC Editor text may name GitHub: RFC 8874 and 8875 (their titles and abstracts), and RFC 6749's
- * hand-written tagline. Their own pages are exempt from the bare-word rule, and the two official titles and
- * the 6749 tagline are ignored where other pages list them.
+ * RFC content may mention GitHub (explainer prose, implementation links, official titles), but the site's own
+ * harness may not: header, nav, footer, scripts and head links. So "github" is forbidden only outside <main>.
+ * The page's own <title> and description/Open Graph/Twitter text restate the RFC's official title and abstract
+ * (e.g. RFC 8874), and the reader footer repeats "RFC n — title", so those count as RFC content too.
  */
-const BARE_WORD_EXEMPT_PAGES = new Set(['8874/index.html', '8875/index.html', '6749/index.html']);
-const OFFICIAL_TITLES = /Working Group GitHub (?:Usage Guidance|Administration)|Sign in with Google\/GitHub\/Facebook/g;
+const MAIN_RE = /<main\b[\s\S]*?<\/main>/gi;
+const HEAD_TEXT_RE =
+  /<title\b[\s\S]*?<\/title>|<meta\s+(?:name|property)="(?:description|og:title|og:description|twitter:title|twitter:description)"\s+content="[^"]*"\s*\/?>/gi;
+const FOOTER_TITLE_RE = /<span><span class="rd-foot-n">[^<]*<\/span>[^<]*<\/span>/gi;
 
-/** Labels of the forbidden strings found in a page's HTML (`rel` is the page path within dist/, when known). */
-export function forbiddenStrings(html: string, rel = ''): string[] {
+/** Labels of the forbidden strings found in a page's HTML. */
+export function forbiddenStrings(html: string): string[] {
   const found = FORBIDDEN.filter((f) => f.re.test(html)).map((f) => f.label);
-  if (!BARE_WORD_EXEMPT_PAGES.has(rel) && /github/i.test(html.replace(OFFICIAL_TITLES, ''))) {
-    if (!found.includes('github')) found.unshift('github');
-  }
+  const chrome = html.replace(MAIN_RE, '').replace(HEAD_TEXT_RE, '').replace(FOOTER_TITLE_RE, '');
+  if (/github/i.test(chrome)) found.unshift('github');
   return found;
 }
 
@@ -294,7 +298,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
         }
       }
     }
-    for (const label of forbiddenStrings(html, rel)) errors.push(`${rel}: contains forbidden string "${label}"`);
+    for (const label of forbiddenStrings(html)) errors.push(`${rel}: contains forbidden string "${label}"`);
     const pageUrl = rel === 'index.html' ? '/' : `/${rel.replace(/index\.html$/, '')}`;
     const broken = new Map(); // message -> count
     const bump = (m: string) => broken.set(m, (broken.get(m) || 0) + 1);

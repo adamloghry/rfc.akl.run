@@ -28,7 +28,7 @@ Other commands:
 | `npm test` | Vitest: unit tests, happy-dom client-script tests and Astro component tests (Container API) |
 | `npm run test:coverage` | `npm test` with v8 coverage over `src/lib/**` and `src/scripts/**`; fails below the thresholds in `vitest.config.ts` |
 | `npm run lint` | Content lint (Zod schemas, cross-references, viz rendering and anchors, permalink lock, HTML sanitizer). `--only <file>` lints specific files |
-| `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), forbidden strings in built HTML (GitHub, Contribute, "Request an explainer", feed.xml), that `404.html`, `404/index.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), the Cloudflare file-count limit and `_redirects` rule limits |
+| `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (JS counted with its statically imported chunks), forbidden strings in built HTML (the repo slug `adamloghry/rfc.akl.run` and the solicitation copy "Contribute", "Request an explainer", feed.xml anywhere; GitHub only outside `<main>`, since RFC content may mention it), that `404.html`, `404/index.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), the Cloudflare file-count limit and `_redirects` rule limits |
 | `npm run check:types` | `astro check` (TypeScript and Astro diagnostics) |
 | `npm run parity` | Dev tool: structural comparison of `dist/` pages against a golden directory (see below) |
 | `npm run test:e2e` | Playwright (desktop and 390px mobile) against `wrangler dev --local` serving `dist/` (build first) |

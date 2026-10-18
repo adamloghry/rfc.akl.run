@@ -45,23 +45,42 @@ test('clean dist has 0 errors', () => {
   assert.equal(r.stats.pages, 4); // 2 pages + the two 404 pages
 });
 
-test('forbidden strings in built HTML: github (any case), Contribute, Request an explainer, feed.xml', () => {
+test('forbidden strings: github outside <main>, repo slug anywhere, Contribute, Request an explainer, feed.xml', () => {
   assert.deepEqual(forbiddenStrings('<p>plain text about RFCs</p>'), []);
+  // GitHub is fine inside <main> (RFC content), including links and any case
+  assert.deepEqual(forbiddenStrings('<header>x</header><main><p>Use GitHub today</p><a href="https://GitHub.com/x/y">code</a></main>'), []);
+  // but not in the header, footer, nav, head or scripts
+  assert.deepEqual(forbiddenStrings('<header><a href="https://github.com/x">GitHub</a></header><main>ok</main>'), ['github']);
+  assert.deepEqual(forbiddenStrings('<main>ok</main><footer><a href="https://GitHub.com/x">src</a></footer>'), ['github']);
+  assert.deepEqual(forbiddenStrings('<head><link href="https://github.com/x"></head><main>ok</main>'), ['github']);
   assert.deepEqual(forbiddenStrings('<a href="https://GitHub.com/x">x</a>'), ['github']);
-  // official RFC Editor text: exempt on RFC 8874/8875/6749, and the two official titles anywhere
-  assert.deepEqual(forbiddenStrings('<h1>Working Group GitHub Usage Guidance</h1>', '8874/index.html'), []);
-  assert.deepEqual(forbiddenStrings('<li>RFC 8875 Working Group GitHub Administration</li>', 'areas/meta/index.html'), []);
-  assert.deepEqual(forbiddenStrings('<p>"Sign in with Google/GitHub/Facebook"</p>', 'areas/security/index.html'), []);
-  assert.deepEqual(forbiddenStrings('<p>Use GitHub today</p>', '1/index.html'), ['github']);
-  assert.deepEqual(forbiddenStrings('<a href="https://github.com/x">x</a>', '8874/index.html'), ['github']);
+  // the reader footer repeats the RFC's own title, which is RFC content (e.g. RFC 8875)
+  const foot =
+    '<main>ok</main><footer><div class="rd-foot"><span><span class="rd-foot-n">RFC 8875</span> — Working Group GitHub Administration</span></div></footer>';
+  assert.deepEqual(forbiddenStrings(foot), []);
+  assert.deepEqual(forbiddenStrings(`${foot}<footer><a href="https://github.com/x">src</a></footer>`), ['github']);
+  // the RFC's own title/description metadata restates its official title, so it is allowed too
+  assert.deepEqual(
+    forbiddenStrings(
+      '<title>RFC 8874 — Working Group GitHub Usage Guidance</title><meta name="description" content="use GitHub"><meta property="og:title" content="GitHub">',
+    ),
+    [],
+  );
+  // the repo slug is forbidden everywhere, even inside <main>
+  assert.deepEqual(forbiddenStrings('<main><a href="https://example.com/Adamloghry/rfc.akl.run">x</a></main>'), ['repo slug']);
+  assert.deepEqual(forbiddenStrings('<footer>adamloghry/rfc.akl.run</footer>'), ['repo slug']);
+  assert.deepEqual(forbiddenStrings('<main><a href="https://github.com/adamloghry/rfc.akl.run">x</a></main>'), ['repo slug']);
+  // solicitation rules apply everywhere, inside <main> too
   assert.deepEqual(forbiddenStrings('<a href="/contribute/">Contribute an explainer</a>'), ['Contribute']);
-  assert.deepEqual(forbiddenStrings('<a href="/x/">Contribute</a>'), ['Contribute']);
+  assert.deepEqual(forbiddenStrings('<main><a href="/x/">Contribute</a></main>'), ['Contribute']);
   assert.deepEqual(forbiddenStrings('<h1>RFC 6417 — How to Contribute Research Results</h1>'), []);
   assert.deepEqual(forbiddenStrings('Request an explainer'), ['Request an explainer']);
   assert.deepEqual(forbiddenStrings('<link href="/feed.xml">'), ['feed.xml']);
-  const d = dist({ '1/index.html': page('<a href="https://github.com/a/b">src</a>'), '2/index.html': page('ok') });
-  const r = checkDist(d);
-  assert.deepEqual(r.errors, ['1/index.html: contains forbidden string "github"']);
+  const d = dist({
+    '1/index.html': page('<nav><a href="https://github.com/a/b">src</a></nav><main>ok</main>'),
+    '2/index.html': page('<main><a href="https://github.com/a/b">impl</a></main>'),
+  });
+  assert.deepEqual(checkDist(d).errors, ['1/index.html: contains forbidden string "github"']);
 });
 
 test('budgets: index-tier page over 8 KB gz is an error', () => {
