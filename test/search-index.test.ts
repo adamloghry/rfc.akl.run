@@ -199,7 +199,7 @@ withCore('docRow formats like the old Pagefind rows', () => {
   assert.deepEqual(core.docRow(['/rfc903', 903, 'A Reverse Address Resolution Protocol', 'RARP', 'interactive']), {
     label: 'RFC 903',
     title: 'RARP: A Reverse Address Resolution Protocol',
-    tag: 'INTERACTIVE',
+    tag: 'AI ELI5',
     tier: 'interactive',
     href: '/rfc903',
   });

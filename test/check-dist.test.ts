@@ -309,3 +309,33 @@ test('resolves /rfc903 -> rfc903.html, /areas/core -> areas/core.html and / -> i
   });
   assert.deepEqual(checkDist(d).errors, []);
 });
+
+// A deterministic, poorly compressible string (so gzip size ~ length).
+const noise = (n: number) => {
+  let x = 12345;
+  let s = '';
+  while (s.length < n) {
+    x = (x * 1103515245 + 12345) & 0x7fffffff;
+    s += x.toString(36);
+  }
+  return s.slice(0, n);
+};
+
+test('RFC text: budget is the page budget plus 1.25x the text gzip; text characters are not links, anchors or forbidden strings', () => {
+  const text = noise(300 * 1024); // ~230 KB gz: far over the 60 KB page budget on its own
+  const ok = dist({ 'rfc1.html': page(`<pre class="rt-pre">${text}</pre>`) });
+  assert.deepEqual(checkDist(ok).errors, []);
+  // the same text outside the RFC text block is an ordinary page and over budget
+  const bad = dist({ 'rfc1.html': page(`<div>${text}</div>`) });
+  assert.equal(checkDist(bad).errors.length, 1);
+  // non-text weight is still held to the usual 60 KB: 300 KB of noise next to a small text
+  const heavy = dist({ 'rfc1.html': page(`<pre class="rt-pre">hello</pre><div>${text}</div>`) });
+  assert.equal(checkDist(heavy).errors.length, 1);
+  // "href=", "id=" and feed.xml inside the text are the RFC Editor's words; generated tags inside it are checked
+  const quoted = dist({
+    'rfc1.html': page(
+      '<pre class="rt-pre">&lt;a href="/nope"&gt; feed.xml &lt;b id="x"&gt;<a href="#sec">s</a><span id="sec">h</span></pre><a href="/rfc1#x">bad</a>',
+    ),
+  });
+  assert.deepEqual(checkDist(quoted).errors, ['rfc1.html: missing anchor /rfc1#x']);
+});

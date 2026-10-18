@@ -12,10 +12,18 @@ export const plain = (s: unknown): string =>
     .trim();
 export const upper = (s: unknown): string => String(s).toUpperCase();
 
+/** Meta/OG description: leads with the RFC itself (title, status, date, the authors' abstract), not the explainer. */
 export function describe(rfc: RfcRecord): string {
-  const c = rfc.content || {};
-  const text = plain(c.summary) || plain(rfc.abstract) || displayTitle(rfc);
+  const head = `RFC ${rfc.number}: ${displayTitle(rfc)}. ${rfc.statusLabel}, ${rfc.dateLabel}.`;
+  const abs = plain(rfc.abstract);
+  const text = abs ? `${head} ${abs}` : `${head} The original RFC text${rfc.content ? ', with an optional AI ELI5 explainer' : ''}.`;
   return text.length > 200 ? `${text.slice(0, 197).replace(/\s+\S*$/, '')}…` : text;
+}
+
+/** "claude-sonnet-5-5" -> "Claude Sonnet"; "claude-3-5-haiku-20241022" -> "Claude Haiku"; unknown -> "". */
+export function modelFamily(model: unknown): string {
+  const m = /\b(opus|sonnet|haiku)\b/i.exec(String(model ?? ''));
+  return m?.[1] ? `Claude ${m[1].charAt(0).toUpperCase()}${m[1].slice(1).toLowerCase()}` : '';
 }
 
 const ENT: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };

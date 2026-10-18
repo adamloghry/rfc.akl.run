@@ -19,6 +19,17 @@ const BUDGET = {
   areas: 200 * KB,
   glossary: 200 * KB,
 };
+// An RFC page carries the full original text, which compresses on its own terms. Budget: the usual page budget for
+// everything that is not the text (the largest page measures ~21 KB there) plus 1.25x the text's own gzip size.
+const TEXT_HEADROOM = 1.25;
+const PRE_RE = /<pre class="rt-pre"[^>]*>([\s\S]*?)<\/pre>/;
+/** The page without the RFC text's own characters (kept: the tags the build generated inside it). The text is the RFC
+ * Editor's: it may contain "href=", "id=", "feed.xml" and the like, which are not this site's links or anchors. */
+export const markupOnly = (html: string): string =>
+  html.replace(
+    /(<pre class="rt-pre"[^>]*>)([\s\S]*?)(<\/pre>)/,
+    (_m, a: string, inner: string, c: string) => `${a}${inner.replace(/(<[^>]*>)|[^<]+/g, (_x, tag?: string) => tag ?? ' ')}${c}`,
+  );
 const JS_BUDGET = 25 * KB;
 const COVERAGE_BUDGET = 25 * KB;
 const QUESTIONS_BUDGET = 30 * KB;
@@ -194,7 +205,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     let s = idCache.get(rel);
     if (!s) {
       s = new Set();
-      const h = fs.readFileSync(path.join(dir, rel), 'utf8');
+      const h = markupOnly(fs.readFileSync(path.join(dir, rel), 'utf8'));
       for (const m of h.matchAll(ID_RE)) s.add(decodeEntities(m[1] ?? m[2]));
       for (const m of h.matchAll(NAME_RE)) s.add(decodeEntities(m[1] ?? m[2]));
       idCache.set(rel, s);
@@ -278,7 +289,8 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
   const cspStyleSeen = new Set<string>();
 
   for (const rel of htmlFiles) {
-    const html = fs.readFileSync(path.join(dir, rel), 'utf8');
+    const rawHtml = fs.readFileSync(path.join(dir, rel), 'utf8');
+    const html = markupOnly(rawHtml);
     if (cspScript !== null) {
       for (const m of html.matchAll(INLINE_SCRIPT_RE)) {
         const attrs = m[1] || '';
@@ -362,13 +374,15 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
     let budget = tier && tier in BUDGET ? BUDGET[tier as keyof typeof BUDGET] : BUDGET.default;
     if (!tier && (rel === 'areas.html' || rel.startsWith('areas/'))) budget = BUDGET.areas;
     if (!tier && /^glossary\/[^/]+\.html$/.test(rel)) budget = BUDGET.glossary;
-    const gz = zlib.gzipSync(html, { level: 6 }).length;
+    const gz = zlib.gzipSync(rawHtml, { level: 6 }).length;
+    const pre = tier === 'explainer' || tier === 'interactive' ? PRE_RE.exec(rawHtml) : null;
+    if (pre?.[1]) budget += Math.ceil(TEXT_HEADROOM * zlib.gzipSync(pre[1], { level: 6 }).length);
     const key = tier || (rel === 'areas.html' || rel.startsWith('areas/') ? 'areas' : 'other');
     stats.byTier[key] = (stats.byTier[key] || 0) + 1;
     if (gz > stats.maxGz.bytes) stats.maxGz = { path: rel, bytes: gz };
     if (gz > budget) {
       stats.overBudget++;
-      errors.push(`${rel}: gzip ${(gz / KB).toFixed(1)} KB exceeds ${tier || key} budget ${budget / KB} KB`);
+      errors.push(`${rel}: gzip ${(gz / KB).toFixed(1)} KB exceeds ${tier || key} budget ${(budget / KB).toFixed(0)} KB`);
     }
     if (jsRefs.size) {
       let js = 0;

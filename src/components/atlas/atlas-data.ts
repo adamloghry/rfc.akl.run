@@ -24,14 +24,21 @@ export function journeysModel(site: Site) {
 }
 
 export function areasModel(site: Site) {
-  const by = new Map<string, any>(site.categories.map((k) => [k.key, { key: k.key, name: k.name, f: 0, s: 0, ex: [] as string[] }]));
+  const by = new Map<string, any>(site.categories.map((k) => [k.key, { key: k.key, name: k.name, f: 0, s: 0, ex: [] as any[] }]));
   for (const r of site.rfcs.values()) {
     const a = by.get(r.category);
     if (!a || !covered(r)) continue;
     if (featured(r)) {
       a.f++;
-      a.ex.push(r.shortTitle || r.title);
+      a.ex.push(r);
     } else a.s++;
+  }
+  // Every RFC now has an explainer, so the card examples are the area's most important RFCs (C9 priority),
+  // not the first ones by number.
+  for (const a of by.values()) {
+    a.ex = a.ex
+      .sort((x: any, y: any) => (y.priority ?? 0) - (x.priority ?? 0) || x.number - y.number)
+      .map((r: any) => r.shortTitle || r.title);
   }
   const list = [...by.values()];
   const maxCov = Math.max(1, ...list.map((a) => a.f + a.s));

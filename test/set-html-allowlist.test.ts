@@ -21,6 +21,7 @@ const ALLOWED = [
   // generated / static / escaped by their builders
   'components/rfc/MetaList.astro :: factValueHtml(f.value, site)',
   'components/rfc/Datasheet.astro :: NOSCRIPT',
+  'components/rfc/RfcText.astro :: rendered.html',
   'components/viz/SequenceSim.astro :: safeJson',
   'layouts/BaseLayout.astro :: PREPAINT',
   'pages/glossary/index.astro :: glossaryForwarder(exceptions)',

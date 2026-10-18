@@ -113,13 +113,21 @@ export function rank(p: Plan, postings: Postings, limit?: number): Ranked[] {
   return limit ? list.slice(0, limit) : list;
 }
 
+/** Result tag for a page tier: every RFC page is the RFC text; the explainers are the AI ELI5 bonus. */
+export function tierTag(tier: string): string {
+  if (tier === 'journey') return 'JOURNEY';
+  if (tier === 'explainer' || tier === 'interactive') return 'AI ELI5';
+  if (tier === 'index') return 'RFC';
+  return tier.toUpperCase();
+}
+
 /** doc row [url, number|null, title, shortTitle|null, tier] -> result row */
 export function docRow(d: DocRowIn): Row {
   const tier = d[4] || '';
   return {
     label: d[1] ? `RFC ${d[1]}` : tier === 'journey' ? 'JOURNEY' : 'PAGE',
     title: displayTitle(d[3], d[2]),
-    tag: tier === 'journey' ? 'JOURNEY' : tier.toUpperCase(),
+    tag: tierTag(tier),
     tier: tier === 'journey' ? '' : tier,
     href: d[0],
   };

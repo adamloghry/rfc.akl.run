@@ -156,6 +156,12 @@ export function init(root: ParentNode = document): () => void {
       if (!id || id === active) return;
       active = id;
       for (const a of links) a.classList.toggle('is-active', a.getAttribute('data-toc') === id);
+      // Long tables of contents (the RFC text) scroll inside their rail: keep the active entry in view.
+      const cur = links.find((a) => a.getAttribute('data-toc') === id);
+      const box = cur?.closest<HTMLElement>('.rt-toc');
+      if (cur && box && (cur.offsetTop < box.scrollTop || cur.offsetTop + cur.offsetHeight > box.scrollTop + box.clientHeight)) {
+        box.scrollTop = Math.max(0, cur.offsetTop - box.clientHeight / 3);
+      }
     };
     const io = new IntersectionObserver(
       (entries) => {

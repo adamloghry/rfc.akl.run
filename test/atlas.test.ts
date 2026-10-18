@@ -75,7 +75,7 @@ const withDist = built ? test : test.skip;
 withDist('built index.html: cool palette, site header, inline forwarder in head, hero search', () => {
   assert.ok(built.includes('class="pal-cool"'));
   assert.ok(built.includes('site-header--site'));
-  assert.match(built, /<a href="\/" aria-current="page">Atlas<\/a>/);
+  assert.match(built, /<a href="\/" aria-current="page">Home<\/a>/);
   assert.ok(built.indexOf(HASH_FORWARDER) > 0 && built.indexOf(HASH_FORWARDER) < built.indexOf('</head>'));
   assert.ok(built.includes('search-box search-hero'));
   assert.equal((built.match(/class="at-pill"/g) || []).length, 4);
@@ -83,7 +83,7 @@ withDist('built index.html: cool palette, site header, inline forwarder in head,
   assert.equal((built.match(/class="at-chip"/g) || []).length, 12);
   assert.ok(!built.includes('at-fresh') && !built.includes('at-goal') && !built.includes('at-ladder'));
   assert.ok(!/JUST PUBLISHED|GOAL ·|Coverage report|Follow \(RSS\)/.test(built));
-  assert.match(built, /<title>rfc\.akl\.run — the RFCs, explained<\/title>/);
+  assert.match(built, /<title>rfc\.akl\.run — the documents that built the Internet<\/title>/);
   const legend = must(/class="at-legend"[\s\S]*?<\/div>/.exec(built))[0];
   for (const label of ['Standard / BCP', 'Informational / Experimental', 'Unknown', 'Historic or obsoleted', 'Not issued or reserved'])
     assert.ok(legend.includes(label), `legend entry ${label}`);

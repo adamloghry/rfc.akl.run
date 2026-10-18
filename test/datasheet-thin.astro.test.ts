@@ -71,6 +71,8 @@ function bodies(html: string): [string, string][] {
       .trim(),
   ]);
 }
+// The AI ELI5 panel (the RFC text panel has its own contents rail).
+const aiPanel = (html: string) => html.slice(html.indexOf('id="eli5"'));
 const tocOf = (html: string, cls: string) =>
   [
     ...(new RegExp(`<nav class="${cls}"[^>]*>([\\s\\S]*?)</nav>`).exec(html)?.[1] ?? '').matchAll(
@@ -95,7 +97,7 @@ describe.each([
   });
 
   test('table of contents: one entry per rendered section, numbered in order, every target exists', async () => {
-    const h = await render(rfc);
+    const h = aiPanel(await render(rfc));
     const ids = [...h.matchAll(/ id="([^"]+)"/g)].map((m) => m[1]);
     const refs = bodies(h).some(([id]) => id === 'references') ? 1 : 0;
     for (const cls of ['toc', 'toc-disclosure']) {

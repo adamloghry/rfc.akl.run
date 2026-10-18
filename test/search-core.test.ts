@@ -187,7 +187,7 @@ describe('docRow', () => {
     expect(docRow(['/rfc5', 5, 'Five', null, 'index'])).toEqual({
       label: 'RFC 5',
       title: 'Five',
-      tag: 'INDEX',
+      tag: 'RFC',
       tier: 'index',
       href: '/rfc5',
     });

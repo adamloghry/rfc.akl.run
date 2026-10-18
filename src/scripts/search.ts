@@ -13,6 +13,7 @@ import {
   type Row,
   rank,
   shardsOf,
+  tierTag,
 } from './search-core';
 
 type Cov = { max: number; states: Uint8Array };
@@ -99,7 +100,7 @@ function createLoader() {
     const row: Row = { label: `RFC ${n}`, title: '', tag: '', tier: '', href: `/rfc${n}` };
     // coverage.json state bits only distinguish not-issued (0) and reserved (1) from issued (2+); the tier comes from the titles shard.
     const st = cov ? (cov.states[n - 1] ?? 2) : 2;
-    row.tag = 'INDEX';
+    row.tag = tierTag('index');
     row.tier = 'index';
     if (st === 0) {
       row.title = 'never issued';
@@ -118,7 +119,7 @@ function createLoader() {
         row.title = displayTitle(t[0], t[1]);
         if (t[4]) {
           row.tier = t[4] === 'interactive' ? 'explainer' : t[4];
-          row.tag = row.tier.toUpperCase();
+          row.tag = tierTag(row.tier);
         }
       }
     } catch {

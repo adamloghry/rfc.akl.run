@@ -14,7 +14,7 @@ test.describe('Glossary', () => {
   });
 
   test('a RFC page glossary chip opens the letter page at the term', async ({ page }) => {
-    await page.goto('/rfc903');
+    await page.goto('/rfc903#eli5');
     await page.locator('.chips a.chip[href="/glossary/m#mac-address"]').click();
     await page.waitForURL('**/glossary/m#mac-address');
     await expect(page.locator('dt#mac-address')).toBeInViewport();

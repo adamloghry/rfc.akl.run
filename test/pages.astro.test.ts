@@ -32,8 +32,8 @@ describe('secondary pages', () => {
     const h = await render(AreaCard, { cat: { key: 'core', name: 'Core' }, list });
     expect(h).toContain('href="/areas/core"');
     expect(h).toContain('4 RFCs');
-    expect(h).toContain('width:75%');
-    expect(h).toContain('2 explainers · 1 summaries · 75% covered');
+    expect(h).not.toContain('cov-bar');
+    expect(h).toContain('2 with AI ELI5 · 1 summaries');
   });
 
   test('index list: flat under 300, <details> per 1000 block above', async () => {

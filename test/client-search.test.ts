@@ -131,7 +131,7 @@ describe('number jump', () => {
     expect(first.href).toBe('/rfc903');
     expect(first.label).toBe('RFC 903');
     expect(first.title).toMatch(/Reverse Address Resolution/);
-    expect(first.tag).toBe('EXPLAINER');
+    expect(first.tag).toBe('AI ELI5');
     expect(header().getAttribute('aria-expanded')).toBe('true');
   });
 
@@ -145,7 +145,7 @@ describe('number jump', () => {
     const indexOnly = must([...site.rfcs.values()].find((r) => r.tier === 'index')).number;
     await search(header(), String(indexOnly));
     const b = must(rows(header())[0]);
-    expect(rowText(b).tag).toBe('INDEX');
+    expect(rowText(b).tag).toBe('RFC');
     expect(el('.sr-tag', b).classList.contains('is-index')).toBe(true);
   });
 
@@ -157,7 +157,7 @@ describe('number jump', () => {
     expect(rowText(must(rows(header())[0])).tag).toBe('SUMMARY');
     const explainer = must([...site.rfcs.values()].find((r) => r.tier === 'explainer')).number;
     await search(header(), String(explainer));
-    expect(rowText(must(rows(header())[0])).tag).toBe('EXPLAINER');
+    expect(rowText(must(rows(header())[0])).tag).toBe('AI ELI5');
   });
 
   test('never-issued and reserved numbers say so and carry no tag', async () => {

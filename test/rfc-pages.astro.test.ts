@@ -261,12 +261,12 @@ describe('IndexTier', () => {
     expect(out).toContain('class="it-lin"');
     expect(out).toContain('None — current');
     expect(out).toContain('UPDATED / OBSOLETED BY');
-    expect(out).not.toContain('has explainer');
+    expect(out).not.toContain(' · AI ELI5');
     const s2 = { ...site, rfcs: new Map(site.rfcs) };
     s2.rfcs.set(4291, { ...r5952(), number: 4291, tier: 'explainer', title: 'IPv6 Addressing Architecture' });
     const out2 = await it(r5952(), s2);
     expect(out2).toContain('IPv6 Addressing Architecture');
-    expect(out2).toContain('has explainer');
+    expect(out2).toContain(' · AI ELI5');
     const ob = await it({ ...r5952(), obsoletedBy: [9999] });
     expect(ob).not.toContain('None — current');
     expect(ob).toContain('class="it-warn"');

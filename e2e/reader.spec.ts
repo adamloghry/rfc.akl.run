@@ -2,7 +2,7 @@ import { expect, test } from './fixtures';
 
 test.describe('reading level', () => {
   test('switch toggles eli5 and persists', async ({ page }) => {
-    await page.goto('/rfc903');
+    await page.goto('/rfc903#eli5');
     const html = page.locator('html');
     const eli5 = page.locator('[data-set-level="eli5"]');
     const std = page.locator('[data-set-level="std"]');
@@ -21,7 +21,7 @@ test.describe('reading level', () => {
   });
 
   test('?level=eli5 works (before first paint)', async ({ page }) => {
-    await page.goto('/rfc903?level=eli5');
+    await page.goto('/rfc903?level=eli5#eli5');
     await expect(page.locator('html')).toHaveAttribute('data-level', 'eli5');
     await expect(page.locator('[data-set-level="eli5"]')).toHaveAttribute('aria-pressed', 'true');
   });
@@ -29,7 +29,7 @@ test.describe('reading level', () => {
 
 test.describe('packet viewer', () => {
   test('inspector follows hover and focus', async ({ page }) => {
-    await page.goto('/rfc903');
+    await page.goto('/rfc903#eli5');
     const fig = page.locator('figure[data-viz="packet"]').first();
     const name = fig.locator('.pk-i-name');
     await expect(fig.locator('.pk-inspector')).toBeVisible();
@@ -48,7 +48,7 @@ test.describe('packet viewer', () => {
   });
 
   test('Request/Reply toggle swaps values and tints changed fields', async ({ page }) => {
-    await page.goto('/rfc903');
+    await page.goto('/rfc903#eli5');
     const fig = page.locator('figure[data-viz="packet"]').first();
     const body = fig.locator('.pk-body');
     const req = fig.locator('button[data-mode="req"]');
@@ -80,7 +80,7 @@ test.describe('packet viewer', () => {
 
 test.describe('sequence simulator', () => {
   test('steps update the permalink and #step-N deep links work', async ({ page }) => {
-    await page.goto('/rfc903');
+    await page.goto('/rfc903#eli5');
     const fig = page.locator('figure[data-viz="sequence-sim"]');
     const chip = fig.locator('.sim-permalink');
     const primary = fig.locator('.sim-primary');
@@ -128,7 +128,7 @@ test.describe('sequence simulator', () => {
 
 test('copy link shows "Link copied" and writes the permalink', async ({ page, context }) => {
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.goto('/rfc903');
+  await page.goto('/rfc903#eli5');
   const btn = page.locator('[data-copy]').first();
   const url = await btn.getAttribute('data-copy');
   expect(url).toBe('https://rfc.akl.run/rfc903');
