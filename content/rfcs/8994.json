@@ -9,13 +9,333 @@
   },
   "questions": [
     "what is the autonomic control plane",
-    "acp network management channel"
+    "acp network management channel",
+    "what is acp in networking",
+    "how does acp secure channel work",
+    "what is acp connect",
+    "what is the acp node name"
+  ],
+  "tags": [
+    "Autonomic",
+    "Management",
+    "Security",
+    "IPv6"
+  ],
+  "subtitle": "A self-building, encrypted IPv6 overlay that lets network devices reach each other even when the network is misconfigured.",
+  "tldr": {
+    "problem": "Management and control traffic normally depends on the very addressing, routing and policy it is trying to configure, so one bad change can lock operators out of the devices they need to repair.",
+    "mechanism": "Each node with an ACP certificate builds hop-by-hop authenticated and encrypted channels to neighbors it discovers with GRASP, gives itself an IPv6 ULA address taken from the certificate, and runs RPL routing in a separate virtual context.",
+    "outcome": "The result is a virtual out-of-band network that carries autonomic functions, secure bootstrap and operator access, and keeps working when the data plane is unconfigured or broken.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Address prefix per domain",
+      "value": "/48 ULA, with a 40-bit hashed Global ID"
+    },
+    {
+      "label": "Addressing Type field",
+      "value": "2 bits"
+    },
+    {
+      "label": "Minimum RSA modulus",
+      "value": "2048 bits"
+    },
+    {
+      "label": "Retry backoff",
+      "value": "Initial 10 seconds, maximum 640 seconds"
+    },
+    {
+      "label": "AN_ACP announcement period",
+      "value": "60 seconds recommended"
+    },
+    {
+      "label": "Default RPL instance ID",
+      "value": "0"
+    }
+  ],
+  "today": "<p>RFC 8994 is a Proposed Standard published in May 2021, and the unit metadata lists no RFC that obsoletes or updates it. It names <a href='/8990/'>RFC 8990</a> (GRASP) as the signaling protocol it depends on, and the RFC places enrollment mechanisms such as BRSKI in <a href='/8995/'>RFC 8995</a>.</p>",
+  "glossary": [
+    "unique-local-address",
+    "vrf",
+    "ipv6",
+    "ipsec",
+    "ike",
+    "tls",
+    "certificate",
+    "x509-certificate",
+    "pki",
+    "trust-anchor",
+    "forward-secrecy",
+    "link-local-address"
+  ],
+  "sections": [
+    {
+      "id": "overview",
+      "number": "1",
+      "title": "A Virtual Out-of-Band Network",
+      "content": "<p>Today the management and control plane of IP networks is mostly <strong>in-band</strong>: its traffic follows the routing tables, security, policy and QoS that it first has to establish. A misconfiguration can cut off remote access to the affected device and to many others behind it. The RFC quotes an FCC report in which engineers could not restore a link because the management tools they needed relied on the same paths they had just disabled. Physically separate out-of-band networks avoid this but are expensive.</p><p>The <strong>Autonomic Control Plane</strong> (ACP) is a virtual out-of-band network. It runs in-band over the same links, but is built to be as independent as possible of configuration, addressing and routing. It serves three purposes: a communication infrastructure for autonomic functions (GRASP, <a href='/8990/'>RFC 8990</a>, runs inside it), secure bootstrap of devices over an unconfigured network (for example with BRSKI, <a href='/8995/'>RFC 8995</a>), and permanent operator access with protocols such as SSH or NETCONF.</p><p>A node builds its ACP without configuration: it creates a VRF-like context, assigns the address from its ACP certificate to a loopback interface, finds candidate neighbors on every native interface, negotiates a secure channel with each, authenticates the peer, maps each channel to a virtual interface, and runs a lightweight routing protocol. The ACP uses only IPv6, though the data plane itself can stay IPv4.</p>",
+      "eli5": "<p>Normally the messages that fix the network travel on the same roads that might be broken. The ACP gives them a private road of their own that builds itself.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "2",
+      "title": "ACP Domain, Certificates and Membership",
+      "content": "<p>The ACP relies on <strong>group security</strong>. An ACP domain is a group of nodes that trust each other, and each node needs an X.509 v3 LDevID certificate (the <strong>ACP certificate</strong>) plus information about one or more trust anchors. A single shared secret is ruled out as an unacceptable weakness. Nodes must support RSA keys of at least a 2048-bit modulus and ECDSA with the NIST P-256 curve, and must not support weaker keys.</p><p>The certificate carries an <code>acp-node-name</code> in a Subject Alternative Name <code>otherName</code>. It has the form <code>acp-address+rsub@acp-domain-name</code>. The address is 32 hex digits (or <code>0</code>), the optional <code>rsub</code> lets one domain use several /48 ULA prefixes, and the domain name identifies the ACP domain.</p><p>The <strong>ACP domain membership check</strong> has five points: the peer proves it owns the private key, its certificate path validates against a trust anchor including lifetimes, revocation is honored through CRL or OCSP when available, the acp-node-name is syntactically valid with the same domain name as this node, and, for secure channels only, the acp-address is present as 32 hex digits or <code>0</code>. Secure channels must be closed when any certificate in the chain expires or is revoked.</p>",
+      "eli5": "<p>Every device carries an ID card from the network owner that also says its home address. Two devices only open a tunnel after checking each other's cards are real.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "3",
+      "title": "Finding Neighbors and Choosing a Channel",
+      "content": "<p>ACP nodes discover candidate neighbors with <strong>DULL GRASP</strong>, the insecure link-local subset of GRASP, running one instance per L2 interface. A node announces itself with the <code>AN_ACP</code> objective in a flooded <code>M_FLOOD</code> message. The objective names each secure channel method it supports (<code>IKEv2</code> or <code>DTLS</code>) and a link-local locator when the port is not well known. The recommended period is 60 seconds, and the example ttl of 210000 milliseconds lets an announcement survive two of three messages being lost. The announcement deliberately omits the certificate to avoid fragmented multicast packets.</p><p>A node must try all the secure channel protocols it supports that the neighbor also announces, and must be able to respond to all of them in parallel. Once one attempt authenticates, the peer with the <strong>higher Node-ID</strong> becomes the <em>Decider</em> and the other the <em>Follower</em>. The Decider keeps trying its preferred protocols and closes less preferred connections, while the Follower stays passive.</p><p>If authentication of a candidate fails, reconnection attempts must be throttled. The recommended default is exponential base-two backoff with an initial retransmission time of 10 seconds and a maximum of 640 seconds.</p>",
+      "eli5": "<p>Each device keeps calling out a short hello. When two meet, the one with the bigger number gets to pick which secret handshake they use.</p>"
+    },
+    {
+      "id": "cryptography",
+      "number": "4",
+      "title": "Secure Channel Protocols and TLS",
+      "content": "<p>There is no single mandatory secure channel protocol for the whole network, because nodes only need to interoperate with their own neighbors. The RFC defines two profiles. The <strong>baseline</strong> profile requires native IPsec and allows IPsec over GRE. The <strong>constrained</strong> profile, for nodes that cannot do IPsec, requires DTLS. A gateway between the two areas supports both.</p><p>Any secure channel protocol must authenticate with the ACP certificate, send the certificate directly rather than a reference, use forward secrecy and use symmetric encryption of at least 256-bit strength such as AES-256, with no NULL encryption. For native IPsec, nodes use tunnel mode negotiated by IKEv2 over link-local IPv6 addresses, ESP only (no Authentication Header) and <code>ENCR_AES_GCM_16</code> as the single mandatory-to-implement algorithm. For DTLS, version 1.2 must be supported and older versions must not.</p><p>Other ACP components use TLS: certificate maintenance with EST, revocation checks, and unicast GRASP. TLS 1.2 is required, older versions must not be used, and TLS 1.3 should be supported. GRASP unicast inside the ACP uses TLS on top of the secure channels. This double protection guards against compromised members already inside the ACP.</p>",
+      "eli5": "<p>Every tunnel has to be locked with a strong lock, and some devices only know one kind of lock, so the rules allow two kinds. Messages between faraway devices get a second lock inside the tunnel.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "5",
+      "title": "Addressing Inside the ACP",
+      "content": "<p>Each ACP node has one routable address on an <strong>ACP loopback interface</strong>. All other ACP interfaces use only IPv6 link-local addresses, so each node needs just one routable prefix. The addresses are Unique Local Addresses (ULAs) with the L bit set, are permanent (no temporary addresses), and give no access to the Internet.</p><p>The base scheme is <code>fd</code> followed by a 40-bit Global ID, a 2-bit <strong>Type</strong> field and 78 bits for a sub-scheme. The Global ID is the first 40 bits of the SHA-256 hash of the routing-subdomain, so all nodes in one routing subdomain share a /48 prefix. In the RFC's example, the routing-subdomain <code>area51.research.acp.example.com</code> gives the Global ID <code>89b714f3db</code>.</p><p>The sub-schemes are ACP-Zone, ACP-Manual, ACP-Vlong-8 and ACP-Vlong-16, which announce prefixes of /127, /64, /120 and /112. The ACP-Manual scheme is intended for explicitly configured subnets such as ACP connect. ACP registrars assign addresses through the ACP certificate.</p>",
+      "eli5": "<p>Every device gets a home address that starts with the same neighborhood code. The code comes from a name, so everyone in the same neighborhood can find each other.</p>"
+    },
+    {
+      "id": "routing",
+      "number": "6",
+      "title": "Routing with RPL",
+      "content": "<p>ACP unicast routing uses <strong>RPL</strong> with a deliberately simple profile. It uses a single RPL instance (the default instance ID is 0) and one DODAG, so forwarding is a plain table by destination prefix and RPL packet information headers are not used. The Mode of Operation must support mode 2, storing mode with no multicast. The objective function is OF0, with a rank factor of 5 for links of 100 Mbps or less and 1 above that. RPL's own security is not used, because ACP security takes its place.</p><p>The RFC notes the trade-off: with a single DODAG, traffic between two network operations centers goes through the shortest path tree rooted at the primary one, which may add latency. It argues this is acceptable for management traffic, and that the DODAG reconfigures itself, including choosing a new root, after forwarding failures. Local repair is triggered at once by link failures, which secure channel mechanisms such as IKEv2 dead peer detection can reveal.</p><p>Every node announces the prefix of its ACP address space and must install a black hole route for unused parts of that space. The ACP does not use IP multicast routing; service discovery is done by GRASP flooding instead.</p>",
+      "eli5": "<p>The tunnels need road signs. A simple signpost system points every device toward the main control room, and if one road closes, devices quickly pick another.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "7",
+      "title": "Switches, ACP Connect and Remote Islands",
+      "content": "<p>On a large L2 LAN, discovery at subnet level would make every ACP router a neighbor of every other, creating a full mesh of channels. ACP-capable L2 switches avoid this by running a <strong>separate DULL GRASP instance on every L2 port</strong>, never forwarding <code>ALL_GRASP_NEIGHBORS</code> packets between those ports. Each node then peers only with its physically connected neighbors, and the ACP topology follows the physical topology. The RFC also recommends peering across ports blocked by the Spanning Tree Protocol.</p><p>A normal management host is not an ACP node, so it can be attached with <strong>ACP connect</strong>, an interface-level configured workaround. The node it is configured on is the ACP edge node, and the host reaches the ACP natively without encryption. The RFC stresses the consequence: everything on an ACP connect interface can reach all ACP nodes without further authentication, so the interface and the systems on it must be physically secured. The edge node forwards a packet into the ACP only if its source address belongs to that interface.</p><p>Separate ACP islands can be joined across non-ACP layer 3 networks with configured or tunneled remote ACP neighbors, which adds a dependency on the stability of the network in between.</p>",
+      "eli5": "<p>A big hallway full of rooms would make everyone shake hands with everyone. Putting a door guard at each port means each room only greets its next-door neighbor.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The ACP is self-building and self-protecting, but its security rests on other things. The PKI chain of trust must hold, and ACP registrars and EST servers are security-critical: a malicious registrar could enroll malicious nodes or break routing by assigning duplicate addresses. Device identities and ACP certificates should be protected from extraction, for example with a Trusted Platform Module, and untrusted software should be prevented from running.</p><p>The RFC states that the model is designed primarily to protect against attack from the outside, not from the inside. Because channel selection is negotiated, secure channel setup is subject to downgrade attacks by a man in the middle. There is no prevention of source-address spoofing inside the ACP, so new services should use end-to-end authentication, as GRASP does with TLS. Compromised members are handled by revocation and by not renewing short-lived certificates. The RFC adds that ACP connect and L2 bridging widen the attack surface and need physical security or port security.</p>",
+      "eli5": "<p>The tunnels keep outsiders out, but a bad insider with a real ID card can still cause trouble. So the ID desk and the card makers must be guarded very carefully.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "ACP NODE NAME EXAMPLE (RFC 8994 SECTION 6.2.2)",
+      "data": {
+        "title": "Example acp-node-name",
+        "lang": "text",
+        "code": "ACP address:       fd89:b714:f3db:0:200:0:6400:0000\nACP domain name:   acp.example.com\nrsub extension:    area51.research\n\nacp-node-name      = fd89b714f3db00000200000064000000\n                     +area51.research@acp.example.com\nrouting-subdomain  = area51.research.acp.example.com"
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "TWO NODES BUILD AN ACP CHANNEL (SIMPLIFIED FROM RFC 8994 SECTION 6.6)",
+      "data": {
+        "lanes": [
+          {
+            "key": "node1",
+            "label": "Node 1 (lower Node-ID)"
+          },
+          {
+            "key": "node2",
+            "label": "Node 2 (higher Node-ID)"
+          }
+        ],
+        "messages": [
+          {
+            "from": "node1",
+            "to": "node2",
+            "label": "AN_ACP announcement",
+            "color": "blue",
+            "note": "Link-local GRASP flood listing supported methods."
+          },
+          {
+            "from": "node2",
+            "to": "node1",
+            "label": "AN_ACP announcement",
+            "color": "blue"
+          },
+          {
+            "from": "node2",
+            "to": "node1",
+            "label": "Secure channel setup",
+            "color": "neutral",
+            "note": "Mutual certificate authentication succeeds; Node 2 becomes Decider."
+          },
+          {
+            "from": "node2",
+            "to": "node1",
+            "label": "Close less preferred channel",
+            "color": "green",
+            "note": "Decider keeps the best working method and carries ACP traffic on it."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "addressing",
+      "position": "after",
+      "caption": "ACP ADDRESSING BASE SCHEME (RFC 8994 FIGURE 9)",
+      "data": {
+        "title": "ACP ULA address",
+        "bytes": 16,
+        "width": 64,
+        "fields": [
+          {
+            "key": "fd",
+            "name": "fd",
+            "bits": 8,
+            "desc": "Locally defined ULA prefix."
+          },
+          {
+            "key": "global-id",
+            "name": "hash(routing-subdomain)",
+            "bits": 40,
+            "desc": "First 40 bits of the SHA-256 hash of the routing-subdomain."
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 2,
+            "desc": "Selects the addressing sub-scheme."
+          },
+          {
+            "key": "sub-scheme",
+            "name": "Sub-scheme",
+            "bits": 78,
+            "desc": "Node address bits, defined by the sub-scheme."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "addressing",
+      "position": "after",
+      "caption": "ACP ADDRESSING SUB-SCHEMES (RFC 8994 TABLE 1)",
+      "data": {
+        "columns": [
+          "Type",
+          "Name",
+          "Announced prefix"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0",
+              "ACP-Zone",
+              "/127"
+            ]
+          },
+          {
+            "cells": [
+              "0",
+              "ACP-Manual",
+              "/64"
+            ]
+          },
+          {
+            "cells": [
+              "1",
+              "ACP-Vlong-8",
+              "/120"
+            ]
+          },
+          {
+            "cells": [
+              "1",
+              "ACP-Vlong-16",
+              "/112"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8990]",
+      "text": "Bormann, C., Carpenter, B., Ed., and B. Liu, Ed., \"GeneRic Autonomic Signaling Protocol (GRASP)\", RFC 8990, May 2021.",
+      "rfc": 8990
+    },
+    {
+      "number": "[RFC8995]",
+      "text": "Bootstrapping Remote Secure Key Infrastructure (BRSKI), RFC 8995.",
+      "rfc": 8995
+    },
+    {
+      "number": "[RFC8993]",
+      "text": "A Reference Model for Autonomic Networking, RFC 8993.",
+      "rfc": 8993
+    },
+    {
+      "number": "[RFC7575]",
+      "text": "Behringer, M., et al., \"Autonomic Networking: Definitions and Design Goals\", RFC 7575, June 2015.",
+      "rfc": 7575
+    },
+    {
+      "number": "[RFC8368]",
+      "text": "Using an Autonomic Control Plane for Stable Connectivity of Network Operations, Administration, and Maintenance (OAM), RFC 8368.",
+      "rfc": 8368
+    },
+    {
+      "number": "[RFC6550]",
+      "text": "RPL: IPv6 Routing Protocol for Low-Power and Lossy Networks, RFC 6550.",
+      "rfc": 6550
+    },
+    {
+      "number": "[RFC4193]",
+      "text": "Hinden, R. and B. Haberman, \"Unique Local IPv6 Unicast Addresses\", RFC 4193, October 2005.",
+      "rfc": 4193
+    },
+    {
+      "number": "[RFC7030]",
+      "text": "Enrollment over Secure Transport, RFC 7030.",
+      "rfc": 7030
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile, RFC 5280.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC7296]",
+      "text": "Internet Key Exchange Protocol Version 2 (IKEv2), RFC 7296.",
+      "rfc": 7296
+    },
+    {
+      "number": "[RFC8221]",
+      "text": "Cryptographic Algorithm Implementation Requirements and Usage Guidance for ESP and AH, RFC 8221.",
+      "rfc": 8221
+    },
+    {
+      "number": "[RFC6347]",
+      "text": "Datagram Transport Layer Security Version 1.2, RFC 6347.",
+      "rfc": 6347
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

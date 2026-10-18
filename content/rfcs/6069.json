@@ -9,13 +9,209 @@
   },
   "questions": [
     "tcp long connectivity disruptions",
-    "why is tcp slow to recover after outage"
+    "why is tcp slow to recover after outage",
+    "tcp-lcd algorithm",
+    "icmp unreachable detection"
+  ],
+  "tags": [
+    "Transport",
+    "TCP",
+    "Congestion Control"
+  ],
+  "subtitle": "Making TCP faster at detecting when a broken connection comes back",
+  "tldr": {
+    "problem": "When a TCP connection breaks for a long time (more than one retransmission timeout), TCP thinks it is congestion and keeps backing off its retry timer. This means even when the connection comes back, TCP waits minutes before trying again.",
+    "mechanism": "TCP-LCD uses ICMP unreachable messages that routers send when a link is down to tell the difference between congestion and broken connections. When an ICMP message arrives during retransmission timeout, TCP undoes one backoff and tries again sooner.",
+    "outcome": "TCP can detect when connectivity returns much faster, recovering communication in seconds instead of minutes. The approach is sender-only and does not require changes to routers or receivers.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Problem",
+      "value": "Long connectivity disruptions (> RTO)"
+    },
+    {
+      "label": "Detection method",
+      "value": "ICMP unreachable messages"
+    },
+    {
+      "label": "Action",
+      "value": "Undo retransmission timer backoff"
+    },
+    {
+      "label": "Implementation",
+      "value": "Sender-only (no changes to routers)"
+    },
+    {
+      "label": "Status",
+      "value": "Experimental"
+    }
+  ],
+  "today": "<p>RFC 6069 is an Experimental protocol describing an algorithm used in Linux since 2009. It remains unobsoleted and is still the specification for TCP-LCD, though additional implementations and testing under other operating systems are encouraged.</p>",
+  "glossary": [
+    "tcp",
+    "retransmission",
+    "congestion-control",
+    "icmp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "TCP's Slow Recovery from Disconnections",
+      "content": "<p>TCP was designed to work on stable, wired networks. When TCP does not receive an acknowledgment, it assumes congestion has occurred on the network, doubles its wait time, and retries. This is correct for congestion, but wrong for a broken link.</p><p>Short interruptions recover fine: if the link comes back before the first retry timeout, TCP's fast retransmit mechanism kicks in. But long interruptions (lasting longer than one retransmission timeout) trigger timeout-based loss recovery, where TCP repeatedly backs off the retry timer, doubling the wait each time. If the timeout value hits its maximum (60–120 seconds), TCP must wait that long even after the link comes back.</p><p>In wireless and mobile networks, disconnections are common and often temporary. This delay is harmful.</p>",
+      "eli5": "<p>When TCP thinks a road is jammed, it waits longer and longer before trying again. If the road was actually blocked, not jammed, TCP wasted lots of time.</p>"
+    },
+    {
+      "id": "background",
+      "number": "2",
+      "title": "Distinguishing Link Failures from Congestion",
+      "content": "<p>When a router detects that a link is down (no route to a destination exists), it sends an <strong>ICMP destination unreachable</strong> message back to the sender. This is strong evidence that the packet was not dropped due to congestion, but because the link is broken.</p><p>TCP-LCD exploits this by looking at ICMP messages that arrive during the timeout-based loss recovery period. If an ICMP unreachable message arrives and contains the sequence number of a retransmitted segment, it means that segment got far enough to be reported as undeliverable—it was not congestion.</p><p>The RFC focuses on two ICMP codes: net unreachable and host unreachable. IPv6 has a corresponding ICMPv6 message. The algorithm only triggers when the retransmission timeout has already fired, so TCP's normal steady-state behavior is unchanged.</p>",
+      "eli5": "<p>A router's error message saying 'no route to destination' is a hint that the problem is a broken link, not congestion. TCP can use this hint.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "The TCP-LCD Algorithm",
+      "content": "<p>When TCP enters timeout-based loss recovery, the algorithm starts. It keeps a counter (BACKOFF_CNT) of how many times the retransmission timer has been backed off, and stores the original RTO value (RTO_BASE).</p><p>Normally, TCP waits for the retransmission timer or an acknowledgment. TCP-LCD adds a third event: receiving an ICMP unreachable message. When one arrives, if BACKOFF_CNT is greater than zero, TCP extracts the TCP segment header from the ICMP message. If the sequence number matches SND.UNA (the oldest unacknowledged segment, which means it is a retransmission), TCP undoes one backoff by decrementing BACKOFF_CNT and recalculating the RTO as RTO_BASE * 2^(BACKOFF_CNT).</p><p>This effectively halves the retry interval when there is evidence of a link failure, allowing TCP to detect when the link comes back without waiting for the maximum timeout. The algorithm stops when the first acceptable acknowledgment arrives.</p>",
+      "eli5": "<p>TCP keeps track of how many times it backed off. When an error message arrives, if it came from a retransmission, TCP undoes one backoff, shortening the wait.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "4",
+      "title": "Limitations and Trade-offs",
+      "content": "<p>TCP-LCD has several edge cases where it might make a wrong decision. If the sequence space wraps around (very rare for most connections, but possible on high-bandwidth paths), a delayed ICMP message from a previous cycle might coincidentally match the current SND.UNA, causing a false backoff undo. The probability is low (1 in 2^32), and the harm is limited to a few extra retransmissions.</p><p>Duplicate packets on the path could also cause issues: if a router duplicates ICMP messages, TCP might undo more backoffs than it should. But the algorithm prevents undoing more backoffs than were actually performed.</p><p>The algorithm does not react to ICMP messages during steady-state (when the connection is sending successfully) because doing so could enable an attacker to forge ICMP messages and force the sender to stop transmitting.</p><p>The implementation in Linux has been in use since 2009 with no reported negative effects, though the spec remains Experimental pending broader testing.</p>",
+      "eli5": "<p>The scheme can sometimes be fooled by odd network conditions, but these are rare. For safety, TCP only uses this trick when it is already in timeout recovery.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Analysis",
+      "content": "<p>An attacker might try to forge ICMP unreachable messages to make TCP retransmit faster. But to succeed, the attacker needs to guess the correct four-tuple (source and destination IP and port) and the exact sequence number of the current retransmission. The sequence number has 2^32 possible values, making a correct guess very unlikely (1 in 4 billion). Even with this information, an attacker cannot cause more harm than someone who can already hijack the connection entirely.</p><p>Alternatively, an attacker might try to suppress legitimate ICMP messages. But if all ICMP messages are missing, TCP-LCD simply behaves like standard TCP, so there is no added vulnerability. This is indistinguishable from a router that chooses not to send ICMP messages due to local policy.</p><p>In summary, TCP-LCD introduces no new security vulnerabilities beyond standard TCP.</p>",
+      "eli5": "<p>Forging the right error message is nearly impossible without being able to hijack the connection anyway. Suppressing messages just makes TCP act normal.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "6",
+      "title": "Compatibility with Other TCP Features",
+      "content": "<p>TCP-LCD interacts with a few other TCP mechanisms. With <strong>Explicit Congestion Notification</strong> (ECN), which uses a special flag instead of packet loss to signal congestion, TCP-LCD must also reset the retransmission timer when undoing a backoff, to avoid later confusion about whether congestion actually occurred.</p><p>TCP implementations that detect connection failures by counting retransmission attempts (per <span class='rfc-ref'>RFC 1122</span>) must be careful: with TCP-LCD, a certain count of retransmissions no longer corresponds to a fixed time interval. The implementation should measure the thresholds in time units instead.</p><p>TCP-LCD works fine with IP tunnels, including IPsec, as long as the ICMP messages can be extracted and the TCP header is readable.</p>",
+      "eli5": "<p>A few other TCP features need slight tweaks to work correctly with TCP-LCD, but all combinations are feasible.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "algorithms",
+      "caption": "TCP-LCD behavior when a link recovers",
+      "data": {
+        "lanes": [
+          {
+            "key": "tcp",
+            "label": "TCP Sender"
+          },
+          {
+            "key": "router",
+            "label": "Router (link down)"
+          },
+          {
+            "key": "remote",
+            "label": "Receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "tcp",
+            "to": "router",
+            "label": "Segment (seq=100)",
+            "color": "blue"
+          },
+          {
+            "from": "router",
+            "to": "tcp",
+            "label": "ICMP unreachable",
+            "color": "neutral",
+            "note": "Signal: link is down, not congestion"
+          },
+          {
+            "from": "tcp",
+            "to": "router",
+            "label": "Retry sooner (backoff undone)",
+            "color": "green",
+            "note": "TCP-LCD shortens the wait"
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "algorithms",
+      "caption": "TCP-LCD timeout-based loss recovery",
+      "data": {
+        "states": [
+          {
+            "key": "normal",
+            "label": "Normal",
+            "initial": true
+          },
+          {
+            "key": "timeout",
+            "label": "Timeout-based loss recovery"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "normal",
+            "to": "timeout",
+            "label": "RTO expires (no ACK)"
+          },
+          {
+            "from": "timeout",
+            "to": "normal",
+            "label": "ACK received"
+          },
+          {
+            "from": "timeout",
+            "to": "timeout",
+            "label": "ICMP unreachable + retransmission match: undo backoff, retry sooner"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Postel, J., \"Transmission Control Protocol\", RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[2]",
+      "text": "Postel, J., \"Internet Control Message Protocol\", RFC 792, September 1981.",
+      "rfc": 792
+    },
+    {
+      "number": "[3]",
+      "text": "Paxson, V. and M. Allman, \"Computing TCP's Retransmission Timer\", RFC 2988, November 2000.",
+      "rfc": 2988
+    },
+    {
+      "number": "[4]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[5]",
+      "text": "Braden, R., \"Requirements for Internet Hosts - Communication Layers\", RFC 1122, October 1989.",
+      "rfc": 1122
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

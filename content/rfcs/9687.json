@@ -9,13 +9,160 @@
   },
   "questions": [
     "what is the bgp send hold timer",
-    "why do bgp sessions get stuck when peer stops reading"
+    "why do bgp sessions get stuck when peer stops reading",
+    "why do bgp sessions get stuck when a peer stops reading",
+    "what is the default sendholdtime",
+    "what does rfc 9687 update"
+  ],
+  "tags": [
+    "BGP",
+    "Routing",
+    "Timers"
+  ],
+  "subtitle": "A timer that lets a BGP router hang up on a peer that has stopped accepting its messages.",
+  "tldr": {
+    "problem": "If a BGP peer stops processing messages (for example by advertising a zero TCP receive window), the local router cannot send anything, yet the session stays up and routing information goes stale.",
+    "mechanism": "RFC 9687 adds a SendHoldTimer to the BGP state machine. It restarts each time the router sends a BGP message, and when it expires the router logs the error, drops the TCP connection and returns to Idle.",
+    "outcome": "Blocked sessions are closed locally instead of relying on the remote peer, giving consistent behavior across implementations. The RFC updates RFC 4271.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default SendHoldTime",
+      "value": "Greater of 8 minutes or 2 times the negotiated HoldTime"
+    },
+    {
+      "label": "New FSM event",
+      "value": "Event 29: SendHoldTimer_Expires"
+    },
+    {
+      "label": "Error code registered",
+      "value": "8, Send Hold Timer Expired"
+    },
+    {
+      "label": "NOTIFICATION subcode",
+      "value": "0 (unused)"
+    }
+  ],
+  "today": "<p>RFC 9687 is a Proposed Standard published in November 2024. It updates <a href='/4271/'>RFC 4271</a> and has not itself been obsoleted or updated.</p>",
+  "glossary": [
+    "bgp",
+    "hold-timer",
+    "finite-state-machine",
+    "tcp",
+    "receive-window",
+    "autonomous-system",
+    "mib",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>RFC 9687 defines the <strong>SendHoldTimer</strong> and a <code>SendHoldTimer_Expires</code> event for the BGP Finite State Machine described in Section 8 of <a href='/4271/'>RFC 4271</a>. It updates that RFC.</p><p>The RFC says that failing to terminate a blocked BGP connection can cause reachability problems, because the local system can no longer generate and deliver UPDATE messages to another speaker. This is thought to have contributed to packet loss events in the global routing system. The fix is to require that a connection be terminated when the local system has detected that the remote one cannot possibly have processed any BGP messages for the duration of the SendHoldTime. Speakers no longer rely only on the remote side closing a blocked connection.</p>",
+      "eli5": "<p>If your friend stops listening on the phone, you should hang up yourself instead of waiting for them to do it.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "2",
+      "title": "The Problem Scenario",
+      "content": "<p>Without a SendHoldTimer, a malfunctioning or overwhelmed remote speaker can make data pile up on the local BGP socket indefinitely. Traffic may then be lost because the overwhelmed speaker keeps using stale routes.</p><p>Because BGP runs over TCP (<a href='/9293/'>RFC 9293</a>), a speaker in the Established state can meet a peer advertising a TCP receive window (<code>RCV.WND</code>) of size zero. That stops the local system from sending KEEPALIVE, UPDATE or any other BGP message. BGP implementations generally cannot see lower layers such as TCP window sizes, and no existing BGP mechanism recognizes such a blocked connection.</p><p>The affected speaker may end up with outdated routing information, and one stuck session can hurt convergence for an entire autonomous system or a group of them.</p>",
+      "eli5": "<p>Imagine a mailbox that is stuffed full so no more letters fit. You keep trying to post letters, but nothing goes in, and nobody tells you to stop.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "Changes to the BGP State Machine",
+      "content": "<p>The RFC amends several parts of <a href='/4271/'>RFC 4271</a>:</p><ul><li>Two optional session attributes are added: <code>SendHoldTimer</code> (attribute 14) and <code>SendHoldTime</code> (attribute 15). SendHoldTime says how long a speaker stays in Established before dropping the TCP connection because no BGP messages can be sent. It can be configured per peer.</li><li>A new optional timer event, <code>Event 29: SendHoldTimer_Expires</code>, fires when the timer expires.</li><li>In OpenConfirm, receiving a KEEPALIVE (Event 26) now also starts the SendHoldTimer if SendHoldTime is non-zero, before moving to Established.</li><li>In Established, each time the local system sends a BGP message it restarts the SendHoldTimer. The timer is stopped if SendHoldTime or the negotiated HoldTime is zero, and on any transition out of Established.</li></ul><p>If SendHoldTime is non-zero, it MUST be greater than HoldTime.</p>",
+      "eli5": "<p>Every time the router talks, it resets a stopwatch. If the stopwatch runs all the way out without the router managing to say anything, it knows something is wrong.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "4",
+      "title": "What Happens When the Timer Expires",
+      "content": "<p>On <code>SendHoldTimer_Expires</code> in the Established state, the local system:</p><ul><li>optionally sends a NOTIFICATION with the error code \"Send Hold Timer Expired\", only if that will not delay the next steps;</li><li>logs an error with that code;</li><li>releases all BGP resources and sets the ConnectRetryTimer to zero;</li><li>drops the TCP connection and increments the ConnectRetryCounter by 1;</li><li>optionally performs peer oscillation damping if DampPeerOscillations is TRUE;</li><li>changes state to Idle.</li></ul><p>Section 5 puts the core rule plainly: if no BGP message is sent within SendHoldTime, a NOTIFICATION MAY be sent, the connection MUST be closed, and an error MUST be logged. The NOTIFICATION subcode is 0 and unused, and no extra data is appended.</p>",
+      "eli5": "<p>When the stopwatch runs out, the router tries to leave a quick note, writes the problem in its diary, hangs up, and starts again from the beginning.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Defaults and Operations",
+      "content": "<p>Because the failure is rare and operators may not know about it, implementations are RECOMMENDED to enable the SendHoldTimer by default with no extra configuration. The default SendHoldTime SHOULD be the greater of 8 minutes or 2 times the negotiated HoldTime. Implementations MAY make it configurable globally or per peer, within the rule that it must exceed HoldTime.</p><p>Operationally, the local system will probably be unable to tell the remote peer why the connection is closing, so the NOTIFICATION is attempted only if it does not delay closing. Speakers SHOULD also expose the reason \"Send Hold Timer Expired\" in operational state, for example <code>bgpPeerLastError</code> in the BGP MIB (<a href='/4273/'>RFC 4273</a>).</p>",
+      "eli5": "<p>The timer should be switched on from the start, set long enough that a slow friend is not hung up on too soon, and the router should keep a record of why it hung up.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "6",
+      "title": "Security and IANA",
+      "content": "<p>The RFC says it does not change BGP's security characteristics. Implementing the SendHoldTimer enhances network resilience by terminating connections with malfunctioning or overwhelmed remote peers.</p><p>IANA has registered value 8 for \"Send Hold Timer Expired\" in the BGP Error (Notification) Codes registry.</p>",
+      "eli5": "<p>The timer does not make BGP more or less secure. It just makes it better at getting out of stuck conversations. The new error gets its own number, 8, in the official list.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "design",
+      "position": "after",
+      "caption": "SEND HOLD TIMER TRANSITIONS ADDED TO THE BGP FSM",
+      "data": {
+        "states": [
+          {
+            "key": "open-confirm",
+            "label": "OpenConfirm"
+          },
+          {
+            "key": "established",
+            "label": "Established"
+          },
+          {
+            "key": "idle",
+            "label": "Idle"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "open-confirm",
+            "to": "established",
+            "label": "KEEPALIVE: start SendHoldTimer"
+          },
+          {
+            "from": "established",
+            "to": "idle",
+            "label": "SendHoldTimer_Expires (Event 29)"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4271]",
+      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "rfc": 4271
+    },
+    {
+      "number": "[RFC9293]",
+      "text": "Eddy, W., Ed., \"Transmission Control Protocol (TCP)\", STD 7, RFC 9293, August 2022.",
+      "rfc": 9293
+    },
+    {
+      "number": "[RFC4273]",
+      "text": "Haas, J., Ed. and S. Hares, Ed., \"Definitions of Managed Objects for BGP-4\", RFC 4273, January 2006.",
+      "rfc": 4273
+    },
+    {
+      "number": "[bgpzombies]",
+      "text": "Fontugne, R., \"BGP Zombies\", April 2019."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

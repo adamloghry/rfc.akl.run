@@ -10,13 +10,238 @@
   "questions": [
     "lisp publish subscribe",
     "how does lisp notify of mapping changes",
-    "lisp pubsub"
+    "lisp pubsub",
+    "what is lisp pubsub",
+    "what is the n-bit in a lisp map-request",
+    "how does a lisp map-server notify subscribers"
+  ],
+  "tags": [
+    "LISP",
+    "Routing",
+    "Control Plane"
+  ],
+  "subtitle": "Lets LISP routers subscribe to mapping changes so the Map-Server tells them, instead of them polling.",
+  "tldr": {
+    "problem": "LISP routers pull EID-to-RLOC mappings from the Mapping System with explicit requests, so they learn about changes only when a cache entry expires or they ask again.",
+    "mechanism": "A router sets the N-bit on an EID-Record in a Map-Request, along with its xTR-ID and Site-ID. The Map-Server records a subscription and later sends authenticated Map-Notify messages when the mapping changes.",
+    "outcome": "Changes are notified faster and managed in the Mapping System. The price is subscription state and the need for a security association between each ITR and the Map-Server.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "xTR-ID",
+      "value": "128 bits"
+    },
+    {
+      "label": "Site-ID",
+      "value": "64 bits"
+    },
+    {
+      "label": "I-bit",
+      "value": "Map-Request bit position 11"
+    },
+    {
+      "label": "N-bit",
+      "value": "Map-Request-Record bit position 1"
+    },
+    {
+      "label": "Recommended negative TTL",
+      "value": "15 minutes"
+    }
+  ],
+  "today": "<p>RFC 9437 is a Proposed Standard published in August 2023, and the unit metadata lists no RFC that obsoletes or updates it. It builds on <a href='/9301/'>RFC 9301</a>.</p>",
+  "glossary": [
+    "publish-subscribe",
+    "nonce",
+    "replay-attack",
+    "security-association",
+    "pre-shared-key",
+    "key-derivation",
+    "negative-caching",
+    "rate-limiting",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction and Scope",
+      "content": "<p>LISP (<a href='/9300/'>RFC 9300</a>, <a href='/9301/'>RFC 9301</a>) splits addresses into Endpoint Identifiers (<strong>EIDs</strong>) and Routing Locators (<strong>RLOCs</strong>). Routers called xTRs encapsulate packets using mappings held in a distributed Mapping System. ITRs, RTRs and PITRs normally pull a mapping with an explicit request.</p><p>RFC 9437 adds a <strong>Publish/Subscribe</strong> (PubSub) extension in which the Mapping System notifies those routers of mapping changes. The RFC says changes can then be notified faster and can be managed in the Mapping System versus the LISP sites.</p><p>PubSub is intended for contexts with controlled access to the Map-Server. Map-Resolvers MUST verify that an xTR may set the N-bit and use the xTR-ID, Site-ID and ITR-RLOCs in a Map-Request, and Map-Servers MUST only accept subscriptions from Map-Resolvers that do this.</p>",
+      "eli5": "<p>Normally a router has to keep asking the address book if a friend moved. PubSub lets the address book call the router when a friend moves.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "2",
+      "title": "Deployment Requirements",
+      "content": "<p>On top of the general LISP assumptions, three things are needed:</p><ul><li>Each xTR has a unique 128-bit xTR-ID, plus a 64-bit Site-ID.</li><li>Map-Servers are configured to proxy Map-Replying for the mappings they serve.</li><li>A security association (for example a <strong>PubSubKey</strong>) exists between the ITRs and the Map-Servers.</li></ul><p>If a requirement is not met, no subscription can be established and the network keeps working without this enhancement. How xTR-IDs and Site-IDs are provisioned is out of scope.</p>",
+      "eli5": "<p>Everyone needs a unique name tag and a secret handshake, or the subscription simply does not happen and things go on as before.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "Map-Request Additions",
+      "content": "<p>The RFC gives a meaning to reserved bits in the Map-Request from <a href='/9301/'>RFC 9301</a> and adds two fields at the end:</p><ul><li><strong>I-bit</strong> (xTR-ID bit): set to 1 when a 128-bit xTR-ID and 64-bit Site-ID are present. For PubSub the xTR MUST set it and include both. If the I-bit is set but the fields are missing, the receiver SHOULD log a malformed Map-Request and MUST drop it.</li><li><strong>N-bit</strong> (Notification-Requested): set to 1 in an EID-Record to say the xTR wants updates for that EID-Prefix.</li><li><strong>xTR-ID</strong> and <strong>Site-ID</strong> fields: follow the final Record, or the Map-Reply Record if present.</li></ul><p>An xTR can set the N-bit for several EID-Prefixes in a single Map-Request.</p>",
+      "eli5": "<p>The request gets two new tick boxes: one says my name tag is attached, the other says please tell me about changes to this address.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Subscribing",
+      "content": "<p>The xTR builds a Map-Request as in <a href='/9301/'>RFC 9301</a>, sets the I-bit and the N-bit, and appends its xTR-ID and Site-ID. If it already has a nonce for the EID-Prefix it MUST use that nonce increased by one. Using persistent storage for nonce state is RECOMMENDED.</p><p>The Map-Server that receives the request is the one responsible for notifying that xTR. It checks the nonce is greater than any stored one, otherwise it MUST silently drop the request and SHOULD log a possible replay attack. It then adds the xTR-ID to the subscriber list, stores the EID-Prefix, xTR-ID, ITR-RLOCs and nonce, and MUST send back a Map-Notify that reuses the request's nonce and is signed with the security association.</p><p>If a subscription fails because of policy, the Map-Server sends a Negative Map-Reply with ACT bits <code>4</code> (Drop/Policy-Denied). If it fails because of authentication, the ACT bits are <code>5</code> (Drop/Auth-Failure). Map-Servers SHOULD limit the number of subscriptions and the pace of Map-Notify messages.</p><p>To unsubscribe, an xTR sends a Map-Request with the N-bit set and a single ITR-RLOC with AFI 0. The Map-Server MUST then remove the state and send a Map-Notify. For an EID-Prefix not in the database, a temporary subscription or a Negative Map-Reply is used, with a 15 minute TTL RECOMMENDED.</p>",
+      "eli5": "<p>You send in a sign-up form with your name tag and a counter number. The server checks the counter is newer than any it saw before, writes you down and sends back a signed confirmation.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5",
+      "title": "Publishing Changes",
+      "content": "<p>When a mapping changes, for example through a Map-Register from an ETR, the Map-Server MUST send Map-Notify messages with the latest mapping to every subscriber. If the subscription was for a less-specific prefix and a more-specific prefix changes, the notification carries the more-specific mapping.</p><p>Each Map-Notify goes to one of the subscriber's ITR-RLOCs, the Map-Server increments the nonce by one each time, and it MUST compute the authentication data with the security association. The xTR MUST keep the last nonce seen per EID-Prefix and drops, and logs, any publication whose nonce is not greater. It then validates the authentication data and MUST update its Map-Cache with the mapping carried.</p><p>If no Map-Notify-Ack arrives after the retransmissions in <a href='/9301/'>RFC 9301</a>, the Map-Server can try another ITR-RLOC, and may stop if all fail. When an EID-Prefix is removed or its TTL expires, subscribers get a Map-Notify with TTL 0.</p>",
+      "eli5": "<p>Whenever an address changes, the server sends each signed-up router a numbered message. The router only accepts it if the number is higher than the last one, so old messages cannot be replayed.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security",
+      "content": "<p>Cache poisoning through malicious Map-Notify messages is avoided by the nonce and the security association between ITRs and Map-Servers. A security association can be a shared PubSubKey or set of keys in controlled deployments. Otherwise LISP-SEC (<a href='/9303/'>RFC 9303</a>) can create one: the ITR derives <code>PubSubKey = KDF(OTK + nonce)</code> from the One-Time Key, so the key differs for each EID-Prefix subscribed to. The Map-Server MUST verify the OTK has not been used before, or the request fails with ACT bits 5.</p><p>Because only known nodes take part within the scope of applicability, replay-based DDoS by unknown nodes is avoided. Misbehaving known nodes could still send massive subscription requests or change subscription state often. The RFC points to rate limiting of Map-Requests and Map-Notifies in <a href='/9301/'>RFC 9301</a>. When the Map-Notify rate limit is hit for an xTR-ID, the Map-Server discards further subscription requests from it and replies with a Map-Reply instead.</p>",
+      "eli5": "<p>Each message is signed with a secret that only the router and the server share, and each carries a counter. Fake or replayed messages fail the check.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "7",
+      "title": "IANA and Deployment Experience",
+      "content": "<p>IANA assigned bit position 11 of the Map-Request header bits registry to the I-bit (xTR-ID Bit). It also created a new registry, \"LISP Control Plane Header Bits: Map-Request-Record\", whose first entry is bit position 1, the N-bit (Notification-Requested Bit). Positions 2 to 8 are Unassigned, and new bits require Specification Required.</p><p>The appendix reports experience from LISP production networks that have run forms of PubSub. It describes use as a monitoring tool through an extended <code>lig</code>, caching negative mappings longer to cut signaling, faster convergence after mobility events alongside data-driven Solicit-Map-Requests, learning prefixes to redistribute at border routers, and clearer Map-Cache state for operators. It also notes that not every LISP node must implement PubSub to see benefits.</p>",
+      "eli5": "<p>IANA wrote the new tick boxes into the official list of control-message bits. Real networks that tried PubSub found it helped with moving devices and stale entries.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SUBSCRIBE THEN PUBLISH, SIMPLEST CASE (RFC 9437 SECTION 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "xtr",
+            "label": "ITR/RTR/PITR"
+          },
+          {
+            "key": "ms",
+            "label": "Map-Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "xtr",
+            "to": "ms",
+            "label": "Map-Request (N-bit, xTR-ID, Site-ID)",
+            "color": "blue",
+            "note": "Sent through the Mapping System to a Map-Server."
+          },
+          {
+            "from": "ms",
+            "to": "xtr",
+            "label": "Map-Notify",
+            "color": "green",
+            "note": "Confirms the subscription was created."
+          },
+          {
+            "from": "xtr",
+            "to": "ms",
+            "label": "Map-Notify-Ack",
+            "color": "neutral"
+          },
+          {
+            "from": "ms",
+            "to": "xtr",
+            "label": "Map-Notify (mapping changed)",
+            "color": "green",
+            "note": "Sent to each subscriber."
+          },
+          {
+            "from": "xtr",
+            "to": "ms",
+            "label": "Map-Notify-Ack",
+            "color": "neutral"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "NEW BITS IN RFC 9437",
+      "data": {
+        "items": [
+          {
+            "code": "I (bit 11)",
+            "label": "xTR-ID bit",
+            "desc": "128-bit xTR-ID and 64-bit Site-ID fields are present.",
+            "highlight": true
+          },
+          {
+            "code": "N (bit 1)",
+            "label": "Notification-Requested",
+            "desc": "In an EID-Record: send updates for this EID-Prefix."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "NEGATIVE MAP-REPLY ACT VALUES USED",
+      "data": {
+        "items": [
+          {
+            "code": "4",
+            "label": "Drop/Policy-Denied",
+            "desc": "Subscription failed due to policy."
+          },
+          {
+            "code": "5",
+            "label": "Drop/Auth-Failure",
+            "desc": "Subscription failed due to authentication."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9300]",
+      "text": "Farinacci, D., et al., \"The Locator/ID Separation Protocol (LISP)\", RFC 9300, October 2022.",
+      "rfc": 9300
+    },
+    {
+      "number": "[RFC9301]",
+      "text": "Farinacci, D., et al., \"Locator/ID Separation Protocol (LISP) Control Plane\", RFC 9301, October 2022.",
+      "rfc": 9301
+    },
+    {
+      "number": "[RFC9303]",
+      "text": "Maino, F., et al., \"Locator/ID Separation Protocol Security (LISP-SEC)\", RFC 9303, October 2022.",
+      "rfc": 9303
+    },
+    {
+      "number": "[RFC6835]",
+      "text": "Farinacci, D. and D. Meyer, \"The Locator/ID Separation Protocol Internet Groper (LIG)\", RFC 6835, January 2013.",
+      "rfc": 6835
+    },
+    {
+      "number": "[RFC8126]",
+      "text": "Cotton, M., Leiba, B., and T. Narten, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 8126, June 2017.",
+      "rfc": 8126
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

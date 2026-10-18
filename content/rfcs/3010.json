@@ -9,13 +9,325 @@
   },
   "questions": [
     "what is nfs version 4",
-    "how does nfsv4 share files"
+    "how does nfsv4 share files",
+    "what is the difference between nfsv3 and nfsv4",
+    "what is an nfs delegation",
+    "what port does nfs version 4 use"
+  ],
+  "tags": [
+    "File Systems",
+    "NFS",
+    "Locking",
+    "Security"
+  ],
+  "subtitle": "The first NFS version 4 specification: file locking, security negotiation and delegation built into the protocol itself.",
+  "tldr": {
+    "problem": "NFS versions 2 and 3 relied on side protocols for mounting and locking, offered weak built-in security, and were chatty and slow when clients and servers were far apart.",
+    "mechanism": "NFS version 4 folds mounting and byte-range locking into one protocol, requires RPCSEC_GSS security with in-band negotiation, batches many operations into a single COMPOUND request, and lets servers delegate files to clients so they can cache aggressively.",
+    "outcome": "RFC 3010 was obsoleted by RFC 3530, so it is the first draft of NFS version 4, not the current definition.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Default port",
+      "value": "2049"
+    },
+    {
+      "label": "RPC procedures",
+      "value": "2 (NULL and COMPOUND)"
+    },
+    {
+      "label": "Maximum filehandle size",
+      "value": "128 (NFS4_FHSIZE)"
+    },
+    {
+      "label": "Clientid and stateid size",
+      "value": "64 bits each"
+    },
+    {
+      "label": "Minor version",
+      "value": "0 (this RFC)"
+    }
+  ],
+  "today": "<p>RFC 3010 is a Proposed Standard that was obsoleted by <a href='/3530/'>RFC 3530</a>, which is the later NFS version 4 specification to read instead. It obsoletes <a href='/1094/'>RFC 1094</a> and <a href='/1813/'>RFC 1813</a>.</p>",
+  "glossary": [
+    "filehandle",
+    "stateid",
+    "delegation",
+    "grace-period",
+    "rpcsec-gss",
+    "lease",
+    "kerberos",
+    "port-number",
+    "utf-8",
+    "persistent-connection",
+    "congestion-control"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Goals of NFS Version 4",
+      "content": "<p>RFC 3010 defines <strong>NFS version 4</strong>, a distributed file system protocol that descends from NFS versions 2 (<a href='/1094/'>RFC 1094</a>) and 3 (<a href='/1813/'>RFC 1813</a>). It keeps the traits of the older versions: easy recovery, independence from transport protocols, operating systems and file systems, simplicity, and good performance. It obsoletes RFC 1094 and RFC 1813.</p><p>The RFC lists four goals: improved access and good performance on the Internet (easy firewall traversal, good behaviour when latency is high and bandwidth low, and scaling to very large numbers of clients per server), strong security with negotiation built in, good cross-platform interoperability, and a design that accepts standard extensions without breaking compatibility.</p><p>Compared with earlier versions, NFS version 4 supports traditional file access while integrating file locking and the mount function, and it adds compound operations, client caching support and internationalization.</p>",
+      "eli5": "<p>Older NFS needed helper programs for opening the front door and for locking files. Version 4 puts everything in one program and aims to work well even when the two computers are far apart.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "2",
+      "title": "Transport and Security",
+      "content": "<p>NFS version 4 runs over ONC RPC version 2 and uses XDR for data encoding (<a href='/1831/'>RFC 1831</a>, <a href='/1832/'>RFC 1832</a>). Port 2049 is the default, which means clients do not need the RPC binding protocols and the traffic can pass through firewalls more easily. The transport MUST provide congestion control comparable to TCP's. Where TCP is available, the protocol SHOULD be supported over it, using persistent connections to avoid repeated handshakes.</p><p>For security, the <strong>RPCSEC_GSS</strong> flavor (<a href='/2203/'>RFC 2203</a>) MUST be used to deliver the mandatory security mechanisms. Implementations MUST provide Kerberos V5, LIPKEY and SPKM-3, each with authentication, integrity and privacy services. Older flavors such as AUTH_NONE, AUTH_SYS and AUTH_DH MAY also be implemented.</p><p>Security is negotiated inside the protocol. A client starts with one of the minimal security triples (mechanism, quality of protection and service). If it hits the error <code>NFS4ERR_WRONGSEC</code>, it uses the new <code>SECINFO</code> operation to learn which triples the server accepts for a given filehandle. The callback channel is authenticated too: the server must mutually authenticate with the principal that obtained the clientid.</p><div class='callout callout-note'><p>The Security Considerations section is brief. It points back to these RPC and security rules as the way to authenticate users and protect request integrity and privacy.</p></div>",
+      "eli5": "<p>Before you borrow files, the two computers agree on how to prove who they are. If the first way is not good enough, the server tells the client which ways it will accept.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "COMPOUND Requests",
+      "content": "<p>NFS version 4 has only two RPC procedures, <code>NULL</code> and <code>COMPOUND</code>. COMPOUND carries a list of <strong>operations</strong> (such as LOOKUP, OPEN and READ) that correspond closely to the old NFS procedures. Combining them cuts the number of round trips; the RFC's example is reading a file in one request by combining LOOKUP, OPEN and READ, which was not possible before.</p><p>The server evaluates the operations in order. Each operation is sent as a 32-bit operation code plus arguments, and its result is preceded by the opcode and a status. The first non-zero status stops evaluation and the reply is returned, even for non-error conditions such as <code>NFS4ERR_SAME</code>. There is no logical AND or OR between operations, and no atomicity: the operations may run at the same time as other COMPOUND requests.</p><p>Operations share a <strong>current filehandle</strong> and a <strong>saved filehandle</strong> in the request's context. Most operations act on the current one; the saved one is temporary storage and the second operand for RENAME and LINK. Modifying operations are synchronous: once one succeeds, the data is on stable storage (except WRITE with the UNSTABLE option). The client is responsible for recovering from a partly completed COMPOUND, so it should avoid overly complex ones.</p>",
+      "eli5": "<p>Instead of asking a waiter for the menu, then the water, then the bread in three trips, you hand over one list. The waiter works down the list and stops at the first thing that goes wrong.</p>"
+    },
+    {
+      "id": "naming",
+      "number": "4",
+      "title": "Filehandles and the Server Name Space",
+      "content": "<p>A <strong>filehandle</strong> is the opaque token a client uses to refer to a file or directory. The client may compare two filehandles from the same server byte by byte, but MUST NOT otherwise interpret them. NFS version 4 drops the separate MOUNT protocol. Instead there are two special starting points: the ROOT filehandle (set with <code>PUTROOTFH</code>), which is the conceptual root of the server's name space, and the PUBLIC filehandle, whose binding to a file system object is up to the server administrator.</p><p>The server presents all its exports as one name space. Parts of the tree that are not exported are bridged by a read-only <strong>pseudo file system</strong> with its own fsid, so a client can browse from one export to another with LOOKUP and READDIR. For example, <code>/a</code> may be a pseudo file system, <code>/a/b</code> a real one, and <code>/a/b/c</code> another pseudo file system.</p><p>Filehandles come in two types. A <em>persistent</em> filehandle stays valid for the lifetime of the object, as in versions 2 and 3. A <em>volatile</em> filehandle may expire earlier, and the server then returns <code>NFS4ERR_FHEXPIRED</code>. The mandatory attribute <code>fh_expire_type</code> tells the client which kind it is getting. Pseudo file system filehandles should be expected to be volatile. Names of files and directories are encoded as UTF-8.</p>",
+      "eli5": "<p>A filehandle is like a coat-check ticket: you do not need to know how the coat is stored, you just hand the ticket back. Some tickets last forever and some stop working after a while, and the server says which kind you have.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "5",
+      "title": "File Attributes",
+      "content": "<p>NFS version 3 had a fixed attribute structure (<code>fattr3</code>) that could not be extended and could not say that an attribute was unsupported. Version 4 splits attributes into three groups.</p><ul><li><strong>Mandatory</strong> attributes MUST be supported by every client and server. The set is deliberately small, because servers must do whatever it takes to support them.</li><li><strong>Recommended</strong> attributes may be unsupported. A client asks for them by setting bits in the GETATTR bitmap and must cope when the server does not return them. A server should not \"tell lies\"; a modification time should be accurate or not offered.</li><li><strong>Named</strong> attributes are uninterpreted byte streams attached to a file or directory and reached by string name through the <code>OPENATTR</code> operation, which returns a hidden attribute directory.</li></ul><p>Recommended attributes include Access Control Lists (ACLs) that allow user and group level access control. A client can also ask a server which attributes it supports. New mandatory or recommended attributes can only be added by publishing a standards-track RFC that allocates a number and defines the encoding.</p>",
+      "eli5": "<p>Each file has a label with facts about it. Some facts every server must write down, some are optional extras, and programs can also stick on their own sticky notes.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Locking, Leases and Recovery",
+      "content": "<p>Byte-range locking and share reservations are part of the protocol, replacing the separate Network Lock Manager. The server owns the state and the client tells it what it wants. A new <code>OPEN</code> operation subsumes LOOKUP, CREATE and ACCESS so that opening or creating a file with share semantics is atomic; LOOKUP stays for finding a filehandle without creating any state.</p><p>A client first identifies itself with <code>SETCLIENTID</code> (a verifier that changes when the client reboots, plus a unique id) and confirms it with <code>SETCLIENTID_CONFIRM</code>. The server returns a 64-bit <strong>clientid</strong>. When the server grants a lock it returns a 64-bit <strong>stateid</strong>, which READ and WRITE then present as a lightweight proof of lock ownership. Stateids from an earlier server instance produce <code>NFS4ERR_STALE_STATEID</code>.</p><p>All of a client's state is covered by one <strong>lease</strong> with a single fixed interval. Many operations renew it implicitly; otherwise the client sends <code>RENEW</code>, at worst once per lease period. A lease exists so the server can drop state held by a client that crashed or became unreachable.</p><p>After a server loses state, it enforces a <strong>grace period</strong> equal to the lease period. Clients reclaim locks with reclaim-type requests, and the server rejects ordinary lock requests, READs and WRITEs with <code>NFS4ERR_GRACE</code> unless it can guarantee there is no conflict.</p>",
+      "eli5": "<p>Borrowing a locked file is like a library card that has to be stamped every so often. If you vanish, the library eventually frees your books. If the library itself loses its records, everyone gets a short window to say what they had before new loans start.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "7",
+      "title": "Client Caching and Delegation",
+      "content": "<p>The RFC states that NFS version 4 does not provide distributed cache coherence. It defines a limited set of caching guarantees so that locks and share reservations are not disrupted by client caching. Previous versions revalidated cached file data at every open, which is costly when a file is only used by one client, especially over high-latency links.</p><p>The main addition is <strong>delegation</strong>. At OPEN, the server may hand the client a read or a write delegation. With a read delegation no other client can write the file; with a write delegation no other client can read or write it. A delegating client can handle OPEN, CLOSE, LOCK, LOCKU, READ and WRITE locally. Many read delegations can coexist, but only one write delegation can exist for a file.</p><p>Delegations need a callback path from server to client. The server tests it with <code>CB_NULL</code> and will not grant delegations if callbacks do not work, so correct operation never depends on them. When another client makes a conflicting request, the server sends <code>CB_RECALL</code>. The holder flushes modified state and returns the delegation, and the conflicting request waits until that happens or the server times out and revokes the delegation. Clients must never assume a delegation will be granted.</p>",
+      "eli5": "<p>If nobody else wants a toy, the toy box lets you keep it at your desk so you do not have to ask each time. If someone else asks for it, you have to hand it back first.</p>"
+    },
+    {
+      "id": "extensibility",
+      "number": "8",
+      "title": "Minor Versioning, Migration and Internationalization",
+      "content": "<p>Minor version zero of NFS version 4 is this RFC. Each future minor version must be documented in a standards-track RFC, and the COMPOUND procedure encodes the minor version being requested. The rules say that procedures are not added or deleted, minor versions may add operations and append new attributes after the last documented one, and they must not change the structure of existing operations or attributes or delete operations, attributes, flag bits or enumeration values.</p><p>File system migration and replication use the recommended <code>fs_locations</code> attribute, which lists server names (DNS name or IP address) and the path of the file system root. When a file system has moved, the client gets an error such as <code>NFS4ERR_MOVED</code>, reads <code>fs_locations</code> and redirects its requests. Replication is expected mainly for read-only data. Leases that move are signalled with <code>NFS4ERR_LEASE_MOVED</code>.</p><p>For internationalization, the RFC argues that local character sets are unsuitable because a file name would look different under different locales, and it chooses <strong>UTF-8</strong> for names, which it describes as compact for most users and workable with existing byte-oriented code.</p>",
+      "eli5": "<p>The rules for adding things later are like a house with a rule that you can build new rooms but never knock down old ones, so old visitors can still find their way. Names use one shared alphabet so everyone reads them the same.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "WHAT CHANGED FROM NFS VERSION 3",
+      "data": {
+        "columns": [
+          "Area",
+          "NFS version 3",
+          "NFS version 4"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "First filehandle",
+              "Separate MOUNT protocol",
+              "ROOT or PUBLIC filehandle, no ancillary protocol"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "File locking",
+              "Network Lock Manager (NLM)",
+              "Part of the protocol, lease-based"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Filehandles",
+              "Persistent only",
+              "Persistent or volatile"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Attributes",
+              "Fixed fattr3 structure",
+              "Mandatory, recommended and named"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "design",
+      "position": "after",
+      "caption": "ILLUSTRATIVE, NOT FROM THE RFC: ONE COMPOUND REQUEST",
+      "data": {
+        "title": "A COMPOUND request as an ordered list of operations",
+        "lang": "text",
+        "code": "COMPOUND\n  PUTROOTFH\n  LOOKUP  (name)\n  OPEN\n  READ\n\nReply: status + op + results for each operation,\nstopping at the first failing status."
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "ESTABLISHING A CLIENT IDENTITY (ILLUSTRATIVE SUMMARY OF SECTION 8.1.1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "SETCLIENTID",
+            "color": "blue",
+            "note": "Sends its verifier and unique id."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "clientid + confirmation verifier",
+            "color": "green",
+            "note": "The clientid is a 64-bit shorthand for the client."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "SETCLIENTID_CONFIRM",
+            "color": "blue",
+            "note": "Returns the confirmation verifier."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "RECALLING A DELEGATION (ILLUSTRATIVE SUMMARY OF SECTION 9.2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "holder",
+            "label": "Client A"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          },
+          {
+            "key": "other",
+            "label": "Client B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "other",
+            "to": "server",
+            "label": "OPEN (conflicts)",
+            "color": "blue",
+            "note": "Conflicts with A's delegation."
+          },
+          {
+            "from": "server",
+            "to": "holder",
+            "label": "CB_RECALL",
+            "color": "neutral",
+            "note": "Callback asking A to give the delegation back."
+          },
+          {
+            "from": "holder",
+            "to": "server",
+            "label": "DELEGRETURN",
+            "color": "green",
+            "note": "A flushes modified state, then returns it."
+          },
+          {
+            "from": "server",
+            "to": "other",
+            "label": "OPEN reply",
+            "color": "green",
+            "note": "B's request is answered only after the recall completes."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1094]",
+      "text": "Sun Microsystems, Inc., \"NFS: Network File System Protocol Specification\", RFC 1094, March 1989.",
+      "rfc": 1094
+    },
+    {
+      "number": "[RFC1813]",
+      "text": "Callaghan, B., Pawlowski, B. and P. Staubach, \"NFS Version 3 Protocol Specification\", RFC 1813, June 1995.",
+      "rfc": 1813
+    },
+    {
+      "number": "[RFC1831]",
+      "text": "Srinivasan, R., \"RPC: Remote Procedure Call Protocol Specification Version 2\", RFC 1831, August 1995.",
+      "rfc": 1831
+    },
+    {
+      "number": "[RFC1832]",
+      "text": "Srinivasan, R., \"XDR: External Data Representation Standard\", RFC 1832, August 1995.",
+      "rfc": 1832
+    },
+    {
+      "number": "[RFC1833]",
+      "text": "Srinivasan, R., \"Binding Protocols for ONC RPC Version 2\", RFC 1833, August 1995.",
+      "rfc": 1833
+    },
+    {
+      "number": "[RFC2203]",
+      "text": "Eisler, M., Chiu, A. and L. Ling, \"RPCSEC_GSS Protocol Specification\", RFC 2203, August 1995.",
+      "rfc": 2203
+    },
+    {
+      "number": "[RFC2279]",
+      "text": "Yergeau, F., \"UTF-8, a transformation format of ISO 10646\", RFC 2279, January 1998.",
+      "rfc": 2279
+    },
+    {
+      "number": "[RFC2623]",
+      "text": "Eisler, M., \"NFS Version 2 and Version 3 Security Issues V5\", RFC 2623, June 1999.",
+      "rfc": 2623
+    },
+    {
+      "number": "[RFC2847]",
+      "text": "Eisler, M., \"LIPKEY - A Low Infrastructure Public Key Mechanism Using SPKM\", RFC 2847, June 2000.",
+      "rfc": 2847
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

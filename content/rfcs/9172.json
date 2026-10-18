@@ -9,13 +9,333 @@
   },
   "questions": [
     "how to secure bundle protocol",
-    "what is bpsec"
+    "what is bpsec",
+    "what is a bundle integrity block",
+    "bpsec bib vs bcb",
+    "how to secure delay tolerant networking",
+    "what is a security context in bpsec"
+  ],
+  "tags": [
+    "Security",
+    "DTN",
+    "Bundle Protocol"
+  ],
+  "subtitle": "Integrity and confidentiality for bundles in delay-tolerant networks, applied block by block with pluggable security contexts.",
+  "tldr": {
+    "problem": "The Bundle Protocol runs in stressed networks with long delays and intermittent links, where data waits at rest in nodes and there may be no live contact with a certificate authority. Usual transport security does not fit.",
+    "mechanism": "BPSec adds two extension blocks to a bundle: a Block Integrity Block (BIB) that protects the plaintext of target blocks, and a Block Confidentiality Block (BCB) that encrypts them. The algorithms and keys come from a separate, named security context.",
+    "outcome": "Different blocks can get different protection from different nodes, and any node can verify or process the blocks it is responsible for. Key management and security policy are left to each network.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "BIB block type",
+      "value": "11"
+    },
+    {
+      "label": "BCB block type",
+      "value": "12"
+    },
+    {
+      "label": "Security reason codes",
+      "value": "12 to 16"
+    },
+    {
+      "label": "Security context id range",
+      "value": "Signed 16-bit integer"
+    },
+    {
+      "label": "Context registry policy",
+      "value": "Specification Required"
+    },
+    {
+      "label": "Encoding",
+      "value": "CBOR"
+    }
+  ],
+  "today": "<p>RFC 9172 is a Proposed Standard published in January 2022, and the unit metadata lists no RFC that obsoletes or updates it. The default security contexts are defined separately in <a href='/9173/'>RFC 9173</a>.</p>",
+  "glossary": [
+    "bundle-protocol",
+    "security-context",
+    "store-and-forward",
+    "aead",
+    "canonicalization",
+    "fragmentation",
+    "nonce",
+    "cipher-suite",
+    "mac-integrity",
+    "public-key-cryptography"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Bundles Need Their Own Security",
+      "content": "<p>BPSec defines security features for the Bundle Protocol (BP, <a href='/9171/'>RFC 9171</a>), used in Delay-Tolerant Networking (DTN). Security is provided between a <strong>security source</strong> and a <strong>security acceptor</strong>; when these are the bundle source and destination, the protection is end-to-end.</p><p>DTN is a store-carry-forward overlay for stressed environments: intermittent connectivity, large or variable delays, asymmetric data rates and high bit error rates. The RFC says BP should be presumed to run in an untrusted network. The usual transport security may not be enough, because the network may need to protect data at rest, prevent misuse of scarce resources such as storage, and work without regular contact with a central security oracle such as a certificate authority.</p><p>BPSec offers two services. <strong>Integrity</strong> ensures that changes to target data can be discovered. <strong>Confidentiality</strong> makes target data unintelligible to nodes without special information, and it does not hide the fact that confidentiality is applied. Hop-by-hop authentication is explicitly not supported, because neighbors in the overlay may not be adjacent physically and may have incompatible security capabilities. BPSec protects data on the DTN, not the DTN itself.</p>",
+      "eli5": "<p>Packages in this network may sit in a warehouse for ages and nobody can phone a central office to check IDs. So the protection has to travel with the package.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "Design Decisions",
+      "content": "<p>Five goals shape the protocol. <strong>Block-level granularity:</strong> a bundle has a primary block, a payload block and extension blocks, which need different protection. For example, a payload might be encrypted while a summary extension block is integrity signed but readable, so waypoints can use it. <strong>Multiple security sources:</strong> a bundle can carry security blocks added by different nodes, and implementations MUST NOT assume all blocks have the same operations applied.</p><p><strong>Mixed security policy:</strong> some waypoints verify services meant for others, some terminate a service even though they are not the destination, and some understand security blocks but refuse to process them unless they are the destination. <strong>User-defined security contexts:</strong> a context is the set of assumptions, algorithms, configurations and policies behind a service; users pick registered contexts and customize them with parameters, for instance a SHA2 or SHA3 hash. <strong>Deterministic processing:</strong> every node must process several security blocks in the same, fixed order, even at some cost in flexibility.</p>",
+      "eli5": "<p>Each part of the package can have its own lock or seal, different travelers can add their own, and everyone follows the same order of unwrapping.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Security Blocks and the Abstract Security Block",
+      "content": "<p>BPSec defines two block types. The <strong>Block Integrity Block (BIB)</strong> protects the plaintext integrity of its targets and can be verified by any node on the path; BIBs are never used to protect the ciphertext from a BCB. The <strong>Block Confidentiality Block (BCB)</strong> says its targets were encrypted at the BCB's security source, and it also gives integrity protection for the ciphertext it makes. A security target is identified by the block number of the target block.</p><p>Both use the same structure, the Abstract Security Block, encoded in CBOR as the block-type-specific data. Its fields, in order, are:</p><ul><li><strong>Security Targets</strong>: an array of block numbers, at least one, no duplicates.</li><li><strong>Security Context Id</strong>: which context to use.</li><li><strong>Security Context Flags</strong>: bit 0 says whether parameters are present; other bits are reserved.</li><li><strong>Security Source</strong>: the endpoint ID of the node that added the block.</li><li><strong>Security Context Parameters</strong> (optional): id and value pairs.</li><li><strong>Security Results</strong>: one array of id and value pairs per target, in the same order as the targets.</li></ul><p>Security operations must be unique: the same service cannot be applied to the same target twice in a bundle. One security block may carry several operations when they share the service, context parameters and source, and have no common target.</p>",
+      "eli5": "<p>Every seal or lock comes with a little label saying what it covers, who put it on, which rule book was used, and the result.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3.9",
+      "title": "Rules for Combining BIBs and BCBs",
+      "content": "<p>A BIB cannot target another security block. A BCB can target the payload, a non-security extension block or a BIB, but never another BCB or the primary block, and it may target a BIB only if it shares a target with it. A BCB must use an authenticated encryption cipher with associated data (AEAD), and a BCB covering the payload MUST have the 'replicate in every fragment' flag set. A BCB MUST NOT have the flag that removes it when it cannot be processed, since that would destroy the information needed to decrypt later.</p><p>When a BCB and BIB share a target, the target is encrypted, so the BIB cannot be checked by a waypoint. Therefore, if a BCB covers all of a BIB's targets, that BIB MUST also be encrypted. If it covers only some, those results MUST move into a new BIB, which is then encrypted. A BIB MUST NOT be added for a target already covered by a BCB. For a given target, BIBs MUST be added before BCBs; to get both a plaintext integrity check and encryption at the source, a BCB whose context also produces an integrity result MUST be used.</p>",
+      "eli5": "<p>If you seal a note and then lock it in a box, anyone who cannot open the box cannot check the seal. So the seal goes in the box too.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Canonical Forms and Processing",
+      "content": "<p>Integrity checks need the same bits on both ends, so BPSec uses canonical forms. Values are encoded as Deterministically Encoded CBOR (<a href='/8949/'>RFC 8949</a>), and only the block-type-specific data field of a non-primary block may be encrypted. Other fields may be integrity protected, for example as associated authenticated data. Reserved flag bits are set to 0 in a canonical form.</p><p>On receipt, a node checks each security block to see whether it is the security acceptor. If a BIB and a BCB share a target, BCBs MUST be evaluated first. An accepted operation is processed and its information removed, and a security block with no operations left MUST be removed. A destination MUST decrypt any remaining BCBs. If an encrypted payload cannot be authenticated, the bundle MUST be discarded; for another target, that target and its security blocks MUST be discarded. A non-acceptor MAY verify a BIB anyway to avoid forwarding corrupt data, but if the check passes it MUST NOT remove the operation.</p><p>Security blocks cannot be fragmented, and a BCB or BIB MUST NOT be added to a bundle that is a fragment, so confidentiality should be applied before any fragmentation. Key management is out of scope: BPSec assumes it is handled as a separate part of network management.</p>",
+      "eli5": "<p>Everyone unwraps in the same order: open the locked boxes first, then check the seals. If the box will not open properly, the package is thrown away.</p>"
+    },
+    {
+      "id": "management",
+      "number": "7",
+      "title": "Policy and Status Report Reason Codes",
+      "content": "<p>The RFC gives no policy but lists decisions each network must make: what to do with disallowed combinations, which operations to apply to which bundles, and what to do when an operation is already present. It RECOMMENDS that security operations be applied to every block and that using BPSec services be the default, deviating only with justification. It also warns that BCB contexts can change block sizes, which can disturb storage and transmission planning.</p><p>Security-related bundle status reports use five reason codes: missing, unknown, unexpected, failed and conflicting security operation. The report itself could weaken security if intercepted, so policy SHOULD say when sending such codes is appropriate, such as when the report-to address is verified unchanged or when the report block is encrypted by a BCB. The 'unexpected' code is not an error by itself, since not every node handles every operation.</p>",
+      "eli5": "<p>When something goes wrong, a node can send a note saying why. But the note itself could tip off a bad guy, so it should be sent carefully.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Threats and Security Contexts",
+      "content": "<p>The threat model follows <a href='/3552/'>RFC 3552</a> but focuses on on-path attackers, nodes that can receive, examine, modify, forward and generate bundles. They are classed as unprivileged, legitimate (holding provisioned key material) or privileged, which is tantamount to compromise. The RFC advises against sharing one set of key material across all nodes, because a legitimate node then equals a privileged one.</p><p>Against eavesdropping, BPSec relies on BCBs; bundles can live for days or even years and an attacker can keep a copy indefinitely, so cipher strength matters. Traffic analysis is possible whether or not BPSec is used. Against modification, BIBs and BCBs detect tampering, but BPSec cannot detect a node removing a block, so endpoints need out-of-band policy about what must be present. A BIB shows only that a key holder made it, so for stronger assurance the RFC suggests a BCB scheme that is IND-CCA2 secure covering both the BIB and its target. The primary block cannot be encrypted, so rerouting must be tackled with other means such as requiring BIBs on primary blocks. For injection and replay, BPSec depends on the cipher suite and on measures such as signed timestamps, lifetimes and nonces.</p><p>All implementations MUST support the current mandatory security context(s) in IETF Standards Track RFCs, specified in <a href='/9173/'>RFC 9173</a> at the time of writing. A context definition MUST state its parameter and result ids and encodings, and whether ciphertext size differs from plaintext. Other Security Blocks may be defined if they reuse no enumerations, define a deterministic processing order and do not conflict with BPSec.</p>",
+      "eli5": "<p>A sneaky traveler can peek, tamper, drop things or send fakes. The seals and boxes help catch most of this, but some tricks need extra rules set by the network's owners.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "BIB VERSUS BCB",
+      "data": {
+        "columns": [
+          "Property",
+          "BIB",
+          "BCB"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Service",
+              "Plaintext integrity",
+              "Confidentiality plus ciphertext integrity"
+            ]
+          },
+          {
+            "cells": [
+              "Block type code",
+              "11",
+              "12"
+            ]
+          },
+          {
+            "cells": [
+              "Can target the payload",
+              "Yes",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "Can target another security block",
+              "No",
+              "Only a BIB that shares a target"
+            ]
+          },
+          {
+            "cells": [
+              "Can target the primary block",
+              "Yes",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Who can verify or act",
+              "Any node on the path with the key",
+              "Security acceptors, up to the destination"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "ABSTRACT SECURITY BLOCK FIELDS IN ORDER (CBOR, NOT FIXED-WIDTH)",
+      "data": {
+        "title": "Abstract Security Block",
+        "width": 32,
+        "fields": [
+          {
+            "key": "targets",
+            "name": "Security Targets",
+            "bits": 32,
+            "desc": "CBOR array of target block numbers, at least one, no duplicates."
+          },
+          {
+            "key": "context-id",
+            "name": "Security Context Id",
+            "bits": 32,
+            "desc": "CBOR unsigned integer naming the security context."
+          },
+          {
+            "key": "flags",
+            "name": "Security Context Flags",
+            "bits": 32,
+            "desc": "Bit 0 set means parameters are present; other bits reserved."
+          },
+          {
+            "key": "source",
+            "name": "Security Source",
+            "bits": 32,
+            "desc": "Endpoint ID of the node that inserted the block."
+          },
+          {
+            "key": "params",
+            "name": "Security Context Parameters",
+            "bits": 32,
+            "desc": "Optional array of id and value pairs."
+          },
+          {
+            "key": "results",
+            "name": "Security Results",
+            "bits": 32,
+            "desc": "One array of id and value pairs per target, in target order."
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "BPSEC WITHIN THE BUNDLE PROTOCOL (ILLUSTRATIVE)",
+      "data": {
+        "layers": [
+          {
+            "label": "Application",
+            "detail": "Produces the payload carried in a bundle"
+          },
+          {
+            "label": "BPSec",
+            "detail": "BIB and BCB extension blocks give integrity and confidentiality",
+            "highlight": true
+          },
+          {
+            "label": "Bundle Protocol",
+            "detail": "Defines bundles, blocks and store-carry-forward delivery"
+          },
+          {
+            "label": "Constituent networks",
+            "detail": "The underlying networks the bundles cross"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "management",
+      "position": "after",
+      "caption": "SECURITY REASON CODES FOR BP VERSION 7",
+      "data": {
+        "items": [
+          {
+            "code": "12",
+            "label": "Missing security operation",
+            "desc": "One or more required operations were absent."
+          },
+          {
+            "code": "13",
+            "label": "Unknown security operation",
+            "desc": "An operation cannot be understood, for example an unknown context id."
+          },
+          {
+            "code": "14",
+            "label": "Unexpected security operation",
+            "desc": "The node is neither verifier nor acceptor for an operation; not an error by itself."
+          },
+          {
+            "code": "15",
+            "label": "Failed security operation",
+            "desc": "Processing or verification failed for reasons other than misconfiguration."
+          },
+          {
+            "code": "16",
+            "label": "Conflicting security operation",
+            "desc": "Operations violate the BPSec specification."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "requirements",
+      "position": "after",
+      "caption": "FIGURE 3 IN THE RFC: SECURITY AT BUNDLE CREATION (REDRAWN)",
+      "data": {
+        "title": "Bundle with security",
+        "lang": "text",
+        "code": "B1  Primary Block\nB2  BIB  OP(bib-integrity, targets = B1, B5, B6)\nB3  BCB  OP(bcb-confidentiality, target = B4)\nB4  Extension Block (encrypted)\nB5  Extension Block\nB6  Payload Block"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9171]",
+      "text": "Burleigh, S., Fall, K., and E. Birrane, III, \"Bundle Protocol Version 7\", RFC 9171, January 2022.",
+      "rfc": 9171
+    },
+    {
+      "number": "[RFC9173]",
+      "text": "Birrane, III, E., White, A., and S. Heiner, \"Default Security Contexts for Bundle Protocol Security (BPSec)\", RFC 9173, January 2022.",
+      "rfc": 9173
+    },
+    {
+      "number": "[RFC4838]",
+      "text": "Cerf, V., et al., \"Delay-Tolerant Networking Architecture\", RFC 4838, April 2007.",
+      "rfc": 4838
+    },
+    {
+      "number": "[RFC8949]",
+      "text": "Bormann, C. and P. Hoffman, \"Concise Binary Object Representation (CBOR)\", STD 94, RFC 8949, December 2020.",
+      "rfc": 8949
+    },
+    {
+      "number": "[RFC6257]",
+      "text": "Symington, S., et al., \"Bundle Security Protocol Specification\", RFC 6257, May 2011.",
+      "rfc": 6257
+    },
+    {
+      "number": "[RFC3552]",
+      "text": "Rescorla, E. and B. Korver, \"Guidelines for Writing RFC Text on Security Considerations\", BCP 72, RFC 3552, July 2003.",
+      "rfc": 3552
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

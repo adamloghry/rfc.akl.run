@@ -9,13 +9,242 @@
   },
   "questions": [
     "http compression dictionary",
-    "how does dictionary compression work in http"
+    "how does dictionary compression work in http",
+    "what is compression dictionary transport",
+    "what is the use-as-dictionary header",
+    "what are dcb and dcz content encodings",
+    "how does http delta compression work"
+  ],
+  "tags": [
+    "HTTP",
+    "Compression",
+    "Caching"
+  ],
+  "subtitle": "How a web server and a browser agree to compress a new response against an older one they both already have.",
+  "tldr": {
+    "problem": "Ordinary HTTP compression squeezes each response on its own, so it cannot take advantage of a previous version of the same resource or of patterns shared across many pages.",
+    "mechanism": "A server marks a response with Use-As-Dictionary so the client stores it, the client later names that stored response by its SHA-256 hash in Available-Dictionary, and the server answers with the new dcb (Brotli) or dcz (Zstandard) content encoding.",
+    "outcome": "Responses can shrink dramatically; the RFC's own example goes from 100KB to 1KB for a new script version. The price is a set of security and privacy rules, because dictionaries can leak information if mixed carelessly.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New content codings",
+      "value": "dcb and dcz"
+    },
+    {
+      "label": "Dictionary hash",
+      "value": "SHA-256 (32 bytes)"
+    },
+    {
+      "label": "dcb header",
+      "value": "36 bytes"
+    },
+    {
+      "label": "dcz header",
+      "value": "40 bytes"
+    },
+    {
+      "label": "Maximum id length",
+      "value": "1024 characters"
+    },
+    {
+      "label": "Transport",
+      "value": "HTTPS only (secure contexts)"
+    }
+  ],
+  "today": "<p>RFC 9842 is a Proposed Standard published in September 2025. It does not obsolete or update any other RFC, and no RFC has obsoleted or updated it.</p>",
+  "glossary": [
+    "compression-dictionary",
+    "http",
+    "header-field",
+    "content-negotiation",
+    "lossless-compression",
+    "cache-control",
+    "origin-server",
+    "cookie"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Using Old Responses as Dictionaries",
+      "content": "<p>RFC 9842 defines a way to designate an HTTP response as an <strong>external dictionary</strong> for compressing future responses. It works with compression schemes that support external dictionaries, and the RFC names Brotli (<a href='/7932/'>RFC 7932</a>) and Zstandard (<a href='/8878/'>RFC 8878</a>). The negotiation uses HTTP content negotiation and can be used with all versions of HTTP.</p><p>Any HTTP response can be a dictionary. The RFC describes two common uses. In a <strong>version upgrade</strong>, the previous version of a resource is the dictionary for the new one, so only the changes travel over the wire. With <strong>common content</strong>, a separate dictionary holds patterns that many responses share, such as template HTML for similar pages or common keys and values in API calls.</p><div class='callout callout-info'><p>In the RFC's version upgrade example, the first <code>app.v1.js</code> download is 100KB compressed, and the later <code>app.v2.js</code> response is a delta-compressed 1KB.</p></div>",
+      "eli5": "<p>If you already hold an old copy of something, the server only needs to send the parts that changed. It is like getting a list of edits instead of a brand new book.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "2",
+      "title": "Dictionary Negotiation Headers",
+      "content": "<p>A server offers a dictionary by adding a <code>Use-As-Dictionary</code> response header. It is a Structured Field Dictionary (<a href='/9651/'>RFC 9651</a>) with four values:</p><ul><li><code>match</code> (required): a URL Pattern saying which future request URLs the dictionary applies to. Regular expressions are not allowed, and the pattern must be for the same origin as the dictionary. The pattern works on the percent-encoded URL path.</li><li><code>match-dest</code> (optional): a list of Fetch request destinations. An empty list, the default, matches all destinations.</li><li><code>id</code> (optional): a server-chosen identifier of up to 1024 characters. The client treats it as opaque and must echo it back.</li><li><code>type</code> (optional): the dictionary format. The only one defined is <code>raw</code>, an unformatted blob of bytes, and it is the default. A client that does not understand a type must not use the dictionary.</li></ul><p>For example, <code>match=\"/product/*\"</code> with <code>match-dest=(\"document\")</code> matches document requests under the path prefix <code>/product/</code>, and <code>match=\"/app/*/main.js\"</code> matches any path that starts with <code>/app/</code> and ends with <code>/main.js</code>.</p>",
+      "eli5": "<p>The server sticks a label on a response that says, \"keep this, I may use it later for pages that look like this.\" The label also says which pages it is good for.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "2.2",
+      "title": "Picking and Announcing a Dictionary",
+      "content": "<p>When a client requests a URL for which it holds a suitable dictionary, it can add an <code>Available-Dictionary</code> request header. Its value is a Byte Sequence holding the SHA-256 hash of the dictionary contents. The client MUST send only one such header, with one hash, for the best available match. The dictionary must also be fresh, or allowed to be served stale, in the sense of HTTP caching.</p><p>A stored dictionary matches a request when the destination fits (if <code>match-dest</code> was given), the origins are the same, and the request URL matches the stored <code>match</code> pattern. If several dictionaries match, the client picks one by three rules in order: a dictionary with a matching <code>match-dest</code> beats one without, then the longest <code>match</code> wins, then the most recently fetched dictionary wins.</p><p>If the dictionary was stored with an <code>id</code>, the client MUST also send it back in a <code>Dictionary-ID</code> request header, as a String identical to the server's value. The server must not rely on the identifier to guarantee the contents; it validates the hash before use.</p><p>A server can also point at a dictionary without using it for the current response, with a <code>Link</code> header whose relation type is <code>compression-dictionary</code>. The client may fetch it whenever it sees fit, and the fetched response must carry <code>Use-As-Dictionary</code> and a caching header to be usable.</p>",
+      "eli5": "<p>When the browser asks for a page, it says \"I have an old copy with this fingerprint.\" If it has several old copies, it picks the best fit. The fingerprint lets the server check that both sides mean the exact same copy.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "4",
+      "title": "The dcb and dcz Content Encodings",
+      "content": "<p>The RFC registers two new content codings. <strong><code>dcb</code></strong> (Dictionary-Compressed Brotli) is a fixed 36-byte header followed by a Shared Brotli stream (<a href='/9841/'>RFC 9841</a>). The header is a 4-byte magic number (<code>0xff, 0x44, 0x43, 0x42</code>) and the 32-byte SHA-256 hash of the dictionary. The compression window is at most 16 MB, and clients that announce <code>dcb</code> MUST handle windows up to that size. The dictionary is treated as a prefix dictionary.</p><p><strong><code>dcz</code></strong> (Dictionary-Compressed Zstandard) starts with a 40-byte header: an 8-byte magic number (<code>0x5e, 0x2a, 0x4d, 0x18, 0x20, 0x00, 0x00, 0x00</code>) and the 32-byte SHA-256 hash. This header is a Zstandard skippable frame, so existing Zstandard decoders can handle it. Clients announcing <code>dcz</code> MUST support a window of at least 8 MB or 1.25 times the dictionary size, whichever is greater, up to a maximum of 128 MB.</p><p>The two differ in how long the dictionary stays useful. With Brotli the whole dictionary is available regardless of the window, so resources larger than the window can still be delta-compressed. With Zstandard the dictionary is available only until the input exceeds the window. A window of 1.25 times the dictionary allows full delta compression for resources that grew by 25% between releases.</p>",
+      "eli5": "<p>Each compressed answer starts with a small tag that says which old copy was used. Brotli and Zstandard are two different squeezing tricks, and each gets its own name tag.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Negotiating the Content Encoding",
+      "content": "<p>The dictionary itself is chosen through <code>Available-Dictionary</code>, but the compression method is negotiated the usual HTTP way. If the client has a matching dictionary and wants to use it, it lists the dictionary-aware codings in <code>Accept-Encoding</code>, for example <code>gzip, deflate, br, zstd, dcb, dcz</code>. If it has no matching dictionary, or chooses not to use one, it MUST NOT list <code>dcb</code> or <code>dcz</code>.</p><p>If the server supports one of the advertised codings and decides to use the advertised dictionary, it sets <code>Content-Encoding</code> to <code>dcb</code> or <code>dcz</code>. A cacheable response MUST include a <code>Vary</code> header, such as <code>Vary: accept-encoding, available-dictionary</code>, so caches do not serve it to clients that cannot decode it or that used a different dictionary.</p><p>The RFC also requires that compression dictionary transport only be used in secure contexts (HTTPS). Devices on the network path, such as web proxies, firewalls and intrusion detection systems, might otherwise process dictionary-compressed responses incorrectly.</p>",
+      "eli5": "<p>The browser first says which special squeezing tricks it understands. The server then picks one, says which one it used, and makes sure shared caches do not hand the squeezed answer to someone who cannot unsqueeze it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The dictionary must be treated with the same care as the content, because changing the dictionary can change the decompressed content. The SHA-256 hash makes sure both sides use the same dictionary. Its strength is not what protects against attacks, since the dictionary comes from the same origin as the content, and the header could be extended to a different hash algorithm if a weakness in SHA-256 were found.</p><p>The larger concern is leaking data through compression. Compressing data from mixed sources, for example public and private, is a bad idea, and the dictionary counts as a source. Compressing secret cookies with a public-only dictionary still leaks information about the cookies. An adversary who controls part of the data and can see compressed sizes can learn about the dictionary, and one who controls the dictionary can learn about the data.</p><p>The RFC lists mitigations. The URL Pattern is guaranteed to be for the origin that served the dictionary. Clients such as browsers that protect response readability MUST use dictionary compression only when both the dictionary and the compressed response are fully readable by the client, meaning same-origin or passing the CORS check. Servers should avoid per-request variation, disable compression when part of the content comes from uncontrolled sources, and protect the dictionary like the content. The RFC also gives an algorithm based on the <code>Sec-Fetch-Site</code>, <code>Sec-Fetch-Mode</code>, <code>Origin</code> and <code>Access-Control-Allow-Origin</code> headers that returns FALSE for cross-origin requests where dictionary compression should be avoided.</p>",
+      "eli5": "<p>Squeezing a secret together with something an attacker can influence can give the secret away, because the size of the result is a clue. So the rules keep dictionaries and the pages they help squeeze inside the same site.</p>"
+    },
+    {
+      "id": "privacy-considerations",
+      "number": "10",
+      "title": "Privacy Considerations",
+      "content": "<p>Because a client announces a stored dictionary by the hash of its contents, a dictionary could be abused as a tracking cookie. To limit this, clients MUST treat dictionaries the same way they treat cookies (<a href='/6265/'>RFC 6265</a>). That includes partitioning dictionary storage the same way as, or more strictly than, cookie storage, and clearing the dictionaries whenever cookies are cleared.</p>",
+      "eli5": "<p>A saved dictionary could work like a secret name tag that follows you around. So browsers must handle dictionaries like cookies: keep them separate per site and throw them out when cookies are cleared.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "VERSION UPGRADE EXAMPLE (RFC 9842, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "GET /app.v1.js",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "200 OK, Use-As-Dictionary: match=\"/app*js\"",
+            "color": "green",
+            "note": "Full app.v1.js resource, 100KB compressed."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "GET /app.v2.js with Available-Dictionary and Accept-Encoding: gzip, br, zstd, dcb, dcz",
+            "color": "blue",
+            "note": "Some time later."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "200 OK, Content-Encoding: dcb",
+            "color": "green",
+            "note": "Delta-compressed app.v2.js resource, 1KB."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "THE TWO DICTIONARY CONTENT ENCODINGS",
+      "data": {
+        "columns": [
+          "Coding",
+          "Based on",
+          "Header size",
+          "Required window support"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "dcb",
+              "Shared Brotli",
+              "36 bytes (4-byte magic + 32-byte hash)",
+              "Up to 16 MB"
+            ]
+          },
+          {
+            "cells": [
+              "dcz",
+              "Zstandard",
+              "40 bytes (8-byte magic + 32-byte hash)",
+              "At least 8 MB or 1.25 x dictionary size, whichever is greater, up to 128 MB"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[HTTP]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP Semantics\", STD 97, RFC 9110, June 2022.",
+      "rfc": 9110
+    },
+    {
+      "number": "[HTTP-CACHING]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP Caching\", STD 98, RFC 9111, June 2022.",
+      "rfc": 9111
+    },
+    {
+      "number": "[SHARED-BROTLI]",
+      "text": "Alakuijala, J., Duong, T., Kliuchnikov, E., Szabadka, Z., and L. Vandevenne, Ed., \"Shared Brotli Compressed Data Format\", RFC 9841, September 2025.",
+      "rfc": 9841
+    },
+    {
+      "number": "[STRUCTURED-FIELDS]",
+      "text": "Nottingham, M. and P. Kamp, \"Structured Field Values for HTTP\", RFC 9651, September 2024.",
+      "rfc": 9651
+    },
+    {
+      "number": "[ZSTD]",
+      "text": "Collet, Y. and M. Kucherawy, Ed., \"Zstandard Compression and the 'application/zstd' Media Type\", RFC 8878, February 2021.",
+      "rfc": 8878
+    },
+    {
+      "number": "[RFC7932]",
+      "text": "Alakuijala, J. and Z. Szabadka, \"Brotli Compressed Data Format\", RFC 7932, July 2016.",
+      "rfc": 7932
+    },
+    {
+      "number": "[WEB-LINKING]",
+      "text": "Nottingham, M., \"Web Linking\", RFC 8288, October 2017.",
+      "rfc": 8288
+    },
+    {
+      "number": "[RFC6265]",
+      "text": "Barth, A., \"HTTP State Management Mechanism\", RFC 6265, April 2011.",
+      "rfc": 6265
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

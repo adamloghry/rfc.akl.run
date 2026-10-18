@@ -9,13 +9,191 @@
   },
   "questions": [
     "turn mobility",
-    "keep turn allocation when ip changes"
+    "keep turn allocation when ip changes",
+    "what is turn mobility",
+    "what is the mobility-ticket attribute",
+    "how does turn keep an allocation when the ip address changes",
+    "what does error 405 mobility forbidden mean"
+  ],
+  "tags": [
+    "NAT Traversal",
+    "Mobility",
+    "TURN"
+  ],
+  "subtitle": "How a TURN client keeps its relay allocation when its own IP address changes, without the remote peer noticing.",
+  "tldr": {
+    "problem": "A TURN allocation is tied to the client's IP address, so when a mobile client changes networks it must build a new allocation, redo permissions and channels, and re-signal the remote peer.",
+    "mechanism": "The server hands the client an encrypted, opaque MOBILITY-TICKET at allocation time. After an address change the client presents the ticket in a Refresh request and the server moves the existing allocation to the new address and port.",
+    "outcome": "The relayed address and channel bindings survive the move and the remote peer does not have to support mobility or see the change. Security rests on the ticket plus normal TURN authentication.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New STUN attribute",
+      "value": "MOBILITY-TICKET (0x8030, comprehension-optional range)"
+    },
+    {
+      "label": "New error code",
+      "value": "405 (Mobility Forbidden)"
+    },
+    {
+      "label": "Old ticket retention",
+      "value": "At least 30 seconds"
+    },
+    {
+      "label": "Example ticket keys",
+      "value": "128-bit AES-CBC and 256-bit HMAC-SHA-256-128"
+    }
+  ],
+  "today": "<p>RFC 8016 is a Proposed Standard published in November 2016, and the unit metadata lists no RFC that obsoletes or updates it. It builds on the TURN specification in <a href='/5766/'>RFC 5766</a>.</p>",
+  "glossary": [
+    "turn",
+    "stun",
+    "five-tuple",
+    "nat",
+    "nat-traversal",
+    "ip-address",
+    "hmac",
+    "sctp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem: Addresses That Change",
+      "content": "<p>When an endpoint moves between networks, its IP address can change. Because of NAT, its public address can change too. That breaks upper-layer protocols such as TCP and RTP. Some fixes keep the address static (Mobile IP, Proxy Mobile IP, LISP). Others make the upper layer indifferent to address changes (SCTP). RFC 8016 belongs to the second group.</p><p>A <strong>TURN</strong> server (see <a href='/5766/'>RFC 5766</a>) relays media packets and helps with NAT and firewall traversal. The base TURN specification does not let a client reuse an allocation after its address changes. The client has to request a new allocation, create permissions and channels again, reconnect to its signaling server, and send an updated offer. The remote side then has to gather and signal candidates again, and both ends run ICE checks.</p>",
+      "eli5": "<p>If your phone switches from home Wi-Fi to mobile data, the old way meant starting the whole phone call setup again from scratch.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "The Mobility Ticket Idea",
+      "content": "<p>The client keeps its allocation on the TURN server across changes of client IP address. In the first Allocate request it adds a new STUN attribute, <code>MOBILITY-TICKET</code>, with a zero-length value. That tells the server the client is mobile and wants a ticket.</p><p>The server puts a ticket in the same attribute in the Allocate success response. The client uses it later in a Refresh request sent from its new address and port. That ensures only the same client that created the allocation can move it. If the ticket is valid, the server keeps the same relayed address and port, the client keeps its earlier channel bindings, and data from the peer is delivered to the new client address.</p><p>The RFC says the technique works across network types, such as between 3G and wired access, as long as the client can still reach the TURN server. It should also work when (D)TLS carries STUN, using session resumption without server-side state (<a href='/5077/'>RFC 5077</a>).</p><div class='callout callout-info'><p>The remote peer does nothing. The client, which is the one that moves, does all the work.</p></div>",
+      "eli5": "<p>The relay gives you a special claim ticket. After you move, you show the ticket and the relay says, \"Right, same customer, same mailbox.\"</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Allocating and Refreshing",
+      "content": "<p>On the client side, the Allocate request adds a zero-length <code>MOBILITY-TICKET</code>. The client stores the ticket from the success response, and stores any new ticket from later Refresh responses.</p><p>When the client's IP address or source port changes and it wants to keep the allocation, it includes the ticket in a Refresh request. If nothing has changed, it <strong>MUST NOT</strong> include the attribute, since the server would reject it.</p><p>When the server gets a Refresh with a ticket, it does not look up the allocation by the packet's 5-tuple. It decrypts the ticket, checks it, and finds the allocation from the 5-tuple stored in it. The request must then come from a different source address and port than the stored one, and pass the <code>MESSAGE-INTEGRITY</code> check showing it is the same user. The server updates its state with the new address but keeps the old 5-tuple for now. It returns a new ticket, which <strong>MUST</strong> differ from the old one.</p><p>The server <strong>MUST</strong> keep sending and receiving on the old 5-tuple until it sees a Send Indication or ChannelData message on the new 5-tuple, or a message closing the old connection such as a TLS fatal alert or TCP RST. Then it discards the old ticket and old 5-tuple. If the Refresh does not succeed, the client can keep using the old 5-tuple until it gets a success response.</p><p>The old ticket is good only for retransmission, and the server must retain it for at least 30 seconds so it can recognize a retransmitted Refresh. The server may discard or queue data arriving on the new path before the Refresh is acknowledged, so the client is told it is RECOMMENDED to wait for the acknowledgement before sending.</p>",
+      "eli5": "<p>You show your ticket from your new address. The relay checks it and checks your password too. It keeps listening at your old address until you start talking from the new one, then it drops the old one.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "4",
+      "title": "Error Responses",
+      "content": "<p>The RFC defines one new STUN error code, <code>405</code> (Mobility Forbidden): the request was valid but cannot be performed because of administrative or similar restrictions. A server returns it if a zero-length ticket arrives in an Allocate request but local policy forbids mobility. It also returns it for a Refresh with a ticket if the configuration has changed to forbid mobility, or if the server has transparently failed over to an instance that forbids it. In that case the client starts afresh with a new allocation. A client that gets 405 on Allocate treats the transaction as failed and SHOULD NOT retry with a ticket until it believes the problem is fixed.</p><p>Other errors reuse existing codes:</p><ul><li><code>400</code> (Bad Request): a non-zero-length ticket in an Allocate request, an invalid ticket, or a ticket Refresh sent from the same address and port as the stored 5-tuple.</li><li><code>437</code> (Allocation Mismatch): the ticket's 5-tuple does not identify an existing allocation.</li><li><code>441</code> (Wrong Credentials): the integrity check fails.</li></ul><p>A server that does not understand the attribute ignores it, following the STUN rules.</p>",
+      "eli5": "<p>The relay can say no for a few reasons: it does not do forwarding, your ticket is bad, or your password does not match.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>The server <strong>MUST</strong> authenticate and encrypt the ticket with strong cryptography to prevent modification or eavesdropping, and build it with strong entropy so nothing can be learned from the ticket alone.</p><p>The risk is that an attacker watching the traffic could replay the client's ticket from the attacker's own address and take over the allocation. To prevent that, the client and server <strong>MUST</strong> use the STUN long-term credential mechanism, the STUN extension for third-party authorization (<a href='/7635/'>RFC 7635</a>), or a (D)TLS connection. If (D)TLS is not used or its handshake fails, and authentication also fails, they <strong>MUST</strong> fail and not proceed with mobility. The security considerations of <a href='/5766/'>RFC 5766</a> also apply.</p>",
+      "eli5": "<p>A ticket alone is not enough, or a stranger who copied it could take your place. You also have to prove who you are with your password.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "6",
+      "title": "Building the Ticket",
+      "content": "<p>The ticket is opaque to the client, so its structure is not an interoperability concern and implementations may differ. Clients cannot count on decoding it. Because the client may roam between networks with different path MTUs, or from IPv6 to IPv4, the server must assume the path MTU is unknown and keep the ticket length within the STUN guidance on UDP fragmentation.</p><p>Appendix A gives an example construction. The server uses a 128-bit AES key in CBC mode and a 256-bit key for HMAC-SHA-256-128. The ticket holds a 16-byte <code>key_name</code>, a 16-byte <code>iv</code>, the variable-length <code>encrypted_state</code> and a 16-byte <code>mac</code>. The state is encrypted, and the MAC covers the key name, IV, the 2-byte length and the encrypted state.</p>",
+      "eli5": "<p>The ticket is a sealed envelope that only the relay can open. You just carry it and hand it back.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "MOBILITY USING TURN (RFC 8016, FIGURE 1, SIMPLIFIED)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "TURN client"
+          },
+          {
+            "key": "server",
+            "label": "TURN server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Allocate request + MOBILITY-TICKET (length 0)",
+            "color": "blue"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "401 Unauthorized",
+            "color": "neutral"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Allocate request + MOBILITY-TICKET (length 0)",
+            "color": "blue",
+            "note": "Retried with credentials."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Allocate success + MOBILITY-TICKET",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Refresh request + MOBILITY-TICKET",
+            "color": "blue",
+            "note": "Sent after the client IP address changes."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Refresh success + new MOBILITY-TICKET",
+            "color": "green"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5766]",
+      "text": "Mahy, R., Matthews, P., and J. Rosenberg, \"Traversal Using Relays around NAT (TURN): Relay Extensions to Session Traversal Utilities for NAT (STUN)\", RFC 5766, April 2010.",
+      "rfc": 5766
+    },
+    {
+      "number": "[RFC5389]",
+      "text": "Rosenberg, J., Mahy, R., Matthews, P., and D. Wing, \"Session Traversal Utilities for NAT (STUN)\", RFC 5389, October 2008.",
+      "rfc": 5389
+    },
+    {
+      "number": "[RFC5245]",
+      "text": "Rosenberg, J., \"Interactive Connectivity Establishment (ICE): A Protocol for Network Address Translator (NAT) Traversal for Offer/Answer Protocols\", RFC 5245, April 2010.",
+      "rfc": 5245
+    },
+    {
+      "number": "[RFC5077]",
+      "text": "Salowey, J., Zhou, H., Eronen, P., and H. Tschofenig, \"Transport Layer Security (TLS) Session Resumption without Server-Side State\", RFC 5077, January 2008.",
+      "rfc": 5077
+    },
+    {
+      "number": "[RFC7635]",
+      "text": "Reddy, T., Patil, P., Ravindranath, R., and J. Uberti, \"Session Traversal Utilities for NAT (STUN) Extension for Third-Party Authorization\", RFC 7635, August 2015.",
+      "rfc": 7635
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

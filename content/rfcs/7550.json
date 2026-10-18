@@ -10,13 +10,110 @@
   "questions": [
     "dhcpv6 ia_na and ia_pd together",
     "multiple stateful dhcpv6 options",
-    "dhcpv6 stateful option issues"
+    "dhcpv6 stateful option issues",
+    "dhcpv6 ia_na ia_pd together",
+    "dhcpv6 renewal timers",
+    "dhcpv6 status codes"
+  ],
+  "tags": [
+    "IPv6",
+    "Network Configuration",
+    "DHCP"
+  ],
+  "subtitle": "Fixing conflicts when DHCP hands out both addresses and delegated prefixes.",
+  "tldr": {
+    "problem": "DHCPv6 was designed to assign addresses to a single client. When prefix delegation was added (allowing a router to ask for a block of prefixes to distribute), there were no clear rules for handling clients that needed both addresses and prefixes simultaneously.",
+    "mechanism": "This RFC clarifies and updates the DHCPv6 specification to allow a single DHCP session to obtain both IA_NA (addresses) and IA_PD (prefixes). Key changes include using a single renewal timer for all bindings, allowing clients to accept Advertise messages with only partial results, and letting clients include unfulfilled requests in subsequent messages.",
+    "outcome": "Routers and edge devices can now reliably obtain both IPv6 addresses for themselves and delegated prefixes to distribute to other networks using a single DHCP exchange. RFC 8415 later incorporated these changes into a fully revised DHCPv6 specification.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Stateful option types covered",
+      "value": "IA_NA (addresses), IA_PD (prefix delegation)"
+    },
+    {
+      "label": "Key status codes for multiple options",
+      "value": "NoAddrsAvail, NoPrefixAvail, NoBinding"
+    }
+  ],
+  "today": "<p>RFC 7550 addresses issues with using multiple stateful DHCPv6 options in a single session. Its recommendations were incorporated into <a href='/8415/'>RFC 8415</a>, the revised DHCPv6 specification published in 2018. All new DHCPv6 implementations should follow RFC 8415, which supersedes and consolidates RFC 3315, RFC 3633, and this RFC.</p>",
+  "glossary": [
+    "ipv6",
+    "prefix"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Multiple Stateful Options Problem",
+      "content": "<p><strong>DHCPv6</strong> (Dynamic Host Configuration Protocol for IPv6) was designed to assign temporary IPv6 addresses to clients. The original RFC 3315 anticipated only two stateful options: <strong>IA_NA</strong> for assigning addresses to a client, and <strong>IA_TA</strong> for temporary addresses with no renewal timers.</p><p><strong>DHCPv6 Prefix Delegation</strong> (RFC 3633) later added <strong>IA_PD</strong>, a third stateful option that lets a delegating router assign a block of IPv6 prefixes to a requesting router, which then sub-delegates parts of those prefixes to other networks. This is essential for home routers and edge devices that need their own address but also need prefixes to distribute.</p><p>The problem: DHCPv6 Prefix Delegation did not clearly specify how a client could request both IA_NA and IA_PD in a single DHCP session. Different server and client implementations made different choices, leading to interoperability problems. Some clients created separate DHCP sessions for each option type, wasting resources. Others gave up if the server did not immediately offer both types.</p>",
+      "eli5": "<p>DHCP is like a restaurant menu where you order your meal. Originally, you could ask for your own food (address) or temporary plates (temporary addresses). Later, prefix delegation was added like asking for a party platter to share. But the rules were unclear about ordering both your meal and the platter together.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "Single Session with Multiple Request Types",
+      "content": "<p>This RFC recommends that clients use a single DHCP session and state machine to request both IA_NA and IA_PD options. If a server offers only one type in an Advertise message, the client should accept it and include both types in the subsequent Request message, allowing the server to fulfill the remaining request in the Reply.</p><p>The key change is in how clients handle Advertise messages. The original DHCPv6 spec required clients to ignore an Advertise message if no addresses were offered. This RFC updates the rule: clients must ignore an Advertise only if it contains no addresses AND no prefixes, otherwise the client should accept the partial offer and ask for the missing options in the next message.</p><p>Servers are similarly updated: they must include IA options in Advertise messages with appropriate status codes (NoAddrsAvail or NoPrefixAvail) rather than omitting the IA option entirely. This makes the Advertise format consistent with the Reply message format and gives clients clear feedback about what was not available.</p>",
+      "eli5": "<p>Instead of giving up when the server says 'I have prefixes but no addresses,' the client should say 'thanks for the prefixes, let me ask again for addresses in my next message.' The server should also say clearly 'I don't have addresses available' rather than staying silent.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "3",
+      "title": "Renewal Timers and Consistent Lifetimes",
+      "content": "<p>Each IA option carries renewal timers called <strong>T1</strong> (when to send a Renew message) and <strong>T2</strong> (when to send a Rebind message to any server). When a client has both IA_NA and IA_PD, they may arrive with different T1/T2 values from the server.</p><p>The RFC requires that servers set the same T1 and T2 times in all IA options within a Reply or Advertise message. This ensures the client can renew all bindings simultaneously. For clients dealing with servers that have not been updated, the client must select the earliest T1 and earliest T2 from all its IA options, guaranteeing it will send renewal messages in time to extend all bindings.</p><p>For example, if IA_NA specifies T1=3600 / T2=5760 and IA_PD specifies T1=0 / T2=1800, the client uses T1=0 / T2=1800 (the earlier times). This ensures the client does not miss a renewal deadline for the prefix delegation.</p>",
+      "eli5": "<p>When your address lease and your prefix lease expire at different times, you need to renew both at the same time. The rule is: use the expiration time that comes soonest, so you never miss a renewal deadline.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Renewal and Rebind Message Handling",
+      "content": "<p>When a client sends a <strong>Renew</strong> message to extend its lease, it should include IA options for all bindings it currently holds AND for any bindings it previously requested but did not receive. This allows the client to simultaneously extend existing leases and request newly available options.</p><p>If the server cannot create a new binding for a requested IA option, it returns the IA option with a <strong>NoBinding</strong> or <strong>NoAddrsAvail</strong> status code. The client can then continue using its existing bindings and try again in the next renewal cycle. This avoids the previous situation where a client would give up if some options were not available.</p><p>At time <strong>T2</strong>, if the original server does not respond, the client initiates a <strong>Rebind</strong> message to any available server using the same approach: including all current bindings and all unfulfilled requests. The client continues this pattern until all desired bindings are obtained or their valid lifetimes expire.</p><p>The Rebind message does not include a Server Identifier (since it is broadcast to any server), but it includes all IA options using the same format as the Renew message, ensuring any server can process it correctly.</p>",
+      "eli5": "<p>When it's time to renew, ask for everything you have AND everything you still want. If the server can't give you something, don't give up on everything else—just try again next renewal cycle.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5",
+      "title": "Status Code Placement and Processing",
+      "content": "<p>DHCPv6 uses <strong>status codes</strong> to signal errors: <strong>NoAddrsAvail</strong> means no addresses are available, <strong>NoPrefixAvail</strong> means no prefixes are available, <strong>NoBinding</strong> means the server has no record of the client's lease, and <strong>NotOnLink</strong> means the client's address is not appropriate for the link it is on.</p><p>Status codes can be placed either at the top level of a DHCPv6 message or encapsulated within an IA option. This RFC clarifies that IA-specific status codes (NoAddrsAvail, NoPrefixAvail, NoBinding) must be encapsulated in the IA option to indicate that the failure is specific to that IA. Top-level status codes remain for message-level errors.</p><p>When a client receives a Reply with <strong>NoBinding</strong>, it should send a new Request for those IA options in the next message. If it receives <strong>NoAddrsAvail</strong> or <strong>NoPrefixAvail</strong>, it can continue using other bindings and retry later. The client examines each IA's status separately rather than treating message-level and IA-level statuses the same way.</p>",
+      "eli5": "<p>When something goes wrong, the protocol now says exactly which option failed, not just 'the whole message failed.' This lets the client keep what worked and try again for what didn't.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC3315]",
+      "text": "Droms, R. (Ed.), Bound, J., Volz, B., Lemon, T., Perkins, C., and M. Carney, \"Dynamic Host Configuration Protocol for IPv6 (DHCPv6)\", RFC 3315, July 2003.",
+      "rfc": 3315
+    },
+    {
+      "number": "[RFC3633]",
+      "text": "Troan, O. and R. Droms, \"IPv6 Prefix Options for Dynamic Host Configuration Protocol (DHCP) version 6\", RFC 3633, December 2003.",
+      "rfc": 3633
+    },
+    {
+      "number": "[RFC8415]",
+      "text": "Mrugalski, T., Siodelski, M., Volz, B., Yourtchenko, A., Richardson, M., Jiang, S., and T. Lemon, \"Dynamic Host Configuration Protocol for IPv6 (DHCPv6)\", RFC 8415, November 2018.",
+      "rfc": 8415
+    },
+    {
+      "number": "[RFC7083]",
+      "text": "Droms, R., \"Modification to Default Values of SOL_MAX_RT and INF_MAX_RT\", RFC 7083, November 2013.",
+      "rfc": 7083
+    },
+    {
+      "number": "[RFC7084]",
+      "text": "Singh, H., Beebee, W., Donley, C., and B. Stark, \"Basic Requirements for IPv6 Customer Edge Routers\", RFC 7084, November 2013.",
+      "rfc": 7084
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

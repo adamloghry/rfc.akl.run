@@ -10,13 +10,157 @@
   "questions": [
     "subnetwork encapsulation and adaptation layer",
     "seal tunnel mtu",
-    "handling mtu problems in tunnels"
+    "handling mtu problems in tunnels",
+    "what is seal tunnel",
+    "how does seal handle mtu",
+    "seal segmentation and reassembly"
+  ],
+  "tags": [
+    "Tunneling",
+    "MTU",
+    "Reliability"
+  ],
+  "subtitle": "A mid-layer encapsulation for tunnels that handles mismatched packet sizes and packet duplication.",
+  "tldr": {
+    "problem": "When packets travel through tunnels with different-sized links, some packets are too large and get broken up (fragmented), others may arrive twice, and the tunnel cannot always report these problems back to the original sender. Classical methods for handling these issues have known limitations.",
+    "mechanism": "SEAL adds a thin header between the inner packet and the outer tunnel headers. This header carries a 32-bit packet identifier for duplicate detection and segment numbers for reassembly. ITEs (tunnel entry points) adapt packets to the path's characteristics; ETEs (tunnel exit points) reassemble them, and fragmentation becomes a signal to adjust packet sizes rather than a failure mode.",
+    "outcome": "SEAL provides more reliable delivery through tunnels with varying MTU, eliminates certain security attacks related to packet spoofing, and converges faster on optimal packet sizes. However, it remains experimental and is rarely deployed.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "SEAL header size",
+      "value": "4 bytes"
+    },
+    {
+      "label": "S_MRU (maximum reassembly)",
+      "value": "2 KB (typical)"
+    },
+    {
+      "label": "Maximum segments per packet",
+      "value": "8"
+    },
+    {
+      "label": "SEAL_ID size",
+      "value": "32 bits"
+    }
+  ],
+  "today": "<p>RFC 5320 is experimental and not widely deployed. The concepts have influenced later MTU discovery methods (such as RFC 4821, Packetization Layer PMTUD) but SEAL itself remains a research protocol. Some tunnel implementations have adopted similar ideas for handling variable-MTU paths.</p>",
+  "glossary": [
+    "mtu",
+    "fragmentation",
+    "datagram"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Problem and Approach",
+      "content": "<p>Virtual tunnels that encapsulate packets face challenges: the insertion of an outer IP header reduces the effective MTU (Maximum Transmission Unit) visible to applications, IPv4 fragmentation in tunnels is problematic due to the limited 16-bit Identification field, and classical Path MTU Discovery relies on ICMP error messages that are often blocked by firewalls. SEAL is a minimal mid-layer encapsulation for tunnels that addresses these issues.</p><p>SEAL introduces three key features: a 32-bit Identification value (extended from IPv4's 16 bits) for duplicate packet detection, a mid-layer segmentation and reassembly capability that allows simplified cutting and pasting of packets, and the ability to treat in-the-network fragmentation as a signal that packet sizing is out of tune with the network path. The protocol operates in both tunnel mode (encapsulating IP packets) and transport mode (encapsulating upper-layer protocol data).</p>",
+      "eli5": "<p>Tunnels have narrow spots that regular packets do not fit through. SEAL adds a label with a number that tracks the package and instructions for cutting it into pieces at the narrow spots, then taping it back together on the other side.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Tunnel Mode: Encapsulation and Segmentation",
+      "content": "<p>In tunnel mode, an Ingress Tunnel Endpoint (ITE) receives inner IP packets and encapsulates them in a SEAL header and outer IP headers for transmission to an Egress Tunnel Endpoint (ETE). The SEAL header is 4 bytes and contains a 16-bit ID Extension field, three control bits (Acknowledgement Requested, Report Fragmentation, More Segments), a 3-bit segment number, and an 8-bit Next Header field (similar to IPv6 Next Header).</p><p>For each ETE, the ITE maintains two key values: S_MRU (SEAL Maximum Reassembly Unit, initialized to 2KB) which is the largest packet the ETE must reassemble, and S_MSS (SEAL Maximum Segment Size) which starts at the underlying link MTU minus overhead and decreases when fragmentation is detected. If a mid-layer packet fits in one SEAL segment (i.e., its length plus SEAL/IP headers fits in S_MSS), it is sent as a single segment. If it is larger but fits in S_MRU, the ITE breaks it into up to 8 equal-sized segments (except the last may be smaller) and sends them with increasing segment numbers.</p>",
+      "eli5": "<p>The tunnel entry point wraps each package with a special SEAL label. If the package fits through the tunnel, it goes as one piece. If it is too big, the label shows how to cut it into equal pieces, and which piece number this is.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "4.2",
+      "title": "Automatic MTU Adjustment",
+      "content": "<p>SEAL does not depend on receiving ICMP error messages to discover the path MTU. Instead, it uses fragmentation itself as feedback. The ITE can set the Acknowledgement Requested (A) bit to ask for explicit confirmation, or the Report Fragmentation (R) bit to request notification if any IPv4 fragmentation occurs on the path through the tunnel.</p><p>When the ETE receives a SEAL packet with the R bit set and detects that IPv4 fragmentation occurred (by receiving multiple IPv4 fragments), it sends back a SEAL-encapsulated ICMPv4 Fragmentation Needed message. The ITE uses this feedback to reduce S_MSS and resend the packet with smaller segments. Because SEAL ensures all packets are at most S_MRU bytes, the ETE does not need to send fragmentation reports for every packet; it can rate-limit them. The protocol typically converges to the optimal packet size in one iteration.</p>",
+      "eli5": "<p>The tunnel entry point can send packages with a \"report if you break me\" label. If a package is too big and breaks, the exit point says so. The entry point then sends smaller pieces next time.</p>"
+    },
+    {
+      "id": "section-2",
+      "number": "4.3",
+      "title": "Reassembly at the Egress Endpoint",
+      "content": "<p>The Egress Tunnel Endpoint (ETE) performs standard IPv4 reassembly first, then SEAL-layer reassembly. After IPv4 reassembly, if the packet contains multiple SEAL segments (indicated by the M bit or a non-zero segment number), the ETE collects and concatenates segments in order. Segments are matched by their SEAL_ID values (formed from the ID Extension in the SEAL header and the Identification field in the outer IPv4 header) and segment numbers.</p><p>The ETE maintains a SEAL reassembly cache with high and low water marks to avoid memory exhaustion. It discards incomplete reassemblies after 15 seconds. Once all segments of a packet are collected and reassembled, the ETE delivers the resulting mid-layer packet to the upper layer indicated by the SEAL Next Header field. SEAL reassembly is transparent to the inner IP layer: the fact that the packet was segmented in the tunnel is not observable outside the tunnel.</p>",
+      "eli5": "<p>The tunnel exit point collects all the pieces (using the tracking number and piece numbers), tapes them back together in the right order, and passes the whole package to the next layer as if it never was cut.</p>"
+    },
+    {
+      "id": "section-3",
+      "number": "12",
+      "title": "Advantages over Classical Methods",
+      "content": "<p>SEAL provides several advantages over classical Path MTU Discovery. First, when an MTU restriction is encountered, IPv4 fragmentation serves as a short-term interim mechanism to ensure delivery while SEAL adjusts its packet sizing parameters. Second, because SEAL ensures packets are at most S_MRU bytes, the ETE can rate-limit fragmentation reports instead of sending one for each packet, reducing ICMP flooding. Third, SEAL converges to the optimal packet size in one iteration under normal circumstances, whereas classical methods may require multiple iterations.</p><p>Fourth, ordinary data packets serve as implicit probes without exposing data to loss; explicit probes are also supported. Fifth, ETEs encapsulate ICMP error messages in outer SEAL headers so firewalls can distinguish them from spoofed raw ICMP. Finally, and most importantly, all SEAL packets carry a 32-bit Identification value for duplicate detection and ICMP matching without requiring per-packet state, and the ITE can be configured to accept ICMP feedback only from the legitimate ETE, eliminating packet spoofing denial-of-service attacks.</p>",
+      "eli5": "<p>SEAL learns the right package size quickly without relying on broken messages. It does not get tricked by fake error messages. It does not flood the tunnel with error reports. Packages do not need to be guarded individually. The tunnel remembers what size works without asking the other side for help every time.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SEAL Header Format (4 bytes)",
+      "data": {
+        "title": "SEAL Header",
+        "bytes": 4,
+        "width": 16,
+        "fields": [
+          {
+            "key": "id-ext",
+            "name": "ID Extension",
+            "bits": 16,
+            "desc": "High 16 bits of the 32-bit SEAL packet identifier."
+          },
+          {
+            "key": "flags",
+            "name": "Flags (A/R/M/RSV)",
+            "bits": 6,
+            "desc": "Acknowledgement Requested, Report Fragmentation, More Segments, and Reserved bits."
+          },
+          {
+            "key": "seg",
+            "name": "Segment Number",
+            "bits": 3,
+            "desc": "Segment number (0-7) for multi-segment packets."
+          },
+          {
+            "key": "next-hdr",
+            "name": "Next Header",
+            "bits": 8,
+            "desc": "Protocol number of encapsulated payload."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC0791]",
+      "text": "Postel, J., \"Internet Protocol\", STD 5, RFC 791, September 1981.",
+      "rfc": 791
+    },
+    {
+      "number": "[RFC2460]",
+      "text": "Deering, S. and R. Hinden, \"Internet Protocol, Version 6 (IPv6) Specification\", RFC 2460, December 1998.",
+      "rfc": 2460
+    },
+    {
+      "number": "[RFC1191]",
+      "text": "Mogul, J. and S. Deering, \"Path MTU discovery\", RFC 1191, November 1990.",
+      "rfc": 1191
+    },
+    {
+      "number": "[RFC4821]",
+      "text": "Mathis, M. and J. Heffner, \"Packetization Layer Path MTU Discovery\", RFC 4821, March 2007.",
+      "rfc": 4821
+    },
+    {
+      "number": "[RFC4963]",
+      "text": "Heffner, J., Mathis, M., and B. Chandler, \"IPv4 Reassembly Errors at High Data Rates\", RFC 4963, July 2007.",
+      "rfc": 4963
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

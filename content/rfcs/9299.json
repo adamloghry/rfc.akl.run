@@ -9,13 +9,240 @@
   },
   "questions": [
     "what is lisp",
-    "how does lisp work at a high level"
+    "how does lisp work at a high level",
+    "what is the difference between eid and rloc",
+    "how does lisp encapsulation work",
+    "what is a lisp map server"
+  ],
+  "tags": [
+    "Routing",
+    "Overlay",
+    "Architecture"
+  ],
+  "subtitle": "A guided tour of LISP, which splits who a host is from where it is attached, so the Internet core can route on locators alone.",
+  "tldr": {
+    "problem": "IP addresses say both who a node is and where it is attached, but routing needs addresses that aggregate by topology while nodes need identities that do not change when they move.",
+    "mechanism": "LISP creates two namespaces, EIDs for hosts at the edge and RLOCs for the core. Edge routers look up EID-to-RLOC mappings in a Mapping System and encapsulate packets toward the right RLOC.",
+    "outcome": "This document is an informational introduction only. It does not specify LISP; the protocol details are in RFC 9300 and RFC 9301.",
+    "outcomeLabel": "What it is"
+  },
+  "facts": [
+    {
+      "label": "Data packet transport",
+      "value": "UDP port 4341"
+    },
+    {
+      "label": "Control message transport",
+      "value": "UDP port 4342"
+    },
+    {
+      "label": "Control messages",
+      "value": "Map-Register, Map-Notify, Map-Request, Map-Reply"
+    },
+    {
+      "label": "Mobility mapping TTL",
+      "value": "Typically low, 1 min"
+    }
+  ],
+  "today": "<p>RFC 9299 is an Informational document and has not been obsoleted or updated. It is an introduction only; the protocol is specified in <a href='/9300/'>RFC 9300</a> and <a href='/9301/'>RFC 9301</a>.</p>",
+  "glossary": [
+    "endpoint-identifier",
+    "routing-locator",
+    "udp",
+    "multihoming",
+    "multicast",
+    "mtu",
+    "bgp",
+    "dns"
+  ],
+  "sections": [
+    {
+      "id": "overview",
+      "number": "1",
+      "title": "Why Split Identity From Location",
+      "content": "<p>An IP address today does two jobs. It identifies the node, and it gives the topological location of the node's network attachment point. The RFC points out that these jobs have different needs: routing wants addresses that aggregate and have topological meaning, while nodes must be identified independently of where they currently are.</p><p>LISP's initial motivation is the routing scalability problem. If LISP were completely deployed, the Internet core would carry only RLOCs, which are quasi-static, so routing stays scalable, while EIDs can roam anywhere without churn in the global routing system. The same split also suits traffic engineering, multihoming and mobility.</p><div class='callout callout-note'><p>This document does not specify or complement LISP. The protocol is specified in <a href='/9300/'>RFC 9300</a> (data plane) and <a href='/9301/'>RFC 9301</a> (control plane).</p></div><p>The architecture rests on four principles: a <strong>locator/identifier split</strong>, an <strong>overlay architecture</strong> that needs no change to the existing infrastructure, a <strong>decoupled data plane and control plane</strong> that can scale independently, and <strong>incremental deployability</strong> so LISP interoperates with the legacy Internet.</p><p>The edge consists of LISP sites that use <strong>Endpoint Identifiers</strong> (EIDs). These are ordinary IPv4 or IPv6 addresses that identify end hosts but carry no inter-domain topology, so they are routable at the edge but not in the core. The core uses <strong>Routing Locators</strong> (RLOCs), IPv4 or IPv6 addresses assigned to core-facing interfaces of LISP routers.</p><p>An <strong>Ingress Tunnel Router</strong> (ITR) encapsulates packets going from a site toward the core, and an <strong>Egress Tunnel Router</strong> (ETR) decapsulates packets coming the other way. A router doing both is an <strong>xTR</strong>. Hosts and ordinary routers stay unchanged; only the routers joining EID space to RLOC space change, plus a new distributed database, the Mapping System.</p>",
+      "eli5": "<p>Your home address tells people both who lives there and how to get there. If you move, everyone has to learn a new one. LISP keeps your name and your address separate so one can change without the other.</p><p>Think of two address books. Kids at school use class names to find each other, while the post office only uses street addresses. A helper at the school gate looks up the street address and puts your letter in an outer envelope.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "2",
+      "title": "Packet Flow and Encapsulation",
+      "content": "<p>When HostA sends to HostB, it looks up HostB's EID (typically through DNS) and sends an ordinary packet to its local ITR. The ITR sends a Map-Request to the Mapping System and gets back a Map-Reply listing RLOCs, each with a priority and weight. It can cache the mapping, picks an RLOC by those values, and encapsulates the packet. The core forwards it as a normal IP packet, so EIDs stay invisible there, and the ETR decapsulates it and delivers it to HostB.</p><p>A LISP packet carries four headers: the outer IP header with RLOCs, a UDP header (port 4341, usually with a zero checksum), a LISP header, and the inner IP header with EIDs. The UDP source port is usually chosen from a 5-tuple hash of the inner header so multipath such as ECMP stays consistent. The LISP header carries reachability information and an <code>Instance ID</code> that separates tenant address spaces.</p><p>ITRs keep mappings in a local <strong>Map-Cache</strong> indexed by (Instance ID, EID-Prefix). Each mapping has a TTL set by the ETR. Re-encapsulating Tunnel Routers (RTRs) can decapsulate and then encapsulate again toward another locator, to steer a path around congestion or failure.</p>",
+      "eli5": "<p>Your letter goes into a bigger envelope addressed to the far-away post office. The outer envelope is what the mail trucks read, and the inner letter is only opened at the end.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "The Control Plane and Mapping System",
+      "content": "<p>A mapping binds EID-Prefixes to a set of RLOCs, with priorities for active/backup policy and weights for per-flow load balancing. Addresses are encoded with an Address Family Identifier, and the LISP Canonical Address Format can carry other things such as MAC addresses or geocoordinates.</p><p>The interface to the Mapping System has two entities. A <strong>Map-Server</strong> learns mappings from ETRs and publishes them. A <strong>Map-Resolver</strong> proxies queries from ITRs. Four control messages travel as UDP datagrams on port 4342: <code>Map-Register</code> (authenticated with a shared key), <code>Map-Notify</code>, <code>Map-Request</code> and <code>Map-Reply</code>. A negative Map-Reply tells the ITR to forward the traffic unencapsulated to the public Internet.</p><p>Two Mapping Systems have been implemented and deployed. LISP-ALT is a BGP overlay linked by static tunnels. LISP-DDT is a DNS-like hierarchy whose leaves are Map-Servers and which supports only iterative lookups using a Map-Referral message. DDT indexes Extended EID-Prefixes, built from a Database-ID, Instance ID, Address Family Identifier and the EID-Prefix.</p>",
+      "eli5": "<p>The Mapping System is a phone book. You ask who is in charge of an address and the book tells you where to send things, and you can write the answer down so you do not have to ask again.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "4",
+      "title": "Cache, Reachability, Internetworking and MTU",
+      "content": "<p>LISP keeps the Map-Cache fresh with three mechanisms: the record TTL, <strong>Solicit-Map-Request</strong> (SMR) sent on demand by ETRs, and optional Map-Versioning carried in data packets. For locator reachability it defines Locator-Status-Bits, Echo-Nonce and active RLOC-Probing, and it recommends using hints from the underlay such as ICMP unreachable messages and BGP or IGP routing information. LSBs must not be used over the public Internet, and Echo-Nonce must be used in trusted environments only.</p><p>To talk to non-LISP sites, a <strong>Proxy ITR</strong> (PITR) announces EID-Prefixes into the global routing system and encapsulates traffic toward LISP sites, and a <strong>Proxy ETR</strong> (PETR) carries traffic from LISP sites to the legacy Internet. LISP-NAT handles private EIDs.</p><p>LISP does not specify a mechanism for ETR synchronization, so operators must rely on coherent manual configuration. For packets too large for the path MTU, LISP defines a stateless and a stateful mechanism; if a packet cannot be fragmented, the ITR drops it and sends an ICMP Too Big to the source.</p>",
+      "eli5": "<p>Phone book entries can go out of date, so each one has a use-by time and people can say it changed. There are also helpers that let LISP houses talk to ordinary houses, and rules for big parcels that will not fit.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "5",
+      "title": "Mobility, Multicast and Use Cases",
+      "content": "<p>When a device changes its RLOC, its xTR updates the mapping and registers it with its Map-Server, typically with a low TTL of 1 minute, and tells remote devices that are currently talking to it. The EID-Prefix can be as small as a full /32 or /128. LISP also carries multicast from the EID space, and the changes needed to multicast protocols are in <a href='/6831/'>RFC 6831</a>.</p><p>The RFC lists four use cases: traffic engineering through per-RLOC priorities and weights, IPv6 co-existence (IPv6 EIDs carried over IPv4 RLOCs with no translation), virtual private networks using the Instance ID, and virtual machine mobility in data centers.</p>",
+      "eli5": "<p>If you move house, you only tell the phone book your new address. Your friends keep using your name and the book points them to the right place.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Because LISP pulls mappings on demand, data plane events can trigger control plane work. The control plane runs on a slower path than forwarding, so rate limiting should be used as specified in RFC 9300 and RFC 9301. Control information gleaned from data plane packets, such as locator reachability, must not be used or must be verified in environments that are not fully trusted, like the open Internet.</p><p>Mappings are the centerpiece, so all precautions must be taken against manipulation. The RFC recommends trustable Map-Servers that strictly follow <a href='/9301/'>RFC 9301</a> and the LISP-SEC authentication in <a href='/9303/'>RFC 9303</a>. Middleboxes must strip the LISP encapsulation to inspect content, and LISP enables triangular routing, so packets may reach an ETR that is not responsible for the destination EID; filtering is the mitigation. Further discussion is in <a href='/7835/'>RFC 7835</a>.</p>",
+      "eli5": "<p>The phone book is the most important thing, so only trusted people should be allowed to write in it, and nobody should be able to flood it with questions.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "SIMPLIFIED PACKET FLOW (RFC 9299, FIGURE 2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "hosta",
+            "label": "HostA"
+          },
+          {
+            "key": "itr",
+            "label": "ITR_A"
+          },
+          {
+            "key": "ms",
+            "label": "Mapping System"
+          },
+          {
+            "key": "etr",
+            "label": "ETR_B"
+          },
+          {
+            "key": "hostb",
+            "label": "HostB"
+          }
+        ],
+        "messages": [
+          {
+            "from": "hosta",
+            "to": "itr",
+            "label": "Packet EID_A to EID_B",
+            "color": "neutral",
+            "note": "Forwarded with standard intra-domain mechanisms."
+          },
+          {
+            "from": "itr",
+            "to": "ms",
+            "label": "Map-Request",
+            "color": "blue",
+            "note": "EID_B is the lookup key."
+          },
+          {
+            "from": "ms",
+            "to": "itr",
+            "label": "Map-Reply",
+            "color": "green",
+            "note": "RLOC_B1 and RLOC_B2 with priority and weight."
+          },
+          {
+            "from": "itr",
+            "to": "etr",
+            "label": "Encapsulated packet",
+            "color": "blue",
+            "note": "Outer header RLOC_A1 to RLOC_B1."
+          },
+          {
+            "from": "etr",
+            "to": "hostb",
+            "label": "Decapsulated packet",
+            "color": "neutral"
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "HEADERS ON A LISP-ENCAPSULATED PACKET, OUTER TO INNER",
+      "data": {
+        "layers": [
+          {
+            "label": "Outer IP header",
+            "detail": "RLOCs as source and destination"
+          },
+          {
+            "label": "UDP header",
+            "detail": "Port 4341, usually zero checksum"
+          },
+          {
+            "label": "LISP header",
+            "detail": "Reachability bits and Instance ID",
+            "highlight": true
+          },
+          {
+            "label": "Inner IP header",
+            "detail": "EIDs as source and destination"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9300]",
+      "text": "The Locator/ID Separation Protocol (LISP), RFC 9300.",
+      "rfc": 9300
+    },
+    {
+      "number": "[RFC9301]",
+      "text": "Locator/ID Separation Protocol (LISP) Control Plane, RFC 9301.",
+      "rfc": 9301
+    },
+    {
+      "number": "[RFC4984]",
+      "text": "Meyer, D., Ed., Zhang, L., Ed., and K. Fall, Ed., \"Report from the IAB Workshop on Routing and Addressing\", RFC 4984, September 2007.",
+      "rfc": 4984
+    },
+    {
+      "number": "[RFC6831]",
+      "text": "Farinacci, D., Meyer, D., Zwiebel, J., and S. Venaas, \"The Locator/ID Separation Protocol (LISP) for Multicast Environments\", RFC 6831, January 2013.",
+      "rfc": 6831
+    },
+    {
+      "number": "[RFC6832]",
+      "text": "Lewis, D., Meyer, D., Farinacci, D., and V. Fuller, \"Interworking between Locator/ID Separation Protocol (LISP) and Non-LISP Sites\", RFC 6832, January 2013.",
+      "rfc": 6832
+    },
+    {
+      "number": "[RFC6836]",
+      "text": "Locator/ID Separation Protocol Alternative Logical Topology (LISP+ALT), RFC 6836.",
+      "rfc": 6836
+    },
+    {
+      "number": "[RFC8111]",
+      "text": "Locator/ID Separation Protocol Delegated Database Tree (LISP-DDT), RFC 8111.",
+      "rfc": 8111
+    },
+    {
+      "number": "[RFC7835]",
+      "text": "Locator/ID Separation Protocol (LISP) Threat Analysis, RFC 7835.",
+      "rfc": 7835
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

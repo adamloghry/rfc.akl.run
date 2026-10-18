@@ -10,13 +10,179 @@
   "questions": [
     "tfmcc",
     "multicast congestion control",
-    "tcp-friendly multicast"
+    "tcp-friendly multicast",
+    "what is tfmcc",
+    "how does multicast congestion control work",
+    "what is the current limiting receiver"
+  ],
+  "tags": [
+    "Multicast",
+    "Congestion Control"
+  ],
+  "subtitle": "A way for a multicast sender to share the network fairly with TCP by following its slowest receiver.",
+  "tldr": {
+    "problem": "Multicasting to many receivers at once needs congestion control too, or the stream can take more than its fair share from TCP flows. Reporting from thousands of receivers must also not flood the sender.",
+    "mechanism": "Each receiver measures its own loss event rate and round-trip time and computes a TCP-friendly rate with a throughput equation. A feedback suppression scheme lets only a few receivers report, and the sender follows the one with the lowest rate, called the current limiting receiver.",
+    "outcome": "The sender adapts to the worst receiver and keeps a smooth rate, which suits streaming media. The RFC is Experimental, and the authors say the Reliable Multicast Transport group intends to resubmit it as a Proposed Standard once the scheme is deemed adequate.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Status",
+      "value": "Experimental"
+    },
+    {
+      "label": "Feedback round length",
+      "value": "6 x maximum RTT (4 x for ASM)"
+    },
+    {
+      "label": "Initial maximum RTT",
+      "value": "at least 500 ms on the public Internet"
+    },
+    {
+      "label": "Recommended receiver bound N",
+      "value": "10,000"
+    },
+    {
+      "label": "Minimum sending rate",
+      "value": "1 packet every 8 seconds"
+    },
+    {
+      "label": "Loss detection",
+      "value": "3 later packets arrived"
+    }
+  ],
+  "today": "<p>RFC 4654 is an Experimental RFC, and the unit metadata lists no RFC that obsoletes or updates it. The text says the Reliable Multicast Transport group intended to resubmit it as a Proposed Standard once the scheme was deemed adequate.</p>",
+  "glossary": [
+    "congestion-control",
+    "multicast",
+    "tcp",
+    "unicast",
+    "rtp",
+    "feedback-implosion"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What TFMCC Is For",
+      "content": "<p><strong>TFMCC</strong> (TCP-Friendly Multicast Congestion Control) is a source-based, single-rate congestion control scheme. It builds on the unicast TCP-Friendly Rate Control mechanism, <a href='/3448/'>RFC 3448</a>'s TFRC, and it scales to receiver sets on the order of several thousand receivers. As much of the work as possible sits at the receivers.</p><p>It is a building block, not a full protocol. The RFC does not define packet formats, reliability or implementation details, and says the mechanism could be used in a transport protocol such as RTP. A multicast flow is called reasonably fair if its rate is generally within a factor of two of the rate of a TCP flow from the sender to the slowest receiver under the same conditions.</p><p>The price of smoothness is slower reaction to changes in available bandwidth. The RFC suggests TFMCC when an application needs smooth throughput, and PGMCC for applications that just want to multicast as much data as possible as fast as possible.</p><p>The RFC also lists limits. It works with both Any-Source Multicast, where feedback is multicast, and Source-Specific Multicast, where receivers unicast feedback to the sender. It should not be used together with TCP if the bottleneck link capacity is below 30KBit/s. It is designed for fixed packet sizes with a varying packets-per-second rate, so applications that vary packet size instead, such as audio, cannot use it.</p>",
+      "eli5": "<p>This is a set of rules for a sender that talks to many listeners at once and wants to be fair to everyone else sharing the road.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "Protocol Overview and Packet Contents",
+      "content": "<p>Each receiver measures its loss event rate and round-trip time (RTT), then plugs them into a TCP throughput equation to get a rate that is TCP-friendly for its own path. A <strong>loss event</strong> is one or more lost or marked packets among the packets received during one RTT, where marked means an ECN congestion indication.</p><p>Only a subset of receivers send feedback, chosen by a distributed suppression mechanism that favours receivers reporting low rates. The sender picks the receiver with the lowest rate as the <strong>current limiting receiver</strong> (CLR). When feedback with an even lower rate arrives, that receiver becomes CLR and the sending rate drops to match. The rate rises when the CLR reports a higher calculated rate than the current sending rate.</p><p>The recommended equation is a simplified Reno TCP throughput formula, where <code>X</code> is the rate in bits per second, <code>s</code> the packet size in bytes, <code>R</code> the RTT in seconds and <code>p</code> the loss event rate between 0.0 and 1.0.</p><p>Sender packets carry a sequence number, a suppression rate <code>X_supp</code>, a timestamp, a receiver ID with an echoed timestamp, an <code>is_CLR</code> flag, a feedback round counter and a maximum RTT <code>R_max</code>. Feedback packets carry a receiver ID, flags <code>have_RTT</code>, <code>have_loss</code> and <code>receiver_leave</code>, a timestamp, an echo of the last data packet timestamp, a feedback round echo and the desired rate <code>X_r</code>. The RFC leaves exact packet formats to the transport protocol.</p>",
+      "eli5": "<p>Every listener works out how fast the speaker could talk without bothering others. The speaker slows down to the slowest listener's number.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "The Data Sender",
+      "content": "<p>The sender starts with the maximum RTT set above the highest receiver RTT, and at least 500 milliseconds for the public Internet. The sending rate starts at 1 packet per maximum RTT. For each feedback packet it computes the receiver's instantaneous RTT and raises <code>R_max</code> if needed; otherwise the maximum drifts down to <code>MAX(R_max * 0.9, R_peak)</code> after a feedback round.</p><p>When a report arrives, four cases decide the rate. With no CLR, the reporter becomes CLR and the rate moves toward its rate in steps of at most <code>8s/R_max</code> bits per second every <code>R_max</code>. If another receiver reports a lower rate than the current one, it becomes CLR and the rate drops straight to it. If the old CLR announced it is leaving, a new CLR is chosen but the rate is not raised for a feedback round. If the report comes from the CLR itself, the rate becomes the lower of its report and <code>X + 8s/R_max</code>.</p><p>Silence is treated as a warning. With no CLR report for 4 RTTs the rate is cut in half unless the CLR was chosen less than 10 RTTs ago. After 10 RTTs the sender assumes the CLR left. For every 10 consecutive RTTs without any feedback the rate is halved again, down to a floor of one packet every 8 seconds.</p><p>Feedback is organised in <strong>feedback rounds</strong> lasting six times the maximum RTT, or four times for ASM. The suppression rate is reduced to <code>(1-g) * X_r</code> as lower-rate feedback arrives, with <code>g</code> recommended as 0.1. A <strong>slowstart</strong> phase lets the rate grow exponentially at the start, limited by receivers reporting twice their receive rate, and ends at the first reported packet loss.</p><p>Because operating systems cannot schedule precisely, the sender computes an inter-packet interval <code>ts_ipi = 8s/X</code> and allows slack <code>delta = min(ts_ipi/2, ts_gran/2)</code>. A timer granularity of 10 milliseconds can be assumed if unknown.</p>",
+      "eli5": "<p>The speaker follows the slowest listener. If that listener goes quiet, the speaker gradually talks slower and slower until someone speaks up again.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "The Data Receivers",
+      "content": "<p>A receiver starts when it gets its first data packet, using the maximum RTT in that packet as its RTT until it makes a real measurement. It measures RTT by sending a timestamp and getting it echoed. The sample is smoothed with <code>R = q*R + (1-q)*R_sample</code>, where q of 0.5 is recommended for ordinary receivers and 0.9 for the CLR. Between echoes, a one-way delay adjustment updates the estimate, and the clocks do not need to be synchronized.</p><p>With no loss events yet, a receiver cannot use the equation, so it reports twice its measured receive rate. After a loss it uses the equation, falling back to the maximum RTT if it has no RTT. A receiver may clamp its reported rate to 1 packet per 8 seconds, but must leave the group if its calculated rate stays below the reported rate, and the sender's rate above it, for more than 120 seconds.</p><p>To avoid a <strong>feedback implosion</strong>, non-CLR receivers set a random timer <code>t = max(T * (1 + log(x)/log(N)), 0)</code>, where <code>x</code> is uniform in (0,1], <code>T</code> is the round duration and <code>N</code> is an upper bound on the receiver count. The RFC recommends N of 10,000 and capping a session at 10,000 receivers. The timer is cancelled if a packet shows a suppression rate below the receiver's own calculated rate, with at least its RTT as the maximum RTT. The CLR reports once per RTT independently and is never suppressed.</p>",
+      "eli5": "<p>Each listener waits a random time before raising a hand, and puts it down if someone with a worse problem already spoke. The one with the biggest problem has the best chance of being heard first.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "5",
+      "title": "Measuring the Loss Event Rate",
+      "content": "<p>Receivers detect loss from sequence numbers. A packet is considered lost when at least three packets with higher sequence numbers have arrived, the same threshold as in TCP. Unlike TCP, a late packet can still fill the hole and the rate is recalculated. For ECN-capable connections, a marked packet counts as a congestion event as soon as it arrives. A retransmission must receive a new sequence number.</p><p>Lost packets are grouped into loss events using interpolated arrival times: a new lost packet belongs to the existing loss event if the earlier loss time plus the RTT is at least its time. The loss event rate is <code>p = 1 / I_mean</code>, where <code>I_mean</code> is a weighted average of the most recent loss intervals. For n of 8 the weights are 1.0, 1.0, 1.0, 1.0, 0.8, 0.6, 0.4, 0.2, and the RFC warns against n significantly greater than 8 for traffic competing with TCP in the global Internet.</p><p>An optional <strong>history discounting</strong> mechanism lets receivers react faster when the current interval is more than twice the average, with a recommended THRESHOLD of 0.5. After the first loss event, the receiver seeds its history with a synthetic interval derived from the rate received in the last RTT, because the packets before the first loss do not reflect the real loss rate.</p>",
+      "eli5": "<p>Listeners count how often words get lost in a row, treating a burst of lost words as one problem, and they pay more attention to recent trouble than to old trouble.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>TFMCC is not a transport protocol itself, so security mainly depends on the transport protocol used with it. Spoofed feedback could be used for denial of service, so a transport protocol should accept feedback only from valid receivers.</p><p>A greedy receiver can influence the rate only if it is the CLR, and if it inflates its rate above the second-lowest receiver it stops being CLR. It can significantly raise the rate only if it is the only participant. A receiver claiming a very low rate can make the session useless, but cannot hurt the network itself. Protocols using ECN with TFMCC will probably want the ECN nonce.</p>",
+      "eli5": "<p>A fibbing listener can only make the speaker go slower, not faster, unless it is the only listener.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THROUGHPUT EQUATION (1) AS PRINTED IN RFC 4654",
+      "data": {
+        "title": "Recommended TCP throughput equation",
+        "lang": "text",
+        "code": "                              8 s\nX =  ---------------------------------------------------------   (1)\n      R * (sqrt(2*p/3) + (12*sqrt(3*p/8) * p * (1+32*p^2)))"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "HOW TFMCC LIMITS FEEDBACK (RFC 4654, SECTIONS 3.4 AND 4.5)",
+      "data": {
+        "items": [
+          {
+            "title": "Feedback rounds",
+            "text": "Each lasts six times the maximum RTT, or four times for ASM."
+          },
+          {
+            "title": "Random timers",
+            "text": "Non-CLR receivers wait an exponentially weighted random time before reporting."
+          },
+          {
+            "title": "Suppression rate",
+            "text": "The sender lowers X_supp as reports arrive, and receivers with higher rates stay quiet."
+          },
+          {
+            "title": "Current limiting receiver",
+            "text": "The lowest-rate receiver reports once per RTT and is never suppressed."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Whetten, B., Vicisano, L., Kermode, R., Handley, M., Floyd, S., and M. Luby, \"Reliable Multicast Transport Building Blocks for One-to-Many Bulk-Data Transfer\", RFC 3048, January 2001.",
+      "rfc": 3048
+    },
+    {
+      "number": "[2]",
+      "text": "Kermode, R. and L. Vicisano, \"Author Guidelines for Reliable Multicast Transport (RMT) Building Blocks and Protocol Instantiation documents\", RFC 3269, April 2002.",
+      "rfc": 3269
+    },
+    {
+      "number": "[5]",
+      "text": "Adamson, B., Bormann, C., Handley, M., and J. Macker, \"Negative-Acknowledgment (NACK)-Oriented Reliable Multicast (NORM) Building Blocks\", RFC 3941, November 2004.",
+      "rfc": 3941
+    },
+    {
+      "number": "[9]",
+      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
+      "rfc": 3168
+    },
+    {
+      "number": "[11]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "rfc": 3550
+    },
+    {
+      "number": "[12]",
+      "text": "Spring, N., Wetherall, D., and D. Ely, \"Robust Explicit Congestion Notification (ECN) Signaling with Nonces\", RFC 3540, June 2003.",
+      "rfc": 3540
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -9,13 +9,155 @@
   },
   "questions": [
     "ipsec transport mode for routing protocols",
-    "secure ospf with ipsec transport mode"
+    "secure ospf with ipsec transport mode",
+    "how to use ipsec with dynamic routing",
+    "ipip encapsulation with ipsec",
+    "virtual network ipsec routing conflict"
+  ],
+  "tags": [
+    "Security",
+    "Routing",
+    "IPsec"
+  ],
+  "subtitle": "How to secure routing exchanges between gateways without confusing network routing.",
+  "tldr": {
+    "problem": "IPsec tunnel mode, which encrypts the original IP header, breaks dynamic routing because routers forward based on IP addresses and routing table lookups, and the tunnel mode obscures the original destination address. Routing protocols need to see the original addresses to exchange connectivity information.",
+    "mechanism": "IIPtran (IPIP Tunnel + IPsec Transport Mode) separates encapsulation from encryption: first, IPIP wraps the packet in a new IP header for the tunnel; then IPsec transport mode encrypts that tunnel packet without hiding the tunnel's destination address from the routing protocol.",
+    "outcome": "This allows dynamic routing inside virtual networks secured by IPsec, using existing standards (RFC 2003 IPIP, existing IPsec) without changes to the IPsec architecture. The resulting packets on the wire are indistinguishable from tunnel-mode packets, ensuring interoperability.",
+    "outcomeLabel": "Routing and security together"
+  },
+  "facts": [
+    {
+      "label": "Two IPsec modes",
+      "value": "Transport (hides data, shows outer IP), Tunnel (hides all, adds outer IP)"
+    },
+    {
+      "label": "IIPtran steps",
+      "value": "1. IPIP encapsulation, 2. IPsec transport mode"
+    },
+    {
+      "label": "Packet indistinguishable",
+      "value": "IIPtran and tunnel mode produce identical wire format"
+    },
+    {
+      "label": "Dynamic routing",
+      "value": "Enabled by IPIP interfaces visible to routing protocols"
+    }
+  ],
+  "today": "<p>RFC 3884 is Informational. It documents a working solution to a real problem with IPsec and dynamic routing in virtual networks. The IIPtran approach is implemented in the KAME project's IPv6/IPsec stack and has been used in practical virtual network deployments. The RFC itself does not update or obsolete the IPsec architecture (RFC 2401), which remains in effect; rather, it demonstrates how to use existing IPsec tools in a way that supports dynamic routing, and is available as a reference for implementers and designers of VPN and overlay network systems.</p>",
+  "glossary": [
+    "security-association"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Problem Overview",
+      "content": "<p>A virtual network (VN) is a logical network built on top of an underlying physical network. Virtual routers inside the VN forward packets the same way real routers do: by looking at the destination IP address and consulting a routing table. Virtual links can be secured using IPsec tunnel mode, creating a virtual private network (VPN).</p><p>However, dynamic routing protocols (like OSPF or BGP) exchange reachability information with neighbors directly connected to them. When IPsec tunnel mode is used, the tunnel mode SA (security association) encapsulates the original packet inside a new IP header for encryption. The problem is that the IPsec architecture does not define how these tunnel mode SAs interact with the routing table and dynamic routing protocols. Some implementations make SAs invisible to the routing table; in those cases, dynamic routing inside the VN breaks because the router has no way to know that a route exists through the tunnel.</p>",
+      "eli5": "<p>When routers want to talk securely, they need to both encrypt messages and know how to reach each other. Tunnel mode makes messages secret but hides the path, confusing routing.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "How IPsec Modes Work",
+      "content": "<p><strong>Transport mode</strong> inserts an IPsec header between the original IP header and the payload. The security association lookup uses the original IP header and payload to find the right keys and algorithm. Transport mode is intended for host-to-host communication where both endpoints trust each other directly.</p><p><strong>Tunnel mode</strong> adds an entire new IP header and then applies IPsec to the result. The original packet (IP header and payload) becomes the payload of the tunnel packet. The security association lookup still uses the original IP header and payload, but the tunnel mode SA also specifies the source and destination addresses for the outer tunnel header. The tunnel mode SA lookup thus determines not only the encryption but also the tunnel endpoints—exactly which gateway the packet must traverse to reach its destination.</p><p>The problem: when tunnel mode SAs are used between routers (gateways), the tunnel endpoint addresses are burned into the SA. Dynamic routing protocols, which discover routes by learning which neighbors are reachable, have no way to interact with the SAs because the IPsec architecture does not require them to be represented as network interfaces.</p>",
+      "eli5": "<p>Transport mode hides the data but keeps the addresses visible. Tunnel mode hides both, wrapping the whole packet in a new envelope. Routers can't use the tunnel if they don't know it exists.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "IIPtran: IPIP + Transport Mode",
+      "content": "<p>The solution proposed is <strong>IIPtran</strong>: replace IPsec tunnel mode with a combination of RFC 2003 IPIP encapsulation and IPsec transport mode.</p><p>IPIP (IP in IP) is a simple encapsulation: prepend a new IP header to an existing IP packet, carrying the inner packet as the payload. RFC 2003 specifies IPIP as a full-fledged interface that can have an IP address, be configured in a routing table, and be used for static or dynamic routing.</p><p>IIPtran performs IPIP encapsulation first, creating a tunnel packet. Then it applies IPsec transport mode to that tunnel packet. The SA lookup uses the tunnel IP header as the source and destination, not the inner addresses. Crucially, because IPIP tunnels are interfaces, they can be referenced in the routing table. Dynamic routing protocols can learn about tunnel interfaces the same way they learn about any other interface.</p><p>The resulting packet on the wire is identical to a tunnel-mode packet: outer IP header, IPsec header, inner IP header, payload. But the processing is different and avoids the tunnel/routing conflict because the tunnel encapsulation is now decoupled from the security mechanism.</p>",
+      "eli5": "<p>Instead of one step that both hides the packet and specifies the tunnel, do it in two steps: first hide the path inside a tunnel interface (which the router knows about), then encrypt. The router can work with the tunnel because it is a real interface.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "4",
+      "title": "Comparison with Alternatives",
+      "content": "<p>The RFC compares IIPtran with three other approaches:</p><ul><li><strong>Alternative 1: IPsec with Interface SAs.</strong> Require each IPsec tunnel mode SA to act as a network interface. Routing protocols can then learn about the tunnels. This solves the problem but requires extending the IPsec specification to define SA interfaces and their management, and it recapitulates the entirety of RFC 2003 IPIP inside IPsec, violating modularity.</li><li><strong>Alternative 2: IPsec with Initial Forwarding Lookup.</strong> Insert an extra forwarding lookup before IPsec tunnel mode processing to determine the outbound interface. This does not support dynamic routing because tunnel mode SAs are still not interfaces visible to the routing protocols.</li><li><strong>Alternative 3: IPsec with Integrated Forwarding.</strong> Modify routing protocols and forwarding mechanisms to consult both routing tables and IPsec security association databases. This requires changes to many routing implementations and is unclear how to apply with transport-layer selectors.</li></ul><p>IIPtran outperforms these alternatives: it supports dynamic routing, requires no changes to IPsec, uses existing IPIP standards, and actually simplifies IPsec by eliminating the need for tunnel mode in this context.</p>",
+      "eli5": "<p>Three other ideas could solve the problem but all require changing IPsec or the routers. IIPtran solves it by using existing tools (IPIP and transport mode) in a new combination.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and Interoperability",
+      "content": "<p>IIPtran provides the same security as tunnel mode IPsec: both encryption and authentication are performed by the IPsec transport mode processing on the outer (tunnel) packet. The resulting packets on the wire are indistinguishable from tunnel-mode packets given the same keys, so the two methods interoperate: a tunnel-mode endpoint can communicate with an IIPtran endpoint without knowing which mechanism the other side uses.</p><p>One subtlety: when tunnel mode SAs specify selectors (rules about which traffic can use the SA), the selectors normally match on the inner IP header and transport headers. With IIPtran, the SA lookup happens on the outer tunnel header, so selectors would need to traverse the inner IP header to match on inner addresses or port numbers. RFC 2401 already allows this traversal, so no IPsec change is strictly required, though a small extension clarifying that IP is a recognized extension header would improve clarity.</p><p>For virtual network routing, wildcard selectors are typically used to support dynamic routing of traffic between arbitrary internal addresses through a small set of pre-configured tunnels, so this limitation may not be practical in most VN scenarios.</p>",
+      "eli5": "<p>The encryption and authentication are just as strong. The packets look the same on the network. A server using the old tunnel mode and a server using IIPtran can talk to each other without even knowing the difference.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "contrast",
+      "anchor": "design",
+      "position": "before",
+      "caption": "IPsec tunnel mode vs IIPtran packet structure",
+      "data": {
+        "left": {
+          "title": "Tunnel Mode",
+          "from": "gateway",
+          "to": "gateway",
+          "desc": "IPsec adds outer header and encrypts inner header. Routing sees only tunnel endpoints."
+        },
+        "right": {
+          "title": "IIPtran",
+          "from": "gateway",
+          "to": "gateway",
+          "desc": "IPIP adds outer header (interface), then transport mode encrypts outer packet. Routing sees tunnel interface."
+        },
+        "joiner": "versus"
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "design",
+      "position": "after",
+      "caption": "IIPtran packet layout (same on wire as tunnel mode, but created differently)",
+      "data": {
+        "title": "IIPtran Packet",
+        "lang": "text",
+        "code": "+==================+==============+-----------------+---------+\n| Tunnel IP Header | IPsec Header | Orig. IP Header | Payload |\n+==================+==============+-----------------+---------+\n       (outer)        (ESP/AH)        (inner)          (data)\n\nSA lookup on tunnel IP header (outer source, outer dest)\nIPsec transport mode encrypts/authenticates outer packet\nIPIP tunnel interface is visible to routing protocols"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Kent, S. and R. Atkinson, \"Security Architecture for the Internet Protocol\", RFC 2401, November 1998.",
+      "rfc": 2401
+    },
+    {
+      "number": "[2]",
+      "text": "Perkins, C., \"IP Encapsulation within IP\", RFC 2003, October 1996.",
+      "rfc": 2003
+    },
+    {
+      "number": "[3]",
+      "text": "Braden, R., \"Requirements for Internet Hosts - Communication Layers\", STD 3, RFC 1122, October 1989.",
+      "rfc": 1122
+    },
+    {
+      "number": "[4]",
+      "text": "Harkins, D. and D. Carrel, \"The Internet Key Exchange (IKE)\", RFC 2409, November 1998.",
+      "rfc": 2409
+    },
+    {
+      "number": "[5]",
+      "text": "Kent, S., \"IP Authentication Header\", RFC 2402, November 1998.",
+      "rfc": 2402
+    },
+    {
+      "number": "[6]",
+      "text": "Kent, S. and R. Atkinson, \"IP Encapsulating Security Payload (ESP)\", RFC 2406, November 1998.",
+      "rfc": 2406
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

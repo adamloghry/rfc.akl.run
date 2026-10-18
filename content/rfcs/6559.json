@@ -10,13 +10,130 @@
   "questions": [
     "reliable transport for pim",
     "pim join prune over tcp",
-    "pim without periodic refresh"
+    "pim without periodic refresh",
+    "what is port in pim",
+    "how does reliable transport improve multicast",
+    "when should port be used instead of periodic pim"
+  ],
+  "tags": [
+    "Multicast",
+    "Routing",
+    "Transport"
+  ],
+  "subtitle": "Using TCP and SCTP to reliably deliver PIM Join/Prune messages.",
+  "tldr": {
+    "problem": "PIM sends Join and Prune messages periodically to maintain multicast group membership state, consuming control bandwidth and causing long delays when packets are lost. In networks with packet loss (wireless, satellite), a lost Join may not be retransmitted for 60 seconds.",
+    "mechanism": "PORT (PIM Over Reliable Transport) uses TCP or SCTP to deliver Join/Prune messages between routers, sending them only when state changes (incremental mode) rather than periodically. The reliable transport ensures delivery without periodic retransmission.",
+    "outcome": "Control overhead is reduced, Join latency is improved in lossy networks, and multicast streams stop quickly when Prunes are lost. This is experimental and requires both neighbors to support it.",
+    "outcomeLabel": "Efficient multicast control"
+  },
+  "facts": [
+    {
+      "label": "Port number",
+      "value": "8471"
+    },
+    {
+      "label": "Transport protocols",
+      "value": "TCP, SCTP"
+    },
+    {
+      "label": "Applies to",
+      "value": "PIM-SM, Bidirectional PIM"
+    },
+    {
+      "label": "Message types",
+      "value": "Join/Prune, Keep-Alive"
+    }
+  ],
+  "today": "<p>RFC 6559 is an Experimental protocol defining a reliable transport for PIM. It has not been obsoleted or updated. Implementations and deployments are beginning to emerge in wireless and satellite networks where the bandwidth and latency benefits are most significant.</p>",
+  "glossary": [
+    "multicast",
+    "interior-gateway-protocol",
+    "tcp",
+    "sctp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem with Periodic PIM Join/Prune",
+      "content": "<p><strong>PIM (Protocol Independent Multicast)</strong> is the standard multicast routing protocol. To join a multicast group, a downstream router sends a <strong>Join</strong> message upstream. To leave, it sends a <strong>Prune</strong> message. By default, PIM sends these messages periodically (every 60 seconds or so) to refresh state, ensuring that even if a message is lost, the state will be restored when the next periodic message arrives.</p><p>This periodic model has drawbacks. First, it consumes control-plane bandwidth, multiplied across many groups and interfaces. Second, if a Join is lost in a network with packet loss (common in wireless and satellite networks), the downstream router must wait up to 60 seconds before retransmitting—a long delay for users. Third, when a user leaves a multicast group, the Prune message may be lost, and the upstream router continues sending the multicast stream for up to 3 minutes until the state times out, wasting bandwidth in resource-constrained networks.</p><p>RFC 6559 solves this by proposing <strong>PORT (PIM Over Reliable Transport)</strong>, which carries Join/Prune messages over TCP or SCTP instead of as periodic IP datagrams. Reliable transport guarantees delivery, so routers send Join/Prune messages only when state changes (incremental mode), not periodically.</p>",
+      "eli5": "<p>Normally, routers say 'send me this channel' every minute, whether anything changed or not. If the message gets lost, they wait a whole minute to repeat. With reliable transport, they only say it once, and the network guarantees the message gets there. If they want to stop receiving, the network quickly stops sending.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "How PORT Works",
+      "content": "<p>PORT is negotiated between neighboring PIM routers using <strong>PIM Hello options</strong>. When a router is configured to use PORT, it includes a <strong>PIM-over-TCP-Capable</strong> or <strong>PIM-over-SCTP-Capable</strong> option in its Hello messages to announce its capability.</p><p>When two neighbors both announce PORT capability, they establish a TCP or SCTP connection (port 8471) between them. If both announce both TCP and SCTP, SCTP is preferred because it can handle connection collisions and multiple streams. Once the connection is established, the routers stop sending native (datagram) Join/Prune messages to each other and use only PORT messages carried over the connection.</p><p>Downstream routers then send <strong>incremental</strong> Join/Prune messages over the connection: a Join only when a group is first joined, a Prune only when the last interest in a group is withdrawn. The upstream router no longer maintains timers on outgoing interfaces for PORT-connected neighbors. Instead, it explicitly tracks which downstream routers have expressed interest and forwards traffic only when at least one is interested.</p><p>If the connection is lost, routers immediately try to reestablish it. When a connection comes back up, routers send a full state refresh to ensure the neighbor has the correct information before transitioning to incremental updates again. Routers can mix PORT-capable and non-PORT neighbors on the same interface, using incremental updates for PORT neighbors and periodic updates for non-PORT neighbors.</p>",
+      "eli5": "<p>Routers shake hands and say 'I support reliable transport'. If both agree, they open a phone line (TCP or SCTP connection) between them. Then they only send messages when something changes. The network keeps the line open and resends any message that gets lost on that line.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Connection Establishment and Maintenance",
+      "content": "<p>When two PORT-capable neighbors appear on a link, they negotiate which transport to use and establish a connection. The routers compare connection IDs (typically source IP addresses) announced in their Hello options. The router with the lower connection ID initiates the active open (client role), while the router with the higher ID performs the passive open (server role). This avoids simultaneous open attempts.</p><p>For SCTP, the comparison is not needed because SCTP's protocol handles connection collisions automatically. Both routers can attempt to connect, and SCTP will merge them into a single connection.</p><p>Once connected, both routers send a full set of Join/Prune messages for all relevant state. This is necessary because the routers cannot be certain that all previous state was received, especially when transitioning from datagram mode or recovering from a connection loss. After this initial synchronization, they switch to incremental updates.</p><p>If a connection goes down, routers do not send any Join/Prune messages (neither Native nor PORT) until the connection is reestablished. When reestablishing, another full state refresh occurs. Routers use <strong>keep-alive messages</strong> to detect connection failure and can be configured for connection recovery options, such as on-demand connection establishment (establishing the connection only when needed) rather than immediate establishment.</p><p>When a Connection ID changes (due to configuration changes), routers must tear down the old connection and establish a new one with the new ID pair.</p>",
+      "eli5": "<p>Two routers compare their IDs; the lower one calls the higher one to set up the connection. When connected, they share their full address book. If the line goes down, they both hang up and stop talking until they can reconnect. When they reconnect, they share their full address book again to make sure they're in sync.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "PORT Messages and Explicit Tracking",
+      "content": "<p>PORT Join/Prune messages are wrapped in a <strong>PORT message</strong> container, which is carried as the payload of TCP or SCTP. The PORT message contains:</p><ul><li><strong>PORT Join/Prune messages:</strong> The actual Join/Prune message as defined in the base PIM specification, but carried over reliable transport instead of as a datagram.</li><li><strong>PORT Keep-Alive messages:</strong> Sent periodically (more frequently than datagram-mode Hello messages) to detect connection failures and ensure the connection remains alive.</li><li><strong>PORT options:</strong> Information about which address families (IPv4, IPv6) and groups are being joined or pruned.</li></ul><p>A key enhancement is <strong>explicit tracking</strong>: the upstream router maintains explicit knowledge of which downstream routers have expressed interest in each group, rather than inferring interest from the presence of periodic messages. This is critical for correct operation: if a downstream router joins a group via PORT, the upstream router must know this explicitly; otherwise, when a non-PORT neighbor sends a Prune, the upstream might incorrectly stop forwarding the group despite the PORT neighbor's interest.</p><p>The PORT message also includes an <strong>Interface ID</strong> option (from RFC 6395) to associate Join/Prune messages with the correct interface, especially important for unnumbered interfaces or when multiple interfaces share a single connection.</p>",
+      "eli5": "<p>The message says which channels to join or leave, includes a heartbeat to keep the line alive, and tells the upstream router which interface the request comes from.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "5",
+      "title": "Deployment Considerations and Security",
+      "content": "<p>RFC 6559 is experimental and requires both routers to be PORT-capable. Implementations are recommended to have PORT disabled by default, requiring explicit configuration to enable. PORT can be deployed incrementally: some neighbor pairs can use it while others use the traditional datagram mode.</p><p>PORT is most beneficial in networks with packet loss and limited bandwidth: wireless and satellite networks see immediate improvements in multicast response time. On multi-access LANs with many neighbors, PORT can create a full mesh of connections, increasing state overhead, so careful evaluation is recommended for such deployments.</p><p><strong>Security considerations:</strong> The RFC recommends sending TCP/SCTP packets with TTL/Hop Limit 255 to facilitate <strong>Generalized TTL Security Mechanism</strong> (GTSM), which verifies that packets come from directly connected neighbors. Implementations should provide an option to enable GTSM checks to protect against spoofed control messages from distant networks.</p><p>Because PORT requires both neighbors to be configured and compatible, rogue routers cannot easily inject themselves into the state management. However, like base PIM, PORT should ideally be protected by mechanisms like IPsec or other authentication schemes in untrusted networks.</p>",
+      "eli5": "<p>Routers in wireless and satellite networks see the biggest benefit because they lose more messages. On regular LANs, it just trades bandwidth savings for connection overhead. Both routers must support it and be configured, so rogue routers are harder to sneak in.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC4601]",
+      "text": "Fenner, B., Handley, M., Holbrook, H., and I. Kouvelas, \"Protocol Independent Multicast - Sparse Mode (PIM-SM): Protocol Specification (Revised)\", RFC 4601, August 2006.",
+      "rfc": 4601
+    },
+    {
+      "number": "[RFC5015]",
+      "text": "Handley, M., Kouvelas, I., Speakman, T., and L. Vicisano, \"Bidirectional Protocol Independent Multicast (BIDIR-PIM)\", RFC 5015, October 2007.",
+      "rfc": 5015
+    },
+    {
+      "number": "[RFC0793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC4960]",
+      "text": "Stewart, R., Ed., \"Stream Control Transmission Protocol\", RFC 4960, September 2007.",
+      "rfc": 4960
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC5082]",
+      "text": "Gill, V., Heasley, J., Meyer, D., Savola, P., and C. Pignataro, \"The Generalized TTL Security Mechanism (GTSM)\", RFC 5082, October 2007.",
+      "rfc": 5082
+    },
+    {
+      "number": "[RFC6395]",
+      "text": "Gulrajani, S. and S. Venaas, \"An Interface Identifier (ID) Hello Object for PIM\", RFC 6395, October 2011.",
+      "rfc": 6395
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

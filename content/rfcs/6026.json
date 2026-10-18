@@ -9,13 +9,253 @@
   },
   "questions": [
     "sip invite 2xx retransmission fix",
-    "rfc 3261 invite transaction correction"
+    "rfc 3261 invite transaction correction",
+    "what is rfc 6026",
+    "what is the accepted state in sip invite",
+    "what are sip timer l and timer m",
+    "why must sip proxies not forward stray responses"
+  ],
+  "tags": [
+    "SIP",
+    "Signaling",
+    "Errata Fix"
+  ],
+  "subtitle": "A fix to SIP that keeps INVITE transactions alive after a 2xx reply so retransmitted requests are not mistaken for new calls.",
+  "tldr": {
+    "problem": "RFC 3261 told SIP elements to destroy INVITE transaction state as soon as a 2xx success response passed through. A retransmitted INVITE then looked like a brand new request, and the rule to forward stray responses statelessly was a security risk.",
+    "mechanism": "RFC 6026 adds an Accepted state to both the INVITE client and server state machines, with new Timer L and Timer M set to 64*T1, so the transaction stays around to absorb retransmissions. It also forbids forwarding responses that match no transaction.",
+    "outcome": "Elements follow the corrected state machines and stop forwarding stray responses. The change is backward-compatible with RFC 3261 peers.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Timer L",
+      "value": "64*T1"
+    },
+    {
+      "label": "Timer M",
+      "value": "64*T1"
+    },
+    {
+      "label": "Extra state hold time",
+      "value": "32 seconds longer than RFC 3261"
+    },
+    {
+      "label": "New state",
+      "value": "Accepted (client and server)"
+    },
+    {
+      "label": "Updates",
+      "value": "RFC 3261"
+    }
+  ],
+  "today": "<p>RFC 6026 is a Proposed Standard that updates <a href='/3261/'>RFC 3261</a>. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "sip",
+    "sip-transaction",
+    "sip-proxy",
+    "sip-user-agent",
+    "finite-state-machine",
+    "retransmission",
+    "stateless-protocol",
+    "requirement-keyword"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "3",
+      "title": "The Problem with RFC 3261",
+      "content": "<p>An <strong>INVITE</strong> request starts a SIP session. An initial INVITE can <em>fork</em> at intermediaries, so more than one endpoint may accept it, and the requester is meant to receive all of the resulting 2xx responses.</p><p>RFC 3261 made this work with two rules. First, every element had to destroy its INVITE client transaction state as soon as it forwarded a matching 2xx. Second, proxies had to forward any 2xx that matched no transaction (a <strong>stray response</strong>) statelessly, and user agents had to hand such responses to the UA core.</p><p>Implementation experience showed the text was wrong. Once an element with a server transaction, such as a proxy, deletes that state, any retransmission of the INVITE is treated as a new request and may be forwarded to different places than the original. The RFC notes that many deployed implementations made proprietary adjustments to avoid this.</p><p>RFC 3261 also moved a transaction straight to Terminated after an unrecoverable transport error while sending a response. Retransmitted INVITEs that arrived afterwards were then processed as new requests too.</p>",
+      "eli5": "<p>The old rules threw away the record of a call request too early. When the same request showed up again, the phone thought it was a brand new one.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "4",
+      "title": "Summary of the Change",
+      "content": "<p>RFC 6026 updates RFC 3261 in four ways.</p><ul><li>The INVITE client state machine gets a new state and changed transitions, so the client transaction stays in place to receive multiple 2xx responses.</li><li>The INVITE server state machine gets a new state that absorbs retransmissions of the INVITE after a 2xx has been sent.</li><li>Server state machine transitions change so that retransmissions are still absorbed after an unrecoverable transport error when sending a response.</li><li>Forwarding stray responses to INVITE requests is forbidden, not just stray 2xx responses.</li></ul><p>The core rule is that an element sending or receiving a 2xx to an INVITE <strong>MUST NOT</strong> destroy the matching INVITE transaction state. That state is needed to process retransmissions of the request and the retransmission of the 2xx and ACK that follow.</p><div class='callout callout-info'><p>If not implemented, a strictly RFC 3261 element processes retransmitted initial INVITEs as new requests, and proxies may be used as anonymizing forwarders of bulk traffic.</p></div>",
+      "eli5": "<p>The fix says: keep the paperwork for a request a bit longer, and do not pass along mail that does not belong to any request you know about.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "7.1",
+      "title": "The INVITE Server Transaction",
+      "content": "<p>The server transaction gains an <strong>Accepted</strong> state and a new <strong>Timer L</strong>. When the transaction user (TU) issues a 2xx while the transaction is in Proceeding, the machine MUST move to Accepted and set Timer L to <code>64*T1</code>, where T1 is the round-trip time estimate from RFC 3261.</p><p>In Accepted, retransmitted INVITEs match the transaction and are absorbed without reaching the TU. The server transaction MUST NOT generate 2xx retransmissions itself, because RFC 3261 makes the TU responsible for that. Any 2xx the TU passes down is sent to the transport layer, and any ACK received is passed straight to the TU instead of being absorbed.</p><p>When Timer L fires in Accepted, the machine moves to Terminated and is destroyed immediately. RFC 6026 explains that the 64*T1 value matches both Timer B in the next upstream client state machine and the time a UAS core might spend retransmitting the 2xx while waiting for an ACK.</p><p>For transport errors, a server transaction MUST NOT discard its state just because a response could not be sent. It informs the TU and stays in its current state, and timers eventually terminate it.</p>",
+      "eli5": "<p>After saying yes, the receiver keeps a note on its desk for a short, fixed time. If the same question is asked again, it just ignores it. When the timer rings, the note is thrown away.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "7.2",
+      "title": "The INVITE Client Transaction",
+      "content": "<p>The client transaction also gets an <strong>Accepted</strong> state, plus a new <strong>Timer M</strong>. If a 2xx arrives while the client is in Calling or Proceeding, it MUST move to Accepted, pass the 2xx to the TU and set Timer M to <code>64*T1</code>.</p><p>While in Accepted, further matching 2xx responses are passed to the TU. These can be retransmissions of the 2xx, or extra 2xx responses from other branches of a downstream fork. The client transaction MUST NOT create an ACK for a 2xx; the TU does that, and a UAC core sends the ACK using a new transaction. When Timer M fires, the transaction moves to Terminated and is destroyed.</p><p>Responses that match no client transaction are simply dropped. The RFC says implementations may log them but should consider the impact of large numbers of malicious stray responses.</p><p>Client transactions do not need to keep state after an unrecoverable transport error. The TU has already been notified, and any later retransmitted response will be dropped because no transaction matches.</p>",
+      "eli5": "<p>The caller also keeps its note for a while, because several friends might each say yes at different times. Every yes gets passed along until the timer rings.</p>"
+    },
+    {
+      "id": "routing",
+      "number": "7.3",
+      "title": "Proxies and Stray Responses",
+      "content": "<p>A transaction-stateful proxy that receives any SIP response MUST compare its transaction identifier against existing transaction state machines. If nothing matches, the proxy MUST NOT forward the response. RFC 6026 applies this to all stray INVITE responses, not only 2xx.</p><p>The change also touches ACK handling. An ACK that matches an existing INVITE server transaction but lacks the branch parameter magic cookie from RFC 3261 (as from RFC 2543 clients) is checked against the transaction. If the transaction is in Accepted, the ACK goes directly to the TU instead of being absorbed, since the transaction ID calculation is the same for INVITE and ACK in that case.</p><p>Section 8 of the RFC then lists the exact replacement text for pages of RFC 3261 (for example Sections 16.7, 17.1.1.2, 17.2.1, 17.2.4, 18.1.2 and 18.2.1) and replacement Figures 5 and 7. It also adds Timer L and Timer M, both <code>64*T1</code>, to the timer table.</p>",
+      "eli5": "<p>A mail room that gets a letter for nobody it knows should throw it away, not forward it. That stops people from using the mail room to send junk.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>Stateless forwarding of stray responses let a proxy be compelled to forward packets that look enough like SIP responses, to destinations the sender chooses. That work was not protected by the admission policies applied to requests. The RFC says this can turn a proxy into an anonymizing forwarder in a distributed denial-of-service attack, and that endpoints can collude to tunnel non-SIP content wrapped in a SIP response envelope. Forwarding stray responses is now a violation of the specification.</p><p>The cost is that elements hold each accepted INVITE transaction 32 seconds longer than in RFC 3261. That raises the work needed for a state exhaustion attack, but the RFC says the state is necessary for correct operation.</p><p>Stateless proxies, which keep no transaction state, are not changed by this document and stay inherently vulnerable. The RFC suggests operators carefully control which peers can send traffic to them. The changes are backward-compatible: behavior is no less correct when only one peer in a transaction implements them.</p>",
+      "eli5": "<p>Throwing away letters you cannot match stops bad people from using you to deliver their junk. The price is keeping each note a little longer.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "INVITE SERVER TRANSACTION STATES (RFC 6026, FIGURE 7)",
+      "data": {
+        "states": [
+          {
+            "key": "proceeding",
+            "label": "Proceeding",
+            "initial": true
+          },
+          {
+            "key": "completed",
+            "label": "Completed"
+          },
+          {
+            "key": "accepted",
+            "label": "Accepted"
+          },
+          {
+            "key": "confirmed",
+            "label": "Confirmed"
+          },
+          {
+            "key": "terminated",
+            "label": "Terminated"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "proceeding",
+            "to": "completed",
+            "label": "300-699 from TU"
+          },
+          {
+            "from": "proceeding",
+            "to": "accepted",
+            "label": "2xx from TU"
+          },
+          {
+            "from": "completed",
+            "to": "confirmed",
+            "label": "ACK"
+          },
+          {
+            "from": "completed",
+            "to": "terminated",
+            "label": "Timer H fires"
+          },
+          {
+            "from": "confirmed",
+            "to": "terminated",
+            "label": "Timer I fires"
+          },
+          {
+            "from": "accepted",
+            "to": "terminated",
+            "label": "Timer L fires"
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "INVITE CLIENT TRANSACTION STATES (RFC 6026, FIGURE 5)",
+      "data": {
+        "states": [
+          {
+            "key": "calling",
+            "label": "Calling",
+            "initial": true
+          },
+          {
+            "key": "proceeding",
+            "label": "Proceeding"
+          },
+          {
+            "key": "completed",
+            "label": "Completed"
+          },
+          {
+            "key": "accepted",
+            "label": "Accepted"
+          },
+          {
+            "key": "terminated",
+            "label": "Terminated"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "calling",
+            "to": "proceeding",
+            "label": "1xx to TU"
+          },
+          {
+            "from": "calling",
+            "to": "accepted",
+            "label": "2xx to TU"
+          },
+          {
+            "from": "proceeding",
+            "to": "accepted",
+            "label": "2xx to TU"
+          },
+          {
+            "from": "calling",
+            "to": "completed",
+            "label": "300-699, ACK sent"
+          },
+          {
+            "from": "proceeding",
+            "to": "completed",
+            "label": "300-699, ACK sent"
+          },
+          {
+            "from": "completed",
+            "to": "terminated",
+            "label": "Timer D fires"
+          },
+          {
+            "from": "accepted",
+            "to": "terminated",
+            "label": "Timer M fires"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC3261]",
+      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
+      "rfc": 3261
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

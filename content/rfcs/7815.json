@@ -9,13 +9,212 @@
   },
   "questions": [
     "minimal ikev2 implementation",
-    "ikev2 for constrained devices"
+    "ikev2 for constrained devices",
+    "what is a minimal ikev2 implementation",
+    "can two minimal ikev2 initiators talk to each other",
+    "which ikev2 exchanges does a minimal initiator use"
+  ],
+  "tags": [
+    "IPsec",
+    "Key Exchange",
+    "Constrained Devices"
+  ],
+  "subtitle": "A stripped-down IKEv2 that only starts connections, built for tiny devices that wake up, send data and go back to sleep.",
+  "tldr": {
+    "problem": "Full IKEv2 has many optional features, which is too much code for small, power-limited devices that only need to open a secure tunnel to a bigger server.",
+    "mechanism": "A minimal implementation acts only as the initiator, runs just the IKE_SA_INIT and IKE_AUTH exchanges with shared-secret authentication, and answers every incoming request with an empty or error reply.",
+    "outcome": "It interoperates with a full IKEv2 responder, but two minimal initiators cannot talk to each other. RFC 7296 stays the authoritative description.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Transport",
+      "value": "UDP port 500"
+    },
+    {
+      "label": "Message size to support",
+      "value": "Up to 1280 octets"
+    },
+    {
+      "label": "Initial Message IDs",
+      "value": "0 and 1"
+    },
+    {
+      "label": "Exchange types",
+      "value": "IKE_SA_INIT 34, IKE_AUTH 35, CREATE_CHILD_SA 36, INFORMATIONAL 37"
+    },
+    {
+      "label": "Reference implementation size",
+      "value": "About 1000 lines of code"
+    }
+  ],
+  "today": "<p>RFC 7815 is an Informational RFC and has not been obsoleted or updated. It does not modify <a href='/7296/'>RFC 7296</a>, which remains the authoritative description of IKEv2.</p>",
+  "glossary": [
+    "ike",
+    "ipsec",
+    "security-association",
+    "pre-shared-key",
+    "nonce",
+    "diffie-hellman",
+    "traffic-selector",
+    "constrained-node",
+    "raw-public-key"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a Minimal IKEv2",
+      "content": "<p>The Internet Protocol Suite is increasingly used on small devices with severe limits on power, memory and processing. <strong>IKEv2</strong> is the part of IPsec that performs mutual authentication and sets up and maintains Security Associations (SAs). This RFC describes a minimal initiator version that is interoperable with the full protocol in <a href='/7296/'>RFC 7296</a>.</p><p>A minimal implementation only supports the initiator end. It runs the initial <code>IKE_SA_INIT</code> and <code>IKE_AUTH</code> exchanges, starts no other exchanges, and replies with an empty or error message to every incoming request. That leaves out NAT traversal, IKE SA rekey, Child SA rekey, multiple Child SAs, deleting SAs, Configuration payloads, EAP authentication and COOKIEs.</p><p>The intended devices are things like a garage door opener or a room temperature sensor. They sleep most of the time, always start the data transfer when they wake up, and create the IKEv2 SA from scratch each time, so no liveness checks are needed. The document is meant to stand alone: everything needed is copied from RFC 7296 except the description of the cryptographic algorithms. If the two documents conflict, RFC 7296 wins.</p>",
+      "eli5": "<p>Tiny gadgets like a garage door opener cannot carry a big rulebook. This is a short rulebook that only covers how to knock on the door and get let in.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "2",
+      "title": "The Initial Exchanges",
+      "content": "<p>IKEv2 messages come in request and response pairs called exchanges. The initiator is responsible for retransmission, a retransmission MUST be bitwise identical to the original request, and retransmission times MUST increase exponentially. IKEv2 runs over UDP port 500, and every implementation MUST handle messages up to 1280 octets long.</p><p>In <code>IKE_SA_INIT</code> the initiator sends its algorithm offer (SAi1), a Diffie-Hellman value (KEi) and a nonce (Ni). The responder answers with the chosen suite (SAr1), its own Diffie-Hellman value (KEr) and nonce (Nr), and possibly a certificate request, which a shared-secret implementation ignores. A minimal device usually supports exactly one set of algorithms, so its offer is static and it only checks that the reply matches what it sent.</p><p>In <code>IKE_AUTH</code> the initiator sends its identity (IDi), the AUTH payload, an SA offer for the first Child SA (SAi2), traffic selectors (TSi, TSr) and usually an <code>INITIAL_CONTACT</code> notification. That notification tells the responder that the initiator has no other IKE SAs with it, so leftover state from earlier runs can be deleted. The RFC suggests using a single IP address pair as traffic selectors, because wide wildcard ranges may be narrowed by the responder to something the initiator cannot accept.</p><p>The device must still handle two kinds of incoming request. It answers an <code>INFORMATIONAL</code> request with an empty <code>INFORMATIONAL</code> response, and it rejects a <code>CREATE_CHILD_SA</code> request with a <code>NO_ADDITIONAL_SAS</code> error notify. Because its replies have no side effects, it needs no replay protection for incoming requests and no tracking of incoming Message IDs, and its own two requests use fixed Message IDs 0 and 1.</p>",
+      "eli5": "<p>First you and the server say hello and agree on a secret handshake. Then you show you know the password. If the server asks you for anything else, you just politely say no.</p>"
+    },
+    {
+      "id": "cryptography",
+      "number": "3",
+      "title": "Keys and Shared-Secret Authentication",
+      "content": "<p>After <code>IKE_SA_INIT</code> both sides compute <code>SKEYSEED = prf(Ni | Nr, g^ir)</code>, where <code>g^ir</code> is the Diffie-Hellman shared secret. Running <code>prf+</code> over it produces seven keys: <code>SK_d</code> (for deriving Child SA keys), <code>SK_ai</code> and <code>SK_ar</code> (integrity), <code>SK_ei</code> and <code>SK_er</code> (encryption), and <code>SK_pi</code> and <code>SK_pr</code> (for building AUTH). Each direction has its own encryption and integrity key. All messages after <code>IKE_SA_INIT</code> are protected with them.</p><p>With a shared secret, each side proves knowledge of it by computing a MAC over specific octets. The AUTH value is <code>prf(prf(Shared Secret, \"Key Pad for IKEv2\"), SignedOctets)</code>. The inner prf can be precalculated because a minimal device usually supports one PRF. The initiator signs its first message plus the responder's nonce plus a MAC of its ID, and the responder does the same with its own first message and the initiator's nonce.</p><p>A device that talks to one host holds one secret, so it need not look closely at IDr: if it can verify the responder's AUTH with its secret, it knows the peer is the configured one. The Child SA keys come from <code>KEYMAT = prf+(SK_d, Ni | Nr)</code>, with keys for the initiator-to-responder direction taken before those for the other direction. Unauthenticated error notifications can be faked, so the initiator can ignore them and retransmit until it times out.</p>",
+      "eli5": "<p>Both sides mix some secret numbers together to make matching keys, like two friends who each build the same lock combination without ever saying it aloud. Then each proves they know the shared password.</p>"
+    },
+    {
+      "id": "conformance",
+      "number": "4",
+      "title": "Conformance and What Is Left Out",
+      "content": "<p>To conform to RFC 7296, an implementation must be configurable to accept PKIX certificates with RSA keys of 1024 or 2048 bits, shared-key authentication, and a mode where the responder uses certificates while the initiator uses a shared key. This document supports only shared-key authentication, with IDs of type <code>ID_KEY_ID</code>, <code>ID_FQDN</code> or <code>ID_RFC822_ADDR</code>.</p><p>Since a full RFC 7296 responder must support shared-key authentication, a minimal initiator can interoperate with every compliant responder. Certificates are left out because the validation code would be more complex than the whole minimal implementation. The author reports two proof-of-concept implementations, in perl and python, each about 1000 lines of code excluding cryptographic libraries, and both interoperated with a full IKEv2 server.</p>",
+      "eli5": "<p>Everyone who runs the big server has to accept the simple password way in. So the little gadget uses only that way and skips the heavy ID-card checking.</p>"
+    },
+    {
+      "id": "options",
+      "number": "5",
+      "title": "Optional Extras: Raw Public Keys",
+      "content": "<p>Shared secrets have a weakness: anybody who knows the secret can impersonate the server, and a secret printed on the device can be read by anyone with physical access. <strong>Raw public keys</strong> give stronger authentication without certificate complexity. The key fingerprint can still be printed on the device, and a device can also imprint on the first server it sees and verify that the key never changes afterward.</p><p>In that variant the <code>IKE_AUTH</code> messages carry a CERT payload with the raw key. Minimal implementations should use SHA-1 as the hash, since it is the SHOULD-support algorithm in RFC 7296. The format used is from <a href='/7670/'>RFC 7670</a>. Where the device does not care who the server is, as with a sensor that only reports data, the NULL authentication method in <a href='/7619/'>RFC 7619</a> allows one-way authentication. The appendices also describe an IKE SA delete notification as a useful optional feature.</p>",
+      "eli5": "<p>Instead of a password written on the box, the device can remember the server's unique fingerprint, like remembering a friend's face the first time you meet.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The RFC's security section is one sentence: because this implements the same protocol as <a href='/7296/'>RFC 7296</a>, all security considerations from that document also apply here.</p>",
+      "eli5": "<p>It is the same secure handshake as the big version, so the same safety rules apply.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "THE TWO INITIAL EXCHANGES (RFC 7815)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Minimal initiator"
+          },
+          {
+            "key": "responder",
+            "label": "Full responder"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "IKE_SA_INIT request",
+            "color": "blue",
+            "note": "SAi1, KEi, Ni; Message ID 0."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "IKE_SA_INIT response",
+            "color": "green",
+            "note": "SAr1, KEr, Nr, optional CERTREQ."
+          },
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "IKE_AUTH request",
+            "color": "blue",
+            "note": "Encrypted: IDi, AUTH, SAi2, TSi, TSr, INITIAL_CONTACT; Message ID 1."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "IKE_AUTH response",
+            "color": "green",
+            "note": "Encrypted: IDr, AUTH, SAr2, TSi, TSr."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "IKE EXCHANGE TYPES",
+      "data": {
+        "items": [
+          {
+            "code": "34",
+            "label": "IKE_SA_INIT",
+            "desc": "Negotiates algorithms and exchanges Diffie-Hellman values and nonces.",
+            "highlight": true
+          },
+          {
+            "code": "35",
+            "label": "IKE_AUTH",
+            "desc": "Authenticates both sides and sets up the first Child SA.",
+            "highlight": true
+          },
+          {
+            "code": "36",
+            "label": "CREATE_CHILD_SA",
+            "desc": "Answered by a minimal device with NO_ADDITIONAL_SAS."
+          },
+          {
+            "code": "37",
+            "label": "INFORMATIONAL",
+            "desc": "Answered by a minimal device with an empty response."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7296]",
+      "text": "Kaufman, C., Hoffman, P., Nir, Y., Eronen, P., and T. Kivinen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", STD 79, RFC 7296, October 2014.",
+      "rfc": 7296
+    },
+    {
+      "number": "[RFC7228]",
+      "text": "Bormann, C., Ersue, M., and A. Keranen, \"Terminology for Constrained-Node Networks\", RFC 7228, May 2014.",
+      "rfc": 7228
+    },
+    {
+      "number": "[RFC7670]",
+      "text": "Kivinen, T., Wouters, P., and H. Tschofenig, \"Generic Raw Public-Key Support for IKEv2\", RFC 7670, January 2016.",
+      "rfc": 7670
+    },
+    {
+      "number": "[RFC7619]",
+      "text": "Smyslov, V. and P. Wouters, \"The NULL Authentication Method in the Internet Key Exchange Protocol Version 2 (IKEv2)\", RFC 7619, August 2015.",
+      "rfc": 7619
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

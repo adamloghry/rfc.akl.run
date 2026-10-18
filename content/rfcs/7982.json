@@ -9,13 +9,195 @@
   },
   "questions": [
     "measure rtt with stun",
-    "stun fractional loss"
+    "stun fractional loss",
+    "what is stun transaction transmit counter",
+    "how to measure rtt with stun",
+    "what is stun attribute 0x8025",
+    "how does stun detect packet loss direction"
+  ],
+  "tags": [
+    "STUN",
+    "Measurement",
+    "NAT Traversal"
+  ],
+  "subtitle": "A small STUN attribute that counts retransmissions so endpoints can measure round-trip time and see which direction lost packets.",
+  "tldr": {
+    "problem": "STUN retransmissions are bit-wise identical, so a client cannot tell which transmission a response answers. That makes round-trip time hard to measure and makes a good path look flawed.",
+    "mechanism": "A new TRANSACTION_TRANSMIT_COUNTER attribute carries a Req count set by the client and a Resp count set by the server. The server echoes Req back, so the client can match each response to the transmission that caused it.",
+    "outcome": "Clients can compute RTT even when retransmits occur and get a hint about whether requests or responses were lost. It is meant as a hint, not a precise measurement.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "STUN attribute type",
+      "value": "0x8025 (comprehension-optional)"
+    },
+    {
+      "label": "Attribute value size",
+      "value": "32 bits"
+    },
+    {
+      "label": "First request Req value",
+      "value": "1"
+    },
+    {
+      "label": "Transaction ID size",
+      "value": "96 bits"
+    }
+  ],
+  "today": "<p>RFC 7982 is a Proposed Standard published in September 2016. The metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "stun",
+    "nat-traversal",
+    "nat",
+    "retransmission",
+    "transaction-id",
+    "round-trip-time",
+    "packet-loss",
+    "stateless-protocol",
+    "man-in-the-middle",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why STUN Needs Transmit Counters",
+      "content": "<p>RFC 7982 extends STUN (<a href='/5389/'>RFC 5389</a>) so that a client can correlate STUN responses with specific requests when retransmits occur. This helps the client work out path characteristics such as <strong>round-trip time</strong> (RTT) and fractional packet loss.</p><p>The motivation is ICE (<a href='/5245/'>RFC 5245</a>), which sends connectivity checks over each candidate pair and uses a static prioritization formula. Choosing the path with the lowest RTT is reasonable, but retransmits can make an otherwise good path look flawed. STUN's retransmission algorithm cannot determine RTT when a request is retransmitted, because each request and retransmission is identical.</p><p>The attribute can be used in ICE connectivity checks (STUN Binding request and response) and in TURN Allocate requests and responses (<a href='/5766/'>RFC 5766</a>) to measure loss and RTT to a TURN server. How ICE uses the numbers to improve candidate pair selection is outside the scope of the document.</p>",
+      "eli5": "<p>When a message is sent again and again, every copy looks the same, so you cannot tell which copy got the reply. This document puts a counter on each copy so you can.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "The TRANSACTION_TRANSMIT_COUNTER Attribute",
+      "content": "<p>The document defines a new comprehension-optional STUN attribute, <code>TRANSACTION_TRANSMIT_COUNTER</code>, with STUN type <code>0x8025</code>. Because the type is in the comprehension-optional range, STUN agents that do not know it can safely ignore it, and ICE falls back to normal procedures.</p><p>The attribute value is 32 bits. A 16-bit <strong>Reserved (Padding)</strong> field is followed by two 8-bit counters:</p><ul><li><code>Req</code>: the number of times the request has been transmitted with the same transaction ID.</li><li><code>Resp</code>: the number of times a response with the same transaction ID has been sent by the server. It MUST be set to zero in requests and is ignored by the receiver.</li></ul><p>The padding exists to reach the 32-bit boundary needed for STUN attributes. Receivers ignore the padding bits, but senders MUST set them to zero so the bits can be reused later.</p><p>This changes one STUN message structuring rule from RFC 5389, under which a retransmission is bit-wise identical to the previous request. Now a retransmitted request MUST be bit-wise identical except for the values in this attribute.</p>",
+      "eli5": "<p>The attribute is a tiny tag with two numbers on it: how many times the question was asked, and how many times the answer was given. A few spare bits are left empty on purpose.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Client and Server Rules",
+      "content": "<p>A client that wants to measure RTT adds the attribute to its STUN request. It MUST fill in <code>Req</code> with the number of requests transmitted to the server so far, so the first request carries 1, the first retransmit carries 2, and so on. <code>Resp</code> MUST be zero.</p><p>A server that supports the attribute processes the request as usual under RFC 5389 and MUST echo the <code>Req</code> field back in a <code>TRANSACTION_TRANSMIT_COUNTER</code> attribute in the response. A server that does not recognize the attribute ignores it, which is the existing comprehension-optional behavior.</p><p>The <code>Resp</code> field depends on whether the server keeps state:</p><ul><li>A stateless server, or one that does not want to remember the transaction ID, sets <code>Resp</code> to 0.</li><li>A stateful server sets <code>Resp</code> to the number of responses it has sent for that request.</li></ul><p>Using the echoed <code>Req</code>, the client can calculate RTT accurately even when retransmits occur. A nonzero <code>Resp</code> also tells the client how many requests the server has seen and answered, which hints at the direction in which loss occurred.</p>",
+      "eli5": "<p>The asker numbers every try. The answerer repeats the number back, so the asker knows exactly which try the answer is for. A careful answerer also says how many answers it has given.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "4",
+      "title": "Example: Spotting Where Packets Are Lost",
+      "content": "<p>The RFC walks through four cases with a stateful server. In the normal case every request and response arrives. In the other cases the two counters disagree in a telling way:</p><ul><li><strong>Upstream loss:</strong> the first request is lost and the second arrives. The client sent two requests but the response shows the server saw only one.</li><li><strong>Downstream loss:</strong> the server responded to three requests, but the client received only one response.</li><li><strong>Loss in both directions:</strong> the server notes that one request never arrived, and the client expecting three responses received only one.</li></ul><p>Upstream loss may also occur at startup when firewalls or NATs block unsolicited incoming traffic. In a reordering example, the second request reaches the server first, so the stateful server answers it with <code>Resp</code> 1 and answers the first request with <code>Resp</code> 2.</p><div class='callout callout-note'><p>The RFC says the goal is not comprehensive or accurate loss measurement. In some cases downstream loss cannot be told apart from reordering, but collecting the metrics from several clients over a longer period makes patterns easier to see.</p></div>",
+      "eli5": "<p>Counting how many tries were sent and how many were heard lets you guess whether your voice did not carry or the reply got lost on the way back.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and IANA Considerations",
+      "content": "<p>IANA has allocated the comprehension-optional codepoint <code>0x8025</code> for the attribute. For security, the considerations of RFC 5389 apply. STUN requires the 96-bit transaction ID to be uniformly random and cryptographically strong, which is good enough against an off-path attacker.</p><p>An on-path attacker can inject a fake response or modify the counter values to mislead the client and server. STUN authentication mitigates this, and since ICE uses the STUN short-term credential mechanism, the risk is judged minimal for ICE peers.</p><p>If the attribute is used with a TURN Allocate request, impersonation of the server can be prevented with the STUN long-term credential mechanism, third-party authorization (<a href='/7635/'>RFC 7635</a>), or a TLS or DTLS connection. An attacker could still corrupt, remove or delay an ICE request or response to discourage a path. Unencrypted STUN packets can be observed passively and used for reconnaissance.</p>",
+      "eli5": "<p>Someone sitting in the middle could scribble on the counters to fool both sides, so the messages should be signed or sent privately.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "TRANSACTION_TRANSMIT_COUNTER VALUE IN A REQUEST (RFC 7982)",
+      "data": {
+        "title": "TRANSACTION_TRANSMIT_COUNTER value",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "reserved",
+            "name": "Reserved (Padding)",
+            "bits": 16,
+            "desc": "Ignored by receivers; MUST be set to zero."
+          },
+          {
+            "key": "req",
+            "name": "Req",
+            "bits": 8,
+            "desc": "Times the request has been sent with the same transaction ID."
+          },
+          {
+            "key": "resp",
+            "name": "Resp",
+            "bits": 8,
+            "desc": "Responses sent by the server; MUST be zero in requests."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "UPSTREAM LOSS, STATEFUL SERVER (AFTER RFC 7982 FIGURE 2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Request, Req=1 (lost)",
+            "color": "neutral",
+            "note": "The first request never reaches the server."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Request, Req=2",
+            "color": "blue",
+            "note": "The retransmit arrives."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Response, Req=2 Resp=1",
+            "color": "green",
+            "note": "The server has seen and answered one request, though two were sent."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5389]",
+      "text": "Rosenberg, J., Mahy, R., Matthews, P., and D. Wing, \"Session Traversal Utilities for NAT (STUN)\", RFC 5389, October 2008.",
+      "rfc": 5389
+    },
+    {
+      "number": "[RFC5245]",
+      "text": "Rosenberg, J., \"Interactive Connectivity Establishment (ICE): A Protocol for Network Address Translator (NAT) Traversal for Offer/Answer Protocols\", RFC 5245, April 2010.",
+      "rfc": 5245
+    },
+    {
+      "number": "[RFC5766]",
+      "text": "Mahy, R., Matthews, P., and J. Rosenberg, \"Traversal Using Relays around NAT (TURN): Relay Extensions to Session Traversal Utilities for NAT (STUN)\", RFC 5766, April 2010.",
+      "rfc": 5766
+    },
+    {
+      "number": "[RFC7635]",
+      "text": "Reddy, T., Patil, P., Ravindranath, R., and J. Uberti, \"Session Traversal Utilities for NAT (STUN) Extension for Third-Party Authorization\", RFC 7635, August 2015.",
+      "rfc": 7635
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

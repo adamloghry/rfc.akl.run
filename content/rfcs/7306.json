@@ -10,13 +10,217 @@
   "questions": [
     "rdma atomic operations",
     "iwarp rdmap extensions",
-    "rdma immediate data"
+    "rdma immediate data",
+    "what are rdma atomic operations",
+    "what is rdma immediate data",
+    "what is fetchadd in rdma"
+  ],
+  "tags": [
+    "Transport",
+    "RDMA",
+    "iWARP"
+  ],
+  "subtitle": "Two new tricks for RDMA over IP: atomic operations on remote memory and a small immediate-data message.",
+  "tldr": {
+    "problem": "RDMA applications written for other transports such as InfiniBand expect atomic operations and immediate data, but the IETF RDMA Protocol (RDMAP) from RFC 5040 had neither.",
+    "mechanism": "The RFC adds four RDMA messages: Atomic Request, Atomic Response, Immediate Data and Immediate Data with SE. Atomic operations (FetchAdd and CmpSwap) work on a 64-bit value in remote memory, and immediate data carries 8 bytes to the other side.",
+    "outcome": "Applications and middleware can use the same operations over iWARP and InfiniBand. The extensions are optional, so ULPs should negotiate them rather than assume them.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New opcodes",
+      "value": "1000b to 1011b"
+    },
+    {
+      "label": "Atomic Request header",
+      "value": "52 bytes"
+    },
+    {
+      "label": "Atomic Response header",
+      "value": "32 bytes"
+    },
+    {
+      "label": "Immediate Data size",
+      "value": "8 bytes"
+    },
+    {
+      "label": "Atomic operand width",
+      "value": "64 bits, 64-bit aligned"
+    },
+    {
+      "label": "New queue number",
+      "value": "QN=3 (Atomic Response)"
+    }
+  ],
+  "today": "<p>RFC 7306 is a Proposed Standard published in June 2014. It is not marked as obsoleted or updated, and it extends <a href='/5040/'>RFC 5040</a> rather than replacing it.</p>",
+  "glossary": [
+    "rdma",
+    "atomic-operation"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why RDMAP Needed Extensions",
+      "content": "<p><a href='/5040/'>RFC 5040</a> defines the <strong>RDMA Protocol</strong> (RDMAP), which gives zero-copy data transfer while preserving memory protection. It belongs to the iWARP family of specifications, which also includes <a href='/5041/'>RFC 5041</a>, <a href='/5044/'>RFC 5044</a> and <a href='/6581/'>RFC 6581</a>. This RFC extends RDMAP with two things: <strong>Atomic Operations</strong> on remote memory and <strong>Immediate Data</strong> messages.</p><p>The stated motivation is that other RDMA transport protocols already offer this functionality, so RDMA applications and Upper-Layer Protocols (ULPs) behave differently depending on the transport. Removing those differences simplifies the applications. The RFC gives examples: RSockets cannot use the RDMA Write with Immediate Data operation of InfiniBand over iWARP, and DAT Atomics includes a primitive that iWARP RNICs do not support.</p>",
+      "eli5": "<p>Some computer networks could do two handy tricks and others could not. This document teaches the second kind of network the same tricks so programs work on both.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "New Opcodes and Header Extensions",
+      "content": "<p>The RFC adds four RDMA opcodes: <code>1000b</code> Immediate Data, <code>1001b</code> Immediate Data with SE, <code>1010b</code> Atomic Request and <code>1011b</code> Atomic Response. All of them must use RDMA Version (RV) <code>01b</code>, are untagged, and set Invalidate STag to zero on send (the receiver ignores it). STag and Tagged Offset do not apply to these messages.</p><p>The Atomic Request header is 52 bytes long and the Atomic Response header is 32 bytes long. The Immediate Data messages carry 8 bytes of data after the RDMAP header. None of the four messages may carry a ULP message.</p><p>The RFC also defines a new untagged queue, Queue Number 3, used to track outstanding Atomic Requests.</p>",
+      "eli5": "<p>Each kind of message gets its own number on the envelope, so the receiver knows right away whether it is a normal note, a tiny sticky note or a change-this-number request.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Atomic Operations: FetchAdd and CmpSwap",
+      "content": "<p>An Atomic Operation executes a 64-bit memory operation at a given ULP Buffer address on the Responder. It reads the value, modifies it and writes it back, and guarantees that no other Atomic Operation on that address, from other RDMAP Streams on the same RNIC, happens between the read and the write. The target address MUST be 64-bit aligned. An RNIC that supports any Atomic Operation MUST implement both operations below.</p><p><strong>FetchAdd</strong> adds \"Add Data\" to the 64-bit original value. The 64-bit Add Mask splits the value into fields of selectable length: a bit set in the mask marks the top bit of a field, and any carry out of that bit is discarded. A mask of <code>0x0000000000000000</code> gives a plain 64-bit add. The Responder returns the original value.</p><p><strong>CmpSwap</strong> ANDs the original value with the Compare Mask and compares the result with the Compare Data ANDed with the same mask. If they match, the masked bits are replaced with the masked Swap Data; if not, memory is unchanged. Either way, the original value is returned. The fields are big-endian on the wire.</p><p>If the address is not 64-bit aligned, the operation MUST NOT be performed, memory MUST NOT be modified, and an error is surfaced with a terminate message.</p>",
+      "eli5": "<p>Think of a shared scoreboard. FetchAdd says add 5 to the score and tell me what it was before. CmpSwap says if the score is exactly what I think it is, change it, and either way tell me what it was. Nobody can change it halfway through.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5.2",
+      "title": "Request and Response Messages",
+      "content": "<p>The Atomic Request header holds a 4-bit Atomic Operation Code (<code>0000b</code> for FetchAdd, <code>0010b</code> for CmpSwap), a 32-bit Request Identifier chosen by the sender, a 32-bit Remote STag, a 64-bit Remote Tagged Offset, and 64-bit Add or Swap Data, Add or Swap Mask, Compare Data and Compare Mask fields. Unused fields are set to zero or all ones on transmit and ignored by the receiver.</p><p>Requests use Queue Number 1, the same queue as RDMA Read Requests, so they reuse the same ORD/IRD flow control. The Responder processes requests in order and MUST answer a valid request with an Atomic Response. That response carries the 32-bit Original Request Identifier and the 64-bit Original Remote Data Value. It uses Queue Number 3, and the Message Sequence Number lets the Requester match it to the pending request.</p><p>The Requester MUST NOT treat the remote buffer as modified, and an Atomic Operation MUST NOT complete, until the Atomic Response has been Delivered to RDMAP at the Requester.</p>",
+      "eli5": "<p>You send a request with a ticket number. The reply comes back with the same ticket number and the old value, so you know which request it answers.</p>"
+    },
+    {
+      "id": "options",
+      "number": "6",
+      "title": "Immediate Data",
+      "content": "<p>An <strong>Immediate Data</strong> message gives the ULP at the sender a way to hand exactly 8 bytes to the receiver. Sent right after an RDMA Write, the pair behaves like the RDMA Write with Immediate Data operation found in InfiniBand: an RDMA Completion is generated immediately after the write. An Immediate Data message that is not preceded by an RDMA Write still causes an RDMA Completion.</p><p>The message uses the untagged buffer model with Queue Number 0 and consumes one untagged buffer. The receiver MUST check that exactly 8 bytes arrived, and messages MUST be delivered in the order sent. The \"with SE\" variant also marks a Solicited Event. Ordering and completion rules are those of a Send operation in RFC 5040.</p>",
+      "eli5": "<p>Immediate data is a tiny sticky note, always the same size, stuck on after the big delivery to say the delivery has arrived.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "1.1",
+      "title": "Discovering Support",
+      "content": "<p>The extensions are optional, and existing applications and ULPs should not assume they are supported. The RFC RECOMMENDS that applications or ULPs negotiate their use at the application or ULP level; how is out of scope. Because adapter query interfaces usually report only the scope of atomicity, an RNIC that supports any Atomic Operation must support all those defined here.</p><p>Without negotiation, an application can just try the operation. A FetchAdd with Add Data of 0 safely probes for atomics without changing remote memory. A Remote Operation Error or Unexpected OpCode error is reported by a peer that lacks support.</p>",
+      "eli5": "<p>Not every computer knows the new tricks, so you either ask first or try something harmless and see whether it complains.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Errors, Security and IANA",
+      "content": "<p>Errors follow RFC 5040 with extra rules. A local peer sends a Terminate Message for creation errors and for errors on incoming messages. The remote peer MUST validate the DDP segment fields, the opcode and the version. For Atomic Requests it also checks 64-bit alignment, and on failure generates a Terminate Message with a Remote Operation Error and the code \"Catastrophic error, localized to RDMAP Stream\".</p><p>The security considerations of RFC 5040 and <a href='/5042/'>RFC 5042</a> apply. The RFC also notes that traffic patterns of applications such as MPI programs could leak information even when encrypted, and that ESPv3 Traffic Flow Confidentiality (<a href='/4303/'>RFC 4303</a>) can hide them.</p><p>IANA added opcodes 0x8 through 0xB to the RDMAP Message Operation Codes registry and created the RDMAP Message Atomic Operation Subcodes registry (0x0 FetchAdd, 0x1 Reserved, 0x2 CmpSwap). It also recorded Queue 3 for Atomic Response operations.</p>",
+      "eli5": "<p>If a request is malformed, such as pointing at a badly lined-up spot, the receiver refuses and sends back a note saying why.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "NEW RDMA OPCODES AND QUEUE NUMBERS (RFC 7306)",
+      "data": {
+        "items": [
+          {
+            "code": "1000b",
+            "label": "Immediate Data",
+            "desc": "Queue Number 0; carries 8 bytes of data."
+          },
+          {
+            "code": "1001b",
+            "label": "Immediate Data with SE",
+            "desc": "Queue Number 0; same, with a Solicited Event."
+          },
+          {
+            "code": "1010b",
+            "label": "Atomic Request",
+            "desc": "Queue Number 1, shared with RDMA Read Requests.",
+            "highlight": true
+          },
+          {
+            "code": "1011b",
+            "label": "Atomic Response",
+            "desc": "Queue Number 3, new in this RFC.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "ATOMIC OPERATION EXCHANGE (RFC 7306)",
+      "data": {
+        "lanes": [
+          {
+            "key": "requester",
+            "label": "Requester"
+          },
+          {
+            "key": "responder",
+            "label": "Responder"
+          }
+        ],
+        "messages": [
+          {
+            "from": "requester",
+            "to": "responder",
+            "label": "Atomic Request (1010b)",
+            "color": "blue",
+            "note": "Names AOpCode, Remote STag, offset, data and masks."
+          },
+          {
+            "from": "responder",
+            "to": "requester",
+            "label": "Atomic Response (1011b)",
+            "color": "green",
+            "note": "Returns the Original Request Identifier and Original Remote Data Value."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5040]",
+      "text": "Recio, R., Metzler, B., Culley, P., Hilland, J., and D. Garcia, \"A Remote Direct Memory Access Protocol Specification\", RFC 5040, October 2007.",
+      "rfc": 5040
+    },
+    {
+      "number": "[RFC5041]",
+      "text": "Shah, H., Pinkerton, J., Recio, R., and P. Culley, \"Direct Data Placement over Reliable Transports\", RFC 5041, October 2007.",
+      "rfc": 5041
+    },
+    {
+      "number": "[RFC5042]",
+      "text": "Pinkerton, J. and E. Deleganes, \"Direct Data Placement Protocol (DDP) / Remote Direct Memory Access Protocol (RDMAP) Security\", RFC 5042, October 2007.",
+      "rfc": 5042
+    },
+    {
+      "number": "[RFC5044]",
+      "text": "Culley, P., Elzur, U., Recio, R., Bailey, S., and J. Carrier, \"Marker PDU Aligned Framing for TCP Specification\", RFC 5044, October 2007.",
+      "rfc": 5044
+    },
+    {
+      "number": "[RFC5045]",
+      "text": "Bestler, C., Ed., and L. Coene, \"Applicability of Remote Direct Memory Access Protocol (RDMA) and Direct Data Placement (DDP)\", RFC 5045, October 2007.",
+      "rfc": 5045
+    },
+    {
+      "number": "[RFC6581]",
+      "text": "Kanevsky, A., Ed., Bestler, C., Ed., Sharp, R., and S. Wise, \"Enhanced Remote Direct Memory Access (RDMA) Connection Establishment\", RFC 6581, April 2012.",
+      "rfc": 6581
+    },
+    {
+      "number": "[RFC4303]",
+      "text": "Kent, S., \"IP Encapsulating Security Payload (ESP)\", RFC 4303, December 2005.",
+      "rfc": 4303
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

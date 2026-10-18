@@ -9,13 +9,396 @@
   },
   "questions": [
     "multicast traceroute",
-    "what is mtrace2"
+    "what is mtrace2",
+    "how does multicast traceroute work",
+    "mtrace2 forwarding codes",
+    "mtrace2 udp port",
+    "difference between mtrace and mtrace2"
+  ],
+  "tags": [
+    "Multicast",
+    "Diagnostics",
+    "Routing"
+  ],
+  "subtitle": "A traceroute for IP multicast: routers cooperate to report each hop on the path from a receiver back to a source.",
+  "tldr": {
+    "problem": "Unicast traceroute cannot follow a multicast tree. Walking down from a source to one receiver is hard, because there is no efficient way to know which branch the receiver is on.",
+    "mechanism": "A client sends a Query to the last-hop router. Each router on the way up toward the source appends a block of its own multicast state and packet counters, and the first-hop router (or the RP) sends the full Reply back to the client over UDP.",
+    "outcome": "A client can see the path, find where packets are lost or pruned, and estimate rates and delays, but only if the routers implement Mtrace2 and are configured to answer.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "UDP destination port",
+      "value": "33435 (mtrace)"
+    },
+    {
+      "label": "TLV types",
+      "value": "0x01 Query to 0x06 Extended Query Block"
+    },
+    {
+      "label": "Query length",
+      "value": "20 (IPv4) or 56 (IPv6)"
+    },
+    {
+      "label": "IPv6 packet limit",
+      "value": "1280 bytes"
+    },
+    {
+      "label": "Default reply timeout",
+      "value": "10 seconds"
+    },
+    {
+      "label": "Packet counters",
+      "value": "64 bits each"
+    }
+  ],
+  "today": "<p>RFC 8487 is a Proposed Standard from October 2018, and the unit metadata shows no RFC that obsoletes or updates it. It replaces the older IGMP-based Mtrace with a UDP-based version for both IPv4 and IPv6.</p>",
+  "glossary": [
+    "multicast",
+    "multicast-router",
+    "traceroute",
+    "ttl",
+    "ntp-timestamp",
+    "udp",
+    "mtu",
+    "rate-limiting",
+    "rendezvous-point",
+    "reverse-path-forwarding",
+    "igmp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Tracing a Multicast Tree Upward",
+      "content": "<p>Tracing <em>down</em> a multicast tree from a source to one receiver is difficult, because there is no efficient and deterministic way to tell which branch the receiver lies on. Tracing <em>up</em> from a receiver is easy: most multicast routing protocols know the upstream router for each source, so only the routers on the direct path are involved.</p><p><strong>Mtrace2</strong> uses that second direction. A client sends an Mtrace2 <strong>Query</strong> to a Last-Hop Router (LHR) or to a Rendezvous Point (RP). If a source address is given and the router has source-specific state, the trace heads toward that source. Otherwise it heads toward the RP for the group. Beyond the path itself, Mtrace2 reports packet rates and losses and other diagnostic data.</p><p>The RFC lists three purposes: tracing the path a packet would take from a source to a receiver, isolating packet-loss problems such as congestion, and isolating configuration problems such as a TTL threshold. Unlike the earlier Mtrace, which used IGMP messages, all Mtrace2 messages are UDP based, and both IPv4 and IPv6 are supported.</p><div class='callout callout-note'><p>Unlike unicast traceroute, Mtrace2 needs special support in routers. Extensions such as Mtrace2 for Automatic Multicast Tunneling and for Multicast VPNs are out of scope.</p></div>",
+      "eli5": "<p>It is easier to follow a trail backwards from where you are standing than to guess which of many paths a crowd walked. So Mtrace2 starts at the receiver and walks back toward the source.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "TLV Messages and Blocks",
+      "content": "<p>Every Mtrace2 message is built from Type/Length/Value (<strong>TLV</strong>) pieces. The first TLV is a header that says what kind of message it is: a Query (<code>0x01</code>), a Request (<code>0x02</code>) or a Reply (<code>0x03</code>). Later TLVs, called blocks, carry more detail: a Standard Response Block (<code>0x04</code>), an Augmented Response Block (<code>0x05</code>) and an Extended Query Block (<code>0x06</code>). A TLV length counts the Type, Length and Value fields, must be at least 4 octets, and must be a multiple of 4.</p><p>The Query header carries the number of hops to trace (<code>0xff</code> is suggested when the real count is unknown), a multicast group address, a source address, the client address, a Query ID and the client's UDP port. The group or the source may be all ones (IPv4) or <code>::</code> (IPv6) when not wanted, but not both at once. The Length is 20 for IPv4 or 56 for IPv6.</p><p>The Request and Reply headers are identical to the Query except for the Type. Each router on the path appends a <strong>Standard Response Block</strong> that holds the time the Query arrived (a 32-bit NTP-style timestamp), the incoming and outgoing interfaces, the upstream router, three 64-bit packet counters (input on the incoming interface, output on the outgoing interface, and the count for the source-group pair), the routing protocols in use, the forwarding TTL threshold, and a one-octet Forwarding Code. The IPv6 block has the same ideas, with interface IDs and local and remote addresses.</p><p>All messages are UDP to the IANA-assigned port, must carry a valid UDP checksum, and cannot mix IPv4 and IPv6. IPv4 messages must not be fragmented (DF bit set), and IPv6 messages must not exceed 1280 bytes. A receiver that sees an unknown TLV type SHOULD silently discard the whole packet.</p>",
+      "eli5": "<p>Every note in Mtrace2 is a labelled box with its size written on the outside. The first box says what kind of note it is, and each router adds its own box with what it saw.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "How Routers Handle a Trace",
+      "content": "<p>A router that gets a Query first checks that the group and source combination is valid and that the client address is a real unicast address; otherwise it silently ignores the Query. It must also be able to drop Queries from clients beyond an administrative boundary. If it is the proper LHR (or RP), it changes the Type from <code>0x01</code> to <code>0x02</code> and treats the message as a Request. If it is not the proper LHR and the Query came by unicast, it answers with a Reply whose block has the <code>WRONG_LAST_HOP</code> code. Duplicate Queries, identified by the client address and Query ID, SHOULD be ignored.</p><p>For each Request, a router builds a Standard Response Block. It works out forwarding information the same way it would for real traffic (a \"dry-run\" state is allowed), fills in the block, and notes a Forwarding Code for the first condition it meets, such as <code>NO_ROUTE</code> or <code>PRUNE_SENT</code>. Requests are accepted only from adjacent routers, and the Generalized TTL Security Mechanism SHOULD be used to check adjacency.</p><p>If more hops remain, the router appends its block and sends the Request to the upstream router, or to a link-scoped multicast address such as an ALL-[protocol]-ROUTERS group if the upstream router is not known. It sends a Reply to the client, unicast to the Client Address, when the hop count is reached, when the packet would no longer fit the MTU (1280 bytes for IPv6), or when the Request reaches the RP (for a group-only trace) or the first-hop router (for a source-specific trace).</p><p>A gateway such as a NAT or firewall may proxy the trace. It returns a Reply with the <code>REACHED_GW</code> code, then starts a new Query of its own with the RPF interface as the client address and relays the eventual Reply back, so the topology behind it stays hidden.</p>",
+      "eli5": "<p>Each helper along the way checks the note is real, adds a line about itself, and hands it to the next helper closer to the source. The last helper sends the whole note back to whoever asked.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5",
+      "title": "Forwarding Codes and Stopping Conditions",
+      "content": "<p>The <strong>Forwarding Code</strong> in each block tells the client why a trace went well or stopped. Values with the high-order bit set (<code>0x80</code> to <code>0xff</code>) mark transitory or automatically recovered conditions; the other values flag a problem in the Query or a need to redirect it. Examples are <code>NO_ERROR</code> (<code>0x00</code>), <code>PRUNE_SENT</code> (<code>0x02</code>), <code>SCOPED</code> (<code>0x04</code>), <code>REACHED_RP</code> (<code>0x08</code>), <code>NO_SPACE</code> (<code>0x81</code>) and <code>ADMIN_PROHIB</code> (<code>0x83</code>).</p><p>If appending another block would overflow the packet, the router marks the last block <code>NO_SPACE</code>, sends the Request back as a Reply, and carries on with a fresh Request. That Request holds its own block plus an Augmented Response Block (type <code>0x01</code>) recording how many blocks were already returned, so later routers can count the hops traced. The client must treat several Replies with the same Query ID as one.</p><p>A client knows a trace has reached the source when the last router has a non-zero incoming interface but a zero upstream router. A Forwarding Code with the <code>0x80</code> bit set means a fatal error. The default reply timeout is 10 seconds and can be changed on the client and routers.</p>",
+      "eli5": "<p>Each helper can attach a small status code to the note, like a stamp that says everything is fine, the road is closed, or the note ran out of room.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "What the Client Does",
+      "content": "<p>An Mtrace2 client sends the Query to the LHR, from its own interface address. If it does not know the LHR, it MAY send the Query to the all-routers group (<code>224.0.0.2</code> for IPv4, <code>FF02::2</code> for IPv6), and every router except the correct LHR SHOULD ignore it.</p><p>To find the path, the client can ask for a large hop count at once. If that fails, it can search linearly like unicast traceroute, using 1 hop, then 2, and so on, and a hop with no reply is the probable cause of the failure. It MUST NOT start one attempt before the previous one has ended with a Reply or a timeout. A router that does not support Mtrace2 silently discards multicast Queries, or answers a unicast Query with an ICMP port unreachable, so the client times out and retries with a lower hop count.</p><p>The RFC also covers how the trace behaves with PIM-SM, Bidirectional PIM, PIM-DM and IGMP/MLD proxies. For example, with PIM-SM a trace that reaches the RP without source-specific state ends there, but the client can trace the path a source-specific join would take by aiming a Query at the RP with the group set to 0.</p>",
+      "eli5": "<p>The person asking sends a note to the last helper. If no answer comes back, they try again asking for fewer stops, until they find where the chain breaks.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "7",
+      "title": "Diagnosing Problems with a Trace",
+      "content": "<p>The counters and timestamps let a client run <strong>two traces</strong> and compare them. If the path is the same both times, the difference in a router's input or output packet count divided by the difference in timestamps gives a packet rate. With the average packet size, link utilization can be estimated.</p><p>Packet loss shows up as a steady increase in the gap between the output count at one router and the input count at the next. On a shared link the input count can exceed the previous hop's output count, which looks like \"negative loss\" and can hide real loss. The per-source-group counter is not affected by shared links, so it gives a cleaner loss measure for one source and one receiver.</p><p>The Forwarding Code reveals unexpected pruning or administrative scoping. Taking the maximum hop count and TTL thresholds along the path gives the TTL needed for the source to reach the destination. If router clocks are synchronized, timestamp differences estimate delay, but that includes control-plane overhead and may not match the delay of data traffic. Because control and forwarding planes can be out of sync, the traced path may differ from the real data path.</p>",
+      "eli5": "<p>If you ask twice and compare the counts, you can tell how fast traffic is flowing and where some of it goes missing.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>Mtrace2 can reveal topology, which sources send to which groups, and at what rates. A network that wants to keep this secret can restrict Mtrace2 at its border and answer with the <code>ADMIN_PROHIB</code> code.</p><p>Routers MUST support source verification: Queries are accepted only from authorized clients and Requests only from directly connected peer routers on the right interface. A Query produces larger Request and Reply messages, so unchecked it could serve for amplification attacks. A PIM router SHOULD also drop Requests and Replies from addresses that are not authenticated PIM neighbors. Routers MAY rate-limit Queries, Requests and Replies, and the limits are left to the implementation.</p><p>Forged Replies could feed a client false topology or statistics. To forge one, an attacker would need the 2-byte Query ID and the client's dynamically allocated port, and source verification blocks off-path senders, which leaves on-path attackers. Encrypting messages between each pair of hops is out of scope.</p>",
+      "eli5": "<p>The map this tool draws could help a bad guy, so routers only answer people they trust and can refuse to answer at all.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "A TYPICAL MTRACE2 EXCHANGE (RFC 8487, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Mtrace2 Client"
+          },
+          {
+            "key": "lhr",
+            "label": "Last-Hop Router"
+          },
+          {
+            "key": "fhr",
+            "label": "First-Hop Router"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "lhr",
+            "label": "1. Query",
+            "color": "blue",
+            "note": "Asks to trace a group and optional source."
+          },
+          {
+            "from": "lhr",
+            "to": "fhr",
+            "label": "2. Request",
+            "color": "neutral",
+            "note": "Each router on the path appends a Standard Response Block."
+          },
+          {
+            "from": "fhr",
+            "to": "client",
+            "label": "3. Reply",
+            "color": "green",
+            "note": "Unicast back to the client with all the blocks."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "MTRACE2 TLV TYPES (SECTION 3.2)",
+      "data": {
+        "items": [
+          {
+            "code": "0x00",
+            "label": "Reserved",
+            "desc": "Not used."
+          },
+          {
+            "code": "0x01",
+            "label": "Query",
+            "desc": "Sent by the client to the last-hop router.",
+            "highlight": true
+          },
+          {
+            "code": "0x02",
+            "label": "Request",
+            "desc": "A Query turned around by the LHR and passed upstream."
+          },
+          {
+            "code": "0x03",
+            "label": "Reply",
+            "desc": "Sent back to the client by the final router."
+          },
+          {
+            "code": "0x04",
+            "label": "Standard Response Block",
+            "desc": "One per router: state and statistics."
+          },
+          {
+            "code": "0x05",
+            "label": "Augmented Response Block",
+            "desc": "Optional extra information."
+          },
+          {
+            "code": "0x06",
+            "label": "Extended Query Block",
+            "desc": "Optional extra detail attached to a Query."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "IPV4 MTRACE2 QUERY (SECTION 3.2.1)",
+      "data": {
+        "title": "Mtrace2 Query, IPv4",
+        "bytes": 20,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "0x01 for a Query.",
+            "value": "0x01"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "20 for IPv4 addresses, 56 for IPv6.",
+            "value": "20"
+          },
+          {
+            "key": "hops",
+            "name": "# Hops",
+            "bits": 8,
+            "desc": "Maximum number of hops the client wants to trace."
+          },
+          {
+            "key": "group",
+            "name": "Multicast Address",
+            "bits": 32,
+            "desc": "Group to trace, or all ones if no group information is wanted."
+          },
+          {
+            "key": "source",
+            "name": "Source Address",
+            "bits": 32,
+            "desc": "Source to trace, or all ones if no source information is wanted."
+          },
+          {
+            "key": "client",
+            "name": "Mtrace2 Client Address",
+            "bits": 32,
+            "desc": "Unicast address that the Reply is sent to."
+          },
+          {
+            "key": "query-id",
+            "name": "Query ID",
+            "bits": 16,
+            "desc": "Identifies this Query so duplicate or delayed Replies can be detected."
+          },
+          {
+            "key": "client-port",
+            "name": "Client Port #",
+            "bits": 16,
+            "desc": "UDP port on which the client receives the Reply."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "SOME FORWARDING CODES (SECTION 3.2.4)",
+      "data": {
+        "items": [
+          {
+            "code": "0x00",
+            "label": "NO_ERROR",
+            "desc": "No error."
+          },
+          {
+            "code": "0x01",
+            "label": "WRONG_IF",
+            "desc": "Request arrived on an interface that does not forward the group toward the source or RP."
+          },
+          {
+            "code": "0x02",
+            "label": "PRUNE_SENT",
+            "desc": "This router has sent a prune upstream for the source and group."
+          },
+          {
+            "code": "0x04",
+            "label": "SCOPED",
+            "desc": "The group is administratively scoped at this router."
+          },
+          {
+            "code": "0x05",
+            "label": "NO_ROUTE",
+            "desc": "No route for the source or group."
+          },
+          {
+            "code": "0x06",
+            "label": "WRONG_LAST_HOP",
+            "desc": "This router is not the proper LHR."
+          },
+          {
+            "code": "0x08",
+            "label": "REACHED_RP",
+            "desc": "Reached the Rendezvous Point."
+          },
+          {
+            "code": "0x0C",
+            "label": "REACHED_GW",
+            "desc": "Request arrived at a gateway that hides information."
+          },
+          {
+            "code": "0x80",
+            "label": "FATAL_ERROR",
+            "desc": "Router may know the upstream router but cannot forward to it.",
+            "highlight": true
+          },
+          {
+            "code": "0x81",
+            "label": "NO_SPACE",
+            "desc": "Not enough room to insert another Standard Response Block."
+          },
+          {
+            "code": "0x83",
+            "label": "ADMIN_PROHIB",
+            "desc": "Mtrace2 is administratively prohibited."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[5]",
+      "text": "Fenner, B., et al., \"Protocol Independent Multicast - Sparse Mode (PIM-SM): Protocol Specification (Revised)\", STD 83, RFC 7761, March 2016.",
+      "rfc": 7761
+    },
+    {
+      "number": "[4]",
+      "text": "Handley, M., et al., \"Bidirectional Protocol Independent Multicast (BIDIR-PIM)\", RFC 5015, October 2007.",
+      "rfc": 5015
+    },
+    {
+      "number": "[3]",
+      "text": "Fenner, B., et al., \"IGMP/MLD-Based Multicast Forwarding (IGMP/MLD Proxying)\", RFC 4605, August 2006.",
+      "rfc": 4605
+    },
+    {
+      "number": "[11]",
+      "text": "Adams, A., et al., \"Protocol Independent Multicast - Dense Mode (PIM-DM): Protocol Specification (Revised)\", RFC 3973, January 2005.",
+      "rfc": 3973
+    },
+    {
+      "number": "[13]",
+      "text": "Gill, V., et al., \"The Generalized TTL Security Mechanism (GTSM)\", RFC 5082, October 2007.",
+      "rfc": 5082
+    },
+    {
+      "number": "[14]",
+      "text": "McWalter, D., et al., \"IP Multicast MIB\", RFC 5132, December 2007.",
+      "rfc": 5132
+    },
+    {
+      "number": "[9]",
+      "text": "McCloghrie, K. and F. Kastenholz, \"The Interfaces Group MIB\", RFC 2863, June 2000.",
+      "rfc": 2863
+    },
+    {
+      "number": "[10]",
+      "text": "Cain, B., et al., \"Internet Group Management Protocol, Version 3\", RFC 3376, October 2002.",
+      "rfc": 3376
+    },
+    {
+      "number": "[8]",
+      "text": "Deering, S. and R. Hinden, \"Internet Protocol, Version 6 (IPv6) Specification\", STD 86, RFC 8200, July 2017.",
+      "rfc": 8200
+    },
+    {
+      "number": "[6]",
+      "text": "Cotton, M., et al., \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 8126, June 2017.",
+      "rfc": 8126
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -10,13 +10,186 @@
   "questions": [
     "what is tcpcrypt",
     "encrypt tcp connections",
-    "tcpcrypt and tcp-eno"
+    "tcpcrypt and tcp-eno",
+    "how does tcpcrypt work with middleboxes",
+    "what is tcp-eno",
+    "how do ephemeral keys provide forward secrecy"
+  ],
+  "tags": [
+    "Security",
+    "Encryption",
+    "Transport"
+  ],
+  "subtitle": "Encryption for TCP connections designed to work with middleboxes and NATs.",
+  "tldr": {
+    "problem": "TCP connections are not encrypted by default, exposing application data to eavesdropping and tampering. Standard encryption protocols like TLS add overhead and may fail with network middleboxes that modify TCP headers.",
+    "mechanism": "tcpcrypt adds encryption directly to TCP using ephemeral Elliptic Curve Diffie-Hellman key exchange negotiated via TCP-ENO. It tolerates resegmentation and TCP header modifications by middleboxes, works in kernel implementations, and supports session resumption to avoid repeated public key operations.",
+    "outcome": "Applications can enable transparent encryption on TCP connections without application-level changes, though passive openers cannot authenticate endpoints without application-level verification of session IDs.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Mandatory key-agreement scheme",
+      "value": "ECDHE-Curve25519"
+    },
+    {
+      "label": "Required AEAD algorithm",
+      "value": "AES-128-GCM"
+    },
+    {
+      "label": "Recommended AEAD algorithms",
+      "value": "AES-256-GCM, ChaCha20-Poly1305"
+    },
+    {
+      "label": "Nonce length (all TEPs)",
+      "value": "32 bytes"
+    },
+    {
+      "label": "Session resumption nonce length",
+      "value": "0 to 8 bytes (random or unique per VM)"
+    },
+    {
+      "label": "Maximum plaintext per frame",
+      "value": "less than 2^16 bytes"
+    }
+  ],
+  "today": "<p>RFC 8548 is an Experimental specification. tcpcrypt is not yet widely deployed, and the protocol's success depends on middlebox behavior and implementation ease in kernel environments. Applications using tcpcrypt must verify session IDs (an optional identifier computed from the session secret) to authenticate endpoints against man-in-the-middle attacks.</p>",
+  "glossary": [],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "TCP Encryption Design Goals",
+      "content": "<p>tcpcrypt is a TCP encryption protocol designed to protect session data between two hosts. It aims to meet the requirements of TCP-ENO (TCP Encryption Negotiation Option) while being implementable in small, self-contained code suitable for kernel TCP stacks. The protocol minimizes connection setup latency, tolerates NATs and middleboxes that normalize or manipulate TCP segments, operates independently of IP addresses (supporting session resumption across address changes), and avoids large external cryptographic library dependencies.</p><p>The protocol is negotiated via TCP-ENO and uses ephemeral Elliptic Curve Diffie-Hellman (ECDH) for key agreement, allowing each connection to use fresh keys. It is an Experimental protocol that has been published for testing and evaluation.</p>",
+      "eli5": "<p>tcpcrypt was designed to be simple, fast, and flexible: simple enough to fit in operating system kernels, fast enough not to add much delay, and flexible enough to work even when routers tweak packets.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "2",
+      "title": "Protocol Negotiation with TCP-ENO",
+      "content": "<p>tcpcrypt depends on TCP-ENO to negotiate whether encryption will be used and which key-agreement scheme to employ. The active opener includes an ENO option in its SYN segment with tcpcrypt protocol identifiers (TEP identifiers) indicating the key-agreement schemes it supports. The passive opener may respond with its ENO option in the SYN-ACK, selecting one supported TEP.</p><p>Four TEP identifiers are defined: TCPCRYPT_ECDHE_P256, TCPCRYPT_ECDHE_P521, TCPCRYPT_ECDHE_Curve25519 (mandatory to implement), and TCPCRYPT_ECDHE_Curve448 (recommended). TCP-ENO also establishes asymmetric roles for the two hosts (role A and role B) to enable proper key derivation. Once both hosts have sent and received an ACK with a valid ENO option, encryption is enabled and plaintext application data MUST NOT be exchanged.</p>",
+      "eli5": "<p>During the TCP handshake, the two hosts agree on which encryption method to use. The initiator proposes options, and the other side picks one.</p>"
+    },
+    {
+      "id": "key-management",
+      "number": "3",
+      "title": "Key Exchange and Session Secrets",
+      "content": "<p>After ENO negotiation, the two hosts perform key exchange via Init1 and Init2 messages. Host A (the active opener) sends Init1 containing a list of acceptable AEAD algorithms, a random nonce, and an ephemeral public key. Host B responds with Init2 containing its selected symmetric cipher, its own nonce, and ephemeral public key.</p><p>From these public keys, each host computes an ephemeral secret (ES) using its own private key and the peer's public key. A pseudo-random key (PRK) is derived from the nonces, protocol transcript, and ephemeral secret using HKDF-Extract. From the PRK, a sequence of session secrets ss[0], ss[1], ss[2]... is generated, where ss[0] protects the current connection and subsequent ss[i] values enable fast session resumption without public key operations.</p><p>Master keys mk[j] are derived from each session secret, and traffic keys k_ab[j] and k_ba[j] are derived from each master key. Host A encrypts with k_ab and host B encrypts with k_ba; this asymmetry is maintained across resumed sessions regardless of which host initiates.</p>",
+      "eli5": "<p>The two hosts exchange ephemeral public keys and use math to agree on a shared secret that only they know, then derive multiple encryption keys from it.</p>"
+    },
+    {
+      "id": "section-2",
+      "number": "4",
+      "title": "Session Resumption",
+      "content": "<p>If two hosts previously negotiated a tcpcrypt session, they can establish a new connection without public-key operations by resuming from the next session secret in the chain. A host signals resumption willingness by sending a SYN segment with a resumption suboption containing the TEP identifier, half of a resumption identifier (derived from the session secret), and a resumption nonce (0 to 8 bytes, unique even after system cloning or hibernation).</p><p>The resumption identifier is split: the active opener or role-A host sends the first 9 bytes, and the role-B host sends the second 9 bytes. The passive opener, upon recognizing its cached session secret from the resumption identifier, agrees by sending its own resumption suboption with the other half. Master keys are then computed from the cached session secret and the combined nonces.</p><p>A given session secret MUST NOT be used to secure more than one TCP connection. Implementations SHOULD cache the next session secret and erase the current one from memory after first use, and MUST provide APIs for applications to control resumption and caching policies.</p>",
+      "eli5": "<p>If two hosts have talked before, they remember a secret that lets them skip the slow math part and encrypt immediately, as long as they prove they remember the old conversation.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5",
+      "title": "Data Encryption and Frame Format",
+      "content": "<p>After key exchange (or its omission via resumption), all communication is carried in <strong>encryption frames</strong> consisting of a control byte, a 2-byte length field, and ciphertext. The control byte carries a rekey flag and reserved bits. The ciphertext is produced by an AEAD algorithm (AES-GCM or ChaCha20-Poly1305) encrypting a plaintext that includes a flags field and optional urgent field, followed by application data.</p><p>The plaintext flags field encodes FINp (indicating the last frame) and URGp (indicating an urgent offset). The frame ID is a 64-bit byte offset in the TCP datastream, left-padded with zeros to the AEAD nonce length. Each frame receives a unique frame ID; the nonce is computed as frame_ID XOR NR, where NR is a nonce randomizer from the traffic key. An implementation MUST NOT transmit more than 2^64 bytes before rekeying.</p><p>When receiving, the receiver reconstructs the associated data and frame ID, computes the nonce, and provides these to AEAD decryption. If decryption fails, the implementation SHOULD abort the connection and report an error distinct from end-of-file.</p>",
+      "eli5": "<p>All data is broken into frames, each encrypted with a unique nonce (a randomizer combined with the frame's position in the stream). The receiver decrypts and verifies each frame.</p>"
+    },
+    {
+      "id": "section-3",
+      "number": "6",
+      "title": "Rekeying and Key Rotation",
+      "content": "<p>Rekeying allows hosts to wipe old keys from memory and limits the amount of data encrypted under a single key. Each host maintains a local generation number for encryption and a remote generation number for decryption. A host may increment its local generation number and use a new key set for encryption. When a host first uses a higher-generation key, it sets the rekey flag in that frame. When a host receives rekey=1, it increments its remote generation. If the remote generation exceeds the local generation, the receiver immediately increments its local generation to match.</p><p>To verify liveness, tcpcrypt recommends using rekeying instead of TCP keep-alives: a host can initiate rekeying and immediately send a frame (possibly with empty data) with rekey=1, forcing the peer to respond with a verified frame. This prevents an attacker from prolonging a connection after one endpoint has closed.</p>",
+      "eli5": "<p>Every so often, the hosts switch to a new encryption key. This erases old keys from memory and limits how much can be decrypted if a key is ever compromised.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "tcpcrypt negotiation and key exchange",
+      "data": {
+        "lanes": [
+          {
+            "key": "active",
+            "label": "Active Opener"
+          },
+          {
+            "key": "passive",
+            "label": "Passive Opener"
+          }
+        ],
+        "messages": [
+          {
+            "from": "active",
+            "to": "passive",
+            "label": "SYN + ENO (TEP options)",
+            "color": "blue"
+          },
+          {
+            "from": "passive",
+            "to": "active",
+            "label": "SYN-ACK + ENO (selected TEP)",
+            "color": "green"
+          },
+          {
+            "from": "active",
+            "to": "passive",
+            "label": "ACK + Init1 (cipher list, nonce, public key)",
+            "color": "blue"
+          },
+          {
+            "from": "passive",
+            "to": "active",
+            "label": "Init2 (selected cipher, nonce, public key)",
+            "color": "green"
+          },
+          {
+            "from": "active",
+            "to": "passive",
+            "label": "Encrypted frames",
+            "color": "neutral"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8547]",
+      "text": "Bittau, A., Giffin, D., Handley, M., Mazieres, D., and E. Smith, \"TCP-ENO: Encryption Negotiation Option\", RFC 8547, May 2019.",
+      "rfc": 8547
+    },
+    {
+      "number": "[RFC5869]",
+      "text": "Krawczyk, H. and P. Eronen, \"HMAC-based Extract-and-Expand Key Derivation Function (HKDF)\", RFC 5869, May 2010.",
+      "rfc": 5869
+    },
+    {
+      "number": "[RFC7748]",
+      "text": "Langley, A., Hamburg, M., and S. Turner, \"Elliptic Curves for Security\", RFC 7748, January 2016.",
+      "rfc": 7748
+    },
+    {
+      "number": "[RFC8439]",
+      "text": "Nir, Y. and A. Langley, \"ChaCha20 and Poly1305 for IETF Protocols\", RFC 8439, June 2018.",
+      "rfc": 8439
+    },
+    {
+      "number": "[RFC5116]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

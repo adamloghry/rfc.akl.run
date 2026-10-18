@@ -10,13 +10,292 @@
   "questions": [
     "schc over sigfox",
     "how to compress ip headers on sigfox",
-    "sigfox lpwan parameters"
+    "sigfox lpwan parameters",
+    "what is schc over sigfox",
+    "how big can a sigfox message be",
+    "schc fragmentation modes on sigfox"
+  ],
+  "tags": [
+    "SCHC",
+    "LPWAN",
+    "Fragmentation"
+  ],
+  "subtitle": "How to run SCHC header compression and fragmentation over Sigfox, where uplink messages carry at most 12 bytes.",
+  "tldr": {
+    "problem": "Sigfox messages are tiny (up to 12 bytes uplink, a fixed 8 bytes downlink), and the generic SCHC framework leaves many parameters and modes open.",
+    "mechanism": "RFC 9442 defines a profile that fixes RuleID, window and tile sizes, picks fragmentation modes for each direction, and specifies the message formats, padding and abort rules.",
+    "outcome": "Sigfox devices and the network can send compressed and fragmented packets, up to 2400 bytes with the largest header option, with optional recovery of lost fragments.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Uplink payload",
+      "value": "0 to 12 bytes"
+    },
+    {
+      "label": "Downlink payload",
+      "value": "Fixed 8 bytes (64 bits)"
+    },
+    {
+      "label": "Max packet, Option 2",
+      "value": "2400 bytes"
+    },
+    {
+      "label": "MAX_ACK_REQUESTS",
+      "value": "5"
+    },
+    {
+      "label": "Default timers",
+      "value": "12 hours"
+    },
+    {
+      "label": "Downlink keep-alive",
+      "value": "Uplink every 24 hours with no session"
+    }
+  ],
+  "today": "<p>RFC 9442 is a Proposed Standard published in July 2023, and the metadata lists no obsoleting or updating RFC. It is a profile of <a href='/8724/'>RFC 8724</a> and relies on the Compound ACK of <a href='/9441/'>RFC 9441</a>.</p>",
+  "glossary": [
+    "schc",
+    "lpwan",
+    "fragmentation",
+    "padding",
+    "retransmission",
+    "sliding-window",
+    "replay-protection",
+    "proposed-standard"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "A SCHC Profile for Sigfox",
+      "content": "<p>The SCHC framework (<a href='/8724/'>RFC 8724</a>) compresses headers and fragments packets for Low-Power Wide Area Networks (LPWANs). It is flexible enough for all four LPWAN technologies described in <a href='/8376/'>RFC 8376</a>, but each technology has its own payload sizes and transmission traits, so there are best parameters and modes for each.</p><p>Sigfox is an energy-efficient, low-cost LPWAN. Base Stations receive short uplink messages of up to 12 bytes from devices. The Sigfox Cloud sends downlink messages, which have a fixed size of 8 bytes, and only when the device asks for one with a flag in an uplink message. Using SCHC gives Sigfox more reliable communication, including recovery of lost messages, and allows payloads larger than a single message through fragmentation and reassembly.</p><p>This document defines the \"SCHC over Sigfox Profile\". It applies to Sigfox Radio specification versions up to v1.6 (March 2022), and support for later versions would have to be assessed.</p>",
+      "eli5": "<p>SCHC is a general box of shortening tricks. This document picks the exact tricks and sizes that work best for Sigfox, which can only carry very short notes.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "3.1",
+      "title": "Network Architecture",
+      "content": "<p>Following the terms of <a href='/8376/'>RFC 8376</a>, the Radio Gateway (RGW) is a Sigfox Base Station and the Network Gateway (NGW) is the cloud-based Sigfox network. The NGW is a single entity connected to all Base Stations in the world, which gives a single global star topology.</p><p>The device runs a SCHC compressor/decompressor and fragmenter/reassembler (C/D and F/R) between its applications and the radio. The resulting SCHC message travels in a Sigfox frame to the Base Stations, then to the NGW, which hands it with metadata to the Network SCHC C/D and F/R. That function shares the same Rules as the device and may sit with the NGW or elsewhere, as long as there is a tunnel or secured communication to the NGW. After decompression and reassembly, the packet can go over the Internet to the application servers.</p><p>Both ends must have the context (the Rules) stored in advance. It can be provisioned out of band, at manufacturing time, or with protocols such as NETCONF, RESTCONF or CORECONF, but how this is done is out of scope.</p>",
+      "eli5": "<p>Your gadget shortens its note, a nearby tower passes it to a big central post office, and a translator there expands it again using the same rule book that the gadget has.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "3.2",
+      "title": "Uplink and Downlink on Sigfox",
+      "content": "<p><strong>Uplink.</strong> Uplink transmissions are repeated over different times and frequencies, and several Base Stations may receive a message. The NGW can combine the copies, which gives time, space and frequency diversity. The payload can be up to 12 bytes. Only messages that pass the layer-2 CRC are delivered to the Network SCHC. The L2 word size is 1 byte. The network delivers each message with the Device ID, Message Sequence Number, payload and timestamp, plus optional geolocation, RSSI, temperature and battery voltage.</p><p><strong>Downlink.</strong> Downlink is device-driven. The device sets a Downlink request flag in an uplink message, then opens a reception window of fixed delay and duration. If the network has a message it sends it then; otherwise the device closes the window and goes back to sleep or other activity.</p><p>This affects SCHC acknowledgements. For Uplink ACK-on-Error mode, the last fragment of every window (FCN = All-0 or All-1) MUST be the one that indicates a Downlink opportunity. Intermediate fragments MUST NOT use the Downlink request flag to ask for a SCHC ACK. The network may reply with an ACK at that opportunity, wait for a later one, or send nothing.</p>",
+      "eli5": "<p>The gadget mostly talks and rarely listens. It can only hear a reply right after it asks for one, so it asks only at planned moments.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.5",
+      "title": "Fragmentation Modes and Parameters",
+      "content": "<p>The profile picks a fragmentation mode and parameter set for each case. The receiver MUST check the integrity of a reassembled packet, and because only CRC-checked messages arrive, integrity can be guaranteed when no consecutive messages are missing and all FCN bitmaps are complete. A Reassembly Check Sequence (RCS) MUST be used.</p><ul><li><strong>Uplink No-ACK</strong>, single-byte header: for short, non-critical packets that need fragmentation but not full reliability. Header: RuleID 3 bits, no DTag, FCN 5 bits. Regular tile 11 bytes; maximum SCHC Packet 340 bytes.</li><li><strong>Uplink ACK-on-Error</strong>, single-byte header: for short to medium packets that must be reliable, up to 300 bytes. RuleID 3, W 2, FCN 3 bits; WINDOW_SIZE 7; MAX_ACK_REQUESTS 5.</li><li><strong>Uplink ACK-on-Error</strong>, two-byte header Option 1: up to 480 bytes. RuleID 6, W 2, FCN 4, RCS 4 bits; WINDOW_SIZE 12; tile 10 bytes.</li><li><strong>Uplink ACK-on-Error</strong>, two-byte header Option 2: up to 2400 bytes. RuleID 8, W 3, FCN 5, RCS 5 bits; WINDOW_SIZE 31; tile 10 bytes.</li><li><strong>Downlink ACK-Always</strong>, single-byte header: RuleID 3 bits, no W, FCN 5 bits; WINDOW_SIZE 31; tile 7 bytes. ACK-Always SHOULD be used for reliable downlink because ACK-on-Error does not guarantee feedback when no errors occur.</li></ul><p>ACK-on-Error is considered optimal for reliable uplink because it keeps the number of ACKs low on the smaller downlink channel. When ACK-on-Error is used for uplink, the SCHC Compound ACK of <a href='/9441/'>RFC 9441</a> MUST be used in downlink responses. Timers are application-dependent, with a default of 12 hours for the Retransmission and Inactivity timers.</p><p>A device that is waiting to receive downlink fragments can only trigger them by sending uplink. It MAY send an uplink as soon as possible after a non-last downlink fragment, and it MUST send an uplink requesting a downlink every 24 hours when no SCHC session is started.</p>",
+      "eli5": "<p>There are a few ways to cut a big parcel into postcards. Small parcels get a one-byte label, and bigger ones get a two-byte label so more pieces can be counted. For parcels that must arrive, the receiver says which pieces are missing.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3.6",
+      "title": "Message Formats, Padding and Aborts",
+      "content": "<p>The RFC draws every fragment, ACK and abort message for each mode. The single-byte uplink ACK-on-Error regular fragment is a 3-bit RuleID, 2-bit W, 3-bit FCN and 88 bits of payload, with no padding because tiles are 11 bytes. The SCHC ACK REQ MUST NOT be used. Instead the All-1 fragment requests an ACK.</p><p>An All-1 message carries an RCS and may carry the last tile. To tell it apart from a Sender-Abort message, the Sender-Abort MUST be only a header with no padding, so it is shorter than any All-1 message. When all fragments arrive, the success ACK has C=1. When fragments are lost, the Compound ACK has C=0 and lists bitmaps for the windows with losses. Receiver-Abort messages are made of all 1s, as drawn in the RFC.</p><p><strong>Padding.</strong> Uplink payloads may be 0 to 12 bytes. Sigfox can send zero bits, one single bit, or a whole number of bytes, so a payload of 2 or more bits must be padded to the next byte. Downlink frames are fixed, so the payload MUST be 64 bits (8 bytes), padded with zeros, and the receiver MUST remove the padding before SCHC reassembly.</p><p><strong>Aborts.</strong> A Sender-Abort MUST be sent if the number of repeated All-1 fragments without a Compound ACK reaches MAX_ACK_REQUESTS. A Receiver-Abort MUST be sent when all RuleIDs for a device are in use and a new one is requested, when the RuleID is not valid, and when the Inactivity Timer expires. A Receiver-Abort downlink MUST only be sent when a downlink opportunity exists.</p>",
+      "eli5": "<p>Every kind of postcard has a fixed layout for its label. Small notes are padded with zeros to fill the space, and there is a special short card for saying \"stop, I give up\".</p>"
+    },
+    {
+      "id": "examples",
+      "number": "4",
+      "title": "RuleID Layout and Sequence Examples",
+      "content": "<p>The RFC gives an example of how to share the RuleID space across header sizes. The first 3 bits of the RuleID show the header length: any value other than <code>0b111</code> means a single-byte header, which leaves 7 RuleIDs, while <code>0b111</code> means a two-byte header. In the two-byte case, the next 3 bits separate Option 1 (anything other than <code>0b111</code>) from Option 2 (<code>0b111</code>). The RFC also notes that the RuleID space for uplink is different from the one for downlink.</p><p>The sequence examples use the Sigfox sequence number (Seq). In No-ACK mode, the first fragment gets FCN = X-1 where X is the number of fragments, the following ones count down, and the last gets the All-1 value. So the receiver learns the expected size from the first fragment. If any fragment is lost in No-ACK mode, the packet cannot be reassembled.</p>",
+      "eli5": "<p>The first few bits of a label tell the post office which kind of label it is, so it knows how to read the rest.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The Sigfox radio protocol authenticates and protects the integrity of each message with a unique Device ID and an AES-128-based message authentication code. Application data may or may not be encrypted at the application layer, depending on the criticality of the use case; AES-128 in counter mode is used, with independent keys per device. The radio protocol has protection against replay attacks, and the cloud core network provides firewall protection.</p><p>These mechanisms do not guarantee end-to-end security between the device SCHC and the Network SCHC, so the threats described in <a href='/8724/'>RFC 8724</a> apply. Device location can be privacy-sensitive, so the optional Device Geolocation parameter can be omitted. The RFC has no IANA actions.</p>",
+      "eli5": "<p>Each message is signed with the device's secret stamp so it cannot be forged, and sending the secret contents is optional.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "before",
+      "caption": "UPLINK ACK-ON-ERROR REGULAR FRAGMENT, SINGLE-BYTE HEADER (RFC 9442)",
+      "data": {
+        "title": "Regular SCHC Fragment",
+        "bytes": 12,
+        "width": 32,
+        "fields": [
+          {
+            "key": "ruleid",
+            "name": "RuleID",
+            "bits": 3,
+            "desc": "Identifies the Rule."
+          },
+          {
+            "key": "w",
+            "name": "W",
+            "bits": 2,
+            "desc": "Window index."
+          },
+          {
+            "key": "fcn",
+            "name": "FCN",
+            "bits": 3,
+            "desc": "Fragment Compressed Number, the tile index in the window."
+          },
+          {
+            "key": "payload",
+            "name": "Payload",
+            "bits": 88,
+            "desc": "One regular tile of 11 bytes."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SCHC OVER SIGFOX FRAGMENTATION PROFILES",
+      "data": {
+        "columns": [
+          "Mode",
+          "Header",
+          "Window size",
+          "Regular tile",
+          "Max packet"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Uplink No-ACK",
+              "1 byte",
+              "No windows",
+              "11 bytes",
+              "340 bytes"
+            ]
+          },
+          {
+            "cells": [
+              "Uplink ACK-on-Error",
+              "1 byte",
+              "7",
+              "11 bytes",
+              "300 bytes"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Uplink ACK-on-Error, Option 1",
+              "2 bytes",
+              "12",
+              "10 bytes",
+              "480 bytes"
+            ]
+          },
+          {
+            "cells": [
+              "Uplink ACK-on-Error, Option 2",
+              "2 bytes",
+              "31",
+              "10 bytes",
+              "2400 bytes"
+            ]
+          },
+          {
+            "cells": [
+              "Downlink ACK-Always",
+              "1 byte",
+              "31",
+              "7 bytes",
+              "Not stated"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "UPLINK NO-ACK, NO LOSSES (FIGURE 31, ABRIDGED)",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "Sender"
+          },
+          {
+            "key": "receiver",
+            "label": "Receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "FCN=6, Seq=1",
+            "color": "blue",
+            "note": "First fragment shows how many follow."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "FCN=5, Seq=2",
+            "color": "blue"
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "FCN=1, Seq=6",
+            "color": "blue",
+            "note": "FCN counts down; intermediate fragments omitted."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "FCN=15, Seq=7",
+            "color": "green",
+            "note": "All-1: all fragments received."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8724]",
+      "text": "Minaburo, A., Toutain, L., Gomez, C., Barthel, D., and JC. Zuniga, \"SCHC: Generic Framework for Static Context Header Compression and Fragmentation\", RFC 8724, April 2020.",
+      "rfc": 8724
+    },
+    {
+      "number": "[RFC9441]",
+      "text": "Zuniga, JC., Gomez, C., Aguilar, S., Toutain, L., Cespedes, S., and D. Wistuba, \"Static Context Header Compression (SCHC) Compound Acknowledgement (ACK)\", RFC 9441, July 2023.",
+      "rfc": 9441
+    },
+    {
+      "number": "[RFC8376]",
+      "text": "Farrell, S., Ed., \"Low-Power Wide Area Network (LPWAN) Overview\", RFC 8376, May 2018.",
+      "rfc": 8376
+    },
+    {
+      "number": "[sigfox-spec]",
+      "text": "Sigfox, \"Sigfox Device Radio Specifications\"."
+    },
+    {
+      "number": "[sigfox-callbacks]",
+      "text": "Sigfox, \"Sigfox Callbacks\"."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

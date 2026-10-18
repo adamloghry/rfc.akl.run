@@ -9,13 +9,184 @@
   },
   "questions": [
     "how does websocket compression work",
-    "what is permessage-deflate"
+    "what is permessage-deflate",
+    "what is context takeover in websocket",
+    "what does the rsv1 bit mean in websocket"
+  ],
+  "tags": [
+    "WebSocket",
+    "Compression",
+    "Extensions"
+  ],
+  "subtitle": "A framework for compressing WebSocket messages one at a time, plus the DEFLATE-based permessage-deflate extension.",
+  "tldr": {
+    "problem": "The WebSocket Protocol has no built-in way to compress message data, so there needed to be a general method for adding compression that both sides agree on when the connection opens.",
+    "mechanism": "A framework lets endpoints negotiate a per-message compression extension in the opening handshake and mark compressed messages with the RSV1 bit. One extension, permessage-deflate, applies DEFLATE with parameters to limit memory use.",
+    "outcome": "Either side can compress each message, or leave it uncompressed. The RFC warns that history-based compression combined with a secure transport has a known exploit (CRIME).",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Extension name",
+      "value": "permessage-deflate"
+    },
+    {
+      "label": "Compressed flag",
+      "value": "RSV1 bit (first fragment)"
+    },
+    {
+      "label": "Window bits range",
+      "value": "8 to 15"
+    },
+    {
+      "label": "Maximum LZ77 window",
+      "value": "32,768 bytes"
+    },
+    {
+      "label": "Bytes stripped after DEFLATE",
+      "value": "0x00 0x00 0xff 0xff"
+    },
+    {
+      "label": "Close code on failed negotiation",
+      "value": "1010"
+    }
+  ],
+  "today": "<p>RFC 7692 is a Proposed Standard, and the metadata lists no RFC that obsoletes or updates it. It builds on <a href='/6455/'>RFC 6455</a>.</p>",
+  "glossary": [
+    "websocket",
+    "handshake",
+    "lz77",
+    "sliding-window",
+    "lossless-compression",
+    "huffman-coding",
+    "frame",
+    "fragmentation",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "A Compression Framework for WebSocket",
+      "content": "<p>RFC 7692 specifies a framework for adding compression to the WebSocket Protocol (<a href='/6455/'>RFC 6455</a>). It defines how to build <strong>Per-Message Compression Extensions</strong> (PMCEs) for a given compression algorithm, using the extension concept in Section 9 of RFC 6455.</p><p>The framework is only a general method. Each PMCE has to be specified in its own document, which must define the extension name and its parameters, how to interpret those parameters, and how to transform the payload of a message. The RFC also defines one concrete PMCE, <code>permessage-deflate</code>, based on the DEFLATE algorithm (<a href='/1951/'>RFC 1951</a>). A client and a server negotiate the extension during the WebSocket opening handshake.</p>",
+      "eli5": "<p>This is a recipe for how two computers can agree to shrink their messages. It is a general recipe, and one ready-made version of it is included.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "2",
+      "title": "Negotiating an Extension",
+      "content": "<p>To offer a PMCE, a client MUST include its name in the <code>Sec-WebSocket-Extensions</code> header of its opening handshake. It may offer several choices, even the same extension name with different parameters, and the order expresses preference. A server accepts an offer by including the extension name, along with the <strong>agreed parameters</strong>, in its own handshake header, or declines all offers by including no PMCE element at all, in which case both sides go on without compression.</p><p>An offer can carry <strong>requests</strong>, which are constraints the server must satisfy if it accepts, and <strong>hints</strong>, which the server may ignore. The LZ77 window size is the example the RFC gives. The client must tell the server its own window size so the server does not use a larger one, which is a request. Telling the server the largest window the client can afford to use when sending is only a hint.</p><p>A server MUST NOT accept a PMCE together with another extension that conflicts over the RSV1 bit, or that needs frame boundaries preserved or uses the extension data field or reserved bits per frame. A client that receives such a response, or any invalid response such as a PMCE it never offered, MUST fail the WebSocket connection. If the client cannot or will not proceed with the parameters the server returned, it starts the closing handshake with close code <code>1010</code>.</p>",
+      "eli5": "<p>When two computers meet, the first one lists the ways it could squash messages, favorite first. The second one picks one it knows, or says no thanks. Either way they both know what to do next.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "Framing and the Compressed Bit",
+      "content": "<p>PMCEs operate only on data messages. The RFC allocates the RSV1 bit of the WebSocket header as the <strong>Per-Message Compressed</strong> bit. If it is set on the first fragment of a message, the message is a compressed message and its frames carry compressed data. If it is unset, the message is an uncompressed message and its frames carry the original data as is. This lets an endpoint skip compression for content that does not compress well.</p><p>To send, an endpoint compresses the whole message payload by the PMCE's procedure, builds frames from the result and sets the bit on the first frame. To receive, it concatenates the payload of all the frames, decompresses it and delivers the result. An endpoint MUST NOT set the bit on control frames or on non-first fragments, and a receiver that sees this MUST fail the connection. Opcodes are not changed, and the compressed data does not have to be valid UTF-8 even for a text message, though the data is subject to the original type's rules again after decompression.</p>",
+      "eli5": "<p>Every package has a small sticker that says squashed or not squashed. The receiver looks at the sticker on the first piece to know whether it needs to unsquash the package.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "permessage-deflate Parameters",
+      "content": "<p>The <code>permessage-deflate</code> extension compresses payloads with DEFLATE and uses the byte boundary alignment method of <a href='/1979/'>RFC 1979</a>. It defines four parameters to manage memory use, which apply independently to each direction. Parameters with the <code>client_</code> prefix configure the client's compressor and the server's decompressor, and the <code>server_</code> prefix does the opposite.</p><ul><li><code>server_no_context_takeover</code> and <code>client_no_context_takeover</code> take no value. They control <strong>context takeover</strong>, meaning whether the LZ77 sliding window used for one message is reused for the next. Ruling it out saves the memory needed to keep the window between messages.</li><li><code>server_max_window_bits</code> and <code>client_max_window_bits</code> hold a decimal integer from 8 to 15, the base-2 logarithm of the LZ77 sliding window size. If a client does not limit the window, it can receive windows up to 32,768 bytes. In an offer, <code>client_max_window_bits</code> may be sent with no value just to show the client supports it in a response.</li></ul><p>A server MUST decline an offer that has an undefined parameter, an invalid value, duplicate parameter names or a configuration it does not support. A client MUST fail the connection if a response breaks equivalent rules. If an offer lacks <code>client_max_window_bits</code>, the response MUST NOT include it.</p>",
+      "eli5": "<p>The computers can agree to keep a short memory of what they just sent, or no memory at all. A shorter memory uses less space but squashes a bit less well.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5",
+      "title": "How Payloads Are Transformed",
+      "content": "<p>To compress, an endpoint runs DEFLATE over all octets of the payload. If the result does not end with an empty DEFLATE block with no compression, one is appended. Then the four octets <code>0x00 0x00 0xff 0xff</code> are removed from the tail. To decompress, those four octets are appended again before running DEFLATE. For non-final fragments the removal MUST NOT be done. An endpoint MUST NOT use an LZ77 sliding window longer than 32,768 bytes.</p><p>If the agreed parameters include a no-context-takeover parameter, the endpoint that compresses in that direction MUST start each message with an empty window. Otherwise it MAY keep the window from the last compressed message, and the decompressing side then MUST do likewise. If a <code>max_window_bits</code> value w is agreed, the compressing side MUST NOT use a window longer than 2 to the power w bytes. The client-side versions of these parameters in an offer are only hints to the server.</p><p>The RFC walks through examples with the text message <code>Hello</code>. Uncompressed messages in between do not affect the window. In its sharing example, a second identical <code>Hello</code> takes fewer bytes when the window is carried over, with 2 bytes saved in total.</p>",
+      "eli5": "<p>Before sending, a computer squashes the message and trims off a fixed little tag at the end that both sides know about. The receiver puts the tag back and then unsquashes it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security, Implementation and IANA",
+      "content": "<p>The security section is a single warning: there is a known exploit when history-based compression is combined with a secure transport, called CRIME. Implementors should pay attention to this when integrating the extension with other extensions or protocols.</p><p>The implementation notes say most platforms offer a way to align DEFLATE output to byte boundaries with an empty block. For example, zlib does this when <code>Z_SYNC_FLUSH</code> is passed. A window size of 1,024 or more is RECOMMENDED for a useful compression ratio. IANA registered the extension name <code>permessage-deflate</code> and the RSV1 framing header bit, which is named the Per-Message Compressed bit.</p>",
+      "eli5": "<p>Squashing messages by remembering earlier ones can leak hints about secret contents if an attacker can watch the sizes. So builders have to be careful when mixing it with secret data.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "NEGOTIATION OFFER WITH A FALLBACK (FROM THE RFC)",
+      "data": {
+        "title": "Sec-WebSocket-Extensions offer",
+        "lang": "text",
+        "code": "Sec-WebSocket-Extensions:\n    permessage-deflate;\n    client_max_window_bits; server_max_window_bits=10,\n    permessage-deflate;\n    client_max_window_bits"
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "PERMESSAGE-DEFLATE HANDSHAKE (ILLUSTRATIVE, BASED ON RFC EXAMPLES)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "permessage-deflate; client_max_window_bits; server_max_window_bits=10",
+            "color": "blue",
+            "note": "Offer, with a request limiting the server's window."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "permessage-deflate; server_max_window_bits=10",
+            "color": "green",
+            "note": "Accepts, with the agreed parameters."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6455]",
+      "text": "Fette, I. and A. Melnikov, \"The WebSocket Protocol\", RFC 6455, December 2011.",
+      "rfc": 6455
+    },
+    {
+      "number": "[RFC1951]",
+      "text": "Deutsch, P., \"DEFLATE Compressed Data Format Specification version 1.3\", RFC 1951, May 1996.",
+      "rfc": 1951
+    },
+    {
+      "number": "[RFC1979]",
+      "text": "Woods, J., \"PPP Deflate Protocol\", RFC 1979, August 1996.",
+      "rfc": 1979
+    },
+    {
+      "number": "[RFC5234]",
+      "text": "Crocker, D., Ed. and P. Overell, \"Augmented BNF for Syntax Specifications: ABNF\", STD 68, RFC 5234, January 2008.",
+      "rfc": 5234
+    },
+    {
+      "number": "[LZ77]",
+      "text": "Ziv, J. and A. Lempel, \"A Universal Algorithm for Sequential Data Compression\", IEEE Transactions on Information Theory, Vol. 23, No. 3, May 1977."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

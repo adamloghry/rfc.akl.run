@@ -10,13 +10,207 @@
   "questions": [
     "docsis queue protection algorithm",
     "low latency docsis",
-    "how to stop flows abusing a low-latency queue"
+    "how to stop flows abusing a low-latency queue",
+    "what is docsis queue protection",
+    "how does qprot decide to eject a packet",
+    "what is the queuing score in docsis"
+  ],
+  "tags": [
+    "Queueing",
+    "Latency",
+    "DOCSIS"
+  ],
+  "subtitle": "How DOCSIS spots and sidelines flows that would wreck a shared low-latency queue.",
+  "tldr": {
+    "problem": "A shared low-latency queue only works if every flow in it avoids building a queue, but some flows may not behave, by accident or on purpose.",
+    "mechanism": "The Queue Protection (QProt) algorithm gives each flow a queuing score that grows with its share of the blame for queuing and ages at a constant rate. When queue delay is over a threshold and a packet's flow has a high enough score, the packet is moved to the Classic queue.",
+    "outcome": "Well-behaved flows that keep their ECN-marked rate below the aging rate are not touched, while queue-building flows lose their low-latency treatment. The normative text stays in the DOCSIS specifications.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default aging rate",
+      "value": "2^19 B/s (about 4 Mb/s)"
+    },
+    {
+      "label": "Default score threshold",
+      "value": "4000 µs"
+    },
+    {
+      "label": "Buckets by default",
+      "value": "32, plus one dregs bucket"
+    },
+    {
+      "label": "Maximum queuing score",
+      "value": "5 s"
+    },
+    {
+      "label": "Introduced in",
+      "value": "DOCSIS 3.1"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 9957 is an Informational RFC from the Independent Submission stream, published in May 2026, and no RFC obsoletes or updates it. It states that the DOCSIS specifications remain authoritative and that they, not this document, hold the normative text.</p>",
+  "glossary": [
+    "explicit-congestion-notification",
+    "congestion-control",
+    "token-bucket",
+    "dscp",
+    "rate-limiting"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Queue Protection Exists",
+      "content": "<p>This Informational RFC explains the <strong>queue protection</strong> (QProt) algorithm that was introduced in DOCSIS 3.1. The algorithm is defined in Annex P of the DOCSIS specification, which relies on cross references; this document gathers the pieces into one place. If the two disagree, the DOCSIS specifications take precedence, because the normative language lives there.</p><p>Each direction of a DOCSIS link has two queues: Low-Latency (LL) and Classic, in an arrangement similar to the Dual-Queue Coupled AQM of <a href='/9332/'>RFC 9332</a>. Low queuing delay depends on hosts sending smoothly, either at a low rate or by responding to ECN (<a href='/8311/'>RFC 8311</a>, <a href='/9331/'>RFC 9331</a>). Traffic that does not behave that way can end up in the LL queue by accident or on purpose. QProt sits at the ingress of the LL queue (on the cable modem upstream, on the CMTS downstream) and, when triggered, ejects the packet and reclassifies it into the Classic queue. In normal scenarios it is not expected to intervene at all.</p>",
+      "eli5": "<p>There are two lanes: a fast one for light, speedy traffic and a slow one for heavy traffic. A guard at the fast lane's entrance moves anyone who is clogging it over to the slow lane.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "Mechanism and Policy",
+      "content": "<p>The algorithm splits into <strong>mechanism</strong> and <strong>policy</strong>. The mechanism identifies flows (usually by Layer 4 5-tuple), keeps per-flow state and accumulates a per-flow <strong>queuing score</strong>. The policy decides when to act (the conditions) and what to do (the action). Policy is only a tiny amount of code but may need to change, so hardware designs are advised to keep it in firmware or software.</p><p>The score is the flow's share of blame for queuing. Each arriving packet adds its size scaled by <code>probNative</code>, the same variable (0 to 1) that the LL queue's AQM uses to ECN-mark packets. So a flow's score grows faster the more queuing there is and the faster its packets arrive during it. The score is also aged at a constant rate, because capacity-seeking flows unavoidably cause a low level of congestion.</p><p>For efficiency the score is converted into time units, so it becomes the expiry time of the flow's state and ages by the passage of time alone. Non-queue-building flows release their state quickly, so only queue-building flows hold state persistently.</p><p>The action in the DOCSIS specification is to reclassify the packet into the Classic queue.</p>",
+      "eli5": "<p>Every flow gets a blame score that goes up when it adds to a jam and slowly drains away on its own. Flows that never add to the jam end up with nothing to be blamed for.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "How a Flow Stays on the Good Side",
+      "content": "<p>QProt works for both responsive and unresponsive flows. For a responsive flow that uses ECN, there is an objective rule: keep the bit rate of ECN-marked packets (the congestion-rate) below <code>AGING</code>, a configured constant whose default is 2^19 B/s, roughly 4 Mb/s. A congestion controller does better to keep its average well below that, for example about 1 Mb/s, so transient dynamics do not trigger protection.</p><p>For an unresponsive flow no such rule can be given, because it depends on the link capacity and the other traffic, which an application cannot know. The smoother its pacing and the lower its rate relative to typical broadband capacity, the less likely it is to trigger protection.</p><p>Responsive flows can use the L4S ECN codepoint (<a href='/9331/'>RFC 9331</a>) to be classified into the LL queue. Smooth flows that ignore ECN can use the Non-Queue-Building Diffserv codepoint (<a href='/9956/'>RFC 9956</a>), or an operator can use other local classifiers. The rule is only objective because the score is driven by the same variable that sets the visible ECN marking.</p>",
+      "eli5": "<p>If you slow down a little whenever the signal says the lane is getting busy, you will never be moved. Only people who ignore the signal and keep pushing get moved.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4",
+      "title": "The Pseudocode Walk-Through",
+      "content": "<p>Every packet bound for the LL queue passes through <code>qprotect()</code> after classification and AQM marking and before it is queued. The function reads the queue delay, derives <code>probNative</code> with <code>calcProbNative()</code>, finds the flow's bucket with <code>pick_bucket()</code> and updates its score with <code>fill_bucket()</code>.</p><p><code>calcProbNative()</code> is a linear ramp that turns queue delay into a probability: 0 below <code>MINTH</code>, 1 at or above <code>MAXTH</code>, and proportional in between.</p><p><code>pick_bucket()</code> is tuned for flow state that has usually expired between packets. It hashes the flow ID up to <code>ATTEMPTS</code> times into a small array of buckets, looking first for the flow's own bucket, and otherwise recycles an expired one. If none is free, flows share one extra bucket called the dregs.</p><p><code>fill_bucket()</code> adds <code>probNative * pkt_sz / AGING</code> to the bucket's expiry time, capped at <code>qLSCORE_MAX</code> (5 s), so the score ages implicitly.</p><p>The packet is sanctioned if the queue delay exceeds <code>CRITICALqL</code> and the score, scaled by delay over that threshold, exceeds <code>CRITICALqLSCORE</code>, or if the score reaches <code>qLSCORE_MAX</code>. Otherwise it is forwarded. The document warns that defaults, and any aspect of the algorithm, can change, so the latest DOCSIS specifications are definitive.</p>",
+      "eli5": "<p>Each flow has a small bucket that fills as it adds to a jam and drains as time passes. If the lane is already too slow and a flow's bucket is too full, its next packet is sent to the other lane.</p>"
+    },
+    {
+      "id": "design",
+      "number": "5",
+      "title": "Design Rationale and Limits",
+      "content": "<p><strong>Blame for queuing, not for rate.</strong> A high but smooth rate is benign. The document's example has a smooth flow at about 80% of capacity and a bursty flow at 45%, causing 25% overload during bursts; they bear 64% and 36% of the responsibility. Score accumulates only to the extent a flow causes queuing.</p><p><strong>Constant aging.</strong> Scalable congestion controllers hold the product of their window and the congestion level roughly constant, so a single aging rate can suit any link capacity or number of competing flows. A flow can be less aggressive than that, but not more.</p><p><strong>Harm first.</strong> Packets are ejected only when queue delay exceeds the threshold, which helps avoid ejecting VPN traffic whose many flows share one flow ID. As delay rises, the score needed to eject falls, so the bar rises for packets passed over.</p><p><strong>Reclassify, not drop.</strong> A redirected packet joins the Classic queue, so it may be delayed or reordered. This mild harm is deliberate, to give senders a slight incentive to mark their packets correctly.</p><p><strong>Limits.</strong> Grouping by Layer 4 flow identifier is pragmatic and has no scientific basis; applications may use several flows, or share one inside a VPN.</p>",
+      "eli5": "<p>The rule is about who actually causes the jam, not who is biggest. And being moved to the slow lane is a small, deliberate nudge to play fair.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The whole document concerns traffic security: how to identify and eject traffic that does not follow the non-queue-building behaviour needed to use a shared low-latency queue. <a href='/9330/'>RFC 9330</a> places QProt in the wider set of approaches to this problem.</p><p>QProt is designed to fail gracefully under resource-exhaustion attacks, so non-queue-building flows stay less likely to be sanctioned than queue-building ones. An attacker can still raise the share of innocent flows wrongly sanctioned, which means more reordering, not catastrophic loss. For example, with <code>ATTEMPTS=2</code> and <code>NBUCKETS=32</code>, about 94 attack flows on different ports raise to 99% the chance that an arriving flow has to share the dregs. Doubling the buckets to 64 doubles the attack force needed. Redirecting whole offending flows would be the most effective mitigation but is out of scope. Dropping them is not recommended, since attackers might turn it onto innocent flows. The document has no IANA actions.</p>",
+      "eli5": "<p>A cheater could try to fill up every bucket so honest flows get blamed too. Having more buckets makes that harder, and the worst result is just that some honest packets take the slower lane.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "DEFAULT PARAMETERS IN THE PSEUDOCODE (DEFAULTS MAY CHANGE)",
+      "data": {
+        "items": [
+          {
+            "code": "QPROTECT_ON",
+            "label": "Enabled",
+            "desc": "Queue Protection is on by default (TRUE)."
+          },
+          {
+            "code": "CRITICALqLSCORE_us",
+            "label": "Score threshold",
+            "desc": "4000 microseconds."
+          },
+          {
+            "code": "LG_AGING",
+            "label": "Aging rate",
+            "desc": "19, meaning 2^19 B/s, roughly 4 Mb/s."
+          },
+          {
+            "code": "MAXTH_us",
+            "label": "Max marking threshold",
+            "desc": "1000 microseconds; CRITICALqL_us defaults to this."
+          },
+          {
+            "code": "LG_RANGE",
+            "label": "Ramp range",
+            "desc": "19, meaning 2^19 = 524288 ns."
+          },
+          {
+            "code": "NBUCKETS",
+            "label": "Buckets",
+            "desc": "2^5 = 32, plus one extra bucket (the dregs)."
+          },
+          {
+            "code": "ATTEMPTS",
+            "label": "Hash attempts",
+            "desc": "2 attempts to pick a bucket."
+          },
+          {
+            "code": "qLSCORE_MAX",
+            "label": "Maximum score",
+            "desc": "5 seconds."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "THE SANCTION TEST IN qprotect(), FROM THE RFC",
+      "data": {
+        "title": "Policy conditions",
+        "lang": "text",
+        "code": "if ( ( ( qdelay > CRITICALqL )\n   && ( qdelay * qLscore > CRITICALqLPRODUCT ) )\n   || ( qLscore >= qLSCORE_MAX ) )\n   return EXIT_SANCTION;\nelse\n   return EXIT_SUCCESS;"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3168]",
+      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
+      "rfc": 3168
+    },
+    {
+      "number": "[RFC8311]",
+      "text": "Black, D., \"Relaxing Restrictions on Explicit Congestion Notification (ECN) Experimentation\", RFC 8311, January 2018.",
+      "rfc": 8311
+    },
+    {
+      "number": "[RFC9330]",
+      "text": "Briscoe, B., et al., \"Low Latency, Low Loss, and Scalable Throughput (L4S) Internet Service: Architecture\", RFC 9330, January 2023.",
+      "rfc": 9330
+    },
+    {
+      "number": "[RFC9331]",
+      "text": "De Schepper, K. and B. Briscoe, \"The Explicit Congestion Notification (ECN) Protocol for Low Latency, Low Loss, and Scalable Throughput (L4S)\", RFC 9331, January 2023.",
+      "rfc": 9331
+    },
+    {
+      "number": "[RFC9332]",
+      "text": "De Schepper, K., Briscoe, B., and G. White, \"Dual-Queue Coupled Active Queue Management (AQM) for Low Latency, Low Loss, and Scalable Throughput (L4S)\", RFC 9332, January 2023.",
+      "rfc": 9332
+    },
+    {
+      "number": "[RFC9956]",
+      "text": "White, G., Fossati, T., and R. Geib, \"A Non-Queue-Building Per-Hop Behavior (NQB PHB) for Differentiated Services\", RFC 9956, May 2026.",
+      "rfc": 9956
+    },
+    {
+      "number": "[DOCSIS]",
+      "text": "CableLabs, \"MAC and Upper Layer Protocols Interface (MULPI) Specification, CM-SP-MULPIv3.1\", DOCSIS 3.1."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

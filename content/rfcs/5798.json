@@ -10,13 +10,253 @@
   "questions": [
     "what is vrrp",
     "vrrp version 3 for ipv6",
-    "how does router failover work"
+    "how does router failover work",
+    "how does vrrp failover work",
+    "what is the vrrp multicast address",
+    "what is vrrp priority 255"
+  ],
+  "tags": [
+    "Routing",
+    "Redundancy",
+    "Failover"
+  ],
+  "subtitle": "How a group of routers on one LAN share a virtual default gateway so a backup takes over when the master fails.",
+  "tldr": {
+    "problem": "Hosts on a LAN usually rely on a single default router, which is a single point of failure. IPv6 Neighbor Discovery alone takes about 38 seconds with default parameters to notice a dead router.",
+    "mechanism": "VRRP elects one router as Master for a virtual router with its own ID and MAC address. The Master sends periodic multicast advertisements, and the highest-priority Backup takes over when they stop.",
+    "outcome": "Backup routers can take over in around three seconds with default parameters, without any change on the hosts. RFC 5798 has since been obsoleted by RFC 9568.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "IPv4 multicast address",
+      "value": "224.0.0.18"
+    },
+    {
+      "label": "IPv6 multicast address",
+      "value": "FF02:0:0:0:0:0:0:12"
+    },
+    {
+      "label": "IP protocol number",
+      "value": "112"
+    },
+    {
+      "label": "Required TTL / Hop Limit",
+      "value": "255"
+    },
+    {
+      "label": "Default Backup priority",
+      "value": "100"
+    },
+    {
+      "label": "Default advertisement interval",
+      "value": "100 centiseconds (1 second)"
+    }
+  ],
+  "today": "<p>RFC 5798 is a Proposed Standard that obsoletes <a href='/3768/'>RFC 3768</a>, and it has itself been obsoleted by <a href='/9568/'>RFC 9568</a>. Use RFC 9568 for the current VRRP specification.</p>",
+  "glossary": [
+    "virtual-router",
+    "router",
+    "arp",
+    "gratuitous-arp",
+    "mac-address",
+    "ttl",
+    "hop-limit",
+    "multicast",
+    "neighbor-unreachability-detection",
+    "solicited-node-multicast-address",
+    "link-local-address"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "The Single Gateway Problem",
+      "content": "<p>An IPv4 host often uses a statically configured default route. That is simple and works almost everywhere, but it creates a single point of failure: if the default router is lost, all hosts that cannot detect another path are isolated.</p><p>For IPv6, hosts learn default routers from Router Advertisements, which are not sent often enough to detect a failure. Neighbor Unreachability Detection can do it, but with default parameters a host needs about 38 seconds to switch to another router. Making ND more aggressive would add a lot of ND traffic.</p><p><strong>VRRP</strong> (Virtual Router Redundancy Protocol) avoids both problems. It elects a router to be responsible for a <strong>virtual router</strong>, so hosts keep using the same gateway address. The RFC notes that it provides a function similar to the proprietary protocols HSRP (<a href='/2281/'>RFC 2281</a>) and IP Standby Protocol.</p>",
+      "eli5": "<p>If your only door to the street gets stuck, you are trapped. VRRP gives the house a second door that opens automatically when the first one jams.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Virtual Routers, Master and Backup",
+      "content": "<p>A virtual router is identified by a <strong>VRID</strong> (1 to 255) plus a set of either IPv4 or IPv6 addresses on one LAN. The same VRID used for IPv4 and for IPv6 gives two different virtual routers. The router that really owns the virtual router's address is the <strong>IP address owner</strong>. It uses priority <code>255</code> and, whenever it is up, always becomes Master.</p><p>The <strong>Master</strong> forwards packets sent to the virtual address, answers ARP requests (IPv4) or Neighbor Solicitations (IPv6), and sends the periodic advertisements. <strong>Backup</strong> routers use priority 1 to 254, with a default of <code>100</code>. A Backup does not preempt the Master unless it has higher priority, and preemption can be switched off administratively by setting Preempt_Mode to False.</p><p>Two configurations are shown. In the first, one router is Master and the other Backup. In the second, each router is Master of one virtual router and Backup for the other, so hosts split their traffic while both routers are up.</p>",
+      "eli5": "<p>One guard is in charge at a time. The helper has a smaller badge number and only takes over if the first guard goes missing or is clearly outranked.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "3",
+      "title": "The VRRP Advertisement",
+      "content": "<p>The only packet type is <code>ADVERTISEMENT</code> (type 1), version 3. IPv4 packets go to the link-local multicast address <code>224.0.0.18</code>, IPv6 packets to <code>FF02:0:0:0:0:0:0:12</code>, and the IP protocol number is <code>112</code>. The TTL (or Hop Limit) MUST be 255, and a receiver MUST discard a packet where it is not. That keeps remote packets out.</p><p>The header holds Version, Type, Virtual Rtr ID, Priority, Count IPvX Addr, a 12-bit Maximum Advertisement Interval in centiseconds (default 100, which is 1 second), a checksum and then the virtual router's addresses. Priority 0 means the Master has stopped participating, so Backups can take over quickly. The addresses are mainly for spotting misconfiguration, and IPv4 and IPv6 MUST NOT be mixed in one packet.</p><p>Frames from the Master use the virtual router MAC address as the source, so learning bridges find the right LAN segment. It is <code>00-00-5E-00-01-{VRID}</code> for IPv4 and <code>00-00-5E-00-02-{VRID}</code> for IPv6.</p>",
+      "eli5": "<p>The Master sends a short note every second saying 'I am here, my rank is this'. The note only works if it comes from the same street, which is why it carries a special stamp (255).</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4",
+      "title": "The State Machine",
+      "content": "<p>Each virtual router runs a small machine with three states. In <strong>Initialize</strong> it waits for a Startup event. If it owns the address (priority 255), it sends an advertisement, announces the virtual MAC with a gratuitous ARP (IPv4) or an unsolicited Neighbor Advertisement (IPv6), and becomes Master. Otherwise it becomes Backup.</p><p>A Backup watches the Master. It must not answer ARP or Neighbor Solicitations for the virtual addresses. Its Master_Down_Interval is <code>(3 * Master_Adver_Interval) + Skew_time</code>, where Skew_Time is <code>((256 - priority) * Master_Adver_Interval) / 256</code>, so higher-priority Backups time out first. When the timer fires it announces itself and becomes Master.</p><p>A Master that hears an advertisement with higher priority, or equal priority from a sender with a greater primary address, drops back to Backup. On shutdown a Master sends an advertisement with priority 0.</p>",
+      "eli5": "<p>Each router counts down while it listens. The stronger the router's rank, the shorter its countdown, so the best backup is first to say 'my turn'.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Operations and Security",
+      "content": "<p>The Master must answer ARP and Neighbor Solicitations with the virtual MAC address, never its physical one, so hosts keep the same MAC regardless of which router is Master. A non-owner SHOULD NOT forward packets addressed to the virtual address itself, to avoid loops. Accept_Mode, False by default, controls whether such packets are accepted, for example for pings. The RFC also recommends spreading Backup priorities, for example 50 rather than 99 or 100 for a second Backup.</p><p>VRRP for IPvX has no authentication. Earlier versions had it, but operational experience showed it did not make up for misconfigured secrets, and it cannot stop a hostile node from acting as a Master anyway. The TTL check limits most attacks to the local LAN, and the RFC says VRRP adds nothing to what any node on a LAN can already do. Mixing VRRPv2 and VRRPv3 is allowed only as an upgrade step and is not recommended permanently.</p>",
+      "eli5": "<p>The guards do not check ID cards, because someone on the same street could pretend anyway. They only ignore notes from far away.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "FIXED PART OF THE VRRP PACKET (RFC 5798)",
+      "data": {
+        "title": "VRRP advertisement",
+        "width": 32,
+        "fields": [
+          {
+            "key": "version",
+            "name": "Version",
+            "bits": 4,
+            "desc": "3 for this document.",
+            "value": "3"
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 4,
+            "desc": "Only ADVERTISEMENT is defined.",
+            "value": "1"
+          },
+          {
+            "key": "vrid",
+            "name": "Virtual Rtr ID",
+            "bits": 8,
+            "desc": "Which virtual router this reports on."
+          },
+          {
+            "key": "priority",
+            "name": "Priority",
+            "bits": 8,
+            "desc": "255 for the address owner, 0 when the Master stops."
+          },
+          {
+            "key": "count",
+            "name": "Count IPvX Addr",
+            "bits": 8,
+            "desc": "Number of addresses that follow; minimum 1."
+          },
+          {
+            "key": "rsvd",
+            "name": "Rsvd",
+            "bits": 4,
+            "desc": "Set to zero on sending, ignored on receipt."
+          },
+          {
+            "key": "max-adver-int",
+            "name": "Max Adver Int",
+            "bits": 12,
+            "desc": "Interval between advertisements in centiseconds."
+          },
+          {
+            "key": "checksum",
+            "name": "Checksum",
+            "bits": 16,
+            "desc": "Detects corruption in the message."
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "VRRP STATES",
+      "data": {
+        "states": [
+          {
+            "key": "initialize",
+            "label": "Initialize",
+            "initial": true
+          },
+          {
+            "key": "master",
+            "label": "Master"
+          },
+          {
+            "key": "backup",
+            "label": "Backup"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "initialize",
+            "to": "master",
+            "label": "startup, priority 255"
+          },
+          {
+            "from": "initialize",
+            "to": "backup",
+            "label": "startup, not owner"
+          },
+          {
+            "from": "backup",
+            "to": "master",
+            "label": "Master_Down_Timer fires"
+          },
+          {
+            "from": "master",
+            "to": "backup",
+            "label": "higher-priority advertisement"
+          },
+          {
+            "from": "backup",
+            "to": "initialize",
+            "label": "shutdown"
+          },
+          {
+            "from": "master",
+            "to": "initialize",
+            "label": "shutdown"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC3768]",
+      "text": "Hinden, R., \"Virtual Router Redundancy Protocol (VRRP)\", RFC 3768, April 2004.",
+      "rfc": 3768
+    },
+    {
+      "number": "[RFC4861]",
+      "text": "Narten, T., Nordmark, E., Simpson, W., and H. Soliman, \"Neighbor Discovery for IP version 6 (IPv6)\", RFC 4861, September 2007.",
+      "rfc": 4861
+    },
+    {
+      "number": "[RFC2281]",
+      "text": "Li, T., Cole, B., Morton, P., and D. Li, \"Cisco Hot Standby Router Protocol (HSRP)\", RFC 2281, March 1998.",
+      "rfc": 2281
+    },
+    {
+      "number": "[RFC3971]",
+      "text": "Arkko, J., Kempf, J., Zill, B., and P. Nikander, \"SEcure Neighbor Discovery (SEND)\", RFC 3971, March 2005.",
+      "rfc": 3971
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

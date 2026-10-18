@@ -9,13 +9,151 @@
   },
   "questions": [
     "bidirectional rpc over rdma",
-    "nfsv4.1 callbacks over rdma"
+    "nfsv4.1 callbacks over rdma",
+    "what is bidirectional rpc over rdma",
+    "how do nfs callbacks work over rdma",
+    "what is reverse direction rpc",
+    "how do credits work in rpc over rdma"
+  ],
+  "tags": [
+    "RPC",
+    "RDMA",
+    "NFS"
+  ],
+  "subtitle": "How an RPC-over-RDMA connection can carry remote procedure calls in both directions at once, so NFS servers can call clients back.",
+  "tldr": {
+    "problem": "NFS version 4.1 needs the server to send RPC calls back to the client, but RPC-over-RDMA version 1 connections were set up for calls going only from client to server.",
+    "mechanism": "The RFC defines how an endpoint forms reverse-direction Calls and Replies on the same connection, with separate credit accounting for each direction and rules for receive buffers, chunks and retransmission.",
+    "outcome": "Forward and reverse traffic can share one RPC-over-RDMA version 1 connection without changing that protocol. An Upper-Layer Binding for NFS callbacks is still needed and is not provided here.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Applies to",
+      "value": "RPC-over-RDMA version 1 and other versions without reverse-direction facilities"
+    },
+    {
+      "label": "Credit accounting",
+      "value": "Forward and reverse credits counted separately"
+    },
+    {
+      "label": "Chunk error",
+      "value": "RDMA_ERROR with ERR_CHUNK"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 8167 is a Proposed Standard published in June 2017, and the unit metadata lists no RFC that obsoletes or updates it. It builds on <a href='/8166/'>RFC 8166</a> without changing it.</p>",
+  "glossary": [
+    "flow-control",
+    "remote-procedure-call",
+    "rdma"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Bidirectional RPC-over-RDMA",
+      "content": "<p>RPC-over-RDMA transports, introduced in <a href='/8166/'>RFC 8166</a>, carry Remote Procedure Call (RPC) transactions over transports that support Remote Direct Memory Access (RDMA). This document lets both ends of one connection send Calls at the same time, using RPC-over-RDMA protocol versions that have no special facility for the reverse direction.</p><p>The need comes from NFS version 4.1 and Parallel NFS (pNFS), which depend on reverse-direction RPC. For example, RPC-over-RDMA version 1 can carry transactions in both directions with no change to that protocol. The RFC does not update <a href='/8166/'>RFC 8166</a>. It also says an Upper-Layer Binding (ULB) for NFS version 4.x callbacks is still required and is not given here.</p>",
+      "eli5": "<p>Some file-sharing jobs need the server to ask the client a question too, not just answer. This RFC lets them do that on one connection.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "RPC Direction and XIDs",
+      "content": "<p>ONC RPC messages are either a <strong>CALL</strong>, which requests work, or a <strong>REPLY</strong>, which reports the result. The host that sends a Call is the <strong>Requester</strong> and the host that sends a Reply is the <strong>Responder</strong>. A Reply is never sent without a matching Call.</p><p>Traditionally the client is the Requester and the server is the Responder: this is <strong>forward-direction</strong> operation. Nothing in <a href='/5531/'>RFC 5531</a> forbids the opposite, where the server is the Requester. That is <strong>reverse-direction</strong> operation. Even then, the client is still the one that establishes the transport connection. <strong>Bidirectional operation</strong> means both endpoints act as Requester and Responder at once.</p><p>Each Call carries a transaction ID (<code>XID</code>) and a Reply copies it. Forward and reverse XIDs are generated on different hosts, possibly by different algorithms, with no coordination. So a forward Requester MAY use the same XID as a reverse Requester at the same time on one connection, and these are still distinct transactions.</p>",
+      "eli5": "<p>Normally you ask and the shop answers. In two-way mode the shop can ask you things too. Each question has its own number, and the two sides may reuse the same number without mixing things up.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "3",
+      "title": "Immediate Uses: NFS Callbacks",
+      "content": "<p>NFS version 4.x servers grant <strong>delegations</strong>: a promise to notify a client before anyone else may access a file, so the client can cache its data and metadata aggressively. Callbacks administer these delegations. In NFS version 4.0 the server connects back to a callback service on the client, usually over a separate TCP connection when RDMA is used for the forechannel. Without a backchannel, the server grants no delegations, which may hurt performance but not correctness.</p><p>NFS version 4.1 also uses callbacks to manage pNFS layouts. Clients start the connections, so servers send callbacks in the reverse direction on a connection the client made. Clients may keep separate forechannel and backchannel connections or combine them. A combined transport simplifies connection setup and recovery, and can use fewer connections. Without a backchannel, pNFS cannot operate at all.</p>",
+      "eli5": "<p>A file server sometimes needs to tell you, 'someone else wants your file, please hand it back.' This RFC lets it say that on the same line instead of opening a second one.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Flow Control and Receive Buffers",
+      "content": "<p>An RDMA Send only works if the receiver has already posted a Receive buffer. If it has not, the RDMA provider is allowed to terminate the connection. RPC-over-RDMA prevents this with a <strong>credit grant</strong> mechanism.</p><p>Credits work the same in the reverse direction, but forward and reverse credits on one connection are accounted separately, so a stall in one direction cannot block the other. The reverse credit value is the number of RPC requests the client is ready to receive at once and MAY differ from the forward value. If a receiver cannot tell from context whether a header's credit value is a request or a grant, it MUST ignore it.</p><p>Both directions share the same Receive buffers, so the inline thresholds are the same. The reverse call threshold equals the forward reply threshold, and vice versa.</p><p>A client posts extra Receive buffers to match its reverse credit value, on top of one per outstanding forward Call. A server posts extra buffers for the replies to each reverse Call it sends. After a lost connection, all posted buffers are flushed, so both sides must post fresh ones on reconnect, including for retransmitted Calls.</p>",
+      "eli5": "<p>Before someone sends you a message, you must hold out a bucket to catch it. Credits say how many buckets are out, and each direction counts its own buckets.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "Sending Calls and Replies in Reverse",
+      "content": "<p>A reverse-direction Call is built by the server endpoint. Its RPC-over-RDMA header holds a fresh XID in <code>rdma_xid</code>. The <code>rdma_vers</code> field MUST match the value used for forward Calls on that connection, and <code>rdma_credit</code> carries the number of requested reverse credits. The ONC RPC Call header, inline or in a chunk, MUST start with the same XID and have <code>msg_type</code> set to <code>CALL</code>.</p><p>A reverse-direction Reply is built by the client endpoint. It copies the matching Call's XID into <code>rdma_xid</code>, uses the same <code>rdma_vers</code>, and puts the granted reverse credits in <code>rdma_credit</code>. The RPC header MUST start with that XID and have <code>msg_type</code> set to <code>REPLY</code>.</p><p>Chunks MAY be used in the reverse direction and work as they do forward. If no ULP needs them, implementers can skip them. Reverse messages then always go as Short Messages, no larger than the inline threshold, since a larger inline message can cost the connection. A Responder that gets a non-empty chunk list but lacks chunk support MUST reply with an <code>RDMA_ERROR</code> message with <code>rdma_err</code> set to <code>ERR_CHUNK</code>.</p>",
+      "eli5": "<p>A reverse question is written just like a normal one, with its own number, and the answer copies that number back so everyone knows which question it belongs to.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "Retransmission and Unsupported Peers",
+      "content": "<p>When a transaction cannot finish, the Requester normally sends it again with the same XID. In the forward direction the client can always reconnect first. In the reverse direction the Requester is the server, which cannot open connections, so it must wait for the client to reconnect. A waiting reverse Call may time out. Forward-direction Requesters SHOULD therefore keep a connection open as long as the peer might send reverse requests. An NFS version 4.1 client with open delegated files or active pNFS layouts is the RFC's example.</p><p>An endpoint may not support reverse operation at all, or the ULP may not have enabled it. Sending it reverse messages could lose the connection, and repeating that after every reconnect could amount to denial of service. So a ULP MUST NOT perform reverse-direction operations until the peer has indicated it is ready. How it indicates this is outside the scope of the RFC. In NFS version 4.1, the server waits for the client's <code>CREATE_SESSION</code> or <code>BIND_CONN_TO_SESSION</code> operation first.</p>",
+      "eli5": "<p>If the line drops, only the client can call back to reconnect, so the server has to wait. And you should never ask a question on a line until the other side says it is ready to hear it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "ULBs and Security",
+      "content": "<p>A ULP can have procedures with data items eligible for direct data placement (DDP). Which items qualify is stated in its Upper-Layer Binding, and direction of operation does not remove the need for those statements. Reverse-only operation needs the client to make a fresh connection, and the ULB can specify RPC binding parameters for it. Bidirectional operation uses an existing connection, so those are usually unnecessary. If distinct RPC Programs share a connection, other considerations may apply.</p><p>On security, the RFC says RPC security is handled in the RPC layer, above RPC-over-RDMA. Reverse-direction operations use an authentication mechanism and credentials independent of the forward direction. The document requires no IANA actions.</p>",
+      "eli5": "<p>Locks and ID checks happen in the layer above the line, and each direction uses its own. This RFC does not need anything added to any official list.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "contrast",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "FORWARD AND REVERSE DIRECTION",
+      "data": {
+        "left": {
+          "title": "Forward direction",
+          "from": "client",
+          "to": "server",
+          "desc": "The client is the Requester and the server is the Responder."
+        },
+        "right": {
+          "title": "Reverse direction",
+          "from": "server",
+          "to": "client",
+          "desc": "The server is the Requester and the client is the Responder."
+        },
+        "joiner": "mirrored by"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8166]",
+      "text": "Lever, C., Ed., Simpson, W., and T. Talpey, \"Remote Direct Memory Access Transport for Remote Procedure Call Version 1\", RFC 8166, June 2017.",
+      "rfc": 8166
+    },
+    {
+      "number": "[RFC5531]",
+      "text": "Thurlow, R., \"RPC: Remote Procedure Call Protocol Specification Version 2\", RFC 5531, May 2009.",
+      "rfc": 5531
+    },
+    {
+      "number": "[RFC5661]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[RFC7530]",
+      "text": "Haynes, T., Ed. and D. Noveck, Ed., \"Network File System (NFS) Version 4 Protocol\", RFC 7530, March 2015.",
+      "rfc": 7530
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

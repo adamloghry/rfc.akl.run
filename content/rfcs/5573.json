@@ -9,13 +9,108 @@
   },
   "questions": [
     "beep asynchronous channels",
-    "what is the blocks extensible exchange protocol"
+    "what is the blocks extensible exchange protocol",
+    "how do async beep channels work",
+    "why is message ordering important in protocols"
+  ],
+  "tags": [
+    "Protocols",
+    "Asynchrony",
+    "Efficiency"
+  ],
+  "subtitle": "Independent request handling within a single BEEP communication channel.",
+  "tldr": {
+    "problem": "BEEP channels normally process requests in strict order: a reply must be sent before the next request is processed. This blocks the channel if a request takes time to process, even if the client has many requests ready to send.",
+    "mechanism": "RFC 5573 adds an \"async\" feature to BEEP that allows a channel to process and respond to requests in any order, using the message number field to correlate requests with their responses.",
+    "outcome": "Applications can send multiple requests on one channel without waiting for each reply, and the server can process them in parallel, improving throughput and reducing latency for other requests.",
+    "outcomeLabel": "Unblocked communication"
+  },
+  "facts": [
+    {
+      "label": "Status",
+      "value": "Experimental"
+    },
+    {
+      "label": "Feature Name",
+      "value": "async"
+    },
+    {
+      "label": "Channel 0",
+      "value": "Always synchronous"
+    },
+    {
+      "label": "Message Correlation",
+      "value": "msgno field"
+    },
+    {
+      "label": "Response Order",
+      "value": "Independent of request order"
+    }
+  ],
+  "today": "<p>RFC 5573 is Experimental. While BEEP itself sees limited deployment compared to protocols like HTTP, asynchronous channels remain the standard way to enable parallel request handling in BEEP when both peers support the feature.</p>",
+  "glossary": [],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p><strong>BEEP</strong> (Blocks Extensible Exchange Protocol) is a framework for building application protocols. One of its features is that it manages <strong>asynchrony</strong>, or the ability to handle multiple communication tasks independently.</p><p>However, BEEP's standard asynchrony works only between separate channels. Within any single channel, responses are ordered: the server must send a reply to a request before it can process the next request on that same channel. This is called <strong>serial processing</strong>. If a request takes significant time to process, the channel becomes blocked, and subsequent requests must wait.</p><p>RFC 5573 extends BEEP to allow asynchronous channels, where a single channel can handle multiple outstanding requests, and responses can be sent in any order. This is useful for applications where servers need time to process requests (such as database lookups or external API calls) and the client has many requests pending.</p>",
+      "eli5": "<p>BEEP normally makes you wait: each question gets one answer, then the next question. This adds a way to ask many questions at once and get the answers whenever they're ready.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Asynchronous Channels",
+      "content": "<p>In a standard BEEP channel, the message number field (<code>msgno</code>) is used only for error checking. In an <strong>asynchronous channel</strong>, the <code>msgno</code> becomes the key tool for matching requests with responses: a request with <code>msgno=5</code> can be answered by a response with <code>msgno=5</code>, regardless of the order in which other requests and responses are sent.</p><p>An asynchronous channel looks identical to a normal BEEP channel in terms of framing and encoding. The difference is purely in how the server processes messages and sends replies.</p><p>The RFC notes that asynchronous channels are not suitable for applications where state established by one request is needed by later requests, or where the order of messages matters. For example, if a client sends a request to create an account, then a request to use that account, the second request depends on the first completing successfully—asynchronous processing would break this dependency.</p>",
+      "eli5": "<p>A normal channel: ask a question, wait for the answer, ask the next question. An async channel: ask five questions, get answers as the server finishes them, no waiting.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Feature Negotiation and Channel Creation",
+      "content": "<p>Both peers in a BEEP connection declare their capabilities in a greeting exchange. This RFC registers a new BEEP feature called <code>async</code>. If both the client and server list <code>async</code> in their greeting message, they can create asynchronous channels.</p><p>To create an asynchronous channel, the client includes an <code>async=\"true\"</code> attribute in the BEEP <code>start</code> request. The server responds with either a profile confirmation (accepting the channel) or an error code if the profile or server does not support asynchronous operation.</p><p>The <strong>management channel</strong> (channel 0) always operates synchronously, even in connections where asynchronous channels are negotiated.</p><p>Asynchronous channels work identically to synchronous channels for segmented messages: each message must be completed before sending the next one. The only difference is that responses to different messages can be interleaved.</p>",
+      "eli5": "<p>First, both sides say \"I support async.\" Then the client asks for an async channel when starting. If the server agrees, it's enabled.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "4",
+      "title": "Error Handling and State Management",
+      "content": "<p>BEEP does not provide a mechanism to recover from a peer that never sends a response. In a synchronous channel, this makes the channel unusable and the connection must be closed. In an asynchronous channel, the requesting peer can continue sending other requests, but the original request consumes state resources at the receiver.</p><p>A client peer should enforce a configurable limit on the number of outstanding requests it will send. This prevents state accumulation if the server is not responding. When a client reaches its limit, it can stop generating new requests.</p><p>A server peer receiving asynchronous requests should also limit how many it will process concurrently. If the limit is reached, the server can stop reading requests (which triggers flow control on the client) or reject requests by sending error responses.</p><p>If a client disposes of state for an old request after a timeout, it must be prepared to discard any responses that arrive after that point.</p>",
+      "eli5": "<p>If a request never gets an answer, the client should give up after a while and move on. Servers should limit how many requests they process at once so they don't get overwhelmed.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Implications",
+      "content": "<p>Asynchronous processing can create a denial-of-service vulnerability if not managed carefully. A misbehaving server that accepts requests but never sends responses causes the client to accumulate state indefinitely. To prevent this, clients should enforce a strict limit on outstanding requests, either per channel, per connection, or per application.</p><p>Similarly, a misbehaving client that sends many requests without waiting for responses can overwhelm a server's resources. Servers should enforce limits on the number of concurrent requests they will process. The server can use the BEEP flow control mechanism to prevent receiving further requests: by stopping <code>SEQ</code> frame transmission, the server allows the flow control window to close, preventing the client from sending more requests until the window reopens.</p><p>These limits prevent resource exhaustion attacks while preserving the benefits of asynchrony for legitimate use cases.</p>",
+      "eli5": "<p>If one side sends too many requests without answers, or never answers questions, the other side can run out of memory. Both sides need to set limits on how many unanswered requests they'll keep.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC3080]",
+      "text": "Rose, M., \"The Blocks Extensible Exchange Protocol Core\", RFC 3080, March 2001.",
+      "rfc": 3080
+    },
+    {
+      "number": "[RFC3081]",
+      "text": "Rose, M., \"Mapping the BEEP Core onto TCP\", RFC 3081, March 2001.",
+      "rfc": 3081
+    },
+    {
+      "number": "[RFC1323]",
+      "text": "Jacobson, V., Braden, B., and D. Borman, \"TCP Extensions for High Performance\", RFC 1323, May 1992.",
+      "rfc": 1323
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

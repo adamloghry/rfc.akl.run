@@ -9,13 +9,210 @@
   },
   "questions": [
     "what is serve-stale in dns",
-    "can dns resolvers use expired records"
+    "can dns resolvers use expired records",
+    "what ttl should stale dns answers have",
+    "how long should a resolver keep stale dns data"
+  ],
+  "tags": [
+    "DNS",
+    "Resilience",
+    "Caching"
+  ],
+  "subtitle": "Lets DNS resolvers answer with expired records when the authoritative servers cannot be reached.",
+  "tldr": {
+    "problem": "When authoritative DNS servers become unreachable, for example during a DoS attack, resolvers can no longer answer even though the data those servers would return is typically unchanged.",
+    "mechanism": "Serve-stale lets a recursive resolver keep records past their TTL and use them as though unexpired, but only when it has been unable to refresh them, returning them with a TTL greater than 0 (30 seconds recommended).",
+    "outcome": "RFC 8767 is a Proposed Standard that updates the TTL definitions in RFC 1034 and RFC 1035 and the TTL range in RFC 2181, so keeping expired data for resilience is explicitly allowed.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Recommended TTL cap",
+      "value": "604,800 seconds (7 days)"
+    },
+    {
+      "label": "TTL on stale answers",
+      "value": "Greater than 0; 30 seconds recommended"
+    },
+    {
+      "label": "Client response timer",
+      "value": "1.8 seconds recommended"
+    },
+    {
+      "label": "Failure recheck",
+      "value": "No more often than every 30 seconds"
+    },
+    {
+      "label": "Maximum stale timer",
+      "value": "Suggested 1 to 3 days"
+    }
+  ],
+  "today": "<p>RFC 8767 is a Proposed Standard published in March 2020; the unit metadata lists no obsoleting or updating RFC. It updates <a href='/1034/'>RFC 1034</a>, <a href='/1035/'>RFC 1035</a> and <a href='/2181/'>RFC 2181</a>, so its amended TTL definition applies alongside them.</p>",
+  "glossary": [
+    "dns",
+    "ttl",
+    "recursive-resolver",
+    "authoritative-server",
+    "negative-caching",
+    "dnssec",
+    "nxdomain",
+    "edns"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Expired Data Can Still Help",
+      "content": "<p>Traditionally the <strong>Time To Live</strong> (TTL) of a DNS resource record has meant the maximum number of seconds a record can be used before it must be discarded. RFC 8767 expands that definition to explicitly allow expired data to be used in the exceptional case that a recursive resolver is unable to refresh it.</p><p>The idea rests on one observation: an outage of the authoritative servers can break name resolution even when the data those servers would return has not changed. The RFC calls the resulting method <strong>serve-stale</strong> and says it balances the competing needs of resiliency and freshness. One stated motivation is to make the DNS more resilient to DoS attacks and so less attractive as an attack vector.</p>",
+      "eli5": "<p>Sometimes the place that knows the answer is closed. Instead of saying 'I do not know', a helper can pass along the last answer it remembers, which is usually still right.</p>"
+    },
+    {
+      "id": "background",
+      "number": "3",
+      "title": "Background: What the Old Specs Said",
+      "content": "<p>An authoritative server can become unreachable for several reasons, including DoS attacks and network problems. The RFC sums up the case with the saying 'stale bread is better than no bread'.</p><p>RFC 1035 says the TTL is the interval a record may be cached before the source should be consulted again or before it should be discarded. That reads as if records past their TTL must not be used, but RFC 1035 predates the RFC 2119 key words and its 'may' and 'should' were never precise. RFC 2181 aimed to define the TTL precisely but was mostly about the numeric range, although it does say the TTL is a maximum, not a mandatory, time to live.</p><p>The RFC also notes that, at the time of writing, several large-scale operators already used stale data in some way, and that several resolver packages (BIND, Knot Resolver, OpenDNS and Unbound) offer options for it. The collective experience was that it brings significant benefit with minimal downside.</p>",
+      "eli5": "<p>The old rule books said to throw away old answers, but they were written loosely. Many people were already quietly keeping old answers for emergencies and it worked well, so this document makes it official.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "The Amended TTL Definition",
+      "content": "<p>Section 4 rewrites the TTL definition from RFC 1035. A TTL is a 32-bit unsigned number of seconds saying how long a record <code>MAY</code> be cached before the source <code>MUST</code> be consulted again. If the data cannot be authoritatively refreshed when the TTL expires, the record <code>MAY</code> be used as though it is unexpired. A TTL of zero still means the record is for the transaction in progress only and should not be cached.</p><p>Two further changes touch RFC 2181. Values with the high-order bit set are now interpreted as positive rather than as 0, and TTLs <code>SHOULD</code> be capped on the order of days to weeks, with a recommended cap of 604,800 seconds (7 days). The RFC says this reflects the current practice of major resolvers, as opposed to the 68 years the full 31 bits would allow.</p><p>When a resolver returns a stale record, it <code>MUST</code> set that record's TTL in the message to a value greater than 0, with a <code>RECOMMENDED</code> value of 30 seconds. Answers from authoritative servers with response code 0 (NoError) or 3 (NXDomain) and the Authoritative Answer bit set <code>MUST</code> count as refreshing the data. Answers with any other response code <code>SHOULD</code> count as a failure to refresh and leave the previous state intact.</p>",
+      "eli5": "<p>The rule now says: normally throw out old answers, but if you cannot get a new one you may use the old one, and tell whoever asks to check back in 30 seconds.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "The Example Method and Its Timers",
+      "content": "<p>The RFC gives an example method, noting that there is more than one responsible way to implement the feature. Four timers drive it. Most resolvers already have the query resolution timer and, effectively, a failure recheck timer. The client response timer and maximum stale timer are new concepts.</p><p>When a request arrives, the resolver starts the <strong>client response timer</strong>, recommended at 1.8 seconds, just under a common client timeout of 2 seconds. It first returns any unexpired records from its cache. Otherwise, for iterative lookups, it checks the failure recheck timer: attempts to refresh from failing servers are recommended no more often than every 30 seconds. Outside that period it starts the query resolution timer, commonly around 10 to 30 seconds, and begins resolving.</p><p>If the answer is not complete when the client response timer elapses, the resolver checks for expired data that would satisfy the request. If it finds some, it sends that with a TTL greater than 0 while continuing to try to refresh. If no authorities can be reached, it should refresh the delegation and restart the lookup once per resolution effort.</p><p>The <strong>maximum stale timer</strong> works independently of queries and sets how long after expiry a record is retained. The suggested value is between 1 and 3 days. It is different from the maximum cache TTL, which clamps TTLs as received and is recommended to be 7 days.</p>",
+      "eli5": "<p>The helper has four clocks: one for how long to wait before giving up and handing over the old answer, one for how long to keep trying, one for how soon to try a broken server again, and one for how long old answers are kept at all.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "6",
+      "title": "Implementation Choices and Caveats",
+      "content": "<p>The RFC intentionally gives no formal algorithm. Serve-stale is a local operation and needs no consistent settings between deployments for interoperability, so the details are left to resolver authors, who are told how each choice plays out.</p><ul><li><strong>Maximum stale timer:</strong> too large risks excessive cache memory, too small makes the technique less effective. Shorter values, even under a day, can handle most outages, while values as long as a week give people time to notice and fix a problem.</li><li><strong>Client response timer:</strong> too short risks serving stale answers when the server is only slow; too long hurts user experience.</li><li><strong>Failure recheck timer:</strong> too large keeps stale answers after the servers recover (RFC 2308 says no more than 5 minutes); too small can flood the servers with traffic.</li><li><strong>Stale TTL:</strong> zero has been problematic for some implementations, negative values cannot be communicated, and very short TTLs could cause congestive collapse, so 30 seconds is recommended.</li></ul><p>Other points: stale nameserver addresses can also be used, which can keep names under an attacked top-level domain resolvable. Only NoError and NXDomain responses invalidate earlier answers; implementers <code>MAY</code> return stale answers when servers respond with errors such as ServFail, and <code>MAY</code> consider treating all-Refused as preempting stale data. A zero-TTL record is never usable even as stale fallback. Stale data is used only after a refresh has failed, and resolution should continue after a stale reply is sent, until the query resolution timeout. Finally, CNAME and DNAME records mixed with other expired records at the same name can give surprising results, as seen in an early BIND implementation that returned an old A record instead of a newer CNAME.</p>",
+      "eli5": "<p>Each clock has a 'too short' and a 'too long' problem, like waiting too little to check or too long. The document explains the trade-offs and lets each builder pick.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security and Privacy Considerations",
+      "content": "<p>The most obvious issue is a higher likelihood of DNSSEC validation failures, because signatures could be returned outside their validity period. Stale negative records (NSEC or NSEC3) can also lengthen the window in which new TLSA or DS records are not used. The RFC points out that these only matter when the authoritative servers are unreachable, so serve-stale does not turn a success into a failure.</p><p>Serve-stale potentially makes it easier for bad actors who use caches to keep records alive after their authorities have gone away, though without a new risk. Attackers could also pair it with a DDoS on authoritative servers to prolong stale information. The RFC adds that stale data can enlarge the window for the attack in which an attacker gets domain-validated certificates fraudulently issued; a proposed mitigation is for certificate authorities to look up each name from the DNS root or use a resolver that does not serve stale data.</p><p>The RFC says it adds no practical new privacy issues, that NAT devices do not affect the method, and that it has no IANA actions.</p>",
+      "eli5": "<p>Old answers can occasionally be wrong or tricked into lasting longer. Important checkers, like those that hand out security certificates, should ask for fresh answers.</p>"
+    },
+    {
+      "id": "status",
+      "number": "8",
+      "title": "Implementation Status and Rejected Ideas",
+      "content": "<p>The algorithm was originally implemented as a patch to BIND 9.7.0 and has been in use on Akamai's production network since 2011. According to the RFC, it smoothed over transient failures and longer outages that would otherwise have been major incidents. The functionality is available in BIND 9.12 and later through <code>stale-answer-enable</code>, <code>stale-answer-ttl</code> and <code>max-stale-ttl</code>. Unbound has a similar feature and, from version 1.10.0, can follow the Section 5 algorithm.</p><p>The RFC also records that an EDNS option was discussed and rejected. An opt-in option was rejected because the technique was meant to help all clients immediately, and an option to report that stale data was used was judged too much trouble for too little value.</p>",
+      "eli5": "<p>People had already tried this for years on real networks and it worked. Adding a special switch to ask for old answers was judged not worth the bother.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE FOUR TIMERS OF THE EXAMPLE METHOD",
+      "data": {
+        "items": [
+          {
+            "title": "Client response timer",
+            "text": "Max time before replying to a client; recommended 1.8 seconds."
+          },
+          {
+            "title": "Query resolution timer",
+            "text": "Caps total work on a query; commonly around 10 to 30 seconds."
+          },
+          {
+            "title": "Failure recheck timer",
+            "text": "Limits retries to failing servers; recommended no more often than every 30 seconds."
+          },
+          {
+            "title": "Maximum stale timer",
+            "text": "How long expired records are kept; suggested between 1 and 3 days."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "HOW A RESOLVER TREATS AUTHORITATIVE ANSWERS",
+      "data": {
+        "columns": [
+          "Authoritative answer",
+          "Treated as"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "RCODE 0 (NoError), AA bit set",
+              "Refreshed the data (MUST)"
+            ]
+          },
+          {
+            "cells": [
+              "RCODE 3 (NXDomain), AA bit set",
+              "Refreshed the data (MUST)"
+            ]
+          },
+          {
+            "cells": [
+              "Any other response code",
+              "Failure to refresh; previous state intact (SHOULD)"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1034]",
+      "text": "Mockapetris, P., \"Domain names - concepts and facilities\", STD 13, RFC 1034, November 1987.",
+      "rfc": 1034
+    },
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC2181]",
+      "text": "Elz, R. and R. Bush, \"Clarifications to the DNS Specification\", RFC 2181, July 1997.",
+      "rfc": 2181
+    },
+    {
+      "number": "[RFC2308]",
+      "text": "Andrews, M., \"Negative Caching of DNS Queries (DNS NCACHE)\", RFC 2308, March 1998.",
+      "rfc": 2308
+    },
+    {
+      "number": "[RFC6672]",
+      "text": "Rose, S. and W. Wijngaards, \"DNAME Redirection in the DNS\", RFC 6672, June 2012.",
+      "rfc": 6672
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC8499]",
+      "text": "Hoffman, P., Sullivan, A., and K. Fujiwara, \"DNS Terminology\", BCP 219, RFC 8499, January 2019.",
+      "rfc": 8499
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

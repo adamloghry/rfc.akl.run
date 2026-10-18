@@ -9,13 +9,164 @@
   },
   "questions": [
     "how to build fault tolerant process groups",
-    "what are multicast primitives for process failure"
+    "what are multicast primitives for process failure",
+    "what is gbcast multicast primitive",
+    "how do process groups handle failures",
+    "what is causal ordering in multicast",
+    "how does isis system ensure consistency"
+  ],
+  "tags": [
+    "Distributed Systems",
+    "Reliability",
+    "Fault Tolerance"
+  ],
+  "subtitle": "Reliable multicast primitives for fault-tolerant process groups",
+  "tldr": {
+    "problem": "Building fault-tolerant distributed software is difficult when communication primitives only offer unreliable delivery that may lose messages or provide inconsistent ordering when failures occur, forcing complex error handling into application code.",
+    "mechanism": "Three multicast primitives—GBCAST (ordered group multicast), ABCAST (atomic multicast), and CBCAST (causal multicast)—provide guaranteed delivery and specified ordering properties, integrated with mechanisms to detect and handle process failures and recoveries as special ordering events.",
+    "outcome": "The ISIS system built on these primitives achieved high concurrency and correctness with significantly simpler code, demonstrating that reliable communication at the system level reduces complexity in fault-tolerant applications.",
+    "outcomeLabel": "Ordering guarantees reliability"
+  },
+  "facts": [
+    {
+      "label": "Number of multicast primitives",
+      "value": "3 (GBCAST, ABCAST, CBCAST)"
+    },
+    {
+      "label": "Failure model",
+      "value": "Fail-stop: processors crash and halt"
+    },
+    {
+      "label": "CBCAST overhead",
+      "value": "Often less than one packet per destination"
+    }
+  ],
+  "today": "<p>RFC 992 describes the ISIS project from 1986. The concepts of virtual synchrony and causal ordering have become foundational in modern distributed systems, influencing systems like Apache Kafka, Apache Flink, and various consensus protocols. The trade-off between consistency and performance remains central to distributed computing design.</p>",
+  "glossary": [
+    "multicast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>Building reliable distributed systems is complicated when the communication layer cannot guarantee that messages reach all intended recipients, especially when failures occur. Existing <strong>unreliable multicast</strong> primitives in host groups (RFC 966, 988) provide only \"best effort\" delivery, leaving applications uncertain whether distant processes received a message if a failure happens during transmission.</p><p>This memo describes communication primitives that integrate reliable delivery with failure detection, allowing groups of processes to maintain consistent agreement about system state even when members crash. Rather than trying to provide physical delivery guarantees (which is expensive), these primitives provide <strong>logical reliability</strong>: all processes observe the same sequence of messages and failures, so the system state is consistent with the assumption that reliable delivery occurred.</p><p>The approach is demonstrated in the ISIS system, which was initially difficult to implement correctly using unreliable primitives but became straightforward and efficient when built on top of these reliable multicast primitives.</p>",
+      "eli5": "<p>Instead of trying to guarantee that every message physically reaches every machine (which is slow and hard), these tools guarantee that every machine agrees on what messages were successfully delivered and in what order, even when some machines crash.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "2",
+      "title": "Three Multicast Primitives",
+      "content": "<p><strong>GBCAST (group multicast)</strong> is the most constrained. It is used to send information about process failures and recoveries. When any process receives GBCAST message B before GBCAST G, then all overlapping destinations receive B before G. Each member maintains a VIEW of group membership, updated when a GBCAST is received. All members observing the same multicast see the same VIEW, ensuring consistent group membership.</p><p><strong>ABCAST (atomic multicast)</strong> guarantees that if two messages are received in some order at one site, they are received in that order everywhere. This is useful for operations on replicated data structures: if two queue operations are received as (insert, remove) at one replica, all replicas process them in the same order, staying consistent.</p><p><strong>CBCAST (causal multicast)</strong> is the weakest. It ensures that if message B depends causally on message B (because the same process sent both, or because a chain of communication connected them), then B is received after B at all overlapping destinations. For causally independent messages, delivery order is not constrained, allowing higher concurrency.</p>",
+      "eli5": "<p>GBCAST announces when someone joins or leaves the group, and everyone agrees on the order of these announcements. ABCAST tells everyone the same order to execute shared work. CBCAST just preserves cause-and-effect, letting independent work happen in parallel.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "3",
+      "title": "Failure Detection and Recovery",
+      "content": "<p>Failures and recoveries are integrated into the communication system as special events ordered relative to messages. When a process fails, the system arranges for a GBCAST to be issued on its behalf, informing the group of the failure. A recovering process issues a GBCAST to request state information from the group. Because GBCAST is ordered relative to all other messages, all group members observe failures and recoveries in the same sequence, ensuring consistent state transitions.</p><p>A recovering process requests state transfer from group members, who send their current state while updating the VIEW. Subsequent messages delivered after the GBCAST update are delivered to the recovered process, with all synchronization provided by the ordering properties of GBCAST. This eliminates complex manual recovery logic: processes simply observe the VIEW changes and act accordingly.</p>",
+      "eli5": "<p>When someone rejoins the team after being sick, they announce it to everyone at once. The team sends them all the recent news at that point, and from then on they get all new messages in order with everyone else.</p>"
+    },
+    {
+      "id": "section-2",
+      "number": "4",
+      "title": "Building Distributed Services",
+      "content": "<p>The primitives enable simple solutions to fundamental distributed computing problems. For <strong>synchronization</strong>, GBCAST naturally handles group membership changes, and ABCAST can implement distributed semaphores: the order of lock operations is determined by ABCAST, so all managers see operations in the same order. For <strong>failure detection</strong>, a process observes when another process fails simply by waiting for the corresponding GBCAST.</p><p>For <strong>serializability</strong> of concurrent transactions, a concurrency control algorithm uses ABCAST to order lock acquisitions, then CBCAST to distribute computation results. Processes observe the commit/abort of a computation via the CBCAST, ensuring that only relevant data managers are involved. In the ISIS prototype, conditional commits are avoided entirely using a roll-forward recovery approach: if a process fails, its tentative state is discarded and redone once it recovers and rejoins the group.</p>",
+      "eli5": "<p>These tools solve hard distributed computing problems automatically: shared locks work because everyone agrees on their order, recoveries happen because rejoining members are brought up to date, and transactions can be undone without complicated two-phase commits.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Implementation",
+      "content": "<p>CBCAST uses a lightweight implementation based on flooding: each process buffers copies of messages needed to ensure causality. If message m depends causally on m', a copy of m' is sent to any process receiving m. A garbage collector discards superfluous copies. Piggybacking and scheduling keep the overhead low, often less than one packet per destination.</p><p>ABCAST and GBCAST employ two-phase protocols with higher latency because delivery occurs in the second phase. GBCAST adds special handling to flush messages from a failed process before delivering the failure announcement. Although slower than CBCAST, GBCAST and ABCAST are used rarely enough that throughput remains acceptable. The implementation sits on top of a site-to-site acknowledgement protocol that uses timeouts to detect apparent failures, which may trigger recovery of incorrectly suspected sites.</p>",
+      "eli5": "<p>CBCAST is fast and cheap because it just passes messages along with notes about what they depend on. ABCAST and GBCAST are slower because they need to be careful about the order, but they are only used when that order really matters.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "Recovery sequence with consistent VIEW updates",
+      "data": {
+        "lanes": [
+          {
+            "key": "proc-a",
+            "label": "Process A"
+          },
+          {
+            "key": "proc-b",
+            "label": "Process B"
+          },
+          {
+            "key": "proc-c",
+            "label": "Process C (recovering)"
+          }
+        ],
+        "messages": [
+          {
+            "from": "proc-a",
+            "to": "proc-b",
+            "label": "CBCAST msg1",
+            "color": "blue"
+          },
+          {
+            "from": "proc-c",
+            "to": "proc-a",
+            "label": "GBCAST(recovery)",
+            "color": "green",
+            "note": "C rejoins the group"
+          },
+          {
+            "from": "proc-a",
+            "to": "proc-c",
+            "label": "State transfer",
+            "color": "blue"
+          },
+          {
+            "from": "proc-b",
+            "to": "proc-a",
+            "label": "CBCAST msg2",
+            "color": "blue",
+            "note": "All see msg1, then recovery, then msg2"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC966]",
+      "text": "Deering, S. and Cheriton, D. Host groups: A multicast extension to the internet protocol. December 1985."
+    },
+    {
+      "number": "[RFC988]",
+      "text": "Deering, S. Host extensions for IP multicasting. July 1986."
+    },
+    {
+      "number": "[Birman-a]",
+      "text": "Birman, K. Replication and fault-tolerance in the ISIS system. Proc. 10th ACM SIGOPS Symposium on Operating Systems Principles. December 1985, 79-86."
+    },
+    {
+      "number": "[Birman-b]",
+      "text": "Birman, K., Joseph, T. Reliable communication in the presence of failures. Cornell Technical Report 85-694, August 1985. To appear in ACM TOCS (Feb. 1987)."
+    },
+    {
+      "number": "[Chang]",
+      "text": "Chang, J., Maxemchuck, M. Reliable multicast protocols. ACM TOCS 2, 3 (August 1984), 251-273."
+    },
+    {
+      "number": "[Cristian]",
+      "text": "Cristian, F. et al Atomic multicast: From simple diffusion to Byzantine agreement. IBM Technical Report RJ 4540, October 1984."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

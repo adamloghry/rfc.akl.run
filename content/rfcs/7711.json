@@ -9,13 +9,220 @@
   },
   "questions": [
     "what is posh",
-    "how to get proper certificates in multi-tenant hosting"
+    "how to get proper certificates in multi-tenant hosting",
+    "what is pkix over secure http",
+    "how does posh verify a tls certificate",
+    "what is the well-known posh uri"
+  ],
+  "tags": [
+    "Security",
+    "TLS",
+    "Certificates"
+  ],
+  "subtitle": "Prove a hosted domain's TLS identity by publishing certificate fingerprints at a well-known HTTPS address.",
+  "tldr": {
+    "problem": "Hosting companies often cannot get or hold certificates for each customer's domain, so hosted services present the host's certificate and users must accept an identity mismatch.",
+    "mechanism": "The customer's domain publishes a JSON file over HTTPS at /.well-known/posh/{servicedesc}.json holding certificate fingerprints, or a reference to another HTTPS location that holds them. The client compares the server's certificate to those fingerprints.",
+    "outcome": "A hosting provider can use one certificate for its own name while each customer domain still vouches for it. The RFC was developed for XMPP and might suit other non-HTTP protocols.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Well-known path",
+      "value": "/.well-known/posh/{servicedesc}.json"
+    },
+    {
+      "label": "Example fingerprint hashes",
+      "value": "sha-256, sha-512"
+    },
+    {
+      "label": "Expires value of 0",
+      "value": "Material or delegation is invalid"
+    },
+    {
+      "label": "Recommended redirect limit",
+      "value": "No more than 10"
+    },
+    {
+      "label": "Registry policy",
+      "value": "Expert Review or IETF Review"
+    }
+  ],
+  "today": "<p>RFC 7711 is a Proposed Standard and the metadata lists no replacement or update. It was written alongside <a href='/7712/'>RFC 7712</a>, which uses POSH as a prooftype for XMPP.</p>",
+  "glossary": [
+    "well-known-uri",
+    "tls",
+    "x509-certificate",
+    "json",
+    "srv-record",
+    "dnssec",
+    "xmpp",
+    "virtual-hosting",
+    "hsts",
+    "der-encoding",
+    "base64"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "The Multi-Tenant Certificate Problem",
+      "content": "<p>The RFC opens with a thought experiment. A hosting company runs a service for ten thousand customer organizations. Each customer wants the service identified by its own domain name, such as <code>bar.example.com</code>, not the host's name, such as <code>hosting.example.net</code>.</p><p>That needs TLS certificates that contain the customer's name, and the RFC lists why the hosting company cannot easily get them: certification authorities will not issue them to the host, customers worry about liability if they hand over private keys, the host does not want to hold those keys, and one certificate per customer is a large administrative load.</p><p>The fallback is a certificate for the host's name. Users then see warnings and must take a leap of faith over the mismatch. DNS Security and DANE could help, but the RFC says deploying them for all customers would take several years. <strong>POSH</strong> (PKIX over Secure HTTP) is the faster alternative. It was developed for XMPP, where it serves as a Domain Name Association prooftype (see <a href='/7712/'>RFC 7712</a>), and it might be usable by any non-HTTP application protocol.</p>",
+      "eli5": "<p>A big building hosts many families, but only the building has an official ID. Families want to prove which door is theirs, and POSH gives them a way to do it.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "Fetching the Verification Material",
+      "content": "<p>The server still proves its identity by presenting a PKIX certificate during the TLS handshake, and the certificate is checked by the rules of the application protocol. What POSH changes is where the <strong>POSH client</strong> gets the material to check it against. The client sends an HTTPS GET to the source domain at <code>/.well-known/posh/{servicedesc}.json</code>. For a hypothetical service called SPICE and the domain <code>bar.example.com</code> the request is for <code>/.well-known/posh/spice.json</code>.</p><p>POSH servers MUST use HTTPS, and the client MUST verify the HTTPS certificate of the source domain. That step bootstraps trust for everything after it.</p><p>The source domain answers in one of three ways: with a fingerprints document, with a reference document, or with HTTP 404 Not Found if it has neither.</p>",
+      "eli5": "<p>To check a door, you first go to the family's official noticeboard, which is itself locked up safely, and read what it says about their door.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Fingerprints and Reference Documents",
+      "content": "<p>A <strong>fingerprints document</strong> is a JSON object with a <code>fingerprints</code> array (at least one descriptor) and an <code>expires</code> number of seconds after which the material should be treated as stale. Each descriptor maps the name of a hash function, such as <code>sha-256</code>, to a base64-encoded hash computed over the DER encoding of the X.509 certificate. A document may list several descriptors, most relevant first, for example the renewed certificate before the one soonest to expire. Matching any one is acceptable.</p><p>A <strong>reference document</strong> instead has a <code>url</code> member (the member name is <code>url</code>, not <code>uri</code>, for historical reasons) pointing to an HTTPS location that holds the fingerprints, plus its own <code>expires</code>. The target MUST NOT itself be a reference document, which prevents circular delegation. For either kind, an <code>expires</code> of 0 means the material or delegation is invalid.</p><div class='callout callout-info'><p>With a reference document, the host can replace its certificate without asking each customer to update anything.</p></div>",
+      "eli5": "<p>The noticeboard either shows a fingerprint of the door's key, or it says, go and look at the building's own board. A fingerprint is a short code that only the right key can match.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Verification, Ordering and Caching",
+      "content": "<p>The client compares the certificate the POSH server presents with each fingerprint descriptor until one matches, using the hash functions it supports. If none match, the client SHOULD reject the connection, though it might still accept it if another method such as DANE succeeds. The delegation counts as secure when the server's credentials match the material, however the material was obtained.</p><p>POSH steps MUST finish before any application data is exchanged for the source domain. Clients that start the connection SHOULD do the POSH retrievals first. Where DNS SRV is used, they ideally run in parallel with SRV and address lookups, similar to Happy Eyeballs.</p><p>Clients MUST NOT cache results indefinitely. When a reference was followed, the client MUST use the lower of the two <code>expires</code> values. Clients SHOULD NOT rely on HTTP caching, and the web servers SHOULD send a <code>Cache-Control</code> header with a very short duration such as <code>max-age=60</code>, or <code>no-cache</code>.</p>",
+      "eli5": "<p>You check the noticeboard before you hand over anything private, and you do not trust an old copy forever. Check again after the date it gives.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "5",
+      "title": "Guidance for Operators and Protocol Authors",
+      "content": "<p>An operator can obtain a certificate only for its own hosting service name and does not need certificates for each hosted domain. It must, however, coordinate with customers so that the right POSH document is served at each customer's domain. Errors there lead to authentication problems and certificate warnings.</p><p>Protocols that use POSH are expected to register a service name in the new POSH Service Names registry. For protocols that use DNS SRV the name SHOULD match the SRV service name. XMPP server-to-server connections, for example, use <code>xmpp-server</code>, giving <code>/.well-known/posh/xmpp-server.json</code>.</p>",
+      "eli5": "<p>The building manager has to ask each family to put up the right note, and each kind of service gets its own labelled slot on the board.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "6",
+      "title": "IANA Registrations",
+      "content": "<p>IANA registered the URI suffix <code>posh</code> in the Well-Known URIs registry, with the IETF as change controller. IANA also created the POSH Service Names registry. Its policy is Expert Review or IETF Review, chosen over First Come First Served so that POSH services stay consistent with this specification. Designated Experts approve or deny a request within 14 days, and requests undetermined for more than 21 days can be taken to the IESG.</p>",
+      "eli5": "<p>There is an official list of service names so nobody picks the same label twice.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>POSH adds to, and does not replace, the security rules of the application protocol. The HTTPS fetches depend on checking the web server's identity and on modern TLS practice. HSTS and key pinning can add further protection.</p><p>POSH only delivers a public key to the client. It does not let a hosted domain pass private keys to a host, and it does not do certificate enrollment with a CA.</p><p>Redirects must go to HTTPS URIs. Source domains SHOULD use only temporary redirects (302 or 307), and clients MAY treat any redirect as temporary. Clients are RECOMMENDED to follow no more than 10 redirects. Because POSH material is short-lived, operators are advised to swap out POSH documents if the hash functions are found to be subject to practical attacks.</p>",
+      "eli5": "<p>The noticeboard must be safe from tampering, and it only shows which door is yours. It never hands over your secret key.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "REFERENCE FLOW (RFC 7711, FIGURE 2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "POSH Client"
+          },
+          {
+            "key": "source",
+            "label": "Source Domain"
+          },
+          {
+            "key": "delegated",
+            "label": "Delegated Domain"
+          },
+          {
+            "key": "server",
+            "label": "POSH Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "source",
+            "label": "POSH Request",
+            "color": "blue"
+          },
+          {
+            "from": "source",
+            "to": "client",
+            "label": "Return POSH url",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "delegated",
+            "label": "POSH Request",
+            "color": "blue"
+          },
+          {
+            "from": "delegated",
+            "to": "client",
+            "label": "Return POSH fingerprints",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Service TLS Handshake",
+            "color": "neutral"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Service Data",
+            "color": "neutral"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2818]",
+      "text": "Rescorla, E., \"HTTP Over TLS\", RFC 2818, May 2000.",
+      "rfc": 2818
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC5785]",
+      "text": "Nottingham, M. and E. Hammer-Lahav, \"Defining Well-Known Uniform Resource Identifiers (URIs)\", RFC 5785, April 2010.",
+      "rfc": 5785
+    },
+    {
+      "number": "[RFC6120]",
+      "text": "Saint-Andre, P., \"Extensible Messaging and Presence Protocol (XMPP): Core\", RFC 6120, March 2011.",
+      "rfc": 6120
+    },
+    {
+      "number": "[RFC6125]",
+      "text": "Saint-Andre, P. and J. Hodges, \"Representation and Verification of Domain-Based Application Service Identity within Internet Public Key Infrastructure Using X.509 (PKIX) Certificates in the Context of Transport Layer Security (TLS)\", RFC 6125, March 2011.",
+      "rfc": 6125
+    },
+    {
+      "number": "[RFC6698]",
+      "text": "Hoffman, P. and J. Schlyter, \"The DNS-Based Authentication of Named Entities (DANE) Transport Layer Security (TLS) Protocol: TLSA\", RFC 6698, August 2012.",
+      "rfc": 6698
+    },
+    {
+      "number": "[RFC7712]",
+      "text": "Saint-Andre, P., Miller, M., and P. Hancke, \"Domain Name Associations (DNA) in the Extensible Messaging and Presence Protocol (XMPP)\", RFC 7712, November 2015.",
+      "rfc": 7712
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

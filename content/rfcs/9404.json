@@ -10,13 +10,246 @@
   "questions": [
     "jmap blob management",
     "how to look up blob references in jmap",
-    "jmap upload and download extension"
+    "jmap upload and download extension",
+    "what is jmap blob",
+    "how does blob upload work in jmap",
+    "what is blob lookup in jmap"
+  ],
+  "tags": [
+    "Email",
+    "JMAP",
+    "Blobs"
+  ],
+  "subtitle": "JMAP extension for creating and reading blobs inside ordinary method calls, plus a reverse lookup of where blobs are used.",
+  "tldr": {
+    "problem": "The base JMAP protocol handles binary data (blobs) only through separate HTTP upload and download endpoints, which costs extra round trips, and it gives no way to find which objects reference a blob.",
+    "mechanism": "The extension adds Blob/upload to create blobs from inline text, base64 or slices of other blobs, Blob/get to read blobs with ranges and digests, and Blob/lookup to find the objects that reference a blob.",
+    "outcome": "Clients can create and fetch blob data within a standard JMAP request, and systems that proxy JMAP can discover blob references. It is a Proposed Standard that updates RFC 8620.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Capability URI",
+      "value": "urn:ietf:params:jmap:blob"
+    },
+    {
+      "label": "Minimum data sources per creation",
+      "value": "64"
+    },
+    {
+      "label": "New methods",
+      "value": "Blob/upload, Blob/get, Blob/lookup"
+    },
+    {
+      "label": "New error code",
+      "value": "unknownDataType"
+    },
+    {
+      "label": "Registry policy",
+      "value": "Specification Required"
+    }
+  ],
+  "today": "<p>RFC 9404 is a Proposed Standard published in August 2023. It updates <a href='/8620/'>RFC 8620</a> and has not been obsoleted or updated by a later RFC.</p>",
+  "glossary": [
+    "jmap",
+    "blob",
+    "json",
+    "base64",
+    "utf-8",
+    "media-type",
+    "message-digest",
+    "mailbox"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Blob Methods",
+      "content": "<p>The JMAP base protocol (<a href='/8620/'>RFC 8620</a>) lets clients upload and download arbitrary binary data, called <strong>blobs</strong>, with HTTP POST and GET on a defined endpoint. Sometimes an interaction needs to create a blob and then reference it. Just as IMAP literals were extended by <a href='/7888/'>RFC 7888</a>, embedding small blobs directly in the JMAP method calls array can reduce round trips. Fetching an object together with its raw content can likewise save a round trip.</p><p>Because blobs can hold arbitrary binary data, the document uses base64 coding (<a href='/4648/'>RFC 4648</a>) for both creating and fetching blob data. When JMAP is proxied through a system that applies extra access restrictions, it can also help to know which objects reference a particular blob, so the document defines a way to discover that.</p>",
+      "eli5": "<p>Normally a mail program uses a special door to hand over files. This extension lets it pass small files in the same message it already sends, which is quicker.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "3",
+      "title": "The Blob Capability",
+      "content": "<p>Support is announced with the capability <code>urn:ietf:params:jmap:blob</code>. A server that lists it in any account's <code>accountCapabilities</code> MUST also list it in the session <code>capabilities</code>, where its value MUST be an empty object.</p><p>Inside an account, the value is an object with four properties:</p><ul><li><code>maxSizeBlobSet</code>: the largest blob in octets the server will create, or null for no stated limit. Clients MUST NOT try to create bigger blobs.</li><li><code>maxDataSources</code>: the most data sources allowed in one creation. Servers MUST allow at least 64.</li><li><code>supportedTypeNames</code>: data types supported for <code>Blob/lookup</code>, empty if lookups are not supported. Clients MUST ignore names they do not recognise.</li><li><code>supportedDigestAlgorithms</code>: algorithms for <code>Blob/get</code> digests, drawn from the HTTP Digest registry of <a href='/3230/'>RFC 3230</a> but lowercased, such as <code>md5</code>. Clients SHOULD prefer algorithms listed earlier.</li></ul>",
+      "eli5": "<p>Before using the new features, the program asks the server what it can do: the biggest file it takes, how many pieces it can glue together, and which checks it can run.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4.1",
+      "title": "Blob/upload: Creating Blobs",
+      "content": "<p><code>Blob/upload</code> resembles <code>Foo/set</code> from <a href='/8620/'>RFC 8620</a>, but blobs cannot be updated or deleted, so only <code>create</code> is allowed, and there is no state in the response. Each creation id maps to an <code>UploadObject</code> with a <code>data</code> array of sources and an optional <code>type</code> hint for the media type. The sources are concatenated in order to build the blob, and an empty array creates an empty blob.</p><p>Each source is exactly one of <code>data:asText</code> (raw octets, which must be UTF-8), <code>data:asBase64</code>, or a <code>blobId</code> with optional <code>offset</code> and <code>length</code> to copy a slice of an existing blob. A range that begins or extends past the end of the blob makes that source invalid and yields a <code>notCreated</code> response. The server MUST NOT guess the user's intent about invalid references or data, and invalid base64 or invalid UTF-8 MUST result in <code>notCreated</code>.</p><p>A successful creation returns <code>id</code>, <code>type</code> and <code>size</code>. The server MUST add the new id to the request's <code>createdIds</code> map, so later calls in the same request can use it by back-reference. Created blobs have the same lifetime and expiry as blobs from the upload endpoint, and uploads are limited by the server's <code>maxUploadSize</code> for JMAP requests, so clients SHOULD consider the regular upload mechanism for blobs larger than a megabyte.</p>",
+      "eli5": "<p>You can build a new file by gluing pieces together: some typed text, some coded data, and cut-outs from files you already have. If any piece is bad, the server refuses the whole new file instead of guessing.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4.2",
+      "title": "Blob/get: Reading Blobs",
+      "content": "<p><code>Blob/get</code> is a standard JMAP get with two extra optional parameters, <code>offset</code> and <code>length</code>, to read part of a blob. The properties you can request are <code>data:asText</code>, <code>data:asBase64</code>, <code>data</code> (text if the selected octets are valid UTF-8, otherwise base64), <code>digest:&lt;algorithm&gt;</code> and <code>size</code>. If none are given, the defaults are <code>data</code> and <code>size</code>.</p><p><code>size</code> is always the number of octets in the whole blob, whatever the range. If text was requested for octets that are not valid UTF-8, including a cut in the middle of a multi-octet sequence, the server MUST set <code>isEncodingProblem</code> to true and return null for <code>data:asText</code>. If <code>data</code> was requested, it MUST return <code>data:asBase64</code> instead. If the range goes outside the blob, the server returns what exists, or an empty string if the offset is past the end, and MUST set <code>isTruncated</code> to true.</p><p>Servers SHOULD store blob sizes in a form that is cheap to read, and clients SHOULD ask for just <code>size</code> if that is all they need, since fetching content can be much more expensive.</p>",
+      "eli5": "<p>When you ask for a file, you can ask for just a slice, or just how big it is. If the slice is not readable as text, the server says so and hands over the coded version.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4.3",
+      "title": "Blob/lookup: Finding References",
+      "content": "<p><code>Blob/lookup</code> takes a list of blob ids and a list of type names, and does a reverse lookup: for each type, which objects reference each blob. Only types for which the \"Can reference blobs\" column of the registry is true may be named, and the capability defining each type must be used in the same request. An unknown type name, or one whose capability was not requested, gets an <code>unknownDataType</code> error.</p><p>The notion of reference is loose: roughly, you could discover the blob id by looking at that object or at objects recursively contained in it. With <a href='/8621/'>RFC 8621</a> mail, a Mailbox references a blob if any Email in it does, and a Thread references it if an Email in the Thread does. The reverse does not hold: an Email that points to a Mailbox does not thereby reference blobs of the other Emails there.</p><p>The response is a list of <code>BlobInfo</code> objects, each with the blob <code>id</code> and a <code>matchedIds</code> map from type name to a list of object ids. If a blob does not exist or is not visible to the user, the server MUST still return an empty array for each type, so nothing leaks about whether the blob exists.</p>",
+      "eli5": "<p>This is like asking, 'which folders and conversations use this picture?'. If you are not allowed to see the answer, the server just says 'none', so you cannot tell whether the picture even exists.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>All security considerations of <a href='/8620/'>RFC 8620</a> apply. Because JMAP requires UTF-8 JSON, servers MUST return null for <code>data:asText</code> on non-UTF-8 ranges and set <code>isEncodingProblem</code>. Access controls MUST also apply to lookups: if the user could not discover a blob id by making queries, a <code>Blob/lookup</code> must not reveal it, so an Email in a Mailbox the user cannot see MUST NOT be returned.</p><p>Servers MUST NOT trust that uploaded data is a well-formed instance of the stated media type, SHOULD NOT reject data merely for not being a valid specimen, and should use only hardened parsers if they parse it. Since carefully chosen data sources could recreate dangerous content past scanners watching the upload endpoint, servers SHOULD provide a hook for scanners to check the finished blob. Digests can be expensive, so servers sharing resources between users should track usage and rate-limit expensive operations.</p>",
+      "eli5": "<p>The server must not believe labels on files, must let virus scanners check glued-together files, and must not tell people about things they are not allowed to see.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "6",
+      "title": "IANA Registrations",
+      "content": "<p>IANA registered the <code>urn:ietf:params:jmap:blob</code> capability with intended use <code>common</code> and registered the <code>unknownDataType</code> JMAP error code. It also created a new \"JMAP Data Types\" registry, with the policy \"Specification Required\" (<a href='/8126/'>RFC 8126</a>).</p><p>The registry records, per data type, whether it can reference blobs, whether it can be used for state change, and the capability that defines it. Its initial contents cover Core, PushSubscription, Mailbox, Thread, Email, EmailDelivery, SearchSnippet, Identity, EmailSubmission, VacationResponse and MDN. Of these, only Mailbox, Thread and Email can reference blobs.</p>",
+      "eli5": "<p>The rule book got a new page listing which kinds of things can point to files, and one new error message for 'I do not know that kind of thing'.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "SELECTED ROWS OF THE JMAP DATA TYPES REGISTRY (RFC 9404 TABLE 1)",
+      "data": {
+        "columns": [
+          "Type name",
+          "Can reference blobs",
+          "Can use for state change",
+          "Defined in"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Core",
+              "No",
+              "No",
+              "RFC 8620"
+            ]
+          },
+          {
+            "cells": [
+              "Mailbox",
+              "Yes",
+              "Yes",
+              "RFC 8621"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Thread",
+              "Yes",
+              "Yes",
+              "RFC 8621"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Email",
+              "Yes",
+              "Yes",
+              "RFC 8621"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "EmailDelivery",
+              "No",
+              "Yes",
+              "RFC 8621"
+            ]
+          },
+          {
+            "cells": [
+              "MDN",
+              "No",
+              "No",
+              "RFC 9007"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "BLOB/GET RESULT FLAGS",
+      "data": {
+        "items": [
+          {
+            "title": "isEncodingProblem",
+            "text": "Selected octets are not valid UTF-8, so data:asText is null."
+          },
+          {
+            "title": "isTruncated",
+            "text": "The requested range could not be fully satisfied."
+          },
+          {
+            "title": "size",
+            "text": "Always the octets in the whole blob, regardless of range."
+          },
+          {
+            "title": "digest:algorithm",
+            "text": "Base64 digest of the selected octets, using a supported algorithm."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8620]",
+      "text": "Jenkins, N. and C. Newman, \"The JSON Meta Application Protocol (JMAP)\", RFC 8620, July 2019.",
+      "rfc": 8620
+    },
+    {
+      "number": "[RFC8621]",
+      "text": "Jenkins, N. and C. Newman, \"The JSON Meta Application Protocol (JMAP) for Mail\", RFC 8621, August 2019.",
+      "rfc": 8621
+    },
+    {
+      "number": "[RFC4648]",
+      "text": "Josefsson, S., \"The Base16, Base32, and Base64 Data Encodings\", RFC 4648, October 2006.",
+      "rfc": 4648
+    },
+    {
+      "number": "[RFC3230]",
+      "text": "Mogul, J. and A. Van Hoff, \"Instance Digests in HTTP\", RFC 3230, January 2002.",
+      "rfc": 3230
+    },
+    {
+      "number": "[RFC7888]",
+      "text": "Melnikov, A., Ed., \"IMAP4 Non-synchronizing Literals\", RFC 7888, May 2016.",
+      "rfc": 7888
+    },
+    {
+      "number": "[RFC8126]",
+      "text": "Cotton, M., Leiba, B., and T. Narten, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 8126, June 2017.",
+      "rfc": 8126
+    },
+    {
+      "number": "[RFC9007]",
+      "text": "Ouazana, R., Ed., \"Handling Message Disposition Notification with the JSON Meta Application Protocol (JMAP)\", RFC 9007, March 2021.",
+      "rfc": 9007
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

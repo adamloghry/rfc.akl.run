@@ -9,13 +9,243 @@
   },
   "questions": [
     "how to encrypt onc rpc traffic",
-    "what is rpc-with-tls"
+    "what is rpc-with-tls",
+    "what is rpc with tls",
+    "what is auth_tls",
+    "how does onc rpc start tls",
+    "what is the sunrpc alpn identifier"
+  ],
+  "tags": [
+    "RPC",
+    "TLS",
+    "Encryption"
+  ],
+  "subtitle": "How ONC RPC peers can upgrade to TLS on the same port, falling back gracefully when the other side cannot.",
+  "tldr": {
+    "problem": "RPC traffic, including the NFS-style protocols built on it, often travels in the clear, and the existing RPCSEC_GSS protection is hard to deploy and leaves parts of each RPC header unencrypted. AUTH_SYS, still common, trusts user and group IDs from unauthenticated clients.",
+    "mechanism": "A client sends a NULL RPC procedure using a new AUTH_TLS flavor carrying the token STARTTLS. If the server echoes the token, both sides run a TLS 1.3 (or DTLS 1.3) handshake on the same connection or port and carry RPC inside it.",
+    "outcome": "Encryption can be switched on without per-client key provisioning, and policy decides whether to fall back to cleartext with servers that do not support it. The RFC updates RFC 5531.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "AUTH_TLS flavor value",
+      "value": "7"
+    },
+    {
+      "label": "Probe token",
+      "value": "STARTTLS (8 bytes)"
+    },
+    {
+      "label": "ALPN identifier",
+      "value": "sunrpc"
+    },
+    {
+      "label": "Minimum TLS version",
+      "value": "1.3"
+    },
+    {
+      "label": "DTLS quiet period after close",
+      "value": "60 seconds expected to suffice"
+    },
+    {
+      "label": "Extended key usage values",
+      "value": "33 client, 34 server"
+    }
+  ],
+  "today": "<p>RFC 9289 is a Proposed Standard published in September 2022 and has not been obsoleted. It updates <a href='/5531/'>RFC 5531</a>, and its metadata lists no later RFC that updates it.</p>",
+  "glossary": [
+    "tls",
+    "starttls",
+    "alpn",
+    "pre-shared-key",
+    "opportunistic-privacy",
+    "subject-alternative-name",
+    "closure-alert",
+    "connection-id",
+    "client-hello",
+    "udp"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why RPC Needs Transport Encryption",
+      "content": "<p>RFC 9289 starts from the IETF position that pervasive monitoring is an attack, so protocols should make a real effort to mitigate it, typically by encrypting data in transit. The Remote Procedure Call version 2 protocol has been a Proposed Standard for three decades, and RPCSEC_GSS was introduced over twenty years ago as its in-transit encryption mechanism.</p><p>The RFC explains why that was not enough. With RPCSEC_GSS, parts of each RPC header stay in cleartext, and offloading the GSS privacy service is impractical in large multi-user deployments because each message is encrypted with a key based on the issuing RPC user. <strong>AUTH_SYS</strong> also remains common even though it accepts user IDs (UIDs) and group IDs (GIDs) from unauthenticated clients, partly because the only well-defined alternative is expensive to deploy per client.</p><p>The answer is a transport-layer mechanism that complements the existing ones, using TLS and DTLS. The listed benefits are encryption by default, encryption offload, securing AUTH_SYS, decoupled user and host identities, and compatibility with any upper-layer protocol that uses RPC without changing it.</p>",
+      "eli5": "<p>The old way of locking RPC messages was fiddly, so people often skipped it. This adds a simple lock at the door of the whole conversation, so everything inside is hidden.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "4.1",
+      "title": "Discovering TLS Support with AUTH_TLS",
+      "content": "<p>To stay compatible with RPC peers that know nothing about TLS, the RFC adds a new RPC authentication flavor, <strong>AUTH_TLS</strong>. It signals that the client wants to start TLS if the server supports it. The server MUST listen on the same ports for TLS-protected RPC programs as it does when TLS is not available. Only TCP and UDP transports are supported by this mechanism.</p><p>The client sends a <code>NULL</code> RPC procedure with an auth flavor of AUTH_TLS, over the TCP connection or in a UDP datagram. The credential has length zero and the verifier is an AUTH_NONE verifier of length zero.</p><p>A server that supports RPC-with-TLS replies with <code>MSG_ACCEPTED</code> and an AUTH_NONE verifier whose body is eight bytes: the ASCII characters <code>STARTTLS</code>. The client SHOULD then proceed with the TLS handshake, sending its ClientHello on the same TCP connection or to the same UDP destination port. If the reply lacks any of those properties, the client MUST NOT send a ClientHello, and RPC may continue without TLS depending on local policy.</p><p>AUTH_TLS is only valid on the NULL procedure, and not inside an existing (D)TLS session. A server MUST reject any other use with <code>MSG_DENIED</code>, <code>AUTH_ERROR</code> and <code>AUTH_BADCRED</code>. A successful probe on one port and transport does not imply TLS is available on another, or in the future.</p>",
+      "eli5": "<p>The client first knocks and whispers a secret word, 'STARTTLS'. If the server whispers it back, they both move to a private room. If not, they decide whether to keep talking in the open.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "4.2",
+      "title": "Authentication Roles",
+      "content": "<p>Each server that supports RPC-with-TLS MUST have a unique global identity, such as a certificate signed by a well-known trust anchor, and MUST request a TLS peer identity from each client on first contact. Two client modes are described.</p><ul><li><strong>Server-only host authentication:</strong> the client authenticates the server, but the server cannot authenticate the client, so clients stay anonymous.</li><li><strong>Mutual host authentication:</strong> the client has an identity backed by a trusted entity, such as a pre-shared key or a certificate, and both peers authenticate. If either check fails, or authorization blocks access, the peers MUST reject the association.</li></ul><p>RPC user authentication is not affected. Because the server cannot tell whether a TLS client identity represents one RPC user or many, it cannot use that identity to authenticate RPC users. With RPCSEC_GSS, GSS authentication happens as usual after the TLS session exists. Since GSS integrity and confidentiality become largely redundant over TLS, implementations that use both MUST use GSS-API channel binding (RFC 5056) to detect sufficient transport protection, and MUST provide the <code>tls-exporter</code> channel binding type from <a href='/9266/'>RFC 9266</a>.</p>",
+      "eli5": "<p>TLS checks which computer you are, not which person is typing. The server can check the computer's ID card, or let the computer stay anonymous.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "5",
+      "title": "TLS Requirements and Peer Credentials",
+      "content": "<p>Implementations MUST NOT negotiate TLS versions before 1.3 (or DTLS before 1.3) and must support the mandatory-to-implement cipher suites. They MUST follow BCP 195 (RFC 7525), but the TLS 1.3 requirement takes precedence and that RFC's cipher suite advice does not apply. A cipher suite that gives both confidentiality and integrity is REQUIRED.</p><p>The ClientHello MUST carry the ALPN extension with the identifier <code>sunrpc</code>, and the ServerHello MUST answer with only that identifier. If the server responds incorrectly, the client MUST NOT establish a TLS session for RPC on that connection.</p><p>Certificate-based mutual authentication MUST be supported. Pre-shared keys are OPTIONAL. For certificates, the DNS-ID identifier type (a subjectAltName <code>dNSName</code>) is REQUIRED, wildcards in the name are forbidden, and an <code>iPAddress</code> subjectAltName is used for network identifiers. Clients check that the server certificate matches the expected DNS-ID or address. Servers cannot rely on a client's name or address because they are often dynamic, so the pair (certificate serial number, Issuer) identifies the client.</p><p>The RFC defines two new extended key usage values, one for RPC clients (<code>id-kp-rpcTLSClient</code>) and one for RPC servers (<code>id-kp-rpcTLSServer</code>), and implementations SHOULD reevaluate a session if the trust anchors change and the certificate is no longer trustworthy.</p>",
+      "eli5": "<p>Both sides must use the newest, strongest kind of lock and say they are speaking 'sunrpc'. ID cards are checked carefully, and special badges say 'I am a client' or 'I am a server'.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5.1",
+      "title": "Running over TCP and UDP",
+      "content": "<p>On <strong>TCP</strong>, the server treats all traffic as plain RPC until an AUTH_TLS probe is done. Spurious traffic between the probe and the handshake MUST be discarded without response, and the connection SHOULD be dropped. Only one TLS session per TCP connection is assumed. After the handshake, no cleartext can occur on that connection, and RPC record framing is unchanged. Reverse-direction RPC uses the existing TLS session. A peer ends the session with a TLS closure alert.</p><p>On <strong>UDP</strong>, DTLS protects the datagrams but does not add reliable or in-order delivery. DTLS replay protection is REQUIRED. Each RPC message MUST fit in a single DTLS record, so DTLS overhead reduces the maximum RPC payload. The RFC offers no way to tell DTLS from unprotected RPC on the same port; a datagram that fails to match an existing DTLS session is treated as an RPC message.</p><p>Because multihomed hosts may use interfaces not involved in the handshake, each DTLS handshake MUST include the <code>connection_id</code> extension with a nonzero-length ConnectionID, and endpoints expecting many clients SHOULD use ConnectionIDs of at least 4 bytes. After a session closes, receivers MUST discard datagrams on the same 5-tuple long enough for retransmissions to stop; 60 seconds is expected to suffice.</p><p>Transports with built-in TLS-level security, such as QUIC, and RPC-over-RDMA are left to separate work.</p>",
+      "eli5": "<p>On a steady phone line the lock stays on until hang-up. On the postcard-style line, each card must fit in one envelope, and after hanging up you ignore stray cards for a minute.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Over TLS 1.3 the RPC payload is forward secure, but replay attacks can occur during session establishment. The RFC defines no profile for 0-RTT data, so implementations MUST NOT use it.</p><p>The approach is explicitly <strong>opportunistic</strong>: the allowed security levels range from no peer authentication or encryption, to server-only authentication with encryption, to mutual authentication with encryption. Implementations must accurately report the level in effect to RPC consumers and are REQUIRED to keep an audit log of security mode selection.</p><p>The initial AUTH_TLS probe is in cleartext, so an on-path attacker can mimic a server that lacks TLS (a <strong>STRIPTLS</strong> attack). Mitigations are to check for a DANE TLSA record before connecting, or to require a TLS session on every connection. The NULL probe itself carries no user information, so the privacy impact is negligible, but with pre-shared keys the PSK identifier is exposed during the handshake and can be used to track the client.</p><p>Client TLS credentials may be visible to every RPC user sharing a session, so they should be segregated. For AUTH_SYS, TLS adds integrity and confidentiality, but an unauthenticated client can still misrepresent user identity, so mutual authentication is RECOMMENDED. When AUTH_NULL or AUTH_SYS is used, both peers are RECOMMENDED to have DNSSEC TLSA records and to require mutual authentication. GSS integrity and privacy services SHOULD be disabled when TLS is in use.</p>",
+      "eli5": "<p>The first knock happens before the lock is on, so a sneaky person could pretend the server has no locks. Careful clients check ahead of time, or refuse to talk without a lock.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "7",
+      "title": "IANA Registrations",
+      "content": "<p>IANA added the <code>AUTH_TLS</code> entry (flavor name TLS, value <code>7</code>) to the RPC Authentication Flavor Numbers registry. It is not a pseudo-flavor.</p><p>The ALPN registry gained the protocol <code>SunRPC</code>, identified by the bytes 0x73 0x75 0x6e 0x72 0x70 0x63, which spell \"sunrpc\".</p><p>Two PKIX extended key purpose values were registered: 33 for <code>id-kp-rpcTLSClient</code> and 34 for <code>id-kp-rpcTLSServer</code>. A module identifier, 105 for <code>id-mod-rpcWithTLS-2021</code>, was registered for the ASN.1 module in Appendix B.</p>",
+      "eli5": "<p>The official list of names and numbers got four new entries so everyone uses the same labels for these ideas.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "STARTING TLS ON AN RPC CONNECTION (RFC 9289)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "RPC client"
+          },
+          {
+            "key": "server",
+            "label": "RPC server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "NULL call, AUTH_TLS",
+            "color": "blue",
+            "note": "Credential length zero, AUTH_NONE verifier of length zero."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "MSG_ACCEPTED, STARTTLS",
+            "color": "green",
+            "note": "AUTH_NONE verifier whose 8-byte body is STARTTLS."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "ClientHello",
+            "color": "blue",
+            "note": "Same connection or same UDP port; includes ALPN sunrpc."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "ServerHello",
+            "color": "green",
+            "note": "ALPN answers with only sunrpc."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "requirements",
+      "position": "after",
+      "caption": "KEY TLS REQUIREMENTS FOR RPC",
+      "data": {
+        "items": [
+          {
+            "title": "TLS 1.3 or later",
+            "text": "Earlier TLS and DTLS versions MUST NOT be negotiated."
+          },
+          {
+            "title": "ALPN sunrpc",
+            "text": "Both hellos carry the ALPN extension with the sunrpc identifier."
+          },
+          {
+            "title": "Certificates",
+            "text": "Certificate-based mutual authentication MUST be supported."
+          },
+          {
+            "title": "Pre-shared keys",
+            "text": "Optional to implement."
+          },
+          {
+            "title": "No 0-RTT",
+            "text": "0-RTT data MUST NOT be used."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5531]",
+      "text": "Thurlow, R., \"RPC: Remote Procedure Call Protocol Specification Version 2\", RFC 5531, May 2009.",
+      "rfc": 5531
+    },
+    {
+      "number": "[RFC2203]",
+      "text": "Eisler, M., Chiu, A., and L. Ling, \"RPCSEC_GSS Protocol Specification\", RFC 2203, September 1997.",
+      "rfc": 2203
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[RFC9147]",
+      "text": "Rescorla, E., Tschofenig, H., and N. Modadugu, \"The Datagram Transport Layer Security (DTLS) Protocol Version 1.3\", RFC 9147, April 2022.",
+      "rfc": 9147
+    },
+    {
+      "number": "[RFC7301]",
+      "text": "Friedl, S., Popov, A., Langley, A., and E. Stephan, \"Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension\", RFC 7301, July 2014.",
+      "rfc": 7301
+    },
+    {
+      "number": "[RFC7435]",
+      "text": "Dukhovni, V., \"Opportunistic Security: Some Protection Most of the Time\", RFC 7435, December 2014.",
+      "rfc": 7435
+    },
+    {
+      "number": "[RFC6698]",
+      "text": "Hoffman, P. and J. Schlyter, \"The DNS-Based Authentication of Named Entities (DANE) Transport Layer Security (TLS) Protocol: TLSA\", RFC 6698, August 2012.",
+      "rfc": 6698
+    },
+    {
+      "number": "[RFC9266]",
+      "text": "Whited, S., \"Channel Bindings for TLS 1.3\", RFC 9266, July 2022.",
+      "rfc": 9266
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

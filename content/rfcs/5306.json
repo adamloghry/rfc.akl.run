@@ -10,13 +10,187 @@
   "questions": [
     "is-is graceful restart",
     "isis restart signaling",
-    "how routers restart without dropping traffic"
+    "how routers restart without dropping traffic",
+    "what is is-is graceful restart",
+    "what is the is-is restart tlv",
+    "what do the rr ra and sa bits mean in is-is"
+  ],
+  "tags": [
+    "Routing",
+    "IS-IS",
+    "Restart"
+  ],
+  "subtitle": "How an IS-IS router can reboot its control plane without its neighbors tearing down their adjacencies.",
+  "tldr": {
+    "problem": "When an IS-IS router restarts, its neighbors normally cycle their adjacencies through the down state and regenerate their LSPs, which briefly disrupts routes through the restarting router. The restarting router also computes routes before its database is synchronized.",
+    "mechanism": "A new Restart TLV in IS-IS Hello packets carries three flags (RR, RA and SA). They tell neighbors to keep the adjacency, acknowledge it, and send the full set of database summaries, while three timers (T1, T2, T3) track progress.",
+    "outcome": "RFC 5306 obsoletes RFC 3847 and has itself been obsoleted by RFC 8706, so the current definition of IS-IS restart signaling is there.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Restart TLV type",
+      "value": "211"
+    },
+    {
+      "label": "Flags",
+      "value": "RR, RA and SA"
+    },
+    {
+      "label": "Typical T1",
+      "value": "3 seconds"
+    },
+    {
+      "label": "Typical T2",
+      "value": "60 seconds"
+    },
+    {
+      "label": "T3 initial value",
+      "value": "65535 seconds"
+    }
+  ],
+  "today": "<p>RFC 5306 is a Proposed Standard that obsoletes <a href='/3847/'>RFC 3847</a>, and it has itself been obsoleted by <a href='/8706/'>RFC 8706</a>. Use RFC 8706 for the current definition of IS-IS restart signaling.</p>",
+  "glossary": [
+    "link-state-routing",
+    "link-state-advertisement",
+    "hold-timer",
+    "designated-router"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Restarts Hurt",
+      "content": "<p>The <strong>Intermediate System to Intermediate System</strong> (IS-IS) protocol is a link state routing protocol. When one of its routers restarts, two things go wrong. The restarted router computes its own routes before its database is synchronized with its neighbors, so those routes are likely not to match what the rest of the area computes.</p><p>The neighbors also notice the restart and cycle their adjacencies with the router through the down state. That makes them regenerate their link state PDUs (<strong>LSPs</strong>) for the adjacency, which causes a temporary disruption of routes passing through the restarting router. The RFC describes mechanisms to avoid or minimize both effects.</p><p>The RFC defines two cases. A <strong>restarting</strong> router has kept its forwarding state across the restart of the control function. A <strong>starting</strong> router has not kept that state. Where both apply, the text writes (re)starting.</p>",
+      "eli5": "<p>If a bus driver takes a short break, the passengers should not all get off and the bus line should not be rebuilt. This RFC lets the driver say 'back in a moment'.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "The Restart TLV and Its Flags",
+      "content": "<p>The signaling rides in a new <strong>Restart TLV</strong>, type <code>211</code>, carried in IS-IS Hello (IIH) packets. Every IIH sent by a router that supports the feature MUST include it. Its value holds a one-octet Flags field, a two-octet Remaining Time and a Restarting Neighbor System ID of ID Length octets. The last two are needed when the RA bit is set.</p><ul><li><strong>RR</strong> (Restart Request): the sender is (re)starting, so neighbors SHOULD keep the existing adjacency, send a full set of CSNPs and set their SRMflags.</li><li><strong>RA</strong> (Restart Acknowledgement): sent by a neighbor to confirm it saw an RR.</li><li><strong>SA</strong> (Suppress adjacency advertisement): a starting router asks neighbors not to advertise the adjacency in their LSPs yet.</li></ul><p>A router without restart support ignores the TLV and reinitializes the adjacency as usual.</p>",
+      "eli5": "<p>The Hello message gets three little flags, like raising a card that says 'I am restarting', 'I heard you', or 'do not tell anyone about me yet'.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "What Neighbors and the Restarting Router Do",
+      "content": "<p>When a neighbor receives an IIH with RR set and it has an adjacency in the <code>UP</code> state with that System ID, it leaves the adjacency state unchanged and marks it as being in restart mode. It immediately answers with an IIH that has RA set, carrying a Remaining Time that reflects when the adjacency will actually expire. It then sends a complete set of CSNPs and sets SRMflags for all LSPs, so the restarting router can learn what it is missing. On a LAN this is done by the router with the highest priority, so the neighbors do not all send at once.</p><p>The restarting router starts timers and sends IIHs with RR set, holding back normal IIHs until it has both an acknowledgement and a complete set of CSNPs. On a LAN it SHOULD keep the same LAN-ID it used before the restart, which avoids generating new pseudonode LSPs.</p><p>A starting router instead sends IIHs with RR clear and SA set. Neighbors then reinitialize any old adjacency and hide the new one from their LSPs until the starting router has flooded newer copies of its own old LSPs. This avoids temporary blackholes caused by stale copies with higher sequence numbers.</p>",
+      "eli5": "<p>The neighbors say 'I am still here and I will tell you everything I know', and the restarting router waits to hear that before it talks normally again.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4",
+      "title": "Timers and Database Synchronization",
+      "content": "<p>Three timers drive the process. <strong>T1</strong> is kept per interface and sets when an unacknowledged (re)start attempt is repeated; a typical value might be 3 seconds. <strong>T2</strong> is kept per LSP database and is the maximum time to wait for synchronization; a typical value might be 60 seconds. <strong>T3</strong> is a single system-wide timer that is only used by a restarting router. It starts at 65535 seconds and is lowered to the smallest Remaining Time seen in acknowledgements.</p><p>The router records the LSP IDs listed in the first complete set of CSNPs and removes each one as the LSP arrives. When the list is empty and T1 is cancelled on all interfaces, T2 is cancelled and the database counts as synchronized.</p><p>A restarting router does not flood its own LSPs or update its forwarding tables while T3 runs. If T3 expires first, it floods its LSPs with the <strong>overload bit</strong> set, so other routers MUST NOT compute routes through it. A starting router sends its zeroth LSP with the overload bit set as soon as each adjacency forms, and clears it once all T2 timers are done.</p>",
+      "eli5": "<p>The router sets three alarm clocks: one for nagging, one for how long to wait for the catch-up, and one for when to give up and warn everyone it is not ready.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and Status",
+      "content": "<p>The RFC says the new risks depend on an attacker injecting a false but apparently valid IIH, which is no easier than before. A false RR makes neighbors keep an adjacency and possibly resend CSNPs, which is wasteful but not disruptive. A false RA could delay the finish of a (re)start until T1 has run out its retries. A false SA could suppress an adjacency advertisement, possibly causing lost reachability or extra flooding and SPF runs.</p><p>The RFC points to authentication as described in <a href='/1195/'>RFC 1195</a> and especially cryptographic authentication from <a href='/5304/'>RFC 5304</a> to reduce spoofing. It also assumes the three-way handshake from <a href='/5303/'>RFC 5303</a> is used on point-to-point circuits.</p>",
+      "eli5": "<p>Someone could fake a note saying 'I am restarting'. That mostly wastes time, so routers can check signatures on their notes.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "FLAGS IN THE RESTART TLV (TYPE 211)",
+      "data": {
+        "items": [
+          {
+            "code": "RR",
+            "label": "Restart Request",
+            "desc": "Sender is (re)starting; keep the adjacency, send CSNPs and set SRMflags.",
+            "highlight": true
+          },
+          {
+            "code": "RA",
+            "label": "Restart Acknowledgement",
+            "desc": "Neighbor confirms it saw an RR and reports Remaining Time."
+          },
+          {
+            "code": "SA",
+            "label": "Suppress adjacency advertisement",
+            "desc": "Starting router asks neighbors not to advertise the adjacency in their LSPs."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "RESTART HANDSHAKE (SIMPLIFIED, ILLUSTRATIVE)",
+      "data": {
+        "lanes": [
+          {
+            "key": "restarting",
+            "label": "Restarting router"
+          },
+          {
+            "key": "neighbor",
+            "label": "Neighbor"
+          }
+        ],
+        "messages": [
+          {
+            "from": "restarting",
+            "to": "neighbor",
+            "label": "IIH with RR set",
+            "color": "blue",
+            "note": "Asks the neighbor to keep the adjacency."
+          },
+          {
+            "from": "neighbor",
+            "to": "restarting",
+            "label": "IIH with RA set",
+            "color": "green",
+            "note": "Carries Remaining Time."
+          },
+          {
+            "from": "neighbor",
+            "to": "restarting",
+            "label": "Complete set of CSNPs",
+            "color": "green",
+            "note": "Lists the LSPs the neighbor holds."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1195]",
+      "text": "Callon, R., \"Use of OSI IS-IS for routing in TCP/IP and dual environments\", RFC 1195, December 1990.",
+      "rfc": 1195
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC5303]",
+      "text": "Katz, D., Saluja, R., and D. Eastlake 3rd, \"Three-Way Handshake for IS-IS Point-to-Point Adjacencies\", RFC 5303, October 2008.",
+      "rfc": 5303
+    },
+    {
+      "number": "[RFC5304]",
+      "text": "Li, T. and R. Atkinson, \"IS-IS Cryptographic Authentication\", RFC 5304, October 2008.",
+      "rfc": 5304
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

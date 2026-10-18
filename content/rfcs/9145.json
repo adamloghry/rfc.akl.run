@@ -1,6 +1,6 @@
 {
   "number": 9145,
-  "shortTitle": null,
+  "shortTitle": "Secure NSH",
   "category": "security",
   "categoryReviewed": false,
   "summary": "<p>Describes an optional way to add integrity protection to the Network Service Header (NSH), which carries information for Service Function Chaining. It also allows sensitive metadata in the header to be encrypted. This helps stop tampering with or snooping on the data that steers packets through chains of network services.</p>",
@@ -10,13 +10,235 @@
   "questions": [
     "how to secure the network service header",
     "nsh integrity protection",
-    "service function chaining encryption"
+    "service function chaining encryption",
+    "what is the network service header",
+    "how to encrypt nsh metadata",
+    "what is mac#1 vs mac#2 in nsh"
+  ],
+  "tags": [
+    "Security",
+    "Service Chaining",
+    "Integrity"
+  ],
+  "subtitle": "How to seal the Network Service Header against tampering and hide sensitive metadata inside it.",
+  "tldr": {
+    "problem": "The Network Service Header (NSH) used for Service Function Chaining is neither authenticated nor encrypted, so anyone on the path could alter it or read the metadata it carries.",
+    "mechanism": "Two new variable-length Context Headers carry a key identifier, a timestamp, an optional nonce and a message authentication code (MAC), and can also hold Context Headers encrypted with an authenticated encryption algorithm.",
+    "outcome": "NSH data gains integrity and replay protection, and privacy-sensitive metadata can be kept from nodes that are not entitled to read it. It does not provide data origin authentication.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Header types",
+      "value": "0x02 (MAC#1) and 0x03 (MAC#2)"
+    },
+    {
+      "label": "Timestamp size",
+      "value": "8 bytes (32-bit seconds, 32-bit fraction)"
+    },
+    {
+      "label": "Default replay Delta",
+      "value": "2 seconds"
+    },
+    {
+      "label": "Mandatory AEAD",
+      "value": "AES_128_GCM"
+    },
+    {
+      "label": "Mandatory HMAC",
+      "value": "HMAC-SHA-256-128"
+    },
+    {
+      "label": "Applies to",
+      "value": "NSH MD Type 0x02 only"
+    }
+  ],
+  "today": "<p>RFC 9145 is a Proposed Standard published in December 2021 and has not been obsoleted or updated. It builds on the NSH defined in <a href='/8300/'>RFC 8300</a>.</p>",
+  "glossary": [
+    "service-function-chain",
+    "hmac",
+    "aead",
+    "nonce",
+    "replay-protection",
+    "timestamp",
+    "mtu",
+    "mac-integrity"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem With a Plain NSH",
+      "content": "<p>Service Function Chaining (SFC) steers packets through an ordered set of network services such as firewalls or address translators. The <strong>Network Service Header</strong> (NSH), defined in <a href='/8300/'>RFC 8300</a>, is the encapsulation that tells each hop where a packet is in its chain and can carry metadata for downstream services.</p><p>That header is unauthenticated and unencrypted. Using a transport encapsulation such as IPsec does not fully close the gap, because it only protects hop by hop between two SFC data plane elements. Any forwarder or service function on the path that is not meant to see privacy-sensitive metadata would still see it.</p><p>This RFC fills the gap. It defines the \"NSH Variable Header-Based Integrity\" option mentioned in <a href='/8300/'>RFC 8300</a>, adding integrity protection and optional encryption of sensitive metadata directly to the NSH. The integrity protection covers the packet payload and provides replay protection. It applies only to NSH MD Type 0x02, because MD Type 0x01 has a fixed 16-byte Context Header that cannot hold both metadata and a message integrity value.</p>",
+      "eli5": "<p>Right now the instruction card on a package is written in plain pencil, so anyone handling the package can change it or read the secrets on it. This RFC fixes that.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "2",
+      "title": "Who May Do What",
+      "content": "<p>The NSH has three parts: a Base Header (service header and payload protocol), a Service Path Header (path identity and position in the path) and optional Context Headers that carry metadata. Different SFC elements are allowed to touch different parts.</p><ul><li>Classifiers, NSH-aware service functions (SFs) and SFC proxies may update Context Headers.</li><li>Only NSH-aware SFs and SFC proxies may update the Service Path Header.</li><li>Service Function Forwarders (SFFs) may change the Base Header, for example the TTL, but are not supposed to act on or look into Context Headers.</li></ul><p>From this the RFC derives its requirements. Only Classifiers, NSH-aware SFs and SFC proxies must be able to encrypt and decrypt a Context Header. Encrypted and unencrypted Context Headers can be mixed in one NSH. The Service Path Header must be integrity protected, and the Base Header optionally so.</p><p>The Service Path Header is never encrypted, because SFFs use the Service Index together with the Service Path Identifier to find the next SF.</p>",
+      "eli5": "<p>Some helpers may write on the card, some may only move the package along, and nobody but the right helpers gets the code key for the secret notes.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "Design: Two Levels, One Key",
+      "content": "<p>Two <strong>levels of assurance</strong> are supported. In the first, all NSH data except the Base Header is integrity protected, so SFFs need no keys. In the second, all NSH data including the Base Header is protected, and SFFs can also be NSH imposers because they hold the MAC key.</p><p>Both use a single input secret key <code>K</code>, split into two parts: <code>MAC_KEY</code>, the first <code>MAC_KEY_LEN</code> octets, and <code>ENC_KEY</code>, the final <code>ENC_KEY_LEN</code> octets. The Authenticated Encryption with Associated Data (AEAD) interface of <a href='/5116/'>RFC 5116</a> encrypts the sensitive Context Headers. An HMAC (see <a href='/4868/'>RFC 4868</a> and <a href='/2104/'>RFC 2104</a>) protects the NSH data.</p><p>Using both has a practical benefit: after decrementing the Service Index, an SF or proxy only recomputes the HMAC and does not need to re-encrypt. SFFs never get <code>ENC_KEY</code>, so they cannot read encrypted Context Headers.</p><p>Classifiers, NSH-aware SFs and SFC proxies MUST implement <code>AES_128_GCM</code> and <code>HMAC-SHA-256-128</code>, and SHOULD implement the 192 and 256-bit AES-GCM and the HMAC-SHA-384-192 and HMAC-SHA-512-256 variants. A note explains why <code>AES_128_CBC_HMAC_SHA_256</code> is not used: CBC mode allows malleable plaintexts.</p><p>Key management is out of scope. Keys are referred to by an in-band <strong>key identifier</strong>, which lets keys be per chain, per path or per tenant and be rotated without losing synchronization. When one NSH is nested inside another, the lower-level domain includes the Upper-NSH when computing its MAC, and the two levels SHOULD NOT share keying material.</p>",
+      "eli5": "<p>One master key is split in two: one half makes the tamper-proof seal and the other half scrambles the secret notes. Forwarders get only the sealing half, so they can check the seal but not read the notes.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "4",
+      "title": "The MAC and Encrypted Metadata Context Headers",
+      "content": "<p>The RFC defines two Variable-Length Context Headers, <strong>MAC#1</strong> (Type <code>0x02</code>) and <strong>MAC#2</strong> (Type <code>0x03</code>), with the same layout. The Metadata Class MUST be <code>0x0</code>. The header holds a key identifier length and key identifier, an 8-byte timestamp, a nonce length and nonce, and then the encrypted Context Headers (optional) followed by the message authentication code. It is padded to a multiple of 4 bytes and, if included, MUST be the last Context Header. The nonce length is zero when Context Headers are only integrity protected.</p><p>MAC#1 covers the Service Path Header, Context Headers and inner packet, but not the Base Header. This avoids recomputing the MAC at each SFF because of TTL processing, at the cost that a Base Header change is not detected. MAC#2 covers the entire NSH data and so requires sharing the MAC key with SFFs.</p><p>The <strong>timestamp</strong> has a 32-bit seconds field and a 32-bit fraction field, in units of 2^(-32) seconds. The epoch is 1970-01-01T00:00 UTC, and the format wraps around every 2^32 seconds, with the next wraparound in 2106.</p>",
+      "eli5": "<p>There are two kinds of seal. One seal skips the outer envelope, so the mail carriers need no special tools. The other seals everything, so the carriers need the sealing tool too.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Processing Rules",
+      "content": "<p>To protect NSH data, an imposer first encrypts any Context Headers, then sets the MAC field to zero, computes the HMAC with <code>MAC_KEY</code> over the target data and writes the result into the MAC field. The MAC length depends on the HMAC algorithm for that key identifier. Encryption uses a zero-length associated data input and encrypts each whole Context Header, including its class, type and length. All Context Headers carrying privacy-sensitive metadata MUST be encrypted, and encrypting all of them is RECOMMENDED.</p><p>On receipt, a node checks that a MAC header is present, that the key identifier is known and that the timestamp is acceptable. A packet is accepted only if <code>-Delta &lt; (TSrt - TS) &lt; +Delta</code>, where the default Delta is 2 seconds. It then stores the MAC, zeros the field, recomputes it and compares, in constant time, to thwart timing attacks. Any failure means the packet is discarded. Within the Delta window, nodes can detect replays by recording a unique value such as the MAC.</p><p>Any node that changes Context Headers (strip, update or insert) MUST reapply the integrity protection. A node that cannot consume a Context Header it decrypts MUST keep it unaltered when forwarding. Only one MAC header is allowed per NSH level; extra instances are ignored.</p>",
+      "eli5": "<p>Each helper checks that the seal is unbroken and the date stamp is fresh. If anything looks wrong, the package is thrown away. If a helper changes the card, it must put on a new seal.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations and Limits",
+      "content": "<p>The threats addressed are an on-path attacker modifying NSH data, spoofing it, capturing and replaying it, privacy-sensitive metadata being revealed, and the inner packet being swapped for a modified or bogus one. Where these are possible, NSH data MUST be integrity and replay protected and privacy-sensitive metadata MUST be encrypted.</p><p>The solution does <strong>not</strong> provide data origin authentication. Dropping packets is not handled; it can be detected by statistical analysis, which is out of scope. With MAC#1, an active attacker can alter the Base Header, for example lowering the TTL so the next SFF discards the packet, which the RFC does not count as an attack on this mechanism. MAC#2 lets SFFs detect Base Header changes.</p><p>Keys must carry an expiration time, and the control plane SHOULD distribute the next key identifier well before it. Traffic between SFC elements and a key management system MUST NOT be sent unencrypted. The NSH-aware SFs and SFC proxies are considered fully trusted to act on the NSH data. Also, SFC elements need synchronized clocks, typically via NTP, for the timestamp check.</p>",
+      "eli5": "<p>The seal stops people changing or copying the card, but it cannot prove who first wrote it, and it cannot stop someone just throwing the package away.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "7",
+      "title": "IANA and MTU Notes",
+      "content": "<p>IANA added two entries to the \"NSH IETF-Assigned Optional Variable-Length Metadata Types\" registry for the base NSH MD class: <code>0x02</code> for MAC and Encrypted Metadata #1 and <code>0x03</code> for MAC and Encrypted Metadata #2.</p><p>The added headers make packets bigger. Following <a href='/8300/'>RFC 8300</a>, it is RECOMMENDED that operators raise the underlying MTU so NSH traffic is not fragmented. If that is impossible, they may rely on a transport encapsulation that handles fragmentation, after carefully assessing the effect on SFFs.</p>",
+      "eli5": "<p>The seal and notes make the package bigger, so the delivery trucks need to be roomy enough to carry it without cutting it in pieces.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THE TWO LEVELS OF ASSURANCE",
+      "data": {
+        "columns": [
+          "Level",
+          "Header type",
+          "Covers Base Header",
+          "SFFs hold MAC key"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "First (MAC#1)",
+              "0x02",
+              "No",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Second (MAC#2)",
+              "0x03",
+              "Yes",
+              "Yes"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "header-format",
+      "position": "after",
+      "caption": "TIMESTAMP FIELD FORMAT (RFC 9145)",
+      "data": {
+        "title": "Timestamp",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "seconds",
+            "name": "Seconds",
+            "bits": 32,
+            "desc": "Integer seconds since the 1970-01-01T00:00 UTC epoch."
+          },
+          {
+            "key": "fraction",
+            "name": "Fraction",
+            "bits": 32,
+            "desc": "Fractional seconds, in units of 2^(-32) seconds."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "NEW NSH METADATA TYPES",
+      "data": {
+        "items": [
+          {
+            "code": "0x02",
+            "label": "MAC and Encrypted Metadata #1",
+            "desc": "MAC over everything except the Base Header."
+          },
+          {
+            "code": "0x03",
+            "label": "MAC and Encrypted Metadata #2",
+            "desc": "MAC over the entire NSH data, Base Header included.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8300]",
+      "text": "Quinn, P., Ed., Elzur, U., Ed., and C. Pignataro, Ed., \"Network Service Header (NSH)\", RFC 8300, January 2018.",
+      "rfc": 8300
+    },
+    {
+      "number": "[RFC7665]",
+      "text": "Halpern, J., Ed. and C. Pignataro, Ed., \"Service Function Chaining (SFC) Architecture\", RFC 7665, October 2015.",
+      "rfc": 7665
+    },
+    {
+      "number": "[RFC5116]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[RFC4868]",
+      "text": "Kelly, S. and S. Frankel, \"Using HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512 with IPsec\", RFC 4868, May 2007.",
+      "rfc": 4868
+    },
+    {
+      "number": "[RFC2104]",
+      "text": "Krawczyk, H., Bellare, M., and R. Canetti, \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104, February 1997.",
+      "rfc": 2104
+    },
+    {
+      "number": "[RFC8459]",
+      "text": "Dolson, D., Homma, S., Lopez, D., and M. Boucadair, \"Hierarchical Service Function Chaining (hSFC)\", RFC 8459, September 2018.",
+      "rfc": 8459
+    },
+    {
+      "number": "[RFC4107]",
+      "text": "Bellovin, S. and R. Housley, \"Guidelines for Cryptographic Key Management\", BCP 107, RFC 4107, June 2005.",
+      "rfc": 4107
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

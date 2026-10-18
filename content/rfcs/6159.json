@@ -8,13 +8,181 @@
     "summary": "<p>In a long conversation passed along by middlemen, this makes sure the same middlemen stay on the route the whole time.</p>"
   },
   "questions": [
-    "diameter session-specific request routing"
+    "diameter session-specific request routing",
+    "explicit routing diameter",
+    "diameter stateful proxy path",
+    "3gpp wlan roaming diameter"
+  ],
+  "tags": [
+    "Routing",
+    "Diameter",
+    "AAA"
+  ],
+  "subtitle": "Keeping the same proxy in the path for all session messages.",
+  "tldr": {
+    "problem": "In the Diameter protocol, request messages are routed independently at each hop based on standard routing tables. In some architectures (like 3GPP wireless-to-WiFi interworking), certain stateful proxies must stay in the path for all messages in a session to track charging and enforce policy. Standard Diameter routing offers no guarantee of this.",
+    "mechanism": "This RFC introduces Explicit Routing (ER): proxies that wish to stay in a session's path add their identity to an Explicit-Path AVP in the initial request. Subsequent requests include this path and pop entries as they traverse, ensuring each proxy remains in the message flow.",
+    "outcome": "Stateful proxies can guarantee they process every message in a session, enabling per-session charging, policy enforcement, and service termination at the intermediate proxy without relying on failover robustness.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Explicit-Path AVP code",
+      "value": "35003"
+    },
+    {
+      "label": "Explicit-Path-Record AVP code",
+      "value": "35001"
+    },
+    {
+      "label": "Vendor ID for ER AVPs",
+      "value": "2011"
+    },
+    {
+      "label": "DIAMETER_INVALID_PROXY_PATH_STACK code",
+      "value": "3501"
+    }
+  ],
+  "today": "<p>RFC 6159 is informational. The IETF Diameter Maintenance and Extensions (DIME) Working Group concluded there was no consensus that explicit routing addresses real deployment concerns or aligns with Diameter architecture. The RFC represents work continued after IETF review stopped. It has not been obsoleted but is not widely deployed.</p>",
+  "glossary": [
+    "diameter",
+    "aaa",
+    "proxy"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p><strong>Diameter</strong> is a protocol for Authentication, Authorization and Accounting (AAA) in telecom networks. In normal Diameter routing, each node makes its own routing decision based on the destination realm and host. In a roaming scenario, a WLAN subscriber's request may traverse multiple realms: from the WLAN access network to a visited (roaming) network's proxy, then to the subscriber's home network's server. Once the visited network's proxy processes the initial request, it becomes <strong>stateful</strong>—it must track charging records, enforce policy, and potentially terminate the session. However, with standard Diameter routing, subsequent messages in the same session may take a different path and bypass that proxy, breaking its state tracking. This RFC allows a <strong>stateful proxy to guarantee it stays in the path</strong> for all messages of a session.</p>",
+      "eli5": "<p>Imagine a phone company needs to charge you for every message sent. That company has a middleman (proxy) in the path. They need that same middleman to see every message, or the bill won't be right.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "3GPP WLAN Roaming Architecture",
+      "content": "<p>The motivation for Explicit Routing comes from <strong>3GPP WLAN interworking</strong>, which allows 3GPP (cellular) subscribers to authenticate to Wi-Fi networks. In the non-roaming case, requests go directly to the home network's AAA server. In the roaming case, a subscriber in a visited network sends requests through the visited network's AAA proxy to the home network's AAA server. The visited network's proxy must stay in the path to: collect charging information for offline billing, enforce roaming agreements, and initiate service termination if the visited network operator requires it. These functions are all state-dependent: the proxy maintains session state and must process every message. Standard Diameter routing makes this impossible to guarantee.</p>",
+      "eli5": "<p>When you travel to another country and use a local Wi-Fi network, the local phone company needs to see every message you send so they can write it down for billing.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "Explicit Routing (ER) Mechanism",
+      "content": "<p>Explicit Routing introduces three types of nodes and one new AVP. An <strong>ER-Originator</strong> (a Diameter client, server, or proxy starting a session) maintains a cache of proxies and the final destination, and adds an <strong>Explicit-Path AVP</strong> to each request. This AVP contains a list of <strong>Explicit-Path-Record</strong> AVPs, each identifying a proxy (Proxy-Host) and optionally its realm (Proxy-Realm). An <strong>ER-Proxy</strong> (a proxy that participates in ER) checks the Explicit-Path AVP: if its identity is not yet in the list and discovery is in progress, it appends itself; if its identity is the first record, it removes that record, updates Destination-Host/Realm to the next record, and forwards the message. An <strong>ER-Destination</strong> (the final server) appends itself to the Explicit-Path AVP in its answer, allowing the ER-Originator to populate its cache for future requests. This is <strong>loose routing</strong>: messages are forced through specific proxies, but non-participating relays between them are transparent.</p>",
+      "eli5": "<p>The first message carries a list of middlemen. Each middleman crosses itself off, tells the next one where to go, and passes it on. The last one adds itself to the list and sends it back, so the originator knows the path for next time.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "4",
+      "title": "Path Discovery and Caching",
+      "content": "<p>An ER-Originator can discover the path two ways: <strong>pre-configuration</strong>, if it knows the proxies in advance, or <strong>Explicit-Path discovery</strong>, using the first request. In discovery mode, the ER-Originator sends the initial request with an Explicit-Path AVP containing only its own identity. Participating ER-Proxies append themselves to the list as they process the message. The ER-Destination appends itself in the answer. The ER-Originator receives the complete path in the answer's Explicit-Path AVP and caches it. For subsequent requests in the same session, the ER-Originator includes the cached path (minus its own entry) in the request, and sets the Destination-Host and Destination-Realm to the first proxy in the path. Each ER-Proxy pops its record and updates the Destination fields to route to the next proxy. This stack-like behavior ensures the path remains fixed for the session.</p>",
+      "eli5": "<p>On the first message, the originator says 'who will touch this?' Everyone on the path says 'me!' Then the originator remembers and puts them all in order on future messages.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5",
+      "title": "Error Handling and Failover",
+      "content": "<p>If an ER-Proxy or ER-Destination receives a message where its identity does not match the first Explicit-Path-Record (or is in the wrong position), it sends an error with code <strong>DIAMETER_INVALID_PROXY_PATH_STACK (3501)</strong>. If an ER-Destination cannot participate in ER, it sends <strong>DIAMETER_ER_NOT_AVAILABLE (4501)</strong>. If no ER-Proxy exists on the path, the ER-Originator receives an answer with only ER-Originator and ER-Destination records; the originator should then choose whether to continue without ER or terminate the session. <strong>Note on robustness:</strong> the RFC acknowledges that ER trades away Diameter's normal robustness: if an ER-Proxy fails, the session is terminated (there is no failover because subsequent messages will not match the Explicit-Path stack). This is the trade-off for guaranteeing a proxy stays in the path.</p>",
+      "eli5": "<p>If something goes wrong (a middleman is in the wrong place or stops working), the message bounces back with an error. The system doesn't automatically reroute because the original path is locked in.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "section-1",
+      "position": "after",
+      "caption": "Explicit-Path Discovery on First Request",
+      "data": {
+        "lanes": [
+          {
+            "key": "originator",
+            "label": "Originator"
+          },
+          {
+            "key": "proxy1",
+            "label": "Proxy 1"
+          },
+          {
+            "key": "proxy2",
+            "label": "Proxy 2"
+          },
+          {
+            "key": "destination",
+            "label": "Destination"
+          }
+        ],
+        "messages": [
+          {
+            "from": "originator",
+            "to": "proxy1",
+            "label": "Request + Explicit-Path=[originator]",
+            "color": "blue"
+          },
+          {
+            "from": "proxy1",
+            "to": "proxy2",
+            "label": "Request + Explicit-Path=[originator, proxy1]",
+            "color": "blue",
+            "note": "Proxy1 appends itself"
+          },
+          {
+            "from": "proxy2",
+            "to": "destination",
+            "label": "Request + Explicit-Path=[originator, proxy1, proxy2]",
+            "color": "blue",
+            "note": "Proxy2 appends itself"
+          },
+          {
+            "from": "destination",
+            "to": "proxy2",
+            "label": "Answer + Explicit-Path=[originator, proxy1, proxy2, destination]",
+            "color": "green",
+            "note": "Destination appends itself"
+          },
+          {
+            "from": "proxy2",
+            "to": "proxy1",
+            "label": "Answer (normal routing)",
+            "color": "green"
+          },
+          {
+            "from": "proxy1",
+            "to": "originator",
+            "label": "Answer with complete path",
+            "color": "green"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC3588]",
+      "text": "Calhoun, P., Loughney, J., Guttman, E., Zorn, G., and J. Arkko, \"Diameter Base Protocol\", RFC 3588, September 2003.",
+      "rfc": 3588
+    },
+    {
+      "number": "[RFC5729]",
+      "text": "Korhonen, J., Ed., Jones, M., Morand, L., and T. Tsou, \"Clarifications on the Routing of Diameter Requests Based on the Username and the Realm\", RFC 5729, December 2009.",
+      "rfc": 5729
+    },
+    {
+      "number": "[TS23.234]",
+      "text": "3GPP, \"3GPP system to Wireless Local Area Network (WLAN) interworking; System description\", TS 23.234 Version 7.4.0, 2006."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

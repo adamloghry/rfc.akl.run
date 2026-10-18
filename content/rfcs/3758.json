@@ -9,13 +9,219 @@
   },
   "questions": [
     "sctp partial reliability",
-    "what is forward tsn"
+    "what is forward tsn",
+    "what is pr-sctp",
+    "how does sctp partial reliability work",
+    "what is timed reliability in sctp"
+  ],
+  "tags": [
+    "SCTP",
+    "Transport",
+    "Reliability"
+  ],
+  "subtitle": "Lets an SCTP sender give up on stale data and tell the receiver to skip ahead.",
+  "tldr": {
+    "problem": "SCTP delivers every message reliably, so a lost or stale message holds up the receiver even when the application would rather move on.",
+    "mechanism": "Both ends advertise support with a Forward-TSN-Supported parameter in INIT and INIT ACK. The sender can then abandon a chunk and send a FORWARD TSN chunk that moves the receiver's cumulative ack point forward.",
+    "outcome": "Applications can mix fully reliable and partially reliable messages in one association with the same congestion control. The RFC defines one service, timed reliability, based on message lifetime.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "FORWARD TSN chunk type",
+      "value": "192 (0xC0)"
+    },
+    {
+      "label": "Forward-TSN-Supported parameter type",
+      "value": "49152 (0xC000)"
+    },
+    {
+      "label": "Parameter length",
+      "value": "4"
+    },
+    {
+      "label": "FORWARD TSN delay limit",
+      "value": "SHOULD NOT exceed 200ms, MUST NOT exceed 500ms"
+    }
+  ],
+  "today": "<p>RFC 3758 is a Proposed Standard and the metadata shows no RFC that obsoletes or updates it. It extends the base SCTP specification, <a href='/2960/'>RFC 2960</a>.</p>",
+  "glossary": [
+    "sctp",
+    "retransmission",
+    "congestion-control",
+    "multi-streaming",
+    "partial-reliability"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Partial Reliability",
+      "content": "<p>RFC 3758 extends the Stream Control Transmission Protocol (SCTP) of <a href='/2960/'>RFC 2960</a> so a sender can tell its peer that it should no longer expect one or more DATA chunks. When both ends support it, SCTP can give <strong>partially reliable</strong> service: the user states, per message, how persistent the transport should be in trying to deliver it. The extended protocol is called PR-SCTP.</p><p>The RFC lists benefits. One association can carry both reliable content and timeliness-sensitive content. Partially reliable traffic gets the same failure detection and fail-over as reliable traffic. PR-SCTP can offer ordered as well as unordered unreliable delivery. It uses the same congestion control for all traffic, which keeps it TCP-friendly, and chunk bundling can multiplex both kinds in one association.</p>",
+      "eli5": "<p>One mailbox can carry both must-arrive letters and nice-to-have postcards. If a postcard gets too old, the sender can stop trying to deliver it.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "The Two Protocol Additions",
+      "content": "<p>The wire protocol gets exactly two new elements. The first is an OPTIONAL <strong>Forward-TSN-Supported</strong> parameter for INIT and INIT ACK, type <code>49152</code> (0xC000) and length 4, which says the endpoint can handle the second element. The second is the <strong>FORWARD TSN</strong> chunk, type <code>192</code> (0xC0), which tells the receiver to move its cumulative ack point forward, possibly past DATA chunks it never received.</p><p>How a sender decides to give up on a message does not change the wire format. Only the sender's API and implementation are affected, and the receiver only needs to interpret FORWARD TSN correctly. That is why many kinds of partially reliable service could be built without further protocol changes.</p>",
+      "eli5": "<p>Two small additions: a note at the start saying I can skip, and a message later saying skip up to here.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "3",
+      "title": "Negotiating Support",
+      "content": "<p>An endpoint that supports FORWARD TSN MAY include the Forward-TSN-Supported parameter in its INIT. If a receiver of an INIT sees the parameter and supports the chunk, it MAY answer with the parameter in the INIT ACK.</p><p>If an endpoint does not include the parameter, it can neither send nor process a FORWARD TSN for the life of the association, and it MUST act as if it does not support the chunk, returning an ERROR for any FORWARD TSN it receives. An endpoint that saw no parameter in the INIT MUST NOT send a FORWARD TSN at any time during the association and SHOULD record that the peer lacks support.</p><p>If a peer replies with an operational error showing it does not recognize the parameter, the local endpoint SHOULD tell its upper layer. It may then end the initiation (sending an ABORT if needed) or continue without partial reliability, in which case it MUST NOT send FORWARD TSN.</p>",
+      "eli5": "<p>Before skipping is allowed, both sides must say they understand it. If one side does not, nobody may use it.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "4",
+      "title": "Parameter and Chunk Formats",
+      "content": "<p>The FORWARD TSN chunk has type 192, flags set to zero on transmit and ignored on receipt, and a variable length. Its body starts with a 32-bit <strong>New Cumulative TSN</strong>. The receiver MUST treat any missing TSNs up to and including this value as received and stop reporting them as gaps in later SACKs.</p><p>After that come pairs of a 16-bit Stream and a 16-bit Stream Sequence number. Each pair names a stream that was skipped and the largest stream sequence number being skipped in it. The receiver uses them to release data stranded in stream re-ordering queues. These fields MUST NOT report TSNs of unordered DATA chunks, and for ordered chunks they MUST be filled in.</p>",
+      "eli5": "<p>The skip message says skip to number N, and for each lane of traffic, which place in line was skipped.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Sender and Receiver Rules",
+      "content": "<p>The sender keeps a new variable, <code>Advanced.Peer.Ack.Point</code>, a theoretical cumulative TSN point of the peer. When it <strong>abandons</strong> a chunk it treats it as finally acked and no longer outstanding, but MUST NOT credit it to <code>partial_bytes_acked</code> or advance <code>cwnd</code> because of it. If a fragmented message loses one TSN, all of its TSNs are abandoned together.</p><p>On each SACK the sender first processes it normally, then raises the ack point to the SACK's cumulative TSN ack if that is higher, then advances it past consecutive abandoned chunks. If the result exceeds the SACK's cumulative TSN ack, the sender MUST send a FORWARD TSN, and it MUST make sure a T3-rtx timer is running. Each stream is reported once, with the highest abandoned stream sequence number, and if the chunk does not fit in one MTU the ack point is lowered to what fits.</p><p>A sender SHOULD bundle FORWARD TSN with DATA, and MAY delay it, but any delay SHOULD NOT exceed 200ms and MUST NOT exceed 500ms. FORWARD TSN MUST NOT be used for any other purpose.</p><p>The receiver first moves its cumulative TSN point to the value in the chunk, then advances further if the following chunks have arrived. If the value is behind or at the current point, it ignores the chunk as out of date and SHOULD send a SACK. It MUST release stranded ordered data, drop partially reassembled messages that can no longer complete, and treat a later-arriving skipped TSN as a duplicate.</p>",
+      "eli5": "<p>The sender keeps its own count of how far the receiver can safely skip. When that count passes what the receiver has confirmed, it sends the skip message. The receiver then jumps ahead and hands over anything that was waiting in line.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Timed Reliability Service",
+      "content": "<p>The RFC defines one service, <strong>timed reliability</strong>, as a natural extension of the existing message lifetime in SCTP. In base SCTP, once a message has been sent once before its lifetime expires, it must still be sent reliably, which wastes bandwidth during congestion. With timed reliability that restriction is removed.</p><p>If the lifetime is <code>SCTP_LIFETIME_RELIABLE</code> or unspecified, the message is normal reliable data. Otherwise it is treated as reliable until the lifetime expires. Before assigning a TSN the sender MUST check the lifetime, and an expired message gets no TSN and is abandoned, with a notification SHOULD be sent to the upper layer. Before sending or retransmitting a message that has a TSN, the sender MUST check the lifetime and abandon an expired one. The application MUST NOT change the lifetime after passing the message down.</p><p>The RFC also adds an optional <code>forward tsn supported</code> return value to ASSOCIATE and an <code>ENABLE_PRSCTP</code> primitive, recommended to be disabled by default, and gives guidelines for defining other services. Any service MUST mark an abandoned TSN as eligible for FORWARD TSN, to avoid deadlock.</p>",
+      "eli5": "<p>Each message gets a use-by time. If it is past its time, the sender stops trying and moves on instead of sending stale news.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The RFC says it introduces no new security concerns beyond those of SCTP in <a href='/2960/'>RFC 2960</a>, and shares the issues of unordered data identified by <a href='/3436/'>RFC 3436</a>. An application using PR-SCTP should not use transport layer security; details are in RFC 3436.</p><p>A man-in-the-middle can already change or withhold data, so FORWARD TSN gives no new attack. However, it makes it easier to skip selected messages when the feature is on, because the attacker has less state to maintain.</p>",
+      "eli5": "<p>Someone in the middle could already throw messages away. The skip message just makes it a bit easier to skip chosen ones.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "FORWARD TSN CHUNK (RFC 3758)",
+      "data": {
+        "title": "FORWARD TSN chunk",
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "Chunk type.",
+            "value": "192"
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 8,
+            "desc": "Zero on transmit, ignored on receipt.",
+            "value": "0x00"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Variable length."
+          },
+          {
+            "key": "new-cum-tsn",
+            "name": "New Cumulative TSN",
+            "bits": 32,
+            "desc": "The cumulative TSN the receiver should adopt."
+          },
+          {
+            "key": "stream-1",
+            "name": "Stream-1",
+            "bits": 16,
+            "desc": "A stream number skipped by this chunk."
+          },
+          {
+            "key": "seq-1",
+            "name": "Stream Sequence-1",
+            "bits": 16,
+            "desc": "Largest stream sequence number skipped in that stream."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "SKIPPING AN ABANDONED CHUNK (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "Data sender"
+          },
+          {
+            "key": "receiver",
+            "label": "Data receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "DATA",
+            "color": "blue",
+            "note": "One chunk is lost and the sender abandons it."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "SACK",
+            "color": "green",
+            "note": "Cumulative TSN ack is behind the abandoned chunk."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "FORWARD TSN",
+            "color": "blue",
+            "note": "New Cumulative TSN moves past the abandoned chunk."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "SACK",
+            "color": "green",
+            "note": "Gap is no longer reported."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[2]",
+      "text": "Stewart, R., et al., \"Stream Control Transmission Protocol\", RFC 2960, October 2000.",
+      "rfc": 2960
+    },
+    {
+      "number": "[4]",
+      "text": "Jungmaier, A., Rescorla, E. and M. Tuexen, \"Transport Layer Security over Stream Control Transmission Protocol\", RFC 3436, December 2002.",
+      "rfc": 3436
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

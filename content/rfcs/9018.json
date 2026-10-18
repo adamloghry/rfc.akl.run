@@ -9,13 +9,205 @@
   },
   "questions": [
     "how to generate dns server cookies",
-    "dns cookies anycast interoperability"
+    "dns cookies anycast interoperability",
+    "what is a dns server cookie",
+    "how is a dns server cookie calculated",
+    "what is siphash-2-4 used for in dns",
+    "how to roll over a dns cookie server secret"
+  ],
+  "tags": [
+    "DNS",
+    "Security",
+    "Cookies"
+  ],
+  "subtitle": "A single recipe for DNS Server Cookies so servers from different vendors can validate each other's cookies.",
+  "tldr": {
+    "problem": "RFC 7873 left the exact calculation of a Server Cookie to each implementation. Servers in a multi-vendor anycast set could not validate cookies made by one another, even with a shared secret.",
+    "mechanism": "This RFC defines a 16-byte version 1 Server Cookie made of a version, reserved bytes, a timestamp and an 8-byte SipHash-2-4 hash over the Client Cookie, those fields and the client IP address, keyed with a Server Secret.",
+    "outcome": "It updates RFC 7873, makes SipHash-2-4 the mandatory default, gives a three-stage way to roll the Server Secret, and creates an IANA registry of Server Cookie methods.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Server Cookie size",
+      "value": "16 bytes (128 bits)"
+    },
+    {
+      "label": "COOKIE option length",
+      "value": "24 bytes (8 + 16)"
+    },
+    {
+      "label": "Hash input length",
+      "value": "20 bytes (IPv4) or 32 bytes (IPv6)"
+    },
+    {
+      "label": "Client Cookie entropy",
+      "value": "64 bits"
+    },
+    {
+      "label": "Accepted timestamp window",
+      "value": "1 hour past, 5 minutes future"
+    },
+    {
+      "label": "Mandatory algorithm",
+      "value": "SipHash-2-4"
+    }
+  ],
+  "today": "<p>RFC 9018 is a Proposed Standard published in April 2021. It updates <a href='/7873/'>RFC 7873</a> and has not itself been obsoleted or updated. The text records that BIND from version 9.16 and Knot DNS from version 2.9.0 create Server Cookies this way.</p>",
+  "glossary": [
+    "anycast",
+    "pseudorandom-function",
+    "replay-attack",
+    "timestamp",
+    "edns0",
+    "dns"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Interoperability Problem",
+      "content": "<p><strong>DNS Cookies</strong> (<a href='/7873/'>RFC 7873</a>) are a lightweight transaction security mechanism. They give limited protection against denial-of-service amplification, forgery and cache-poisoning attacks by off-path attackers.</p><p>RFC 7873 recommended that all servers in a set of <strong>anycast</strong> servers use the same Server Secret, but left open how a Server Cookie is computed from it. The result, in the RFC's words, was a gallimaufry of implementations: a cookie made by one could generally not be validated by another, so cookies were impractical on multi-vendor anycast networks. Client cookies do not need to interoperate, since each client only has to recognize its own.</p><p>Single-implementation and non-anycast services can also benefit from a well-studied standardized algorithm.</p>",
+      "eli5": "<p>Before this RFC, every maker of DNS servers made wristbands their own way, so a door from one maker could not read a wristband from another.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "2",
+      "title": "What Changes in RFC 7873",
+      "content": "<p>The example \"simple\" algorithms in Appendices A.1 and B.1 of RFC 7873 MUST NOT be used, because the resulting cookies are too weak by modern standards. The \"more complex\" server algorithm in Appendix B.2 is replaced by the interoperable specification in this document, which MUST be used by Server Cookie implementations.</p><p>The old client example in Appendix A.2 is NOT RECOMMENDED. Section 3 of this document gives new suggestions for building Client Cookies instead.</p>",
+      "eli5": "<p>The old simple recipes are thrown out because they were too easy to fake. One strong recipe takes their place.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "Building a Client Cookie",
+      "content": "<p>The Client Cookie is an identifier for a client and its address, and it needs to be unguessable. A client MUST use a different Client Cookie for each different server IP address, and the cookie SHOULD have 64 bits of entropy. The old advice to hash in the client IP address was dropped, because the cookie is usually computed before the client address is known.</p><p>For privacy, a client MUST NOT reuse a Client or Server Cookie after its own IP address changes. One way is to register the client address next to the Server Cookie and bind the socket to that address on later queries; failure to bind MUST lead to a new Client Cookie.</p><p>If a server does not support DNS Cookies, the client MUST NOT send the same Client Cookie to it again, and is advised to send none for a period such as five minutes. Otherwise the Client Cookie rarely needs to change: the period should be no longer than a year, and cookies are not expected to survive a program restart.</p>",
+      "eli5": "<p>Your half of the wristband is a random number you pick fresh for every club, and you throw it away if you move to a new address, so nobody can follow you around.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "The Version 1 Server Cookie",
+      "content": "<p>A Server Cookie is effectively a Message Authentication Code. It weakly assures the server that a request comes from a client at the stated source address that is using the stated Client Cookie. It gives no protection against on-path adversaries, who can reuse an observed Server Cookie while it is valid.</p><p>The 128-bit Server Cookie has four sub-fields: a 1-octet <strong>Version</strong>, a 3-octet <strong>Reserved</strong> field, a 4-octet <strong>Timestamp</strong> and an 8-octet <strong>Hash</strong>. This document defines Version 1. Reserved MUST be zero when building a cookie, but a verifying server MUST NOT enforce that and computes the hash with the received value.</p><p>The Timestamp is a 32-bit unsigned count of seconds since 1 January 1970 00:00:00 UTC, in network byte order, compared with Serial number arithmetic (<a href='/1982/'>RFC 1982</a>). Servers SHOULD accept cookies up to 1 hour in the past and 5 minutes in the future, and SHOULD issue a fresh cookie when the received one is more than half an hour old.</p><p>The hash is <code>SipHash-2-4(Client Cookie | Version | Reserved | Timestamp | Client-IP, Server Secret)</code>, where <code>|</code> is concatenation. The client IP is hashed but not carried in the cookie. The input MUST be exactly 20 bytes for IPv4 or 32 bytes for IPv6, so the received COOKIE option MUST be exactly 24 bytes (8 for the Client Cookie plus 16 for the Server Cookie). This prevents a 36-byte option from an IPv6 client being validated as IPv4, or the reverse. The Server Secret MUST be configurable.</p>",
+      "eli5": "<p>The server's half of the wristband holds a version number, a time stamp and a scrambled code made from your number, your address and a club secret. Only a door that knows the secret can check the code.</p>"
+    },
+    {
+      "id": "management",
+      "number": "5",
+      "title": "Rolling the Server Secret",
+      "content": "<p>Changing the Server Secret regularly is RECOMMENDED; once a month, for example, would be adequate with a secure function. Every server in an anycast set must always be able to verify cookies from all the others, so a new secret must be shared everywhere before any server uses it, and the old secret must stay valid for verification for a while. Deployment of a new secret MUST be done in three stages.</p><p>The operator starts each stage. In Stage 3 the old secret is removed and MUST NOT be used for verifying. The operator is RECOMMENDED to wait, after starting Stage 2, at least the longest TTL in the served zones plus 1 hour, and in any case longer than the period clients may reuse a cookie, which SHOULD be 1 hour.</p>",
+      "eli5": "<p>To change the club secret, first teach it to every door, then start using it, and only later forget the old one, so nobody holding an old wristband is suddenly turned away.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "6",
+      "title": "Algorithms and the IANA Registry",
+      "content": "<p>A compliant DNS server MUST use SipHash-2-4 as the mandatory and default algorithm for DNS Cookies. A construction method is identified by the version byte and the length of the Server Cookie, so other algorithms may be added later.</p><p>IANA created the registry <strong>DNS Server Cookie Methods</strong> under the DNS Parameters heading, with Expert Review as the assignment policy. Server Cookie size is limited to 8 to 32 bytes. Version 1 with size 16 is SipHash-2-4 from this RFC; version 0 and version 255 are Reserved, versions 240 to 254 are for Private Use, and the rest are Unassigned.</p>",
+      "eli5": "<p>There is a official list of wristband recipes. For now the list has one recipe, and room is kept for new ones.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and Privacy",
+      "content": "<p>DNS Cookies give limited protection against off-path attackers and none against on-path ones, who can observe the plaintext Server Cookie and use it against that client for its lifetime. The cleartext Timestamp even reveals how long that is.</p><p>Because Client Cookies are now simply 64 bits of fresh entropy, extra care is needed to prevent tracking: a new Client Cookie MUST be created whenever the client IP changes, and a client MUST NOT send a previously sent Client Cookie to a server not known to support cookies. A client behind NAT cannot see its public address change, and preventing tracking of that is out of scope.</p><p>The unhashed fields cannot be altered by an on-path attacker without recomputing the hash, which needs the secret. Servers need a reliable time source, and servers in an anycast set that validate cookies need synchronized clocks. SipHash-2-4 is considered sufficiently strong for the immediate future.</p>",
+      "eli5": "<p>A cookie protects against strangers far away, but not against someone standing right next to you who can copy your wristband while it is still good.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "VERSION 1 SERVER COOKIE LAYOUT (RFC 9018)",
+      "data": {
+        "title": "Server Cookie",
+        "bytes": 16,
+        "width": 32,
+        "fields": [
+          {
+            "key": "version",
+            "name": "Version",
+            "bits": 8,
+            "desc": "Structure and hash formula; 1 for this document.",
+            "value": "1"
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 24,
+            "desc": "Set to zero when constructing a cookie."
+          },
+          {
+            "key": "timestamp",
+            "name": "Timestamp",
+            "bits": 32,
+            "desc": "Seconds since 1 January 1970 UTC, unsigned."
+          },
+          {
+            "key": "hash",
+            "name": "Hash",
+            "bits": 64,
+            "desc": "SipHash-2-4 over the Client Cookie, fields and client IP."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "management",
+      "position": "after",
+      "caption": "THE THREE STAGES OF A SERVER SECRET UPDATE",
+      "data": {
+        "items": [
+          {
+            "title": "Stage 1",
+            "text": "New secret deployed everywhere; servers still generate with the old one and verify with both."
+          },
+          {
+            "title": "Stage 2",
+            "text": "Servers start generating with the new secret; both secrets still verify."
+          },
+          {
+            "title": "Stage 3",
+            "text": "Old secret removed and no longer used for verifying."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7873]",
+      "text": "Eastlake 3rd, D. and M. Andrews, \"Domain Name System (DNS) Cookies\", RFC 7873, May 2016.",
+      "rfc": 7873
+    },
+    {
+      "number": "[RFC1982]",
+      "text": "Elz, R. and R. Bush, \"Serial Number Arithmetic\", RFC 1982, August 1996.",
+      "rfc": 1982
+    },
+    {
+      "number": "[RFC3339]",
+      "text": "Klyne, G. and C. Newman, \"Date and Time on the Internet: Timestamps\", RFC 3339, July 2002.",
+      "rfc": 3339
+    },
+    {
+      "number": "[RFC8981]",
+      "text": "Gont, F., Krishnan, S., Narten, T., and R. Draves, \"Temporary Address Extensions for Stateless Address Autoconfiguration in IPv6\", RFC 8981, February 2021.",
+      "rfc": 8981
+    },
+    {
+      "number": "[SipHash-2-4]",
+      "text": "Aumasson, J. and D. J. Bernstein, \"SipHash: A Fast Short-Input PRF\", Progress in Cryptology - INDOCRYPT 2012, December 2012."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

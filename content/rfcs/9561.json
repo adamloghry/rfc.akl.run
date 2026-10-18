@@ -10,13 +10,200 @@
   "questions": [
     "pnfs nvme",
     "scsi layout nvme",
-    "parallel nfs nvme storage"
+    "parallel nfs nvme storage",
+    "what is pnfs scsi layout",
+    "how does pnfs use nvme",
+    "how are clients fenced in pnfs nvme"
+  ],
+  "tags": [
+    "Storage",
+    "NFS",
+    "NVMe"
+  ],
+  "subtitle": "How pNFS clients can read and write NVMe storage directly using the SCSI layout, with fencing and cache flushing mapped to NVMe commands.",
+  "tldr": {
+    "problem": "The pNFS SCSI layout lets NFS clients do I/O straight to block storage, but it is written in SCSI terms, while NVMe is now the common way to reach solid state disks.",
+    "mechanism": "The RFC maps each SCSI idea the layout uses to an NVMe one: namespace identifiers for volume identification, Reservation Register and Reservation Acquire commands for client fencing, and the NVMe Flush command for volatile write caches.",
+    "outcome": "NVMe namespaces can be used with the existing SCSI layout over any NVMe transport, without changing the SCSI layout document.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "NGUID length",
+      "value": "16 octets"
+    },
+    {
+      "label": "EUI64 length",
+      "value": "8 octets"
+    },
+    {
+      "label": "Reservation type",
+      "value": "4h (Exclusive Access - Registrants Only)"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 9561 is a Proposed Standard published in April 2024. It has not been obsoleted or updated, according to the unit metadata.</p>",
+  "glossary": [
+    "pnfs",
+    "tls"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Map the SCSI Layout to NVMe",
+      "content": "<p>NFSv4.1 (<a href='/8881/'>RFC 8881</a>) includes <strong>pNFS</strong>, which lets reads and writes happen by means other than sending them to the server. The server acts as the <strong>metadata server</strong> (MDS) and manages file and directory metadata. Each way of doing the reads and writes is a layout type. The SCSI layout (<a href='/8154/'>RFC 8154</a>) lets NFS clients do I/O directly to block storage devices, bypassing the MDS, using concepts from the SCSI protocol family.</p><p><strong>NVMe</strong> is a set of specifications for talking to storage devices over PCI Express, Fibre Channel, TCP/IP or RDMA. The RFC says it is the predominant protocol for PCIe solid state disks and is increasingly used for remote storage in place of SCSI-based protocols such as iSCSI.</p><p>This document defines how NVMe namespaces, using the NVM Command Set and exported by controllers implementing the NVMe Base specification, are used as storage devices with the SCSI layout. The definition is independent of the transport. It does not amend the SCSI layout document. It maps the SCSI constructs that document uses to NVMe equivalents.</p>",
+      "eli5": "<p>The old rulebook for fetching your own files was written for one kind of shelf. This note explains how to use the same rulebook with a newer kind of shelf.</p>"
+    },
+    {
+      "id": "naming",
+      "number": "2.1",
+      "title": "Identifying an NVMe Volume",
+      "content": "<p>The SCSI layout identifies devices using the Device Identification page (page code 83h). For NVMe, namespaces MUST support either the IEEE Extended Unique Identifier (EUI64) or the Namespace Globally Unique Identifier (NGUID). If both are available the NGUID is preferred because it is the larger one. The designator types for T10 and names have no NVMe equivalent and cannot be used.</p><p>The <code>pnfs_scsi_base_volume_info4</code> structure for an NVMe namespace is built as follows: <code>sbv_code_set</code> is set to <code>PS_CODE_SET_BINARY</code>, the designator type is set to <code>PS_DESIGNATOR_EUI64</code>, and <code>sbv_designator</code> holds the NGUID or EUI64. The length of that opaque value says which one is present: it MUST be 16 octets for an NGUID and 8 octets for an EUI64. No other length may be used.</p>",
+      "eli5": "<p>Every shelf needs a name tag that nobody else has. NVMe shelves have one of two kinds of tag, a long one or a short one, and the length tells you which kind you are looking at.</p>"
+    },
+    {
+      "id": "key-management",
+      "number": "2.2.1",
+      "title": "Registering Keys and Reservations",
+      "content": "<p>The SCSI layout uses Persistent Reservations to <strong>fence</strong> clients. Both the MDS and the clients register a key with the storage device, and the MDS creates a reservation. On NVMe, a key is registered with the Reservation Register command with the RREGA field set to <code>000b</code> and the key in the NRKEY field. It is unregistered with RREGA set to <code>001b</code> and the key in the CRKEY field.</p><p>One difference matters: NVMe reservation keys always apply to all controllers used by a host, as identified by the NVMe Host Identifier. This is like setting ALL_TG_PT in SCSI, which SCSI supports inconsistently but NVMe always supports.</p><p>Before it hands a volume to a client, the MDS registers its own key and issues a Reservation Acquire command with RACQA set to <code>000b</code> (Acquire) and the reservation type RTYPE set to <code>4h</code>, which is Exclusive Access - Registrants Only.</p>",
+      "eli5": "<p>Everyone who may use the shelf signs a guest book with a secret code. The librarian signs first and then says that only people in the book can use the shelf.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "2.2.3",
+      "title": "Fencing and Recovery",
+      "content": "<p>If a client stops responding, the MDS fences it with a Reservation Acquire command. RACQA is set to <code>001b</code> (Preempt) or <code>010b</code> (Preempt and Abort), CRKEY holds the server's key, PRKEY holds the non-responding client's key, and RTYPE is <code>4h</code>. A client can tell I/O errors caused by fencing from other errors by the Reservation Conflict NVMe status code.</p><p>If a client's NVMe command returns a non-retryable error (the DNR bit), the client MUST commit all layouts that use the device through the MDS, return all outstanding layouts for the device, forget the device ID and unregister its reservation key.</p>",
+      "eli5": "<p>If someone is hogging the shelf and will not answer, the librarian crosses their name out of the guest book. When they get turned away, they hand back their borrowed things and ask for a fresh start.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2.3",
+      "title": "Volatile Write Caches",
+      "content": "<p>A volatile write cache is enabled on an NVMe controller when bit 0 of the VWC field in the Identify Controller data structure is set and the Volatile Write Cache Enable bit (bit 00 of Feature Identifier 06h) is set. If a volatile write cache is enabled on a namespace used with the SCSI layout, the MDS MUST use the NVMe Flush command to push the cache to stable storage before the LAYOUTCOMMIT operation returns. The NVMe Flush command is the equivalent of the SCSI SYNCHRONIZE CACHE commands.</p>",
+      "eli5": "<p>Some shelves have a small tray where things wait before being put away. Before the librarian says that everything is saved, the tray must be emptied onto the shelf.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "3",
+      "title": "Security Considerations",
+      "content": "<p>The security considerations of <a href='/8881/'>RFC 8881</a> apply to clients talking to the metadata server. NFSv4 and RPC security do not directly apply to I/O sent to NVMe devices, because that happens at a lower layer. The RFC refers readers to <a href='/8154/'>RFC 8154</a> for direct block access concerns.</p><p>Some NVMe transports, such as PCIe, give essentially no extra security, while NVMe over TCP can provide significant transport security. Over IP-based storage protocols, confidentiality and integrity SHOULD be provided, for example with TLS (<a href='/8446/'>RFC 8446</a>). Where physical or logical measures, such as air gaps or isolated VLANs, give effective access control, a secure protocol might not be needed. If the storage protocol's security needs cannot be met, pNFS with an NVMe layout SHOULD NOT be deployed.</p><div class='callout callout-warning'><p>NFSv4 controls user access to files, while NVMe controls initiator access to volumes. As with the block layout (<a href='/5663/'>RFC 5663</a>), the pNFS client is responsible for matching these two layers. If client-side protection is not enough, the SCSI layout on an NVMe namespace SHOULD NOT be deployed.</p></div><p>If the MDS revokes a layout, the client's access MUST be terminated at the storage devices by fencing.</p>",
+      "eli5": "<p>Going straight to the shelf skips the front desk's checks, so the shelf area itself must be safe. If it is not, do not use this method.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "NVMe FIELD VALUES USED FOR REGISTRATION AND FENCING",
+      "data": {
+        "items": [
+          {
+            "code": "RREGA 000b",
+            "label": "Register Reservation Key",
+            "desc": "Reservation Register command, key supplied in NRKEY."
+          },
+          {
+            "code": "RREGA 001b",
+            "label": "Unregister Reservation Key",
+            "desc": "Reservation Register command, key supplied in CRKEY."
+          },
+          {
+            "code": "RACQA 000b",
+            "label": "Acquire",
+            "desc": "Used by the MDS to create the reservation."
+          },
+          {
+            "code": "RACQA 001b",
+            "label": "Preempt",
+            "desc": "Used to fence a non-responding client."
+          },
+          {
+            "code": "RACQA 010b",
+            "label": "Preempt and Abort",
+            "desc": "Alternative fencing action."
+          },
+          {
+            "code": "RTYPE 4h",
+            "label": "Exclusive Access - Registrants Only",
+            "desc": "Reservation type used for acquire and fencing.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "naming",
+      "position": "after",
+      "caption": "NVMe IDENTIFIERS IN sbv_designator",
+      "data": {
+        "columns": [
+          "Identifier",
+          "Length in octets",
+          "Preference"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "NGUID",
+              "16",
+              "Preferred when both are available"
+            ]
+          },
+          {
+            "cells": [
+              "EUI64",
+              "8",
+              "Used when no NGUID is available"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8154]",
+      "text": "Hellwig, C., \"Parallel NFS (pNFS) Small Computer System Interface (SCSI) Layout\", RFC 8154, May 2017.",
+      "rfc": 8154
+    },
+    {
+      "number": "[RFC8881]",
+      "text": "Noveck, D., Ed. and C. Lever, \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 8881, August 2020.",
+      "rfc": 8881
+    },
+    {
+      "number": "[RFC5663]",
+      "text": "Black, D., Fridella, S., and J. Glasgow, \"Parallel NFS (pNFS) Block/Volume Layout\", RFC 5663, January 2010.",
+      "rfc": 5663
+    },
+    {
+      "number": "[RFC4506]",
+      "text": "Eisler, M., Ed., \"XDR: External Data Representation Standard\", STD 67, RFC 4506, May 2006.",
+      "rfc": 4506
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[NVME-BASE]",
+      "text": "NVM Express, Inc., \"NVM Express Base Specification\", Revision 2.0d, January 2024."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

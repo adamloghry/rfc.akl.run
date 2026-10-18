@@ -18,13 +18,106 @@
   },
   "questions": [
     "ip datagram reassembly algorithm",
-    "how to reassemble ip fragments"
+    "how to reassemble ip fragments",
+    "how does ip reassembly work",
+    "what is a hole descriptor in ip reassembly",
+    "how to reassemble ip fragments in any order",
+    "what identifies an ip reassembly buffer"
   ],
+  "tags": [
+    "IP",
+    "Fragmentation",
+    "Algorithms"
+  ],
+  "subtitle": "A way to rebuild a fragmented IP datagram with one buffer and a list of missing gaps, whatever order the pieces arrive in.",
+  "tldr": {
+    "problem": "A datagram that was split into fragments must be put back together at the destination, and fragments can arrive in any order, overlap or repeat.",
+    "mechanism": "Keep one buffer the size of the final datagram and a list of \"holes\" (missing byte ranges). Each arriving fragment is compared with every hole in four simple tests, and holes are trimmed, split or deleted.",
+    "outcome": "When the hole list is empty, the datagram is complete. The RFC reports a test implementation in BCPL of under one and one-half pages of listing.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Steps per fragment",
+      "value": "8"
+    },
+    {
+      "label": "Minimum hole size",
+      "value": "8 octets"
+    },
+    {
+      "label": "Maximum internet header",
+      "value": "64 octets"
+    },
+    {
+      "label": "Buffer match fields",
+      "value": "foreign and local address, protocol ID, identification"
+    },
+    {
+      "label": "Hole management code",
+      "value": "about 20 lines"
+    }
+  ],
+  "today": "<p>The unit metadata lists no RFC that obsoletes or updates RFC 815, and the memo describes one implementation approach for the reassembly mechanism that IP specifies.</p>",
+  "glossary": [
+    "fragmentation",
+    "ip-datagram",
+    "ip",
+    "ttl"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Reassembly Looks Hard",
+      "content": "<p>IP can split a datagram into <strong>fragments</strong> on its way, so the receiving host must collect fragments until it can rebuild the original. The IP specification already describes reassembly and gives one algorithm, based on a vector of bits that tracks arriving fragments. RFC 815 describes an alternative that should suit some machines better.</p><p>A new fragment might fill the space between two fragments exactly, overlap existing ones, duplicate them, or only partly fill a gap. The RFC's point is that the process is, in fact, extremely simple. The method needs only one buffer equal in size to the final datagram, copes with any number of fragments in any order and with any overlap or duplication, and fits almost any operating system.</p>",
+      "eli5": "<p>Putting a torn picture back together sounds messy because the pieces can come in any order or twice. This memo shows a tidy trick that works anyway.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Holes and the Hole Descriptor List",
+      "content": "<p>A partly reassembled datagram has stretches of octets that have arrived and stretches still to come. The missing stretches are called <strong>holes</strong>. Each hole is described by two numbers, <code>hole.first</code> (the first octet of the hole) and <code>hole.last</code> (the last octet). That pair is the <strong>hole descriptor</strong>, and all descriptors for one datagram form the <strong>hole descriptor list</strong>.</p><p>When a fragment arrives it may fill some holes. Each hole it touches is removed from the list. Eventually a fragment arrives that leaves the list empty, and the datagram can be passed up to the higher-level protocol.</p>",
+      "eli5": "<p>A hole is a gap in your strip of pieces. You keep a list of where each gap starts and ends, and cross a gap off when it is filled.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "The Eight-Step Fragment Algorithm",
+      "content": "<p>Reassembly starts when the earliest fragment of the datagram arrives. The host creates an empty buffer and puts one entry in the list: <code>hole.first</code> equal to zero and <code>hole.last</code> equal to infinity, which is a very large integer greater than 576. Each arriving fragment is described by <code>fragment.first</code> and <code>fragment.last</code>, and then eight steps run:</p><ol><li>Take the next hole descriptor; if there are none left, go to step eight.</li><li>If <code>fragment.first</code> is greater than <code>hole.last</code>, go to step one.</li><li>If <code>fragment.last</code> is less than <code>hole.first</code>, go to step one.</li><li>Delete the current descriptor from the list.</li><li>If <code>fragment.first</code> is greater than <code>hole.first</code>, create a new hole from <code>hole.first</code> to <code>fragment.first</code> minus one.</li><li>If <code>fragment.last</code> is less than <code>hole.last</code> and the fragment's more-fragments flag is true, create a new hole from <code>fragment.last</code> plus one to <code>hole.last</code>.</li><li>Go to step one.</li><li>If the list is now empty, the datagram is complete and goes to the higher-level protocol; otherwise return.</li></ol><p>Steps two and three skip holes the fragment does not touch. The test of the more-fragments flag in step six stops the algorithm creating a hole from the end of the datagram to infinity once the last fragment has been seen.</p>",
+      "eli5": "<p>For each new piece, you look at every gap. If the piece misses the gap, ignore it. If it touches the gap, erase that gap and write down any smaller leftover gaps on either side.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "4",
+      "title": "Storing the List Inside the Buffer",
+      "content": "<p>The hard part is not the arithmetic but adding and deleting list entries, since there is no upper limit on how many holes can exist. The RFC's answer is to put each hole descriptor in the first octets of the hole itself. By the algorithm's definition a hole is at least eight octets long. Storing <code>hole.first</code> and <code>hole.last</code> presumably takes two octets each, two more thread the entries together, and at least two are left over for implementation quirks.</p><p>There is one pitfall: run the eight-step algorithm <strong>before</strong> copying the fragment's data into the buffer. Copying first could smash descriptors, but after the algorithm has run, any descriptors about to be overwritten are already obsolete.</p><p>Because descriptors are scattered, a pointer to the head of the list is needed. It can live in a descriptor block kept with each buffer, or, as a \"dirty but effective\" trick, in an unneeded part of the internet header in the buffer such as the checksum field. When the final fragment arrives, the packet length field in the internet header should be filled in.</p>",
+      "eli5": "<p>Instead of a separate notebook for the gaps, you write each gap's note right inside the empty space it describes. Just make a note before you fill the space.</p>"
+    },
+    {
+      "id": "options",
+      "number": "5",
+      "title": "Internet Options and the Header Size",
+      "content": "<p>The basic description ignored internet options. Some options are copied into every fragment, but others, such as record route, appear only in the first fragment (the one containing octet zero). Until the first fragment arrives, the size of the internet header is unknown, so the host does not know where in the buffer to copy data.</p><p>If the first fragment is the earliest to arrive, there is no problem. Otherwise there are two solutions: leave room in the buffer for the maximum header, which is 64 octets, or gamble that the first fragment has no options and shift the data later if it does. Shifting can trash the pointers that thread the hole descriptors, but the RFC says it is easy to repair them.</p><p>Source route and record route options can arrive with different return routes in different fragments. The specified procedure is to use the return route from the first fragment and ignore the others.</p>",
+      "eli5": "<p>Sometimes you do not know how big the label on the first piece is until it shows up. You either leave extra room for it or move things over later.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Finding Buffers and Timing Out",
+      "content": "<p>Two more parts complete the process. First, an arriving fragment must be matched to its reassembly buffer. The right buffer is the one where the foreign and local internet addresses, the protocol ID and the identification field are all equal.</p><p>Second, a timer must decrement the time to live field of each partly reassembled datagram, so incomplete datagrams that have outlived their usefulness are detected and deleted. This can be a demon that wakes once a second and decrements each field by one, or a timer call queued when the first fragment arrives.</p><p>The author built the complete algorithm in BCPL as a test. It took less than one and one-half pages of listing and generated approximately 400 nova machine instructions, and the part that manages hole descriptors is about 20 lines of code. The RFC credits Elizabeth Martin at MIT for an observation that simplified the original version.</p>",
+      "eli5": "<p>You match each piece to the right puzzle by its labels, and you throw away puzzles that have waited too long for missing pieces.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -9,13 +9,205 @@
   },
   "questions": [
     "radius packet size limit",
-    "radius over tcp larger packets"
+    "radius over tcp larger packets",
+    "what is the radius maximum packet size",
+    "what is radius protocol-error code 52",
+    "what is the radius response-length attribute",
+    "how does radius over tcp handle large packets"
+  ],
+  "tags": [
+    "RADIUS",
+    "Transport",
+    "Experimental"
+  ],
+  "subtitle": "Lets RADIUS over TCP carry packets far bigger than the old 4096-octet limit, with a new error packet for when they are too big.",
+  "tldr": {
+    "problem": "RADIUS over TLS is being used to carry large structures such as SAML messages, and the 4096-octet maximum packet size is too small for some of them.",
+    "mechanism": "The maximum RADIUS packet length is raised to 65535 for RADIUS over TCP. A Response-Length attribute lets peers state how big a packet they can handle, and a new Protocol-Error packet (code 52) reports a request that is too big.",
+    "outcome": "Large packets can travel in one RADIUS message instead of being split at the RADIUS layer, but older RFC 6613 implementations drop them and close the connection, so deployments must manage the mismatch.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Old maximum packet",
+      "value": "4096 octets"
+    },
+    {
+      "label": "New maximum packet",
+      "value": "65535 octets"
+    },
+    {
+      "label": "Protocol-Error code",
+      "value": "52"
+    },
+    {
+      "label": "Too-big Error-Cause",
+      "value": "601"
+    },
+    {
+      "label": "Response-Length attribute",
+      "value": "241.3"
+    }
+  ],
+  "today": "<p>RFC 7930 is an Experimental RFC that updates <a href='/6613/'>RFC 6613</a>, and no RFC in its metadata obsoletes or updates it. The text expects its guidelines to be relaxed and support made a requirement if RADIUS over TLS and TCP move to the Standards Track.</p>",
+  "glossary": [
+    "radius",
+    "tcp",
+    "tls",
+    "proxy",
+    "path-mtu",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why RADIUS Needs Bigger Packets",
+      "content": "<p>RADIUS over TLS (<a href='/6614/'>RFC 6614</a>) gives RADIUS strong confidentiality and integrity. That has opened new uses, such as carrying SAML messages in RADIUS (<a href='/7833/'>RFC 7833</a>). Some of these messages do not fit in the 4096-octet maximum packet length.</p><p>RADIUS fragmentation (<a href='/7499/'>RFC 7499</a>) is one answer, but the RFC lists drawbacks. RADIUS is lock-step, so only one fragment can be in transit at a time. There is also no way to discover the path MTU across the whole path, so fragmentation is likely at both the RADIUS and the transport layer. When TCP is used, it is better to fragment only at the TCP layer.</p><p>This document is Experimental because the TCP extensions to RADIUS are Experimental. It updates <a href='/6613/'>RFC 6613</a> and introduces no new evaluation criteria beyond that base specification.</p>",
+      "eli5": "<p>Some messages are too big for the old envelope. Cutting them into pieces and sending one piece at a time is slow, so it is better to use a bigger envelope.</p>"
+    },
+    {
+      "id": "changes",
+      "number": "2",
+      "title": "Changes to Packet Processing",
+      "content": "<p>The maximum length of a RADIUS message goes from 4096 to <code>65535</code>. A server implementing this specification MUST be able to receive a packet of maximum length. It MAY choose a size limit above which it returns an error, but that limit MUST be at least 4096 octets.</p><p>Clients MUST be able to receive a packet of maximum length and MUST NOT close a TCP connection just because a large packet arrives. A client MAY include the <code>Response-Length</code> attribute to say how large a packet it can process. It MAY silently discard a packet over a configured size, which must be at least 4096 octets. It MUST NOT retransmit an unmodified request whose response was too large for it.</p><p>Proxies MUST be able to receive a maximum-length packet without closing the connection and SHOULD be able to forward one. When a proxy receives a request over a transport with a 4096-octet limit and forwards it over a transport with a larger limit, it MUST include <code>Response-Length</code> with a value of 4096.</p><p>For Status-Server messages, clients SHOULD include <code>Response-Length</code>. A server that sees it MUST include a <code>Response-Length</code> in its reply, giving the largest request it can process. This doubles as a discovery mechanism.</p>",
+      "eli5": "<p>The rule changes from 'no letters bigger than a postcard' to 'letters up to a big box are fine'. Everyone has to promise not to hang up the phone just because a big one arrives, and they can tell each other how big is too big.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "3",
+      "title": "Compatibility With Older Implementations",
+      "content": "<p>An implementation of <a href='/6613/'>RFC 6613</a> silently discards any packet larger than 4096 octets and closes the TCP connection. The guidelines in this section are stated at the SHOULD level, because some environments, such as roaming agreements, may require everyone to support large packets.</p><ul><li>Clients SHOULD be configurable with a maximum request size per server, and servers with a maximum response size per client.</li><li>If a client sends a request larger than 4096 octets and the connection closes without a response, it SHOULD act as if a Request Too Big error with a maximum of 4096 had been received.</li><li>By default, a server SHOULD NOT generate a response larger than 4096 octets, unless the request carried <code>Response-Length</code> or another indicator that larger responses are acceptable.</li><li>A proxy that supports both this document and RADIUS fragmentation SHOULD fragment when the next hop cannot take a packet that large and fragmentation can be used.</li></ul><p>The RFC argues that the risk is acceptable. If an implementation has 10000 octets of attributes to send, without this specification no packet is generated at all. Busy clients and proxies face a special problem, because a closed connection loses all requests in flight, so they SHOULD use the Status-Server discovery.</p>",
+      "eli5": "<p>Old machines panic and hang up when a big letter arrives. So new machines should ask first, and by default keep to small letters unless the other side says big ones are fine.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "4",
+      "title": "The Protocol-Error Packet and Too Big Response",
+      "content": "<p>This document defines a new RADIUS code, <code>52</code>, called <strong>Protocol-Error</strong>. A server may send it in response to any request, such as Access-Request, Accounting-Request, CoA-Request or Disconnect-Request, to say it cannot process the request. It MUST contain an <code>Original-Packet-Code</code> attribute and an <code>Error-Cause</code> attribute. The identifier is copied from the request. The code is hop by hop, so proxies MUST NOT forward it.</p><p>When a server receives a request larger than it can process, it replies with Protocol-Error, a <code>Response-Length</code> giving the maximum request size it will process, an <code>Error-Cause</code> of <code>601</code>, and the original packet code copied from the request.</p><p>Clients usually cannot shrink and resend such a request. In some cases they can fall back to RADIUS fragmentation. Otherwise the error gives better reporting and avoids retransmitting requests that are guaranteed to fail.</p>",
+      "eli5": "<p>If the letter is too big, the receiver sends back a note that says 'too big, the most I can take is this much'. Then you stop sending it over and over.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "5",
+      "title": "IANA Registrations",
+      "content": "<p>A new packet type, Protocol-Error with code 52, is registered in the RADIUS Packet Type Codes registry. Two attributes are assigned using the rules of <a href='/6929/'>RFC 6929</a>: <code>Response-Length</code> (241.3, an integer holding the maximum length) and <code>Original-Packet-Code</code> (241.4, an integer holding the code of the packet that caused the error).</p><p>In a request, <code>Response-Length</code> means the maximum response length the client will accept, with values between 4096 and 65535. In a response to Status-Server, it means the maximum request size that is permitted.</p><p>A new Error-Cause value, 601 for Response Too Big, is registered. The Error-Cause range is extended with two new ranges: 6xx for fatal errors committed by a RADIUS server and 7xx for fatal errors committed by a RADIUS client.</p>",
+      "eli5": "<p>The new codes and labels get written into the official list, so everyone uses the same numbers for 'too big' and 'how big can you take'.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>This specification updates <a href='/6613/'>RFC 6613</a> and is meant to be used with <a href='/6614/'>RFC 6614</a>. Over plain TCP, it creates new opportunities for an on-path attacker to affect availability. These attacks can be entirely mitigated by using TLS. If they are acceptable, the specification can be used over TCP without TLS.</p>",
+      "eli5": "<p>Without a protective tunnel, someone in the middle could mess with the size notes and stop the system from working. Using the protective tunnel (TLS) stops that.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "changes",
+      "position": "after",
+      "caption": "STATUS-SERVER DISCOVERY OF LARGE-PACKET SUPPORT",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Status-Server + Response-Length",
+            "color": "blue",
+            "note": "The client states how large a response it can process."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Reply + Response-Length",
+            "color": "green",
+            "note": "The server states the largest request it can process."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "NEW CODES AND ATTRIBUTES (RFC 7930)",
+      "data": {
+        "items": [
+          {
+            "code": "52",
+            "label": "Protocol-Error",
+            "desc": "New RADIUS packet code sent by a server when it cannot process a request.",
+            "highlight": true
+          },
+          {
+            "code": "241.3",
+            "label": "Response-Length",
+            "desc": "Integer: maximum length of a response, or in a Status-Server reply the maximum request size."
+          },
+          {
+            "code": "241.4",
+            "label": "Original-Packet-Code",
+            "desc": "Integer: the code of the packet that caused a Protocol-Error."
+          },
+          {
+            "code": "601",
+            "label": "Response Too Big",
+            "desc": "New Error-Cause value used in the Too Big Response."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6613]",
+      "text": "DeKok, A., \"RADIUS over TCP\", RFC 6613, May 2012.",
+      "rfc": 6613
+    },
+    {
+      "number": "[RFC6614]",
+      "text": "Winter, S., McCauley, M., Venaas, S., and K. Wierenga, \"Transport Layer Security (TLS) Encryption for RADIUS\", RFC 6614, May 2012.",
+      "rfc": 6614
+    },
+    {
+      "number": "[RFC2865]",
+      "text": "Rigney, C., Willens, S., Rubens, A., and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "rfc": 2865
+    },
+    {
+      "number": "[RFC5997]",
+      "text": "DeKok, A., \"Use of Status-Server Packets in the Remote Authentication Dial In User Service (RADIUS) Protocol\", RFC 5997, August 2010.",
+      "rfc": 5997
+    },
+    {
+      "number": "[RFC7499]",
+      "text": "Perez-Mendez, A., Ed., et al., \"Support of Fragmentation of RADIUS Packets\", RFC 7499, April 2015.",
+      "rfc": 7499
+    },
+    {
+      "number": "[RFC7833]",
+      "text": "Howlett, J., Hartman, S., and A. Perez-Mendez, Ed., \"A RADIUS Attribute, Binding, Profiles, Name Identifier Format, and Confirmation Methods for the Security Assertion Markup Language (SAML)\", RFC 7833, May 2016.",
+      "rfc": 7833
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

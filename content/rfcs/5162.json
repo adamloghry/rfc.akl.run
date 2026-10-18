@@ -10,13 +10,120 @@
   "questions": [
     "what is imap qresync",
     "how to quickly resync an imap mailbox",
-    "imap vanished response"
+    "imap vanished response",
+    "imap modification sequence",
+    "quick mailbox resync"
+  ],
+  "tags": [
+    "Email",
+    "IMAP",
+    "Optimization"
+  ],
+  "subtitle": "Quickly resync a mailbox after disconnection without extra round trips.",
+  "tldr": {
+    "problem": "When a mobile client reconnects after being offline, it must discover which messages were deleted, which flags changed, and what new messages arrived. The standard IMAP process requires multiple commands and round-trips, wasting time and bandwidth.",
+    "mechanism": "RFC 5162 extends the SELECT command to accept a QRESYNC parameter containing the client's last known state (timestamp, UIDs, and message sequence numbers). The server returns all changes in a single response, including a compact VANISHED response listing deleted UIDs instead of individual EXPUNGE responses.",
+    "outcome": "Mobile clients can now resynchronize completely in one round-trip instead of three, reducing bandwidth and latency. RFC 7162 later replaced this specification with updated requirements.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Requires ENABLE",
+      "value": "ENABLE QRESYNC"
+    },
+    {
+      "label": "Depends on",
+      "value": "CONDSTORE (RFC 5161)"
+    },
+    {
+      "label": "Modification sequence per message",
+      "value": "Tracked by server"
+    },
+    {
+      "label": "Vanished response format",
+      "value": "UIDs in ranges, optional EARLIER tag"
+    }
+  ],
+  "today": "<p>RFC 5162 is a Proposed Standard that was obsoleted by <a href='/7162/'>RFC 7162</a>, which updates the requirements and clarifies edge cases in resynchronization.</p>",
+  "glossary": [
+    "imap",
+    "mailbox",
+    "sequence-number"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>IMAP is the protocol for accessing email. The <strong>CONDSTORE</strong> extension lets clients track which flag changes (like marking a message as read) happened since they last checked. However, clients still need a separate command to discover which messages were deleted. This is especially painful for mobile clients that reconnect frequently after losing signal.</p><p>RFC 5162 extends CONDSTORE with <strong>QRESYNC</strong> (Quick Resynchronization), which lets a client provide its last known state in the SELECT command itself. The server responds with all changes—new messages, deleted messages, and flag changes—in a single response. This cuts the typical three-command sequence down to one.</p>",
+      "eli5": "<p>When you reconnect to your email, instead of asking what changed, then what was deleted, then what's new, QRESYNC lets you ask all three at once and get all the answers back in one shot.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "The QRESYNC Parameter",
+      "content": "<p>When a client issues SELECT with the QRESYNC parameter, it provides four pieces of information: (1) the <code>UIDVALIDITY</code> value, which confirms the mailbox hasn't been recreated; (2) the last known modification sequence number, which tells the server \"show me changes since this point\"; (3) optionally, a set of UIDs the client still knows about; and (4) optionally, a sample of message sequence number to UID mappings to help the server optimize its response.</p><p>The server verifies the UIDVALIDITY first. If it doesn't match, the client can't trust anything else it knows about the mailbox, so the server ignores the remaining parameters. If it matches, the server sends flag changes for known messages and a list of deleted UIDs since the given modification sequence.</p>",
+      "eli5": "<p>The client says \"I last saw this mailbox at this version, and I remember these messages. Tell me what changed since then.\" The server checks the version, and if it matches, tells the client the news.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "VANISHED and FETCH Responses",
+      "content": "<p>Instead of sending individual EXPUNGE responses (which take one line per deleted message and require the client to recount everything), the server sends a compact <code>VANISHED</code> response listing deleted UIDs in ranges. For example, <code>VANISHED (EARLIER) 1:10,15,20:25</code> says messages with those UIDs were deleted.</p><p>The client also receives FETCH responses showing which non-deleted messages had flag changes. The server must send the VANISHED response first, before any FETCH responses, so the client knows exactly which messages still exist.</p><p>RFC 5162 also defines a UID FETCH modifier called VANISHED that works with the CHANGEDSINCE modifier, allowing a client to query for both flag changes and expunged messages in a single UID FETCH command.</p>",
+      "eli5": "<p>Instead of saying \"message 3 was deleted, then message 4 was deleted,\" the server says \"messages 1-10 were deleted\" all at once. Then it lists the messages that are still there and changed.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Server State and Mod-Sequences",
+      "content": "<p>CONDSTORE tracks every flag change with a <code>mod-sequence</code> (modification sequence number). RFC 5162 requires servers to also track the mod-sequence of deleted messages. When a message is expunged, the server must remember its UID and the mod-sequence of the expunge operation. This lets the server tell a reconnecting client \"these UIDs were deleted at mod-sequence X\" even if the client's last known mod-sequence was older.</p><p>Servers can implement this with varying levels of sophistication. A minimal implementation might not remember expunge mod-sequences at all and would have to send all expunged UIDs. A sophisticated implementation maintains a queue of recent expunge operations. Servers MUST implement the ENABLE command and support <code>ENABLE QRESYNC</code> to advertise support.</p>",
+      "eli5": "<p>The server keeps a record of which messages were deleted and when. This lets it tell the client exactly what disappeared since the client last looked.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "5",
+      "title": "Compatibility and Fallback",
+      "content": "<p>Servers MUST advertise both QRESYNC and CONDSTORE capabilities. Clients must issue <code>ENABLE QRESYNC</code> before using QRESYNC parameters. A server that receives a QRESYNC parameter without the client having issued ENABLE QRESYNC returns a BAD response.</p><p>Once QRESYNC is enabled on a connection, the server SHOULD send VANISHED responses instead of EXPUNGE responses for all expunges, whether they come from the EXPUNGE command, UID EXPUNGE, or messages deleted in other connections.</p><p>Old clients that only support CONDSTORE will still work, though they may incur an extra round-trip in some cases. New clients get the single-round-trip benefit.</p>",
+      "eli5": "<p>Clients have to ask for this feature by sending ENABLE QRESYNC. Old email clients won't use it, but they still work. New ones get the speed boost.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "6",
+      "title": "Examples",
+      "content": "<p>A typical resynchronization example: the client says <code>SELECT INBOX (QRESYNC (67890007 90060115194045000 41,43:211,214:541))</code>, providing the UIDVALIDITY (67890007), the mod-sequence (90060115194045000), and the UIDs it remembers (41, 43 through 211, 214 through 541).</p><p>The server responds with <code>VANISHED (EARLIER) 41,43:116,118</code> (these UIDs no longer exist), then FETCH responses for messages 117, 119, and 541 that have flag changes, then the normal EXISTS, RECENT, and other mailbox state responses.</p><p>The QRESYNC parameter also supports message sequence number to UID mapping pairs. A client with knowledge of a few message positions can help the server reduce the size of the VANISHED response by only reporting expunges after those known positions.</p>",
+      "eli5": "<p>The client provides a snapshot: \"I remember the mailbox this way; tell me what changed.\" The server responds with a list of deleted messages and updated flags, all at once.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC3501]",
+      "text": "Crispin, M., \"INTERNET MESSAGE ACCESS PROTOCOL - VERSION 4rev1\", RFC 3501, March 2003.",
+      "rfc": 3501
+    },
+    {
+      "number": "[RFC4466]",
+      "text": "Melnikov, A. and C. Daboo, \"Collected Extensions to IMAP4 ABNF\", RFC 4466, April 2006.",
+      "rfc": 4466
+    },
+    {
+      "number": "[RFC4731]",
+      "text": "Melnikov, A. and D. Cridland, \"IMAP4 Extension to SEARCH Command for Controlling What Kind of Information Is Returned\", RFC 4731, November 2006.",
+      "rfc": 4731
+    },
+    {
+      "number": "[RFC5161]",
+      "text": "Melnikov, A. and D. Cridland, \"IMAP4 Extensions for Conditional STORE Operation or Quick Flag Changes Resynchronization (CONDSTORE)\", RFC 5161, March 2008.",
+      "rfc": 5161
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

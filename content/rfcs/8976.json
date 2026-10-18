@@ -9,13 +9,256 @@
   },
   "questions": [
     "what is zonemd",
-    "how to verify dns zone integrity"
+    "how to verify dns zone integrity",
+    "how does zonemd verify a dns zone",
+    "what hash algorithms does zonemd use",
+    "does zonemd replace dnssec"
+  ],
+  "tags": [
+    "DNS",
+    "Integrity",
+    "DNSSEC"
+  ],
+  "subtitle": "A digest of a whole DNS zone, stored inside the zone, so anyone holding a copy can check it is complete and unaltered.",
+  "tldr": {
+    "problem": "Zones travel by zone transfer, file download, even email, and there is no standard way to check that a stand-alone copy is complete and as published. DNSSEC alone does not cover delegations or glue.",
+    "mechanism": "A new ZONEMD record at the zone apex holds a hash of the whole zone, computed over the records in canonical wire format and order. A receiver recomputes the hash and compares.",
+    "outcome": "With DNSSEC the digest proves integrity and origin authenticity; without it, it is only a checksum. It is practical for small or stable zones, and is OPTIONAL to implement.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RR type value",
+      "value": "63"
+    },
+    {
+      "label": "Scheme 1",
+      "value": "SIMPLE"
+    },
+    {
+      "label": "SHA384 digest",
+      "value": "48 octets"
+    },
+    {
+      "label": "SHA512 digest",
+      "value": "64 octets"
+    },
+    {
+      "label": "Minimum digest length",
+      "value": "12 octets"
+    },
+    {
+      "label": "Private Use values",
+      "value": "240-254"
+    }
+  ],
+  "today": "<p>RFC 8976 is a Proposed Standard and the metadata lists no obsoleting or updating RFC. The text itself says the SIMPLE scheme is impractical for large, dynamic zones, and leaves room for new schemes.</p>",
+  "glossary": [
+    "dns-zone",
+    "dnssec",
+    "resource-record",
+    "rrset",
+    "rrsig",
+    "message-digest",
+    "canonical-form",
+    "soa-record",
+    "trust-anchor",
+    "denial-of-existence",
+    "nsec",
+    "ds-record"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>A DNS <strong>zone</strong> is the collection of authoritative records that share a common origin. Zones move between name servers by AXFR and IXFR transfers, but they can also be copied with FTP, HTTP, rsync or even email attachments. The RFC notes that there is no standard way to compute a hash or message digest for a stand-alone zone.</p><p>RFC 8976 adds a <strong>ZONEMD</strong> resource record that carries a cryptographic message digest of the zone's data. The digest is built from the wire format of the records in a canonical order, so it does not depend on whitespace, capitalization or comments in the zone file. Implementing the specification is OPTIONAL for both publishers and consumers of zone data.</p>",
+      "eli5": "<p>Zones get copied in lots of ways. This adds one extra line to the zone that works like a tamper-proof seal on the whole thing.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "1.2",
+      "title": "Why Not Just Secure the Channel or Use DNSSEC",
+      "content": "<p>The main goal is to let a consumer verify the integrity and origin authenticity of a zone no matter how it arrived. That is only assured when the zone is signed with DNSSEC. A secondary goal is a plain checksum, to catch accidents such as truncation.</p><p>The RFC explains why other tools fall short. TSIG, SIG(0) and TLS protect the transfer, but the protection is not retained afterwards, so a server reloading a zone file from disk cannot tell whether it was modified. DNSSEC does not sign delegation NS records or glue, and zones using NSEC3 with Opt-Out can lose or gain names between signed nodes. ZONEMD covers those records. Detached OpenPGP signatures are only loosely tied to a zone file, and attached ones change the file so it no longer loads as a zone.</p><p>Listed use cases include the root zone served by many instances, multi-provider and anycast distribution, Response Policy Zones, ICANN's Centralized Zone Data Service, and comparing copies of a zone from different sources.</p>",
+      "eli5": "<p>Locking the delivery truck does not help once the box is unpacked. The seal is on the box itself, so it still works later.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "The ZONEMD Record",
+      "content": "<p>The ZONEMD record has Type value <code>63</code> and is class independent. Its data has four fields: <strong>Serial</strong>, <strong>Scheme</strong>, <strong>Hash Algorithm</strong> and <strong>Digest</strong>.</p><ul><li><strong>Serial</strong>: a 32-bit unsigned integer, copied from the zone's SOA record. It binds the digest to one version of the zone.</li><li><strong>Scheme</strong>: an 8-bit integer saying how data is collated for hashing. <code>1</code> is SIMPLE, the only standardized scheme, and MUST be supported.</li><li><strong>Hash Algorithm</strong>: an 8-bit integer. <code>1</code> is SHA384 (48-octet digest, MUST be supported) and <code>2</code> is SHA512 (64-octet digest, SHOULD be supported). Results MUST NOT be truncated.</li><li><strong>Digest</strong>: variable length, MUST NOT be shorter than 12 octets.</li></ul><p>Values 240 to 254 are Private Use for both scheme and hash algorithm. Only ZONEMD records at the zone apex mean anything; non-apex ones MUST NOT be used for verification. A zone MAY hold several ZONEMD records, each with a unique scheme and hash algorithm pair, but it is RECOMMENDED to have only one except during a transition. In presentation format the digest is hexadecimal text.</p>",
+      "eli5": "<p>The record says which version of the zone it checks, how the pages were lined up, which fingerprint recipe was used, and then the fingerprint itself.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "Calculating the Digest",
+      "content": "<p>The procedure is designed for offline DNSSEC signing. First, existing apex ZONEMD records and their signatures are deleted and a <strong>placeholder</strong> ZONEMD record is added, with the current SOA serial, the chosen scheme and hash algorithm. Adding it before signing makes sure the NSEC or NSEC3 records already account for the ZONEMD type. The zone may then be signed.</p><p>The SIMPLE scheme hashes the zone as a whole: <code>digest = hash( RR(1) | RR(2) | RR(3) | ... )</code>. Records use the DNSSEC canonical wire format without name compression and the ordering in <a href='/4034/'>RFC 4034</a>, with RRsets of the same owner name ordered by ascending numeric RR type. All records are included, including glue and occluded data, but duplicates are dropped once, the placeholder ZONEMD is left out, and so is the RRSIG covering the apex ZONEMD RRset.</p><p>Finally the digest is written into the placeholder and the ZONEMD signatures are added or updated. Signing the ZONEMD MUST NOT change the SOA serial, and the ZONEMD and its matching SOA MUST be published together. Because any change means rehashing every record, SIMPLE suits small or stable zones, not large dynamic ones.</p>",
+      "eli5": "<p>Put a blank sticker on the book, finish the book, count and mix every page in a fixed order to get the fingerprint, then write it on the sticker.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Verifying a Zone Digest",
+      "content": "<p>A recipient first decides whether the zone should be signed, using local trust anchors and, if needed, DS records from the parent. If signatures are expected, the existence of the apex ZONEMD RRset MUST be validated, and the SOA and ZONEMD RRsets MUST have valid signatures chaining to a trust anchor. If DNSSEC proves a ZONEMD exists but it is missing, verification MUST NOT succeed.</p><p>Then for each apex ZONEMD record the verifier checks that the serial exactly matches the SOA serial, that it supports the scheme and the hash algorithm, and that the digest length is at least 12 octets and equals the length expected for the algorithm. It recomputes the digest and compares. Duplicate scheme and hash pairs make verification fail for those records. With several records, one match using a supported pair is enough. Verifiers SHOULD report success or failure and the reasons.</p>",
+      "eli5": "<p>You check the sticker belongs to this edition, redo the fingerprint recipe on your copy, and see whether the two fingerprints match.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Without DNSSEC, ZONEMD offers no real protection against attacks: an attacker can recompute the Digest field after changing the zone. It then works only as a checksum against accidents such as transmission errors and truncation.</p><p>With DNSSEC, downgrade attacks (serving an unsigned zone, or removing ZONEMD records) and edits to the scheme, hash algorithm or digest are detectable, which is why the verification steps check for expected signatures and denial-of-existence proofs. When several algorithms are published, security is only as good as the weakest. Validation is limited in time: if DS records or trust anchors are gone, for example after a KSK rollover, the ZONEMD RRset cannot be validated even if its signature has not expired.</p><p>Servers SHOULD NOT calculate digests dynamically for each query, as that enables CPU exhaustion. A single ZONEMD record adds approximately 65 to 95 octets to a response. The RFC also warns that verification adds fragility, since a bug or misconfiguration looks like tampering and can make good data unavailable; it suggests gradual deployment and treating failures first as warnings.</p>",
+      "eli5": "<p>A seal anyone can re-stamp only guards against accidents. Add the signed lock from DNSSEC and tampering becomes visible.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "7",
+      "title": "Performance",
+      "content": "<p>Because SIMPLE rehashes the whole zone, the RFC recommends ZONEMD for large or dynamic zones only when digest calculation time is much shorter than propagation times and update intervals.</p><p>The authors measured their implementation on more than 800 TLD zones from the Centralized Zone Data Service, on commodity hardware in early 2020, with SIMPLE and SHA384. The mean time per record ranged from 0.00505 to 0.0148 msec depending on zone size. From that table, a zone with 22,000 records takes approximately 0.13 seconds and one with 300,000 records about 2.5 seconds. The benchmark was meant to emulate a worst case, including canonicalization.</p>",
+      "eli5": "<p>Counting every page takes longer for a bigger book, but even a huge one takes only a few seconds.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "EXAMPLE ZONEMD RECORD (RFC 8976, SECTION 2.4)",
+      "data": {
+        "title": "ZONEMD in presentation format",
+        "lang": "text",
+        "code": "example.com. 86400 IN ZONEMD 2018031500 1 1 (\n    FEBE3D4CE2EC2FFA4BA99D46CD69D6D29711E55217057BEE\n    7EB1A7B641A47BA7FED2DD5B97AE499FAFA4F22C6BD647DE )"
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "ZONEMD HASH ALGORITHM REGISTRY",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Reserved",
+            "desc": "Not usable."
+          },
+          {
+            "code": "1",
+            "label": "SHA384",
+            "desc": "48-octet digest. MUST be supported.",
+            "highlight": true
+          },
+          {
+            "code": "2",
+            "label": "SHA512",
+            "desc": "64-octet digest. SHOULD be supported."
+          },
+          {
+            "code": "3-239",
+            "label": "Unassigned",
+            "desc": "Specification Required."
+          },
+          {
+            "code": "240-254",
+            "label": "Private Use",
+            "desc": "For local or experimental use."
+          },
+          {
+            "code": "255",
+            "label": "Reserved",
+            "desc": "Not usable."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "STEPS FOR PUBLISHING A DIGEST (RFC 8976, SECTION 3)",
+      "data": {
+        "lanes": [
+          {
+            "key": "operator",
+            "label": "Zone operator"
+          },
+          {
+            "key": "zone",
+            "label": "Zone data"
+          }
+        ],
+        "messages": [
+          {
+            "from": "operator",
+            "to": "zone",
+            "label": "Add placeholder ZONEMD",
+            "color": "blue",
+            "note": "Serial, scheme and hash algorithm set; digest value does not matter yet."
+          },
+          {
+            "from": "operator",
+            "to": "zone",
+            "label": "Optionally sign the zone",
+            "color": "neutral",
+            "note": "Denial-of-existence records now account for ZONEMD."
+          },
+          {
+            "from": "zone",
+            "to": "operator",
+            "label": "Hash records in canonical order",
+            "color": "neutral",
+            "note": "Placeholder and its RRSIG are excluded."
+          },
+          {
+            "from": "operator",
+            "to": "zone",
+            "label": "Write digest, re-sign ZONEMD RRset",
+            "color": "green",
+            "note": "SOA serial must not change."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC4034]",
+      "text": "Arends, R., et al., \"Resource Records for the DNS Security Extensions\", RFC 4034, March 2005.",
+      "rfc": 4034
+    },
+    {
+      "number": "[RFC6234]",
+      "text": "Eastlake 3rd, D. and T. Hansen, \"US Secure Hash Algorithms (SHA and SHA-based HMAC and HKDF)\", RFC 6234, May 2011.",
+      "rfc": 6234
+    },
+    {
+      "number": "[RFC5936]",
+      "text": "Lewis, E. and A. Hoenes, Ed., \"DNS Zone Transfer Protocol (AXFR)\", RFC 5936, June 2010.",
+      "rfc": 5936
+    },
+    {
+      "number": "[RFC8806]",
+      "text": "Kumari, W. and P. Hoffman, \"Running a Root Server Local to a Resolver\", RFC 8806, June 2020.",
+      "rfc": 8806
+    },
+    {
+      "number": "[RFC8945]",
+      "text": "Dupont, F., et al., \"Secret Key Transaction Authentication for DNS (TSIG)\", STD 93, RFC 8945, November 2020.",
+      "rfc": 8945
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

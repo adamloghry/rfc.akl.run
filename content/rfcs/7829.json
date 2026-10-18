@@ -10,13 +10,192 @@
   "questions": [
     "sctp potentially failed state",
     "sctp-pf quick failover",
-    "how does sctp failover between paths"
+    "how does sctp failover between paths",
+    "what is sctp-pf",
+    "what is the sctp potentially failed state",
+    "what is pfmr in sctp"
+  ],
+  "tags": [
+    "Transport",
+    "SCTP",
+    "Failover"
+  ],
+  "subtitle": "A middle 'Potentially Failed' state lets SCTP abandon a struggling path after one timeout instead of waiting for many.",
+  "tldr": {
+    "problem": "With the failover rules in RFC 4960, an SCTP sender keeps sending data on a failed path until Path.Max.Retrans consecutive timeouts have happened, which badly hurts performance.",
+    "mechanism": "SCTP-PF adds a Potentially Failed (PF) state between active and inactive. A path becomes PF after its error counter exceeds PFMR (recommended 0), data moves to an active path, and HEARTBEATs probe the PF path once per RTO.",
+    "outcome": "The document is a Proposed Standard. It also defines a dormant state procedure and an optional Primary Path Switchover mode, and it changes only the sender side.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Recommended PFMR",
+      "value": "0"
+    },
+    {
+      "label": "PF probing",
+      "value": "HEARTBEAT once per RTO"
+    },
+    {
+      "label": "Recommended HB.Interval (RFC 4960)",
+      "value": "30 seconds"
+    },
+    {
+      "label": "Scope",
+      "value": "Sender-side only"
+    }
+  ],
+  "today": "<p>RFC 7829 is a Proposed Standard and has not been obsoleted or updated. It builds on the SCTP specification in <a href='/4960/'>RFC 4960</a>.</p>",
+  "glossary": [
+    "sctp",
+    "multihoming",
+    "retransmission",
+    "congestion-control"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why SCTP Failover Is Slow",
+      "content": "<p>SCTP, defined in RFC 4960, supports <strong>multihoming</strong>: an endpoint can have several addresses, so an association can survive the loss of one network path. To detect a failed path, the sender must see <code>Path.Max.Retrans</code> (PMR) consecutive failed timer-based retransmissions on a destination address. Until then it keeps sending data to the failed path, and the RFC says this severely degrades performance.</p><p>RFC 7829 fixes this with a quick failover algorithm called <strong>SCTP-PF</strong>. It also covers three related topics: what to do when every address is inactive (the dormant state), an optional <em>Primary Path Switchover</em> mode, and socket API extensions. The procedures need only minimal changes to RFC 4960, apply to the sender only, and do not affect the receiver.</p>",
+      "eli5": "<p>Imagine a delivery truck that keeps driving down a closed road because it wants to be really sure before turning around. This RFC teaches the truck to switch roads sooner.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "The Potentially Failed State",
+      "content": "<p>Lowering PMR is not a good fix. It could cause spurious failure detection, and because PMR and the association limit (<code>Association.Max.Retrans</code>, AMR) are tuned together in RFC 4960, it could also lower AMR and reduce fault tolerance. Instead, SCTP-PF adds the <strong>PF state</strong> between active and inactive, and lets failover be driven by entering PF rather than inactive.</p><p>A new parameter, <code>PotentiallyFailed.Max.Retrans</code> (<strong>PFMR</strong>), sets the threshold on the destination address error counter. When the counter exceeds PFMR, the endpoint MUST mark the address PF. The recommended PFMR is 0, so by default the first timeout makes a path PF. If PFMR is greater than or equal to PMR, the address reaches inactive before it can become PF.</p><div class='callout callout-info'><p>The algorithm assumes that loss detected by a timeout means either severe congestion or a connectivity failure.</p></div>",
+      "eli5": "<p>Between 'road is fine' and 'road is closed' there is now a 'road might be blocked' sign. As soon as you see it, you start using a different road.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3.2",
+      "title": "Choosing Paths and Probing",
+      "content": "<p>An SCTP-PF sender SHOULD NOT send data to a PF address when an active address is available. That covers new data, retransmissions of timed-out data, and a user request to send to a PF address. Among several active addresses it follows RFC 4960 and picks the most divergent source-destination pair; the exact rule is an implementation decision. Choosing an address MUST NOT change its state or clear its error counter.</p><p>If all addresses are PF (or a mix of PF and inactive), the sender MUST pick a PF address and SHOULD prefer the one with the lowest error count.</p><p><strong>Probing:</strong> <code>HB.Interval</code> is ignored for PF addresses. Instead, HEARTBEAT chunks go to PF addresses once per RTO, provided the Path Heartbeat function is enabled for that address. An unacknowledged HEARTBEAT increments the error counter and backs off the RTO. A HEARTBEAT ACK makes the sender SHOULD clear the error counter and return the address to active, though an implementation MAY wait for the fate of outstanding data first.</p><p><strong>Failure:</strong> after another PMR minus PFMR timeouts the address becomes inactive, the ULP is notified, and HEARTBEATs continue at the lower <code>HB.Interval</code> rate.</p><p>Acknowledgments for chunks sent to one destination only MUST clear the error counter and move a PF address back to active. Acknowledgments for chunks sent to multiple destinations SHOULD NOT, because the sender cannot tell which transmission was acknowledged.</p>",
+      "eli5": "<p>Once a road looks risky, the truck uses another road for the packages. Meanwhile a scout drives the risky road regularly. If the scout gets through, the road is trusted again.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "6",
+      "title": "Telling the Application",
+      "content": "<p>The SCTP stack SHOULD expose the PF state of destination addresses to the upper layer protocol and notify it of transitions between active and PF. It is also recommended that the stack lets the application suppress this exposure, so the application can keep the simpler state model of RFC 4960.</p><p>The informational socket API section extends RFC 6458. The existing <code>SCTP_PEER_ADDR_CHANGE</code> event also fires when an address enters or leaves PF, using the new constant <code>SCTP_ADDR_POTENTIALLY_FAILED</code>. The address info structure can report <code>SCTP_POTENTIALLY_FAILED</code>. Two new socket options, <code>SCTP_PEER_ADDR_THLDS</code> and <code>SCTP_EXPOSE_POTENTIALLY_FAILED_STATE</code>, let applications set the thresholds and control whether the PF state is exposed.</p>",
+      "eli5": "<p>The program using the connection can be told about the 'might be blocked' sign, or it can choose not to hear about it and let SCTP handle it quietly.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Dormant State and Primary Path Switchover",
+      "content": "<p>When every destination is inactive, the association is in the <strong>dormant state</strong>. SCTP-PF's fast probing can reach it sooner than standard SCTP: with two destination addresses, in half the time for the same PMR and AMR, under the stated assumption that RTO is much smaller than <code>HB.Interval</code>. To keep the same disruption tolerance, an SCTP-PF implementation SHOULD follow a dormant procedure: when data is waiting, the sender MUST choose one inactive destination and send to it without changing its state or clearing its error counter, and SHOULD pick the one with the lowest error count. This procedure also suits standard SCTP, and it MUST NOT depend on the value of PFMR.</p><p><strong>Primary Path Switchover</strong> is an optional alternative to the RFC 4960 behavior of switching back to the primary path as soon as it recovers, which forces the congestion window to be rebuilt. A new parameter, <code>Primary.Switchover.Max.Retrans</code> (PSMR), triggers an autonomous change of primary path when the primary's error counter exceeds it. PSMR MUST be at least PFMR (SCTP-PF) or at least PMR (standard SCTP), and the recommended value equals PFMR or PMR respectively. It MUST be possible to disable the mode, and the standard switchback SHOULD stay the default.</p>",
+      "eli5": "<p>If every road looks closed, keep trying the one that failed the fewest times. And once you have found a good new road, you can stay on it instead of rushing back to your old favorite.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The procedures add no new messages on the wire and do not affect existing SCTP messages. The RFC points to RFC 4960 and RFC 6458 for general SCTP security.</p><p>SCTP-PF makes SCTP more robust during primary path failure or congestion, but also more vulnerable to attacks on the primary path: an attacker needs to disturb the network for a much shorter time to trick SCTP into changing path. The RFC argues this is not a significant change in the effort needed to keep SCTP away from the primary path, because standard switchback resumes on the primary as soon as the next HEARTBEAT succeeds.</p><p>Primary Path Switchover does change the analysis: an on-path attacker can force a permanent path change by blocking the primary until the switchover triggers, especially with <code>PSMR = PFMR = 0</code>. State-change notifications could also be used to generate local events, so implementations are assumed to rate-limit them.</p>",
+      "eli5": "<p>Because the truck switches roads faster, a troublemaker can push it off its favorite road more easily. The more it stays on the new road for good, the more that matters.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "7",
+      "title": "Alternatives and Side Effects",
+      "content": "<p>Appendix A explains why two approaches that need no spec changes are not recommended. <strong>Reducing PMR</strong> would need PMR of 0 to be effective, which causes spurious failover. In standard SCTP, HEARTBEATs on the left primary path follow <code>HB.Interval</code>, recommended at 30 seconds, so a recovered path may sit unused for a long time, and a smaller AMR reduces fault tolerance. <strong>Adjusting RTO parameters</strong> needs good knowledge of the network and, even with a low RTO.max, does not cut failover time enough while PMR stays at its recommended value.</p><p>Appendix B addresses the worry about <em>path bouncing</em>. Research cited by the RFC finds no serious problem, since SCTP keeps CWND, ssthresh, RTT and error count per destination address and starts on a new path with the minimal or initial CWND. Appendix C notes that for single-homed associations SCTP-PF only gives better failure detection, such as notifying the PF state and faster detection on idle associations.</p>",
+      "eli5": "<p>The authors tried the easy fixes on paper, like giving up after one failure, and found they cause new problems. That is why they invented the extra state.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "design",
+      "position": "after",
+      "caption": "DESTINATION ADDRESS STATES WITH PF (SIMPLIFIED FROM RFC 7829)",
+      "data": {
+        "states": [
+          {
+            "key": "active",
+            "label": "ACTIVE",
+            "initial": true
+          },
+          {
+            "key": "pf",
+            "label": "POTENTIALLY FAILED"
+          },
+          {
+            "key": "inactive",
+            "label": "INACTIVE"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "active",
+            "to": "pf",
+            "label": "error counter exceeds PFMR"
+          },
+          {
+            "from": "pf",
+            "to": "active",
+            "label": "HEARTBEAT ACK or ack of data sent to one destination"
+          },
+          {
+            "from": "pf",
+            "to": "inactive",
+            "label": "PMR - PFMR more timeouts"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THREE PARAMETERS TO KEEP APART",
+      "data": {
+        "items": [
+          {
+            "title": "PMR",
+            "text": "Path.Max.Retrans from RFC 4960. Exceeding it makes an address inactive."
+          },
+          {
+            "title": "PFMR",
+            "text": "PotentiallyFailed.Max.Retrans. Exceeding it makes an address PF. Recommended value 0."
+          },
+          {
+            "title": "PSMR",
+            "text": "Primary.Switchover.Max.Retrans. Exceeding it on the primary path selects a new primary."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC4960]",
+      "text": "Stewart, R., Ed., \"Stream Control Transmission Protocol\", RFC 4960, September 2007.",
+      "rfc": 4960
+    },
+    {
+      "number": "[RFC3873]",
+      "text": "Pastor, J. and M. Belinchon, \"Stream Control Transmission Protocol (SCTP) Management Information Base (MIB)\", RFC 3873, September 2004.",
+      "rfc": 3873
+    },
+    {
+      "number": "[RFC6458]",
+      "text": "Stewart, R., Tuexen, M., Poon, K., Lei, P., and V. Yasevich, \"Sockets API Extensions for the Stream Control Transmission Protocol (SCTP)\", RFC 6458, December 2011.",
+      "rfc": 6458
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -10,13 +10,260 @@
   "questions": [
     "federated file system nsdb",
     "nfs namespace database",
-    "fedfs namespace"
+    "fedfs namespace",
+    "what is an nsdb",
+    "what is a fedfs junction",
+    "federated file system namespace"
+  ],
+  "tags": [
+    "NFS",
+    "Directory",
+    "File Systems"
+  ],
+  "subtitle": "How independently run file servers publish where their file sets live, so clients see one shared namespace.",
+  "tldr": {
+    "problem": "File servers run by different administrators, often from different vendors, have no standard way to cooperate in presenting one namespace, so building a shared tree has relied on proprietary management tools.",
+    "mechanism": "Each file set gets a unique fileset name (FSN), and an LDAP-based Namespace Database (NSDB) maps that name to one or more fileset locations (FSLs). When a client reaches a junction, the file server asks the NSDB and refers the client to a location.",
+    "outcome": "A federation can present unified namespaces to ordinary NFSv4 clients, which never talk to the NSDB themselves. The RFC defines the LDAP schema, the administrator and file server operations, and the security expectations.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default NFS port",
+      "value": "2049"
+    },
+    {
+      "label": "FsnTTL of zero",
+      "value": "Servers MUST NOT cache the FSN's locations"
+    },
+    {
+      "label": "Recommended UUID type",
+      "value": "Version 4 (RFC 4122)"
+    },
+    {
+      "label": "Required TLS support",
+      "value": "NSDB nodes and clients MUST implement TLS"
+    },
+    {
+      "label": "FedFS OID subrange",
+      "value": "1.3.6.1.4.1.31103.1.x"
+    }
+  ],
+  "today": "<p>RFC 7532 is a Proposed Standard and the unit metadata shows it has not been obsoleted or updated. Its companion administration protocol is described in <a href='/7533/'>RFC 7533</a>.</p>",
+  "glossary": [
+    "uuid",
+    "ttl",
+    "dns",
+    "tls",
+    "uri",
+    "percent-encoding",
+    "iana",
+    "ldap",
+    "nfs",
+    "junction",
+    "fileset",
+    "referral"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Federation Problem",
+      "content": "<p>A <strong>federated file system</strong> lets file access and namespace traversal work in a uniform, secure and consistent way across many independent file servers, inside one enterprise or across several. The namespace of each federated file system is composed of file systems physically hosted on and exported by the federation's servers.</p><p>Building such a namespace has been hard for two reasons the RFC gives. The servers are often in different administrative domains, and there is no standard mechanism for them to present the namespace together. Vendor-specific tools do not scale to larger enterprises or to collaboration across enterprises.</p><p>The protocols here build a namespace that NFS version 4.0 (<a href='/7530/'>RFC 7530</a>), NFSv4.1 (<a href='/5661/'>RFC 5661</a>) or newer clients can use, and are designed to accommodate other file-access protocols later. Requirements are in <a href='/5716/'>RFC 5716</a>, a protocol for administering a file server's namespace is in <a href='/7533/'>RFC 7533</a>, and discovering the root of a federated namespace is in <a href='/6641/'>RFC 6641</a>.</p>",
+      "eli5": "<p>Imagine every school in a country keeping its own list of books and none of the lists agreeing. This RFC is a way to share the lists so any student can find any book.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Filesets, Names and Locations",
+      "content": "<p>A <strong>fileset</strong> is a set of files and the directory tree that contains them, the basic unit of data management. It can be anything from one directory of an exported file system to a whole exported file system.</p><p>A fileset is identified by its <strong>fileset name (FSN)</strong>, unique across a federation. An FSN has three parts: <code>NsdbName</code> (the network location of the NSDB node holding authoritative information), <code>FsnUuid</code> (a UUID per <a href='/4122/'>RFC 4122</a>) and <code>FsnTTL</code> (how many seconds cached location information may be used; zero means servers MUST NOT cache). <code>FsnUuid</code> and <code>NsdbName</code> never change during the FSN's lifetime.</p><p>A <strong>fileset location (FSL)</strong> describes one physical place where a complete copy of the fileset resides. It has its own <code>FslUuid</code>, the <code>FsnUuid</code> of its FSN, and an <code>NsdbName</code>. For each file-access protocol there is a subtype of FSL; this RFC defines one for NFS. FSNs and FSLs can also carry annotations (name/value pairs) and descriptions whose meaning the RFC leaves to higher-level protocols.</p><p>All FSLs of one FSN are equivalent for access but not necessarily identical: locations may be read-only or read-write, and may hold data from different points in time. Keeping them functionally equivalent is the administrators' job.</p>",
+      "eli5": "<p>A fileset is a folder with a permanent name tag. The locations are the different shelves where a copy of that folder sits, and the tag always stays the same even when copies move.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "2.8.1",
+      "title": "Locations as NFS URIs",
+      "content": "<p>To record where an NFSv4 fileset lives, the RFC extends the NFS URL scheme of <a href='/2224/'>RFC 2224</a> into an NFS URI. It MUST contain an authority and a path and MUST NOT contain a query or fragment. The authority MUST contain a host, which for globally scoped URIs SHOULD be a fully qualified domain name. If no port is given, port 2049 is assumed.</p><p>NFSv4 servers expose no public filehandle, so the path is evaluated relative to the server's pseudoroot. The path MUST be absolute and non-empty, so a double slash always follows the authority, and the NFSv4 path <code>/</code> is written as two slashes after the authority. Non-ASCII characters and reserved characters such as the slash inside a name component MUST be percent-encoded.</p><p>An NFS URI represents a single host and path pair. A server MUST NOT merge several FSL records into one NFSv4 location entry unless they share the same root path and extended file system information.</p>",
+      "eli5": "<p>Each location is written as a web-style address saying which machine and which folder on it. Special characters get coded so they cannot be mistaken for the slashes between folders.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2.9",
+      "title": "The NSDB, Junctions and Referrals",
+      "content": "<p>The <strong>Namespace Database (NSDB)</strong> service defines, updates and queries FSN, FSL and FSN-to-FSL information. A single repository is an NSDB node, much as a DNS server relates to the DNS service. Each node is managed by one administrative entity and is authoritative for the filesets it defines. An NSDB MAY be replicated, in which case it MUST show loose, converging consistency; how is out of scope. Each node supports an LDAP interface (<a href='/4510/'>RFC 4510</a>).</p><p>A <strong>junction</strong> is a point in a fileset where another fileset can be attached, like a reference from a directory to the root of the target. How a server stores junctions is not defined, but given a junction the server must be able to find the target FSN. Filesets can be nested and mounted in any number of places.</p><p>When a client reaches a junction, the server refers it to a list of FSLs. Servers act as NSDB clients; file-access clients never need to contact the NSDB. A designated set of servers can export a <strong>root fileset</strong> so clients see a federation-wide unified namespace.</p>",
+      "eli5": "<p>A junction is a signpost in one folder saying the rest is over there. The server reads the signpost, looks up the current address in the shared directory, and sends you along.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.2",
+      "title": "Resolving a Junction and Caching",
+      "content": "<p>Junction resolution has six steps. The server determines the object is a junction, looks up the target FSN locally, finds the responsible NSDB node, asks it for the set of FSLs (possibly empty), converts one or more of them into the form the client understands (for NFSv4, an <code>fs_locations</code> attribute), and redirects the client. Only the NSDB query uses the federation protocols; the rest may be platform specific.</p><p>The server SHOULD include as many FSL records in the referral as possible, but MAY omit some, for instance because the referral format cannot carry them. When it converts or reduces records it SHOULD keep their meaning, for example by ordering entries by read rank and order.</p><p>Servers may cache FSLs for up to <code>FsnTTL</code> seconds. This matters when a fileset migrates: the old server should leave a redirecting junction in place. For an FsnTTL of 3600 seconds, administrators SHOULD keep the redirection for at least an hour, and SHOULD set FsnTTL to a low number or zero before migrating.</p>",
+      "eli5": "<p>Asking the directory every time is slow, so servers remember answers for a while. If a book moves, the old shelf keeps a note saying where it went until all those remembered answers have run out.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "4",
+      "title": "The LDAP Schema",
+      "content": "<p>An NSDB is built from an LDAPv3 directory, preferably a dedicated server. Each naming context holding federation entries must have an <strong>NSDB Container Entry (NCE)</strong>, located through the <code>fedfsNceDN</code> attribute of the <code>fedfsNsdbContainerInfo</code> object class on the context's root entry. The NCE's children are FSNs, and an FSN's children are FSLs.</p><p>The RFC defines attribute types and object classes: <code>fedfsFsn</code> (requires <code>fedfsFsnUuid</code> and <code>fedfsFsnTTL</code>), the abstract <code>fedfsFsl</code>, and <code>fedfsNfsFsl</code> for NFS locations. The NFS attributes carry the data of NFSv4.1's <code>fs_locations_info</code>: URI, currency, writable, going and split flags, RDMA flag, class values, read and write rank and order, variable substitution and a valid-for time. An FSN's distinguished name MUST be <code>fedfsFsnUuid=$FSNUUID,$NCE</code>.</p><p>UUIDs are public because servers read records anonymously. Version 1 UUIDs expose a host's MAC address and timestamp and are no longer considered sufficient, so a federation SHOULD generate UUIDs with the version 4 procedure of RFC 4122. The <code>fedfsAnnotation</code> key can be used to extend the schema, with keys registered with IANA.</p>",
+      "eli5": "<p>The directory is organized like a filing cabinet: one drawer for the whole federation, a folder for each fileset name, and a card inside for each place a copy lives.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "NSDB Operations",
+      "content": "<p>Administrators talk to an NSDB node over LDAPv3. The operations are <strong>create FSN</strong> (an LDAP ADD of a <code>fedfsFsn</code> entry), <strong>delete FSN</strong> (which MUST fail if the FSN still has FSL children, and removes the fileset only from the namespace, not its data), <strong>create FSL</strong>, <strong>delete FSL</strong> and <strong>update FSL</strong> (the FSL and FSN UUIDs MUST NOT change). When no better values are known, the RFC recommends defaults for the NFS attributes, such as 0 for rank, order and class values.</p><p>File servers perform two operations as an unauthenticated user. First, <strong>NCE enumeration</strong>: for each <code>namingContext</code> in the root DSE, look for a <code>fedfsNceDN</code> value. Second, <strong>lookup of FSLs for an FSN</strong>: an LDAP search with one-level scope under <code>fedfsFsnUuid=$FSNUUID,$NCE</code>, filtering on <code>fedfsFsl</code> for all FSLs or <code>fedfsNfsFsl</code> for NFS ones.</p><p>A client MAY follow an LDAP referral, and if so MUST prevent looping as <a href='/4511/'>RFC 4511</a> describes. File-server administration over ONC RPC is the job of <a href='/7533/'>RFC 7533</a>.</p>",
+      "eli5": "<p>Librarians add, remove and fix cards in the directory. Other servers only read it, never change it, and they ask the same simple question each time: which cards belong to this folder?</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The RFC recommends using the security mechanisms of NFSv4 and LDAPv3. RPCSEC_GSS is RECOMMENDED on all NFS connections between client and server. NSDB nodes and clients MUST implement TLS as described in <a href='/4513/'>RFC 4513</a>, and using TLS on all LDAP connections is RECOMMENDED. When following an LDAP referral, a client SHOULD authenticate the target NSDB with that NSDB's own credentials and SHOULD NOT follow a referral to an NSDB whose credentials it does not know.</p><p>Two components can be compromised. An attacker who controls a file server can interfere with I/O or fabricate a referral, as without the federation protocols. An attacker who controls an NSDB can forge FSL information and poison the referrals servers hand out, so an NSDB should be as secure as the servers that query it.</p><p>The protocols only build a namespace. Data transfers happen between client and server as usual, so no new user authentication or authorization mechanism is needed.</p>",
+      "eli5": "<p>If someone tampers with the shared directory, they can send people to the wrong shelf. So the directory needs to be guarded as carefully as the shelves themselves.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "tree",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "WHERE FSNS AND FSLS SIT IN THE DIRECTORY",
+      "data": {
+        "root": {
+          "label": "NSDB Container Entry (NCE)",
+          "note": "Located by fedfsNceDN",
+          "children": [
+            {
+              "label": "FSN entry",
+              "note": "fedfsFsnUuid and fedfsFsnTTL",
+              "children": [
+                {
+                  "label": "FSL entry",
+                  "note": "fedfsNfsFsl for NFS"
+                },
+                {
+                  "label": "FSL entry",
+                  "note": "another location of the same fileset"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "JUNCTION RESOLUTION (RFC 7532, SECTION 3.2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "File-access client"
+          },
+          {
+            "key": "server",
+            "label": "Fileserver"
+          },
+          {
+            "key": "nsdb",
+            "label": "NSDB node"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Access a junction",
+            "color": "blue",
+            "note": "The server finds the target FSN locally."
+          },
+          {
+            "from": "server",
+            "to": "nsdb",
+            "label": "Ask for FSLs of the FSN",
+            "color": "blue",
+            "note": "An LDAP search, made without authentication."
+          },
+          {
+            "from": "nsdb",
+            "to": "server",
+            "label": "Set of FSLs",
+            "color": "green",
+            "note": "Possibly empty."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Referral to location(s)",
+            "color": "green",
+            "note": "For NFSv4, an fs_locations attribute."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "CREATE-FSN REQUEST (EXAMPLE FROM RFC 7532)",
+      "data": {
+        "title": "LDIF for the create FSN operation",
+        "lang": "text",
+        "code": "dn: fedfsFsnUuid=e8c4761c-eb3b-4307-86fc-f702da197966,o=fedfs\nchangeType: add\nobjectClass: fedfsFsn\nfedfsFsnUuid: e8c4761c-eb3b-4307-86fc-f702da197966\nfedfsFsnTTL: 300"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4122]",
+      "text": "Leach, P., Mealling, M., and R. Salz, \"A Universally Unique IDentifier (UUID) URN Namespace\", RFC 4122, July 2005.",
+      "rfc": 4122
+    },
+    {
+      "number": "[RFC4510]",
+      "text": "Zeilenga, K., Ed., \"Lightweight Directory Access Protocol (LDAP): Technical Specification Road Map\", RFC 4510, June 2006.",
+      "rfc": 4510
+    },
+    {
+      "number": "[RFC5661]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[RFC7530]",
+      "text": "Haynes, T., Ed. and D. Noveck, Ed., \"Network File System (NFS) Version 4 Protocol\", RFC 7530, March 2015.",
+      "rfc": 7530
+    },
+    {
+      "number": "[RFC2224]",
+      "text": "Callaghan, B., \"NFS URL Scheme\", RFC 2224, October 1997.",
+      "rfc": 2224
+    },
+    {
+      "number": "[RFC5716]",
+      "text": "Lentini, J., Everhart, C., Ellard, D., Tewari, R., and M. Naik, \"Requirements for Federated File Systems\", RFC 5716, January 2010.",
+      "rfc": 5716
+    },
+    {
+      "number": "[RFC6641]",
+      "text": "Everhart, C., Adamson, W., and J. Zhang, \"Using DNS SRV to Specify a Global File Namespace with NFS Version 4\", RFC 6641, June 2012.",
+      "rfc": 6641
+    },
+    {
+      "number": "[RFC7533]",
+      "text": "Lentini, J., Tewari, R., and C. Lever, Ed., \"Administration Protocol for Federated File Systems\", RFC 7533, March 2015.",
+      "rfc": 7533
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

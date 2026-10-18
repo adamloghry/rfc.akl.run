@@ -9,13 +9,247 @@
   },
   "questions": [
     "active dhcp leasequery",
-    "how to get dhcp lease updates in bulk"
+    "how to get dhcp lease updates in bulk",
+    "what is dhcpactiveleasequery",
+    "what does catchupcomplete mean in dhcp"
+  ],
+  "tags": [
+    "DHCP",
+    "Leasequery",
+    "Streaming"
+  ],
+  "subtitle": "A long-lived DHCPv4 connection that streams lease changes to an outside system as they happen.",
+  "tldr": {
+    "problem": "DHCPv4 Leasequery only answers questions about individual bindings, which is inefficient or impossible for systems that must stay current with every lease change.",
+    "mechanism": "A requestor opens a TCP connection and sends a DHCPACTIVELEASEQUERY. The server then streams DHCPLEASEACTIVE and DHCPLEASEUNASSIGNED messages as bindings change, and can replay recent changes after a reconnect.",
+    "outcome": "Requestors get near real-time binding data but not a complete history, since only the current state of each binding is sent. Bulk Leasequery is still used to initialize a database or recover missed data.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "TCP port",
+      "value": "67 (DHCPv4 port)"
+    },
+    {
+      "label": "New message types",
+      "value": "16, 17, 18"
+    },
+    {
+      "label": "New status codes",
+      "value": "5, 6, 7, 8"
+    },
+    {
+      "label": "Receive / send timeout",
+      "value": "120 s each"
+    },
+    {
+      "label": "Idle timeout",
+      "value": "60 s"
+    },
+    {
+      "label": "Updates",
+      "value": "RFC 6926"
+    }
+  ],
+  "today": "<p>RFC 7724 is a Proposed Standard from December 2015, and no later RFC obsoletes or updates it. It updates <a href='/6926/'>RFC 6926</a> and builds on <a href='/4388/'>RFC 4388</a>.</p>",
+  "glossary": [
+    "dhcp",
+    "lease",
+    "tcp",
+    "tls",
+    "tls-handshake",
+    "dhcp-option",
+    "relay-agent",
+    "leasequery",
+    "dhcp-binding"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Active Leasequery",
+      "content": "<p>DHCPv4 Leasequery (<a href='/4388/'>RFC 4388</a>) lets an outside entity ask a DHCPv4 server about the lease state of one IPv4 address or client. Bulk Leasequery (<a href='/6926/'>RFC 6926</a>) lets an entity pull lots of binding information, for example when it starts up. Some requestors need more: they must keep up with the server's binding activity continuously. The RFC calls this <strong>Active Leasequery</strong>.</p><p>It is meant for an entity that is not directly part of the DHCPv4 client-server exchange but still has to stay current with the lease state database in near real time.</p>",
+      "eli5": "<p>Asking one question at a time is slow. Active Leasequery is like leaving a phone line open so the clerk can call you each time the guest list changes.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "3",
+      "title": "Protocol Overview",
+      "content": "<p>Active Leasequery is modeled on the individual Leasequery and Bulk Leasequery protocols. The requestor opens a TCP connection to the DHCPv4 server on port 67, so it needs the server's address and unicast reachability. No relaying is specified. It then sends a <code>DHCPACTIVELEASEQUERY</code> message, and the server answers with <code>DHCPLEASEACTIVE</code> and <code>DHCPLEASEUNASSIGNED</code> messages whenever binding state changes. A server that supports Active Leasequery MUST also support Bulk Leasequery.</p><p>Much of the design deals with disconnection. The requestor tracks the highest <code>base-time</code> it has received. After reconnecting, it puts that value in a <code>query-start-time</code> option, and the server sends the changes since then (the <strong>catch-up</strong> information). The server MAY limit how much history it keeps. If it kept too little, it says so and the requestor falls back to Bulk Leasequery.</p><p>The intended pattern is an initial Bulk Leasequery to fill the database, then Active Leasequery to keep it current. Active Leasequery has only one qualifier (<code>query-start-time</code>) and no query types, and the connection never completes; the server may close it for exceptional reasons. The messages use the same encoding as Bulk Leasequery, except that a server SHOULD be configurable to withhold specific data items even if the requestor asked for them in its parameter request list.</p>",
+      "eli5": "<p>If your line drops, you tell the clerk when you last heard something. The clerk then repeats what you missed. If you were gone too long, you ask for the full list again.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "New Messages, Status Codes and Timers",
+      "content": "<p>The message framing for TCP is the same as for Bulk Leasequery, and with TLS one DHCP message is carried in one TLS record. The <code>dhcp-message-type</code> option (option 53) gains three values: <code>DHCPACTIVELEASEQUERY</code>, <code>DHCPLEASEQUERYSTATUS</code> and <code>DHCPTLS</code>.</p><p>The <code>dhcp-status-code</code> option from <a href='/6926/'>RFC 6926</a> is reused with four new codes: <code>DataMissing</code>, <code>ConnectionActive</code>, <code>CatchUpComplete</code> and <code>TLSConnectionRefused</code>. When it appears with <code>DHCPLEASEQUERYSTATUS</code> it refers to the whole request stream, otherwise to a single reply.</p><p>Three timers have defaults: a 120 second receive timeout, a 120 second send timeout and a 60 second idle timeout. Implementations MAY make them configurable, but timeouts smaller than the defaults SHOULD NOT be used.</p>",
+      "eli5": "<p>The clerk and you agree on a few new signals, like \"I am still here\" and \"you are all caught up\", and on how long to wait before deciding the line is dead.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "7",
+      "title": "How a Requestor Behaves",
+      "content": "<p>A requestor SHOULD be able to work in insecure or secure mode. In secure mode it MUST try to negotiate TLS: it first sends a <code>DHCPTLS</code> message with no options, and if the server does not answer with a plain <code>DHCPTLS</code>, the requestor MUST close the connection. After a successful TLS handshake it validates the server's certificates and sends the query over TLS.</p><p>An Active Leasequery request MUST NOT have a <code>ciaddr</code>, <code>chaddr</code> or <code>dhcp-client-identifier</code>, and MUST have an <code>xid</code> unique on the connection. It SHOULD include a parameter request list. Only one <code>DHCPACTIVELEASEQUERY</code> is allowed per TCP connection at a time. A reply carrying binding data MUST include a non-zero <code>ciaddr</code>, and the requestor MUST be prepared for multiple copies of the data for one address.</p><p>On an idle connection the server SHOULD send a <code>DHCPLEASEQUERYSTATUS</code> with <code>ConnectionActive</code> every idle-timeout period, so the requestor can tell the link is alive. A requestor whose reply stream stalls SHOULD terminate after the receive timeout.</p><p>If the request had a <code>query-start-time</code>, the connection starts in the catch-up phase. Catch-up updates are not in the order the data changed, so the requestor must not adopt a new <code>base-time</code> until it sees <code>CatchUpComplete</code> (or <code>DataMissing</code>). On <code>DataMissing</code>, the requestor SHOULD issue a Bulk Leasequery covering the gap.</p>",
+      "eli5": "<p>You first check that you are talking to the right clerk, and you only write down \"I have heard everything up to here\" once the clerk says the catch-up is finished.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "8",
+      "title": "How a Server Behaves",
+      "content": "<p>Active Leasequery MUST NOT be enabled by default and needs an explicit configuration step. Insecure mode must never be the default, and enabling it needs its own separate step. In secure mode the server MUST support TLS and be configurable about which requestors it will talk to, based on the certificate the requestor presents. All TLS connections used for Active Leasequery MUST be mutually authenticated, and the server MUST close the TCP connection if the handshake fails.</p><p>The server SHOULD send binding information with minimal delay, but it SHOULD NOT delay its reply to the DHCP client to do so. If a request carries a <code>query-end-time</code> option, the server should send a <code>MalformedQuery</code> status and terminate. To support catch-up, the server SHOULD keep, and SHOULD limit and make configurable, some record of previous binding activity. It need not keep that across a restart, or at all. Once the catch-up messages are sent it MUST send <code>CatchUpComplete</code>.</p><p>The server also MAY close a connection at any time, and SHOULD limit its connection count and close idle ones. When it aborts an in-process request it SHOULD send <code>QueryTerminated</code> and then MUST close. A blocked send SHOULD end after the send timeout. For parallel queries, an Active and a Bulk Leasequery MUST use different connections.</p><p>This RFC also updates <a href='/6926/'>RFC 6926</a>: a server that receives a DHCP message type not supported over a TCP connection, such as <code>DHCPDISCOVER</code>, MUST close the connection.</p>",
+      "eli5": "<p>The clerk keeps this service off until someone turns it on, checks everyone's ID, and hangs up if a caller is rude or goes silent.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The general DHCPv4 threats and the Leasequery recommendations (restricting to trusted requestors, DoS mitigation, IPsec) still apply. Using TCP adds the risk of connection exhaustion: malicious requestors may open connections and send invalid, partial or no queries to use up the server's pool.</p><p>The two modes suit two use models. Secure mode (TLS) fits a requestor at an arbitrary place on the Internet, where data must be protected and both identities verified. Insecure mode is sufficient where the requestor sits next to the DHCP server inside a protected environment. Insecure mode gives no way to check that a requestor is authorized.</p><p>Servers SHOULD offer settings to limit connection sources by certificate, cap the number of connections and bound idle time. The data acquired SHOULD be protected as strongly as the server's own data and deleted as soon as possible after use.</p>",
+      "eli5": "<p>Anyone who can hold the line open could pester the clerk, so the clerk wants to know who is calling, and callers should shred the list once they are done with it.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "10",
+      "title": "IANA Assignments",
+      "content": "<p>IANA assigned three message types in the DHCP Message Type 53 registry and four status codes in the DHCP Status Code Type 151 registry. The values are shown in the table above. The message types are <code>DHCPACTIVELEASEQUERY</code>, <code>DHCPLEASEQUERYSTATUS</code> and <code>DHCPTLS</code>, and the codes are <code>DataMissing</code>, <code>ConnectionActive</code>, <code>CatchUpComplete</code> and <code>TLSConnectionRefused</code>.</p>",
+      "eli5": "<p>The official list of DHCP numbers now includes the new signals so nobody else reuses them.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "NEW DHCP MESSAGE TYPES AND STATUS CODES",
+      "data": {
+        "items": [
+          {
+            "code": "16",
+            "label": "DHCPACTIVELEASEQUERY",
+            "desc": "Message type: the active query.",
+            "highlight": true
+          },
+          {
+            "code": "17",
+            "label": "DHCPLEASEQUERYSTATUS",
+            "desc": "Message type: status for a whole request."
+          },
+          {
+            "code": "18",
+            "label": "DHCPTLS",
+            "desc": "Message type: asks for or accepts TLS."
+          },
+          {
+            "code": "5",
+            "label": "DataMissing",
+            "desc": "Status code: requested binding data is not available."
+          },
+          {
+            "code": "6",
+            "label": "ConnectionActive",
+            "desc": "Status code: this connection remains active."
+          },
+          {
+            "code": "7",
+            "label": "CatchUpComplete",
+            "desc": "Status code: all saved requested data has been sent."
+          },
+          {
+            "code": "8",
+            "label": "TLSConnectionRefused",
+            "desc": "Status code: a TLS connection is not allowed."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "ACTIVE LEASEQUERY WITH CATCH-UP (SIMPLIFIED FROM RFC 7724)",
+      "data": {
+        "lanes": [
+          {
+            "key": "requestor",
+            "label": "Requestor"
+          },
+          {
+            "key": "server",
+            "label": "DHCPv4 server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "requestor",
+            "to": "server",
+            "label": "DHCPACTIVELEASEQUERY (query-start-time)",
+            "color": "blue",
+            "note": "Sent after the TCP connection, and TLS if used."
+          },
+          {
+            "from": "server",
+            "to": "requestor",
+            "label": "DHCPLEASEACTIVE / DHCPLEASEUNASSIGNED",
+            "color": "green",
+            "note": "Catch-up and real-time updates may be mixed."
+          },
+          {
+            "from": "server",
+            "to": "requestor",
+            "label": "DHCPLEASEQUERYSTATUS (CatchUpComplete)",
+            "color": "neutral"
+          },
+          {
+            "from": "server",
+            "to": "requestor",
+            "label": "DHCPLEASEACTIVE / DHCPLEASEUNASSIGNED",
+            "color": "green",
+            "note": "Only real-time changes from here on."
+          },
+          {
+            "from": "server",
+            "to": "requestor",
+            "label": "DHCPLEASEQUERYSTATUS (ConnectionActive)",
+            "color": "neutral",
+            "note": "Sent when the connection is idle."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2131]",
+      "text": "Droms, R., \"Dynamic Host Configuration Protocol\", RFC 2131, March 1997.",
+      "rfc": 2131
+    },
+    {
+      "number": "[RFC4388]",
+      "text": "Woundy, R. and K. Kinnear, \"Dynamic Host Configuration Protocol (DHCP) Leasequery\", RFC 4388, February 2006.",
+      "rfc": 4388
+    },
+    {
+      "number": "[RFC5246]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.2\", RFC 5246, August 2008.",
+      "rfc": 5246
+    },
+    {
+      "number": "[RFC6926]",
+      "text": "Kinnear, K., et al., \"DHCPv4 Bulk Leasequery\", RFC 6926, April 2013.",
+      "rfc": 6926
+    },
+    {
+      "number": "[RFC7525]",
+      "text": "Sheffer, Y., Holz, R., and P. Saint-Andre, \"Recommendations for Secure Use of Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)\", BCP 195, RFC 7525, May 2015.",
+      "rfc": 7525
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

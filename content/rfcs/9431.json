@@ -10,13 +10,231 @@
   "questions": [
     "ace mqtt tls profile",
     "how to authorize mqtt clients with oauth tokens",
-    "mqtt authorization iot"
+    "mqtt authorization iot",
+    "how to authorize mqtt clients with ace tokens",
+    "what is the mqtt tls ace profile",
+    "what is authz-info topic in mqtt"
+  ],
+  "tags": [
+    "Security",
+    "MQTT",
+    "IoT",
+    "Authorization"
+  ],
+  "subtitle": "How an MQTT broker can check, with ACE access tokens, who may publish and subscribe to which topics.",
+  "tldr": {
+    "problem": "MQTT lets clients publish and subscribe to topics through a broker, but it leaves authorization to each implementation, which is a gap for constrained Internet of Things devices.",
+    "mechanism": "A client gets an OAuth 2.0 style access token bound to a proof-of-possession key from an authorization server, then shows the token and proves it holds the key to the broker, either through TLS or through MQTT's own AUTH exchange. The token's scope lists the topics the client may publish or subscribe to.",
+    "outcome": "The broker can authorize connections, publishes and subscribes per topic, and re-check tokens as they expire. It does not protect message payloads from the broker itself.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "ACE profile name",
+      "value": "mqtt_tls (CBOR value 3)"
+    },
+    {
+      "label": "Authentication Method value",
+      "value": "ace"
+    },
+    {
+      "label": "Broker nonce size",
+      "value": "8 bytes"
+    },
+    {
+      "label": "TLS exporter label",
+      "value": "EXPORTER-ACE-MQTT-Sign-Challenge"
+    },
+    {
+      "label": "Exporter length",
+      "value": "32 bytes"
+    },
+    {
+      "label": "Not authorized code",
+      "value": "0x87"
+    }
+  ],
+  "today": "<p>RFC 9431 is a Proposed Standard published in July 2023, and no RFC is listed as obsoleting or updating it. It builds on the ACE framework in <a href='/9200/'>RFC 9200</a>.</p>",
+  "glossary": [
+    "proof-of-possession",
+    "publish-subscribe",
+    "tls",
+    "access-token",
+    "authorization-server",
+    "resource-server",
+    "nonce",
+    "jwt",
+    "oauth-scope",
+    "pre-shared-key",
+    "base64url"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What the Profile Does",
+      "content": "<p>RFC 9431 is a <strong>profile</strong> of the ACE framework (<a href='/9200/'>RFC 9200</a>) for MQTT, a publish-subscribe protocol. After connecting to the MQTT server, called the <strong>Broker</strong>, a client can publish and subscribe to many topics. The Broker acts as the ACE Resource Server (RS), and topic names are treated as resources.</p><p>Clients prove their permission with an access token bound to a <strong>Proof-of-Possession</strong> (PoP) key. The RFC authorizes three kinds of exchange: connection requests, publish requests in both directions, and subscribe requests. TLS provides confidentiality and Broker authentication, and TLS 1.3 is RECOMMENDED. MQTT v5.0 is the RECOMMENDED version, with a reduced set of interactions described for v3.1.1 clients.</p><p>The mechanisms do not protect the payload of a PUBLISH packet from the Broker. Topic discovery is not part of MQTT, so clients are assumed to know their topics out of band.</p>",
+      "eli5": "<p>The post office needs to know who may drop off or pick up mail in which mailbox. This RFC defines the ticket system for that.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Actors and the Token Request",
+      "content": "<p>The Client obtains a token from the Authorization Server (AS) over HTTPS, using the content type <code>application/ace+json</code> (the CBOR form <code>application/ace+cbor</code> MAY also be used). The Client and AS MUST authenticate each other. If the AS authorizes the client for the requested audience and scopes, it issues a token. Where a response carries an <code>ace_profile</code> parameter it is set to <code>mqtt_tls</code>, and the token is a PoP token by default.</p><p>The token can be an opaque reference or a JSON Web Token (<a href='/7519/'>RFC 7519</a>) with PoP semantics from <a href='/7800/'>RFC 7800</a>. A <code>cnf</code> (confirmation) claim declares which key the client holds. The Broker can validate the token locally or ask the AS through its optional introspection endpoint.</p><p>A client that is too constrained for HTTPS can use a separate <strong>Client Authorization Server</strong> (CAS) to request the token on its behalf; that onboarding is out of scope.</p>",
+      "eli5": "<p>A ticket office hands out the tickets. A helper can fetch a ticket for a device that is too small to visit the office itself.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "3",
+      "title": "Authenticating to the Broker",
+      "content": "<p>Unless it uses only public topics, the Client MUST authenticate to the Broker, over MQTT or over TLS, before doing anything else. The RFC names the combinations by their TLS and MQTT parts: <code>TLS:Anon,MQTT:None</code> for public topics only, <code>TLS:Anon,MQTT:ace</code> with the token in the CONNECT packet, and <code>TLS:Known(RPK/PSK),MQTT:none</code> with raw public keys or pre-shared keys in TLS. <code>TLS:Known(RPK/PSK),MQTT:ace</code> SHOULD NOT be chosen. Clients are RECOMMENDED to implement <code>TLS:Anon,MQTT:ace</code> first, and the Broker MUST support it.</p><p>With TLS client authentication the token is often uploaded first by publishing it to the public <code>authz-info</code> topic, which may only be published to, never subscribed to. The Broker validates it, stores only one token per PoP key, and returns reason code <code>0x87</code> (Not authorized) if the token is invalid or <code>0x99</code> (Payload format invalid) if the payload is not a token. For PSKs the token may instead be sent as the TLS PSK identity.</p><p>The Client MUST authenticate the Broker during the TLS handshake. TLS 1.2 implementations MUST use the Extended Main Secret extension, and TLS implementations SHOULD use SNI and ALPN.</p>",
+      "eli5": "<p>There are several ways to show the ticket: hand it over at the door, drop it in a public box first, or show it while the secret handshake happens. The post office also proves who it is.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Proving Possession with the MQTT AUTH Packet",
+      "content": "<p>In MQTT v5.0 the Client sets the CONNECT Authentication Method property (identifier 21, 0x15) to the string <code>ace</code>, and puts data in the Authentication Data property (identifier 22, 0x16). The User Name and Password flags MUST be 0. If the Broker does not support the profile it answers CONNACK reason code <code>0x8C</code> (Bad authentication method). The Broker MUST support both PoP options.</p><p><strong>Option 1, TLS exporter.</strong> The Authentication Data holds the token length, the token and a MAC or signature computed with the PoP key over content exported from the TLS session using the label <code>EXPORTER-ACE-MQTT-Sign-Challenge</code>, an empty context and a length of 32 bytes. This cannot be used to reauthenticate in the same TLS session.</p><p><strong>Option 2, Broker challenge.</strong> If the CONNECT carries only the token, the Broker replies with an AUTH packet (reason code <code>0x18</code>, Continue Authentication) containing an 8-byte RS nonce. The Client answers with an AUTH packet holding its own 8-byte nonce and a MAC or signature over the RS nonce concatenated with the Client nonce. The Broker then validates the token and sends CONNACK <code>0x00</code>.</p><p>For validation, HMAC-SHA-256 and Ed25519 are mandatory to implement for the Broker, and the Client MUST implement at least one. The Broker MUST check the token is still valid, that it is the intended audience, and that an authorized AS issued it.</p>",
+      "eli5": "<p>Showing a ticket is not enough, because someone could copy it. So the post office sets a puzzle only the real owner of the ticket's secret key can solve, and the device answers it.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "5",
+      "title": "Token Scope and Topic Permissions",
+      "content": "<p>The token's scope holds the Client's publish and subscribe permissions. It is a single value following the Authorization Information Format (AIF) from <a href='/9237/'>RFC 9237</a>: a list of pairs, each with a topic filter and a list of permissions that are <code>pub</code> or <code>sub</code>. In a JWT it is a base64url-encoded string without padding.</p><p>Topic filters follow MQTT v5.0 and may include wildcards: the multi-level wildcard (the hash sign) matches any number of levels and <code>+</code> matches one level. The RFC's example scope gives publish and subscribe on <code>topic1</code>, publish on all subtopics of <code>topic2</code>, and subscribe on <code>+/topic3</code>.</p><p>For authorization to succeed, the Broker MUST verify that the requested topic name or filter is an exact match to, or a subset of, at least one filter in the scope. An empty scope means no permissions for protected topics. The Will Topic in a CONNECT is checked against the scope too.</p>",
+      "eli5": "<p>The ticket lists which mailboxes you may use and whether you may put mail in, take mail out, or both. Stars in the names stand for many mailboxes at once.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Publish, Subscribe, Expiry and Disconnects",
+      "content": "<p>The Broker caches the token or its introspection result, because PUBLISH and SUBSCRIBE packets carry no tokens. On a PUBLISH, it matches the topic name against the scope. If not allowed, it answers PUBACK or PUBREC with <code>0x87</code> for QoS level 1 or higher, and sends a DISCONNECT with <code>0x87</code> and closes the connection for QoS 0. The Broker MAY return <code>0x80</code> (Unspecified error) to avoid leaking topic names. The Broker MUST NOT forward messages to unauthorized subscribers, and SHOULD send DISCONNECT <code>0x87</code> before closing the connection to an affected subscriber.</p><p>For SUBSCRIBE, each topic filter gets its own reason code in the SUBACK, so a client may be authorized for some filters and not others.</p><p>The Broker MUST check token expiration when a CONNECT, PUBLISH or SUBSCRIBE is received or sent. To reauthenticate, the Client sends an AUTH packet with reason code <code>0x19</code> (Reauthentication) and a new token. In the same TLS session it MUST NOT use the TLS exporter method, and MUST use the challenge-response method instead.</p><p>Retained messages are kept only while the associated tokens are valid: the Broker MUST use the minimum of the token expiry and the message expiry interval to discard a retained message. A Will Message is published even if the token has since expired, as long as the Will Topic was in the scope when validated at CONNECT.</p>",
+      "eli5": "<p>Every time you try to use a mailbox, the post office checks your ticket. If it has run out or does not cover that mailbox, you are told no or sent away, and you can bring a fresh ticket.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "7",
+      "title": "Support for MQTT v3.1.1 Clients",
+      "content": "<p>An MQTT v5.0 Broker MAY offer reduced interactions to v3.1.1 clients; they are NOT RECOMMENDED for v5.0 clients. A v3.1.1 CONNECT has no Authentication Method field, so the token goes in the User Name field prefixed by the letters <code>ace</code> and encoded in base64url without padding. The Password field carries the MAC or signature, computed over the TLS-exporter challenge. Both the User Name and Password flags MUST be 1.</p><p>Error handling is more primitive because v3.1.1 lacks error codes and server-side DISCONNECT. The Broker disconnects on almost any error. A tokenless CONNECT MUST fail, and authorization server discovery has to happen out of band. After a failed publish the Broker MUST ignore the packet and disconnect the client. Brokers that do not support v3.1.1 reply with CONNACK reason code <code>0x84</code> (Unsupported Protocol Version).</p>",
+      "eli5": "<p>Older devices speak a simpler version of the language. They hide their ticket in the name and password fields, and the post office can only hang up on them when something goes wrong.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and Privacy Considerations",
+      "content": "<p>The security considerations of <a href='/9200/'>RFC 9200</a> and of the MQTT standards apply. A Broker caches a token after validating it, so if a client's permissions are revoked but the token has not expired, the Broker may still grant access. A reasonable cache timeout for introspection results is therefore SHOULD-level advice, and the AS is expected to use a sensible token expiry strategy.</p><p>The public <code>authz-info</code> topic may be vulnerable to a DDoS attack in which many clients upload unusable tokens that the Broker has to store until they expire. Long session expiry intervals, and in MQTT v3.1.1 sessions with no expiry at all, can also force the Broker to hold state, so Brokers SHOULD apply administrative policies to limit misuse.</p><p>On privacy, the Broker is a central trusted party that sees message contents. This profile does not sign or encrypt a PUBLISH payload for subscribers; a separate ACE Pub-Sub Profile proposal could, but even then other fields such as the topic name would not be private.</p>",
+      "eli5": "<p>A ticket that was cancelled might still work until it runs out, and a flood of fake tickets could clog the post office. Also, the post office itself can read the mail.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "BROKER CHALLENGE/RESPONSE POP, SUCCESS CASE (RFC 9431)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "broker",
+            "label": "Broker"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "broker",
+            "label": "CONNECT",
+            "color": "blue",
+            "note": "Authentication Data contains only the token."
+          },
+          {
+            "from": "broker",
+            "to": "client",
+            "label": "AUTH 0x18",
+            "color": "green",
+            "note": "8-byte RS nonce as challenge."
+          },
+          {
+            "from": "client",
+            "to": "broker",
+            "label": "AUTH 0x18",
+            "color": "blue",
+            "note": "8-byte Client nonce plus signature or MAC."
+          },
+          {
+            "from": "broker",
+            "to": "client",
+            "label": "CONNACK 0x00",
+            "color": "green",
+            "note": "Success, after token validation (may involve introspection)."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "EXAMPLE SCOPE FROM RFC 9431",
+      "data": {
+        "title": "Example scope",
+        "lang": "json",
+        "code": "[[\"topic1\",[\"pub\",\"sub\"]],[\"topic2/#\",[\"pub\"]],[\"+/topic3\",[\"sub\"]]]"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9200]",
+      "text": "Seitz, L., Selander, G., Wahlstroem, E., Erdtman, S., and H. Tschofenig, \"Authentication and Authorization for Constrained Environments Using the OAuth 2.0 Framework (ACE-OAuth)\", RFC 9200, August 2022.",
+      "rfc": 9200
+    },
+    {
+      "number": "[RFC9202]",
+      "text": "Gerdes, S., Bergmann, O., Bormann, C., Selander, G., and L. Seitz, \"Datagram Transport Layer Security (DTLS) Profile for Authentication and Authorization for Constrained Environments (ACE)\", RFC 9202, August 2022.",
+      "rfc": 9202
+    },
+    {
+      "number": "[RFC9430]",
+      "text": "Bergmann, O., Preuss Mattsson, J., and G. Selander, \"Extension of the Datagram Transport Layer Security (DTLS) Profile for Authentication and Authorization for Constrained Environments (ACE) to Transport Layer Security (TLS)\", RFC 9430, July 2023.",
+      "rfc": 9430
+    },
+    {
+      "number": "[RFC9237]",
+      "text": "Bormann, C., \"An Authorization Information Format (AIF) for Authentication and Authorization for Constrained Environments (ACE)\", RFC 9237, August 2022.",
+      "rfc": 9237
+    },
+    {
+      "number": "[RFC7519]",
+      "text": "Jones, M., Bradley, J., and N. Sakimura, \"JSON Web Token (JWT)\", RFC 7519, May 2015.",
+      "rfc": 7519
+    },
+    {
+      "number": "[RFC7800]",
+      "text": "Jones, M., Bradley, J., and H. Tschofenig, \"Proof-of-Possession Key Semantics for JSON Web Tokens (JWTs)\", RFC 7800, April 2016.",
+      "rfc": 7800
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[MQTT-OASIS-Standard-v5]",
+      "text": "Banks, A., Ed., Briggs, E., Ed., Borgendale, K., Ed., and R. Gupta, Ed., \"MQTT Version 5.0\", OASIS Standard, March 2019."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

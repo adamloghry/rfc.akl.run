@@ -10,13 +10,232 @@
   "questions": [
     "dns error reporting",
     "report dnssec validation failures",
-    "extended dns errors reporting"
+    "extended dns errors reporting",
+    "what is dns error reporting",
+    "what is edns0 option 18",
+    "what does the _er label mean in dns"
+  ],
+  "tags": [
+    "DNS",
+    "DNSSEC",
+    "Monitoring"
+  ],
+  "subtitle": "How a validating resolver tells an authoritative server's operator about DNS failures by sending one specially named query.",
+  "tldr": {
+    "problem": "When a zone breaks, for example because DNSSEC signatures have lapsed, the operator of the authoritative server may not know. Validating resolvers see the failure, but there is no automated way to report it.",
+    "mechanism": "An authoritative server announces an agent domain in an unsolicited EDNS0 Report-Channel option. A reporting resolver that hits an extended DNS error then sends a TXT query whose QNAME encodes the failing query type, name and error code under that agent domain.",
+    "outcome": "The monitoring agent sees the report simply by receiving the query, and can contact the zone's operators to fix the problem. Caching limits how often the same problem is reported.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "EDNS0 option code",
+      "value": "18 (Report-Channel)"
+    },
+    {
+      "label": "Report query type",
+      "value": "TXT"
+    },
+    {
+      "label": "Label marker",
+      "value": "_er"
+    },
+    {
+      "label": "Maximum QNAME length",
+      "value": "255 octets"
+    }
+  ],
+  "today": "<p>RFC 9567 is a Proposed Standard and the metadata lists no RFC that obsoletes or updates it. It builds on the extended DNS errors defined in <a href='/8914/'>RFC 8914</a>.</p>",
+  "glossary": [
+    "edns0",
+    "opt-record",
+    "validating-resolver",
+    "authoritative-server",
+    "dnssec",
+    "negative-caching",
+    "nxdomain",
+    "ttl",
+    "cookie",
+    "rrsig",
+    "resolver"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem of Silent Failures",
+      "content": "<p>A zone can fail without its operator noticing. An authoritative server may serve a stale DNSSEC-signed zone whose signatures have lapsed, or the Delegation Signer (DS) records at the parent may not match the key signing key in the child. In both cases a validating resolver fails to validate the records.</p><p>The RFC notes that there is no direct relationship between operators of validating resolvers and authoritative servers. Outages are usually noticed indirectly by end users, and any sign of the error may be buried in resolver logs or not logged at all.</p><p>DNS error reporting lets an authoritative server name a <strong>monitoring agent</strong>, and lets validating resolvers that are configured for it report problems there. The burden falls on the resolver, so the effort is kept low by using DNS itself to carry the report.</p>",
+      "eli5": "<p>If a street sign falls down, the town may not notice until someone tells them. This gives drivers an easy way to drop a note in the town's mailbox.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "4",
+      "title": "How Error Reporting Works",
+      "content": "<p>An authoritative server announces support by adding an EDNS0 <strong>Report-Channel</strong> option, <code>OPTION-CODE</code> 18, to its response. The option carries the <strong>agent domain</strong>. The server includes it unsolicited, meaning even when the request did not contain the option. It <code>MUST NOT</code> include the option if the configured agent domain is empty or the null label.</p><p>When a reporting resolver meets an issue that can be described by an extended DNS error (RFC 8914), it builds a <strong>report query</strong>: a TXT query whose QNAME encodes the error. The query ultimately reaches the monitoring agent, which returns a response that the resolver can cache. This caching is essential, because it limits reports to about one report query per TTL for the same problem.</p><p>The RFC gives no guidance on the content of the TXT record data in the response.</p>",
+      "eli5": "<p>A server hangs up a sign saying 'send problem notes to this mailbox'. A helper who finds a problem writes the details right on the envelope, so just mailing it is the whole report.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "The Report-Channel Option and Report Query",
+      "content": "<p>The EDNS0 option has an <code>OPTION-CODE</code> of 18 (2 octets), an <code>OPTION-LENGTH</code> (2 octets) giving the length of the agent domain field in octets, and an <code>AGENT DOMAIN</code>, a fully qualified domain name in uncompressed DNS wire format.</p><p>The report query QNAME is built by concatenating, in order:</p><ul><li>a label <code>_er</code>;</li><li>the QTYPE as a decimal value in a single label (several QTYPEs are joined by hyphens in ordered form, such as <code>1-28</code>);</li><li>the labels of the query name that failed;</li><li>the extended DNS error code as a decimal value in a single label;</li><li>a second <code>_er</code> label;</li><li>the agent domain.</li></ul><p>If the resulting QNAME exceeds 255 octets, it <code>MUST NOT</code> be sent. The two <code>_er</code> labels let the monitoring agent tell the agent domain from the faulty name; the first one also shows that a complete report query arrived rather than a shorter one produced by query minimization. The DNS class is not included in the report.</p>",
+      "eli5": "<p>The report is an address that spells out what went wrong, such as 'type A, broken.test, error 7'. Reading the address tells the agent everything.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "4.1",
+      "title": "A Worked Example",
+      "content": "<p>A reporting resolver queries <code>broken.test.</code> for type A. One authoritative server for <code>test.</code> serves a stale version of the zone and has the agent domain <code>a01.agent-domain.example.</code>, which it returns in the Report-Channel option.</p><p>The resolver cannot validate the A RRset because an RRSIG record has an expired signature. It builds and resolves the QNAME <code>_er.1.broken.test.7._er.a01.agent-domain.example.</code>. This says that extended DNS error 7 occurred while validating <code>broken.test.</code> for type A (RR type 1).</p><p>The operators of the monitoring agent see the query, learn that <code>test.</code> had an expired signature, and can contact the operators of <code>test.</code> to fix it.</p>",
+      "eli5": "<p>The note says 'the sign for broken.test has a stale date', and the town hall can phone the person in charge of that sign.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Rules for Each Party",
+      "content": "<p><strong>Reporting resolvers</strong> must use a maximum expense or depth limit so that resolving the report QNAME cannot trigger cascading error reports. They <code>MUST NOT</code> include the Report-Channel option in queries, and <code>MUST NOT</code> report if the authoritative server returned an empty agent domain. To give the agent confidence that a report is not spoofed, they <code>SHOULD</code> send reports over TCP or other connection-oriented protocols, or <code>SHOULD</code> use DNS Cookies. They <code>MUST</code> validate responses from the agent like any other.</p><p><strong>Authoritative servers</strong> <code>MUST NOT</code> include more than one Report-Channel option in a response.</p><p><strong>Monitoring agents</strong> are <code>RECOMMENDED</code> to answer with a positive response containing a TXT record, not NODATA or NXDOMAIN. They <code>SHOULD</code> answer UDP queries that have no DNS Cookie with the truncation (TC) bit set, challenging the resolver to retry over TCP.</p>",
+      "eli5": "<p>Each helper has a job. The one who reports checks they are not starting an endless chain of notes, and the one who receives asks 'prove it is really you' before trusting a note.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "8",
+      "title": "Choosing an Agent Domain and Caching",
+      "content": "<p>The agent domain is <code>RECOMMENDED</code> to be short, leaving room for a longer QNAME. It <code>MUST NOT</code> be a subdomain of the domain it reports on: a server hosting <code>foo.example</code> must not use an agent domain ending in <code>foo.example</code>.</p><p>Caching can suppress later reports. If the agent answered NXDOMAIN, resolvers following RFC 8020 would treat everything at or below that name as unreachable, and negative caching would block further queries for a time. The monitoring agent therefore <code>MUST NOT</code> respond with NXDOMAIN for domains it monitors. One approach is a wildcard in the agent domain's zone.</p><p>If the agent domain is signed, aggressive negative caching (RFC 8198) may let the resolver synthesize answers and stop sending reports. The RFC suggests avoiding DNSSEC for the agent domain, since the response has no use to the resolver beyond dampening report load.</p>",
+      "eli5": "<p>If the mailbox keeps saying 'nobody lives here', helpers stop sending mail. So the agent must always answer with something friendly.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security and Privacy",
+      "content": "<p>Reports can expose local mistakes in the reporting resolver, such as stale DNSSEC trust anchors, to the monitoring agent. Reporting <code>SHOULD</code> use DNS query name minimization (RFC 9156) to improve privacy.</p><p>There is no authentication between the reporting resolver and the agent domain's authoritative server. That is why resolvers should use TCP or DNS Cookies, and why agents receiving reports over UDP should consider that the source and the contents may be false. Well-known addresses of reporting resolvers can raise confidence in reports.</p><p>The method causes additional queries to authoritative servers. It can also be abused by deliberately deploying broken zones whose agent domains are delegated to victims, especially when triggering queries are sent through open resolvers or widely distributed network monitoring systems.</p>",
+      "eli5": "<p>Anyone can write a note, so the town hall should be careful not to believe every one, and nobody should be tricked into flooding a neighbor's mailbox.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "EDNS0 REPORT-CHANNEL OPTION (RFC 9567)",
+      "data": {
+        "title": "Report-Channel option",
+        "width": 32,
+        "fields": [
+          {
+            "key": "option-code",
+            "name": "OPTION-CODE",
+            "bits": 16,
+            "desc": "EDNS0 option code for error reporting.",
+            "value": "18"
+          },
+          {
+            "key": "option-length",
+            "name": "OPTION-LENGTH",
+            "bits": 16,
+            "desc": "Length of the agent domain field in octets."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "THE EXAMPLE EXCHANGE IN RFC 9567 SECTION 4.1",
+      "data": {
+        "lanes": [
+          {
+            "key": "resolver",
+            "label": "Reporting resolver"
+          },
+          {
+            "key": "auth",
+            "label": "Authoritative server"
+          },
+          {
+            "key": "agent",
+            "label": "Monitoring agent"
+          }
+        ],
+        "messages": [
+          {
+            "from": "resolver",
+            "to": "auth",
+            "label": "Query broken.test. A",
+            "color": "blue"
+          },
+          {
+            "from": "auth",
+            "to": "resolver",
+            "label": "Response with Report-Channel option",
+            "color": "green",
+            "note": "Agent domain a01.agent-domain.example."
+          },
+          {
+            "from": "resolver",
+            "to": "agent",
+            "label": "TXT _er.1.broken.test.7._er.a01.agent-domain.example.",
+            "color": "blue",
+            "note": "Reports extended DNS error 7."
+          },
+          {
+            "from": "agent",
+            "to": "resolver",
+            "label": "TXT response",
+            "color": "green"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8914]",
+      "text": "Kumari, W., et al., \"Extended DNS Errors\", RFC 8914, October 2020.",
+      "rfc": 8914
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC7766]",
+      "text": "\"DNS Transport over TCP - Implementation Requirements\", RFC 7766, March 2016.",
+      "rfc": 7766
+    },
+    {
+      "number": "[RFC7873]",
+      "text": "\"Domain Name System (DNS) Cookies\", RFC 7873, May 2016.",
+      "rfc": 7873
+    },
+    {
+      "number": "[RFC8020]",
+      "text": "\"NXDOMAIN: There Really Is Nothing Underneath\", RFC 8020, November 2016.",
+      "rfc": 8020
+    },
+    {
+      "number": "[RFC8198]",
+      "text": "\"Aggressive Use of DNSSEC-Validated Cache\", RFC 8198, July 2017.",
+      "rfc": 8198
+    },
+    {
+      "number": "[RFC9156]",
+      "text": "\"DNS Query Name Minimisation to Improve Privacy\", RFC 9156, November 2021.",
+      "rfc": 9156
+    },
+    {
+      "number": "[RFC9499]",
+      "text": "\"DNS Terminology\", BCP 219, RFC 9499.",
+      "rfc": 9499
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

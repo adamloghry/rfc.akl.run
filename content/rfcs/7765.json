@@ -9,13 +9,167 @@
   },
   "questions": [
     "tcp rto restart",
-    "faster loss recovery with little data"
+    "faster loss recovery with little data",
+    "what is rto restart",
+    "why is loss recovery slow with little data in flight",
+    "how does rtor improve tcp performance",
+    "when should rtor be used"
+  ],
+  "tags": [
+    "Transport",
+    "TCP",
+    "SCTP",
+    "Retransmission"
+  ],
+  "subtitle": "Faster loss recovery when connections have little data in flight",
+  "tldr": {
+    "problem": "When a sender has only a few segments in flight, TCP and SCTP cannot use their fast retransmission mechanism and must wait a full retransmission timeout (RTO) to detect loss, which can be slow for time-sensitive applications.",
+    "mechanism": "RTO Restart (RTOR) allows the sender to restart its retransmission timer with a shorter timeout by subtracting the time already elapsed since the earliest unacknowledged segment was sent, enabling faster detection without violating the RTO rules.",
+    "outcome": "Loss recovery latency can be reduced by approximately 35% for connections with limited data in flight, improving performance for short-lived flows and bursty applications such as web services and interactive systems.",
+    "outcomeLabel": "Performance improvement"
+  },
+  "facts": [
+    {
+      "label": "RTO threshold (rrthresh)",
+      "value": "4 segments (recommended)"
+    },
+    {
+      "label": "Improvement in loss recovery latency",
+      "value": "~35% reduction observed in testing"
+    },
+    {
+      "label": "Protocols affected",
+      "value": "TCP and SCTP"
+    },
+    {
+      "label": "Status",
+      "value": "Experimental"
+    }
+  ],
+  "today": "<p>RFC 7765 remains Experimental. It is not a mandatory part of TCP or SCTP, but implementations can choose to support it. The RFC recommends further testing in mobile and high-variability networks before it moves to Standards Track.</p>",
+  "glossary": [
+    "retransmission",
+    "tcp",
+    "sctp",
+    "congestion-control",
+    "retransmission-timeout",
+    "spurious-timeout"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Loss Detection in TCP and SCTP",
+      "content": "<p>TCP and SCTP use two main mechanisms to detect when data has been lost in transit. The first is a <strong>retransmission timer</strong>: if data sent by the sender goes unacknowledged for a specified duration (the RTO), the sender assumes it was lost and sends it again. The second is <strong>fast retransmit</strong>: when the receiver sees out-of-order data, it sends duplicate acknowledgments; after three duplicates, the sender retransmits without waiting for the timer.</p><p>Fast retransmit is much quicker and works well for bulk data transfers where many segments are in flight. However, when only a few segments are outstanding—such as in web services, interactive applications, or at the end of a file transfer—the sender cannot trigger three duplicate acknowledgments. In these cases, the sender must rely on the retransmission timer, and the loss detection time becomes unnecessarily long.</p>",
+      "eli5": "<p>When you send lots of letters, the mail carrier notices one is missing quickly. When you send just one letter, you have to wait a long time to realize it got lost, because no other letters arrive to hint that something is wrong.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Why Standard RTO Behavior is Slow",
+      "content": "<p>RFC 6298 specifies that the RTO timer is restarted whenever a new acknowledgment arrives. In a typical scenario, a sender transmits three segments but only two are acknowledged before a delay occurs. When the first acknowledgment arrives, it restarts the RTO timer. The timer then runs for the full RTO duration (typically hundreds of milliseconds or more) before the sender realizes the third segment was lost. Meanwhile, the RTT (round-trip time) for the acknowledgment and any delays from the receiver add to the total recovery time.</p><p>For a single lost segment, the effective loss detection time becomes approximately RTO + RTT (or longer with delayed acknowledgments), which can be a hundred times slower than fast retransmit. For applications with strict timing requirements—such as interactive web sessions, online games, or remote desktop systems—this delay directly harms user experience.</p>",
+      "eli5": "<p>The mail service restarts its timer each time a letter arrives. But if you only sent one letter and it is lost, you have to wait through the entire timer before anyone checks on it.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "The RTOR Algorithm",
+      "content": "<p>RTO Restart modifies this behavior by adjusting the timeout duration based on elapsed time. When an acknowledgment arrives and the sender has fewer than a threshold number of segments outstanding (the recommended value is four), the sender calculates how long has passed since it sent the oldest unacknowledged segment. The retransmission timer is then restarted not for the full RTO, but for (RTO minus elapsed time). This ensures the total time from the original transmission to the retransmission is exactly RTO—no earlier, satisfying RFC 6298's safety requirement—but the wait from now is much shorter.</p><p>For example, if RTO is 1 second and 400 milliseconds have already elapsed, the timer restarts for only 600 milliseconds. The sender still waits a total of 1 second from the original transmission, but retransmission can happen sooner after the acknowledgment arrives.</p>",
+      "eli5": "<p>Instead of always waiting the full timer duration, you count how long you have already waited and wait only for the remaining time. This guarantees the total wait from the start is fair, but you notice the loss faster.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "4",
+      "title": "Where RTOR Helps and Hurts",
+      "content": "<p>RTOR is most beneficial for short-lived connections and application-limited flows. Measurements show that web traffic can recover from loss 35% faster. The RFC cites data showing that 70% of web objects are too small for fast retransmit to work, and 77% of retransmissions at major web services occur after RTO expiry—exactly the scenario RTOR targets. RTOR is not useful for bulk data transfers because such flows nearly always have four or more segments outstanding, so RTOR remains disabled and does not affect them.</p><p>The main risk is <strong>spurious timeouts</strong>: restarting the timer more aggressively can cause the sender to retransmit data that was never actually lost, just delayed. This happens if network conditions vary wildly—such as in mobile networks with handovers—and the RTO calculation becomes optimistic. When a spurious timeout occurs, TCP reduces its congestion window to one segment, harming throughput. However, results suggest that for typical web and interactive traffic, the gains outweigh the costs.</p>",
+      "eli5": "<p>RTOR helps most when you send just one or two letters at a time. For bulk mail, it does not matter because you always have plenty of letters in transit. The main downside is if the mail is just delayed (not lost) and you resend it—that wastes effort.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Implementation and Deployment Considerations",
+      "content": "<p>Implementing RTOR requires tracking two pieces of information: the time the earliest outstanding segment was sent, and whether the total number of outstanding and previously unsent segments is below the threshold (four by default). Packet-based TCP implementations often already track segment transmission times, but byte-based implementations must add this capability. A simplified approach is to track only the rrthresh+1 oldest sequence numbers rather than all outstanding segments.</p><p>RTOR is marked Experimental, meaning implementations should use it with caution until broader deployment experience is gathered. The RFC calls for further testing in mobile networks and other high-variability environments. Modern operating systems include mechanisms to detect and recover from spurious retransmissions (such as F-RTO and DSACK), which reduce the risk of deploying RTOR. For SCTP, the RFC defines a socket option (<code>SCTP_RTO_RESTART</code>) to control the feature per association.</p>",
+      "eli5": "<p>To use RTOR, you need to remember when each letter was sent and count how many are waiting for replies. Some mail systems already track this; others need new bookkeeping. It is still being tested, especially in unreliable networks.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "caption": "Timeline comparison: standard RTO vs RTOR",
+      "data": {
+        "columns": [
+          "Scenario",
+          "Standard RTO",
+          "With RTOR"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Time from send to ACK",
+              "400 ms",
+              "400 ms"
+            ]
+          },
+          {
+            "cells": [
+              "Time remaining to wait",
+              "600 ms (full RTO)",
+              "200 ms (RTO minus 400 ms)"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Total time to retransmit",
+              "1000 ms (full RTO)",
+              "1000 ms (still fair)"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3042]",
+      "text": "Allman, M., Balakrishnan, H., and S. Floyd, \"Enhancing TCP's Loss Recovery Using Limited Transmit\", RFC 3042, January 2001.",
+      "rfc": 3042
+    },
+    {
+      "number": "[RFC5681]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[RFC5682]",
+      "text": "Sarolahti, P., Kojo, M., Yamamoto, K., and M. Hata, \"Forward RTO-Recovery (F-RTO): An Algorithm for Detecting Spurious Retransmission Timeouts with TCP\", RFC 5682, September 2009.",
+      "rfc": 5682
+    },
+    {
+      "number": "[RFC5827]",
+      "text": "Allman, M., Avrachenkov, K., Ayesta, U., Blanton, J., and P. Hurtig, \"Early Retransmit for TCP and Stream Control Transmission Protocol (SCTP)\", RFC 5827, May 2010.",
+      "rfc": 5827
+    },
+    {
+      "number": "[RFC6298]",
+      "text": "Paxson, V., Allman, M., Chu, J., and M. Sargent, \"Computing TCP's Retransmission Timer\", RFC 6298, June 2011.",
+      "rfc": 6298
+    },
+    {
+      "number": "[RFC4960]",
+      "text": "Stewart, R., Ed., \"Stream Control Transmission Protocol\", RFC 4960, September 2007.",
+      "rfc": 4960
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

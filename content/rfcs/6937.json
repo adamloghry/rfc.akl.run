@@ -9,13 +9,132 @@
   },
   "questions": [
     "what is proportional rate reduction",
-    "tcp loss recovery prr"
+    "tcp loss recovery prr",
+    "how does prr improve tcp loss recovery",
+    "prr-crb vs prr-ssrb difference",
+    "when to use prr for tcp"
+  ],
+  "tags": [
+    "Transport",
+    "Congestion Control",
+    "Loss Recovery"
+  ],
+  "subtitle": "A smoother way to adjust TCP's sending rate when packets are lost in flight.",
+  "tldr": {
+    "problem": "When TCP detects lost packets, it must slow down its sending rate, but existing algorithms like Fast Recovery and Rate-Halving often overshoot by reducing the window too much, leaving TCP slower than necessary for longer than needed.",
+    "mechanism": "Proportional Rate Reduction (PRR) spreads the rate reduction smoothly across a full round-trip time, adjusting how much data to send based on how much data the receiver confirms has arrived, so the final window size matches what the congestion control algorithm intended.",
+    "outcome": "PRR was later superseded by RFC 9937, which provides updated guidance on loss recovery.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Proposed by",
+      "value": "Mathis, Dukkipati, and Cheng at Google"
+    },
+    {
+      "label": "Publication date",
+      "value": "May 2013"
+    },
+    {
+      "label": "Status",
+      "value": "Experimental"
+    },
+    {
+      "label": "Key state variables",
+      "value": "prr_delivered, prr_out, ssthresh, RecoverFS"
+    },
+    {
+      "label": "Reduction Bound variants",
+      "value": "PRR-CRB (conservative) and PRR-SSRB (slow-start)"
+    }
+  ],
+  "today": "<p>RFC 6937 is an Experimental specification that was later superseded by <a href='/9937/'>RFC 9937</a>. Although PRR offered improvements over existing loss recovery algorithms and showed promise in measurements, RFC 9937 provides updated guidance on TCP loss recovery practices.</p>",
+  "glossary": [
+    "tcp",
+    "congestion-control",
+    "tcp-segment"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction to TCP Loss Recovery",
+      "content": "<p>TCP detects when packets have been lost and initiates recovery to retransmit those packets and reduce the sending rate. The standard congestion control algorithm in RFC 5681 defines <strong>Fast Recovery</strong>, which is the reference algorithm for adjusting the congestion window (cwnd) after losses. However, Fast Recovery and related algorithms like Rate-Halving were observed to have limitations: they cannot always compensate for the implicit window reduction caused by the losses themselves, leading to overly aggressive or overly conservative adjustments.</p><p>Proportional Rate Reduction (PRR) is an experimental alternative designed to minimize these excess window adjustments. Instead of applying a fixed reduction ratio (like halving the window), PRR calculates how much data to send on each ACK during recovery, based on how much data the receiver confirms has actually arrived.</p>",
+      "eli5": "<p>After losing some packets, TCP slows down to recover. PRR helps it slow down at just the right pace so it doesn't crash too hard or go too slow.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "2",
+      "title": "Limitations of Existing Algorithms",
+      "content": "<p>RFC 6675 improved Fast Recovery by computing <strong>pipe</strong>, an estimate of how many bytes are still in flight. This lets the sender maintain the window during recovery until it reaches the slow-start threshold (ssthresh). However, a sudden jump in the pipe estimate can cause a burst of retransmissions.</p><p>Rate-Halving, used in Linux, sends data on alternate ACKs, reducing the window by 50% over one round-trip time. The problem is that it assumes a fixed 50% reduction is always appropriate, which is not true for modern congestion control algorithms like CUBIC, which reduce the window by only 30%. This can cause the window to fall further than necessary, increasing the risk of additional timeouts and slowing recovery.</p><p>PRR solves this by using the actual window reduction target chosen by the congestion control algorithm, rather than assuming a fixed reduction percentage.</p>",
+      "eli5": "<p>The old methods either crash the window too hard or don't adjust enough. PRR fits whatever the congestion control algorithm actually wants.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "How PRR Works",
+      "content": "<p>At the start of recovery, PRR initializes state variables: the target window (ssthresh), total bytes delivered to the receiver (prr_delivered), total bytes sent during recovery (prr_out), and the flight size at the start of recovery (RecoverFS).</p><p>On each ACK during recovery, PRR computes how many bytes to send. If the estimated pipe size is still above ssthresh, PRR sends data proportionally: the fraction of recovery completed times the target window size, minus what has already been sent. When pipe falls below ssthresh, one of two <strong>Reduction Bound</strong> algorithms limits the total transmission: the Conservative Reduction Bound (CRB) strictly matches data sent to data delivered, while the Slow Start Reduction Bound (SSRB) allows sending one extra segment per ACK to catch up more quickly.</p><p>This approach relies on ACK clocking (using arriving ACKs to pace outgoing data) rather than direct pipe-based rate control, making it more stable when the pipe estimate is uncertain.</p>",
+      "eli5": "<p>PRR counts what data the receiver confirms and sends new data at a rate proportional to that—like a faucet that adjusts to match how fast the bucket drains.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "4",
+      "title": "Comparing PRR Variants",
+      "content": "<p>PRR offers two variants with different trade-offs. <strong>PRR-CRB</strong> (Conservative Reduction Bound) is strictly packet conserving: it never sends more bytes than the receiver has confirmed. It satisfies the <strong>Strong Packet Conservation Bound</strong>, a mathematically appealing property that guarantees it will not cause additional losses at a bottleneck queue. However, measurements show PRR-CRB is less aggressive than RFC 6675 when facing burst losses, leading to longer recovery times.</p><p><strong>PRR-SSRB</strong> (Slow Start Reduction Bound) allows sending one extra segment per ACK compared to CRB, enabling the window to increase slightly during recovery until it reaches ssthresh. While this seems aggressive, it is actually less aggressive than RFC 6675, which can send large unclocked bursts. PRR-SSRB spends less time in recovery and experiences fewer timeouts, often outperforming RFC 6675 in practice because it avoids self-inflicted losses caused by bursts.</p>",
+      "eli5": "<p>CRB is conservative—never sends more than confirmed. SSRB is slightly more aggressive and usually faster. SSRB is usually the better choice.</p>"
+    },
+    {
+      "id": "section-2",
+      "number": "5",
+      "title": "Key Properties",
+      "content": "<p>PRR has several desirable characteristics. It maintains stable ACK clocking throughout recovery, spreading voluntary window reductions evenly over a full round-trip time, which may reduce traffic burstiness. With minimal losses, PRR converges to exactly the target window chosen by the congestion control algorithm. It is robust to errors in the pipe estimator: if pipe is underestimated temporarily, PRR differs from the Reduction Bound by at most one segment per ACK, then converges to the same final window.</p><p>PRR also improves behavior when the application pauses: if the sender cannot transmit data fast enough, those missed opportunities are treated as banked voluntary reductions. When the application catches up, PRR sends a partial burst to make up the time, keeping the behavior uniform across all TCP states.</p><p>Measurements on Google production traffic found that PRR-SSRB spends the least time in recovery of the algorithms tested, with 5% fewer timeouts than Rate-Halving and 29% fewer detected lost retransmissions than RFC 3517.</p>",
+      "eli5": "<p>PRR spreads the slow-down smoothly, reaches exactly the right speed, and handles surprises like network uncertainty without overreacting.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC3042]",
+      "text": "Allman, M., Balakrishnan, H., and S. Floyd, \"Enhancing TCP's Loss Recovery Using Limited Transmit\", RFC 3042, January 2001.",
+      "rfc": 3042
+    },
+    {
+      "number": "[RFC3517]",
+      "text": "Blanton, E., Allman, M., Fall, K., and L. Wang, \"A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP\", RFC 3517, April 2003.",
+      "rfc": 3517
+    },
+    {
+      "number": "[RFC5681]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[RFC6675]",
+      "text": "Blanton, E., Allman, M., Wang, L., Jarvinen, I., Kojo, M., and Y. Nishida, \"A Conservative Loss Recovery Algorithm Based on Selective Acknowledgment (SACK) for TCP\", RFC 6675, August 2012.",
+      "rfc": 6675
+    },
+    {
+      "number": "[IMC11]",
+      "text": "Dukkipati, N., Mathis, M., Cheng, Y., and M. Ghobadi, \"Proportional Rate Reduction for TCP\", Proceedings of the 11th ACM SIGCOMM Conference on Internet Measurement 2011, Berlin, Germany, November 2011."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

@@ -10,13 +10,194 @@
   "questions": [
     "ipfix per sctp stream",
     "pr-sctp ipfix template",
-    "ipfix data record loss"
+    "ipfix data record loss",
+    "what is ipfix over sctp per stream",
+    "how to calculate ipfix data record loss per template",
+    "what is dataRecordsReliability"
+  ],
+  "tags": [
+    "Measurement",
+    "IPFIX",
+    "SCTP"
+  ],
+  "subtitle": "Give each IPFIX template its own SCTP stream so a collector can tell exactly which kind of record went missing.",
+  "tldr": {
+    "problem": "When IPFIX flow records travel over partially reliable SCTP, a lost message cannot be traced to a Template, because any Template's records may go on any stream. Templates and data can also arrive out of order across streams.",
+    "mechanism": "The exporter sends each Template and its Data Records in order on one SCTP stream, announces with a new Options Template whether each Template's records are reliable, and the collector reads loss per Template from the stream's Sequence Number.",
+    "outcome": "Loss can be counted per Template, Templates always arrive before their data, and Template IDs can be reused at once. Old collectors still work, but only upgraded ones get the full benefit.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New Information Element",
+      "value": "dataRecordsReliability, ElementId 276"
+    },
+    {
+      "label": "Boolean encoding",
+      "value": "1 for True, 2 for False"
+    },
+    {
+      "label": "Default Template Reuse Delay",
+      "value": "5 seconds"
+    },
+    {
+      "label": "Reuse delay on same stream",
+      "value": "0"
+    },
+    {
+      "label": "Cost of adding streams",
+      "value": "16-24 bytes"
+    },
+    {
+      "label": "Sequence Number arithmetic",
+      "value": "modulo 2^32"
+    }
+  ],
+  "today": "<p>RFC 6526 is a Proposed Standard, and the metadata lists no RFC that obsoletes or updates it. It builds on <a href='/5101/'>RFC 5101</a> and only changes IPFIX export over partially reliable SCTP.</p>",
+  "glossary": [
+    "sctp",
+    "sequence-number",
+    "association",
+    "multi-streaming",
+    "ipfix",
+    "partial-reliability"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Per-Stream Export for IPFIX",
+      "content": "<p><a href='/5101/'>RFC 5101</a> defines <strong>IPFIX</strong>, a way to export information about IP traffic Flows from an Exporting Process to a Collecting Process. A <strong>Template Record</strong> says once what fields a Flow has, and later <strong>Data Records</strong> carry the values. IPFIX is flexible: it may use many SCTP streams per association, put any Set on any stream, and deliver Data Sets reliably or partially reliably, in order or out of order.</p><p>RFC 6526 narrows that flexibility. A Template Record and its Data Sets go in a single SCTP stream, each Template ID is limited to one stream if possible, and transmission is in order. It applies only to the SCTP transport option of IPFIX and only when the Partial Reliability extension (<a href='/3758/'>RFC 3758</a>) is used. Because PSAMP is based on IPFIX, it applies there too.</p><p>A typical use is a router exporting billing records that cannot afford to buffer every record for reliable delivery, yet still needs to know how many records of a given type were lost.</p>",
+      "eli5": "<p>Instead of mixing every kind of report in one big pipe, each kind gets its own pipe, and everything in a pipe arrives in order.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "2",
+      "title": "Three Limits of Plain IPFIX",
+      "content": "<p>The RFC names three problems with RFC 5101 export, and shows how per-stream export fixes each.</p><ul><li><strong>Loss per Template.</strong> A collector can spot lost messages from the Sequence Number, which is counted per stream. But Data Records of any Template may use any stream, so the collector cannot tell which Template a lost record belonged to. The workaround is one Template per SCTP Transport Session, which multiplies sessions. With one Template per stream, any loss on that stream belongs to that Template.</li><li><strong>Template withdrawal and reuse.</strong> A collector cannot decode Data Records without the Template Record, so early records may be discarded. In order on one stream, the Template always arrives first, and a Template ID can be reused right after its withdrawal, skipping the 5 second Template Reuse Delay default.</li><li><strong>Buffering.</strong> If the Template and its data travel on different streams, order is not guaranteed across streams, and the collector may have to hold data waiting for the Template. Self-contained ordered streams remove that need.</li></ul>",
+      "eli5": "<p>If everything is mixed up, a missing page could belong to any book. If each book has its own box, you know which book lost a page, and the cover always arrives before the pages.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "3",
+      "title": "The dataRecordsReliability Element",
+      "content": "<p>The RFC adds one new Information Element, <code>dataRecordsReliability</code>, with ElementId 276. It is a boolean that reports the export reliability of Data Records within this SCTP stream for the elements in an Options Template scope, typically a Template ID. <code>True</code> means the exporter MUST send those Data Records reliably. <code>False</code> means it MAY send them unreliably.</p><p>As RFC 5101 encodes booleans, it is a single octet with the value 1 for True and 2 for False. IANA has allocated it in the IPFIX Information Elements registry.</p><p>The element is carried in the <strong>Data Records Reliability Options Template</strong>, whose scope is the Template ID and whose non-scope field is <code>dataRecordsReliability</code>. It MAY also contain other non-scope Information Elements.</p>",
+      "eli5": "<p>It is a little yes-or-no note that says, for each kind of report, whether it is sent with a promise to arrive or without one.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "Exporter Rules for Templates and Streams",
+      "content": "<p>Template Sets and Options Template Sets MUST be sent reliably, and any Data Sets for a Template Record MUST be sent on the same SCTP stream as that Template Record. All IPFIX Messages in a stream MUST be sent in order, and every compliant implementation MUST implement PR-SCTP.</p><p>After defining a Template ID and before sending its Data Records, the exporter MUST send a Data Record of the Data Records Reliability Options Template for it, saying reliable or unreliable. Without it, the collector MUST disable the extension. Records of the Reliability Options Template itself need no such notice and MUST always be sent reliably. To change a Template's reliability, the Template MUST be withdrawn and a new one used.</p><p>It is RECOMMENDED to send a single Template and its Data Sets in one stream. The exporter MAY group related Templates in one stream, which is useful when streams run short, but then loss is reported for the group. Options Data Records mixed with Template data SHOULD be sent reliably. If a new Template needs a stream and none is free, the exporter SHOULD try to add outbound streams per <a href='/6525/'>RFC 6525</a>, or MAY share an existing stream and lose granularity.</p><p>Resource impact is modest: adding streams costs 16-24 bytes in the association, less than a new association. Many small streams can mean more message header overhead and more state on the exporter.</p>",
+      "eli5": "<p>Each kind of report gets its own pipe and must say first whether it promises delivery. If there are not enough pipes, you can share one, but then you only know the shared pipe lost something.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Withdrawing and Reusing Templates",
+      "content": "<p>Unused Templates SHOULD be deleted, and a Template MUST be deleted before its ID is reused. The Template Withdrawal Message MUST be sent on the same stream as the Template Record, and MUST be sent reliably with ordered delivery. Since messages arrive in order, it cannot overtake earlier Data Records, so none are lost to late arrival.</p><p>The ID MAY be reused on the same stream immediately after the withdrawal, which equals a Template Reuse Delay of 0. After reuse, the exporter MUST send a Reliability Options Data Record for the new Template. If the ID moves to a different stream, the new Template Record MUST NOT be sent before the Template Reuse Delay interval.</p><p>A withdrawal of all Templates for the Observation Domain ID MUST NOT be used. Several Template IDs MAY be withdrawn together, if all are used on the same stream as the message.</p>",
+      "eli5": "<p>When a pipe is done with one kind of report, you send a note saying so, and you can start a new kind right after, because the note and what follows stay in order.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "The Collector: Enabling, Disabling and Counting Loss",
+      "content": "<p>IPFIX has no capability negotiation, so the collector infers it. If the first Data Record received belongs to the Data Records Reliability Options Template, it enables the extension for that Transport Session. Otherwise it MUST NOT enable it. A collector SHOULD support adding streams per RFC 6525.</p><p>The collector MUST log an error and disable the extension for the association if the exporter misbehaves. The listed conditions include a Data Record arriving before its reliability record, a second reliability record for the same Template, a record or withdrawal tied to a Template defined on another stream, loss seen without an announced unreliable Template, and any message with the SCTP unordered flag set to 1.</p><p>To count loss, the collector uses the Sequence Number in the IPFIX Message header, which grows with the number of Data Records. Where one or more messages are lost, the lost Data Records number the Sequence Number of the first following message (S2) minus the first lost one (S1), where S1 is S0 plus N0, the previous message's number and record count. Arithmetic is modulo 2^32. Because the count is per stream, the loss belongs to the Templates sent unreliably there.</p>",
+      "eli5": "<p>The receiver watches the page numbers. If numbers are skipped in one pipe, it knows how many pages vanished, and which kind of report they were.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "7",
+      "title": "Worked Examples",
+      "content": "<p>The RFC gives three figures. In the first, stream 10 carries Template 257 with full reliability, Data Records for 257 with partial reliability, and Reliability Options Template 256 with full reliability whose single record says Template 257 has <code>dataRecordsReliability</code> False.</p><p>In the second, stream 20 carries Reliability Options Template 258, Options Template 259 and Template 260, all fully reliable. The Reliability Data Set holds three records: 258 and 259 are reliable (True) and 260 is not (False). Any loss seen on that stream can only come from the Data Records for Template 260. The first record, for 258 itself, may be omitted.</p><p>In the third, stream 30 shows Template 262 withdrawn and redefined at once, with no Template Reuse Delay wait.</p>",
+      "eli5": "<p>The examples show pipes holding a few kinds of report. Only one kind is sent without a promise, so any missing pages must be from it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The RFC adds no new security rules. It says only that the same security considerations as for the IPFIX protocol (<a href='/5101/'>RFC 5101</a>) apply.</p>",
+      "eli5": "<p>Nothing new here: the same safety rules as ordinary IPFIX still apply.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "LOSS COUNT PER STREAM (RFC 6526, SECTION 4.5.4)",
+      "data": {
+        "title": "Lost Data Records",
+        "lang": "text",
+        "code": "S1 = S0 + N0\nloss = (S2 - S1) (mod(2^32))\n     = (S2 - (S0 + N0)) (mod(2^32))"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "motivation",
+      "position": "after",
+      "caption": "WHAT ONE ORDERED STREAM PER TEMPLATE BUYS",
+      "data": {
+        "items": [
+          {
+            "title": "Loss per Template",
+            "text": "Loss on a stream is tied to the Template sent unreliably there."
+          },
+          {
+            "title": "Template first",
+            "text": "In-order delivery means the Template arrives before its data."
+          },
+          {
+            "title": "Immediate ID reuse",
+            "text": "Withdraw and redefine on the same stream with no reuse delay."
+          },
+          {
+            "title": "Less buffering",
+            "text": "The collector need not hold data waiting for a Template."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3758]",
+      "text": "Stewart, R., Ramalho, M., Xie, Q., Tuexen, M., and P. Conrad, \"Stream Control Transmission Protocol (SCTP) Partial Reliability Extension\", RFC 3758, May 2004.",
+      "rfc": 3758
+    },
+    {
+      "number": "[RFC4960]",
+      "text": "Stewart, R., Ed., \"Stream Control Transmission Protocol\", RFC 4960, September 2007.",
+      "rfc": 4960
+    },
+    {
+      "number": "[RFC5101]",
+      "text": "Claise, B., Ed., \"Specification of the IP Flow Information Export (IPFIX) Protocol for the Exchange of IP Traffic Flow Information\", RFC 5101, January 2008.",
+      "rfc": 5101
+    },
+    {
+      "number": "[RFC5102]",
+      "text": "Quittek, J., Bryant, S., Claise, B., Aitken, P., and J. Meyer, \"Information Model for IP Flow Information Export\", RFC 5102, January 2008.",
+      "rfc": 5102
+    },
+    {
+      "number": "[RFC6525]",
+      "text": "Stewart, R., Tuexen, M., and P. Lei, \"Stream Control Transmission Protocol (SCTP) Stream Reconfiguration\", RFC 6525, February 2012.",
+      "rfc": 6525
+    },
+    {
+      "number": "[RFC5476]",
+      "text": "Claise, B., Ed., Johnson, A., and J. Quittek, \"Packet Sampling (PSAMP) Protocol Specifications\", RFC 5476, March 2009.",
+      "rfc": 5476
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

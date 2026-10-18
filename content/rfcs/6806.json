@@ -10,13 +10,235 @@
   "questions": [
     "kerberos cross-realm referrals",
     "kerberos principal name canonicalization",
-    "how does kdc refer to another realm"
+    "how does kdc refer to another realm",
+    "what is kerberos canonicalize option",
+    "how does kerberos wrong realm referral work",
+    "what is nt-enterprise principal name"
+  ],
+  "tags": [
+    "Kerberos",
+    "Authentication",
+    "Naming"
+  ],
+  "subtitle": "How a Kerberos KDC can point clients to the right realm, so clients need far less realm configuration.",
+  "tldr": {
+    "problem": "In a Kerberos deployment with several realms, a client has to know which realm holds each user or service before it can ask for a ticket, which means keeping detailed per-host configuration on every client.",
+    "mechanism": "The client sets the canonicalize KDC option. The KDC can then map aliases to real principal names, answer with a KDC_ERR_WRONG_REALM error for users, or hand back a cross-realm ticket-granting ticket for services. A checksum-based negotiation lets the client detect tampering with its request.",
+    "outcome": "Clients can find principals in other realms by following referrals instead of local tables. The RFC is a Proposed Standard that updates RFC 4120, and it spends a lot of space on the attacks that unprotected referrals allow.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "KDC option",
+      "value": "canonicalize (bit 15)"
+    },
+    {
+      "label": "Negotiation padata",
+      "value": "PA-REQ-ENC-PA-REP (149)"
+    },
+    {
+      "label": "Ticket flag",
+      "value": "enc-pa-rep (15)"
+    },
+    {
+      "label": "Suggested referral limit",
+      "value": "5"
+    },
+    {
+      "label": "AD-LOGIN-ALIAS ad-type",
+      "value": "80"
+    },
+    {
+      "label": "Key usage number",
+      "value": "KEY_USAGE_AS_REQ (56)"
+    }
+  ],
+  "today": "<p>RFC 6806 is a Proposed Standard that updates <a href='/4120/'>RFC 4120</a>. The metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "kerberos",
+    "kdc",
+    "principal",
+    "realm",
+    "ticket",
+    "tgt",
+    "canonicalization",
+    "pre-authentication",
+    "man-in-the-middle"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem: Knowing the Realm",
+      "content": "<p>Kerberos principal names are built from a user or service name plus a <strong>realm</strong>. With a single realm this is easy. With several realms, a client must work out which realm a user or service lives in before it sends an AS or TGS request. Traditionally that needs a table on every client mapping DNS host names to realms, and the RFC notes that such tables were often filled using insecure DNS queries, in violation of <a href='/4120/'>RFC 4120</a>. Managing the table is costly when there are many realms and computers.</p><p>This memo moves that work to the KDC. It lets the KDC canonicalize names, supply aliases for users and services, and generate referrals to other realms. There are two kinds: <strong>client referrals</strong>, where the client does not know which realm holds a user account, and <strong>server referrals</strong>, where it does not know which realm holds a server account.</p><p>Because referrals open new attack opportunities, the RFC also adds a way to protect the integrity of the request, and a way to negotiate whether FAST (<a href='/6113/'>RFC 6113</a>) is available.</p>",
+      "eli5": "<p>Instead of every kid memorizing which classroom every teacher is in, the front office tells you where to go. That means fewer lists to keep up to date.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Requesting Referrals and the Realm Model",
+      "content": "<p>A client asks for referrals by explicitly setting the <code>canonicalize</code> KDC option (bit 15) in an AS-REQ or TGS-REQ. This tells the KDC that the client is prepared to get back a principal name other than the one it asked for. A <strong>referral TGT</strong> is a cross-realm ticket-granting ticket whose server name differs from the one in the request.</p><p>The memo assumes principals are arranged on three levels: the realm, the enterprise and the world. A KDC can issue tickets for any principal in its own realm, or cross-realm tickets for realms it has a direct relationship with. It also has access to a trusted name service that can resolve any name in its enterprise into a realm closer along the authentication path. That removes the need for an untrusted DNS lookup.</p><p>Section 4.1 spells out the trust involved. A service that accepts an authentication path trusts every realm on it, and any KDC along the path could impersonate the client. Administrators can limit this by controlling which authentication paths are acceptable and by choosing which principals go on access-control lists.</p>",
+      "eli5": "<p>You raise your hand and say it is fine if the answer comes from a different helper. The helpers form a chain, and you have to trust each one in it.</p>"
+    },
+    {
+      "id": "naming",
+      "number": "3",
+      "title": "Enterprise Names and Canonicalization",
+      "content": "<p>The <code>NT-ENTERPRISE</code> principal name type carries one component, a string of realm-defined content, meant as an alias for another principal name in the enterprise. The aim is to unify email-style names and security principal names. For example, accounts <code>alice</code> in DEV.EXAMPLE.COM and <code>bob</code> in ADMIN.EXAMPLE.COM can log on as <code>alice@EXAMPLE.COM</code> and <code>bob@EXAMPLE.COM</code>. The whole name travels as a single component with name type NT-ENTERPRISE, and the KDC turns it into the true principal name.</p><p>When the canonicalize option is set, the KDC MAY change the client and server principal names and types in an AS response and ticket. In the response to a TGS request, names MUST NOT be changed. Services MUST NOT make distinctions based on which alias appears in a ticket, because the service name in a ticket is not cryptographically protected.</p><p>Clients SHOULD reject an AS response that changes the server name unless the response is protected (for example by FAST) or the new name is one the client explicitly expects. Many clients do allow the realm name to change.</p><p>The KDC MAY also include an <code>AD-LOGIN-ALIAS</code> authorization data element (ad-type 80), wrapped in AD-KDC-ISSUED, listing the aliases the principal is known by. This is specified only for the one-realm case and SHOULD be dropped in the general cross-realm case.</p>",
+      "eli5": "<p>You can sign in with a friendly nickname, and the office quietly swaps it for your real student number. But nobody should trust a name tag that anyone could rewrite.</p>"
+    },
+    {
+      "id": "resolution",
+      "number": "4",
+      "title": "Client and Server Referrals",
+      "content": "<p>In a <strong>client referral</strong>, the client sends its AS-REQ to a convenient realm. If the account is not there and the canonicalize option is set, the KDC may look the name up in a name or directory service. If the lookup fails it MUST return <code>KDC_ERR_C_PRINCIPAL_UNKNOWN</code>. If it succeeds it MUST return <code>KDC_ERR_WRONG_REALM</code>, with the crealm field holding the true realm or another realm that may know better. The client MUST NOT use the cname in that error. It repeats the AS request with the same client name to the realm named, and SHOULD repeat until it finds the true realm. The RFC suggests a limit of 5 referrals to avoid loops.</p><p>In a <strong>server referral</strong> the KDC returns a referral TGT instead of an error. If the canonicalize flag is set and the KDC cannot find the principal locally, it MAY return a cross-realm TGT for the next hop toward a realm that may be able to resolve the name. The client keeps requesting TGTs along the chain until it reaches the realm of the server. The same suggested limit of 5 applies. When the flag is not set, the rules of <a href='/4120/'>RFC 4120</a> apply.</p><p>Clients may cache the mapping from the requested name to the next realm. The cached referral should be treated as invalid when the TGT expires, and KDC authors should consider factors such as DNS alias lifetimes when setting expiry times for referral tickets. Clients should also limit which referral mappings they accept by local policy, such as a configured list of realms or realms the user accepts when prompted.</p>",
+      "eli5": "<p>If you knock on the wrong door, the person says, try the next building over. You keep following the pointers until you find the right place, but you give up after a few tries so you do not walk in circles.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "5",
+      "title": "Negotiating FAST and Detecting Modified Requests",
+      "content": "<p>Implementations MUST support a negotiation mechanism that detects requests modified in transit when the result is a reply rather than an error, and that securely shows whether a KDC supports FAST.</p><p>Conforming clients MUST send pre-authentication data of type <code>PA-REQ-ENC-PA-REP</code> (149) in all AS requests, and MAY send it in TGS requests. The value SHOULD be empty. Conforming KDCs must always set the ticket flag <code>enc-pa-rep</code> (15) in every ticket they issue.</p><p>The KDC reply gains an <code>encrypted-pa-data</code> field in <code>EncKDCRepPart</code>. If the client sent the padata item, the KDC MUST include a <code>PA-REQ-ENC-PA-REP</code> item in it, containing a checksum over the AS-REQ or TGS-REQ. The checksum key is the reply key and the key usage number is <code>KEY_USAGE_AS_REQ</code> (56). A KDC that supports FAST MUST also include a <code>PA-FX-FAST</code> padata item.</p><p>A client MUST reject a response if it sent the request padata, the enc-pa-rep ticket flag is set, and the reply item is absent or its checksum does not verify.</p>",
+      "eli5": "<p>You write a note on how you asked your question and the clerk sends back a sealed copy of it. If the copy does not match, you know someone changed your question on the way.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>Referrals use fields that RFC 4120 does not protect. None of the fields defined for an AS request are protected, and some information in a TGS request may not be. FAST can fully mitigate this by protecting request and response, but it needs an armor ticket and not every realm lets every client get one. The negotiation in the previous section detects modified requests and mitigates some attacks. The RFC says an attacker cannot mount a downgrade attack against a client, because FAST support is indicated by a ticket flag.</p><p>With only the negotiation mechanism, the client name and the ticket in the response remain unprotected. Changing them causes a denial of service, since the later AP-REQ will not match the ticket. An unprotected <code>KDC_ERR_WRONG_REALM</code> error can also convince a client to authenticate to the wrong realm.</p><p>With no protection beyond RFC 4120, changing the server name in a request can be a significant attack, for example by directing a user to a server under the attacker's control. Clients that accept server-name changes SHOULD restrict acceptable names carefully, and MUST restrict them enough that the password-changing service they reach is the correct one.</p><p>A logon mechanism should not trust a name that was not used to authenticate the user. A workstation SHOULD perform an AP-REQ authentication against itself and use the client name in that ticket. The RFC also discusses a shared-password case, where a man-in-the-middle can make a user unknowingly use the wrong credentials, and notes that name canonicalization adds more KDCs as trusted third parties.</p>",
+      "eli5": "<p>Pointers are only safe if nobody can swap the signs. If a trickster changes the sign, you might walk into the wrong office, so check carefully who you end up talking to.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "7",
+      "title": "Compatibility with Windows Name Canonicalization",
+      "content": "<p>Appendix A describes an earlier form of name canonicalization in the Microsoft Windows 2000 and Windows 2003 releases. It differs in two ways. First, Windows includes an extra encrypted padata element, <code>PA-SVR-REFERRAL-INFO</code> (type 20), whose referred-realm field repeats information already in the second component of the returned TGT. Second, with PKINIT the NT-ENTERPRISE client name is encoded as a Subject Alternative Name in the client's X.509 certificate.</p><p>The appendix also says that in Microsoft's current implementation, using global catalogs, any domain in one forest can be reached from any other domain in the same or another trusted forest with 3 or less referrals. Only one NT-ENTERPRISE alias is permitted there, so multiple aliases in <code>AD-LOGIN-ALIAS</code> had not come up.</p>",
+      "eli5": "<p>Another company already had its own way of doing this, so the memo lists how its version differs, so the two can work together.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "resolution",
+      "position": "after",
+      "caption": "SERVER REFERRAL EXAMPLE (RFC 6806)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "admin",
+            "label": "ADMIN.EXAMPLE.COM"
+          },
+          {
+            "key": "example",
+            "label": "EXAMPLE.COM"
+          },
+          {
+            "key": "dev",
+            "label": "DEV.EXAMPLE.COM"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "admin",
+            "label": "TGS-REQ http/foo.dev.example.com +NC",
+            "color": "blue",
+            "note": "+NC means the canonicalize KDC option is set."
+          },
+          {
+            "from": "admin",
+            "to": "client",
+            "label": "TGS-REP krbtgt/EXAMPLE.COM@ADMIN.EXAMPLE.COM",
+            "color": "green",
+            "note": "A referral TGT toward the next realm."
+          },
+          {
+            "from": "client",
+            "to": "example",
+            "label": "TGS-REQ http/foo.dev.example.com +NC",
+            "color": "blue"
+          },
+          {
+            "from": "example",
+            "to": "client",
+            "label": "TGS-REP krbtgt/DEV.EXAMPLE.COM@EXAMPLE.COM",
+            "color": "green"
+          },
+          {
+            "from": "client",
+            "to": "dev",
+            "label": "TGS-REQ http/foo.dev.example.com +NC",
+            "color": "blue"
+          },
+          {
+            "from": "dev",
+            "to": "client",
+            "label": "TGS-REP http/foo.dev.example.com@DEV.EXAMPLE.COM",
+            "color": "green",
+            "note": "The real service ticket."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "EXAMPLE REALM CONFIGURATION (RFC 6806)",
+      "data": {
+        "root": {
+          "label": "EXAMPLE.COM",
+          "note": "Lines are cross-realm relationships",
+          "children": [
+            {
+              "label": "ADMIN.EXAMPLE.COM"
+            },
+            {
+              "label": "DEV.EXAMPLE.COM"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4120]",
+      "text": "Neuman, C., Yu, T., Hartman, S., and K. Raeburn, \"The Kerberos Network Authentication Service (V5)\", RFC 4120, July 2005.",
+      "rfc": 4120
+    },
+    {
+      "number": "[RFC6113]",
+      "text": "Hartman, S. and L. Zhu, \"A Generalized Framework for Kerberos Pre-Authentication\", RFC 6113, April 2011.",
+      "rfc": 6113
+    },
+    {
+      "number": "[RFC4556]",
+      "text": "Zhu, L. and B. Tung, \"Public Key Cryptography for Initial Authentication in Kerberos (PKINIT)\", RFC 4556, June 2006.",
+      "rfc": 4556
+    },
+    {
+      "number": "[RFC5322]",
+      "text": "Resnick, P., Ed., \"Internet Message Format\", RFC 5322, October 2008.",
+      "rfc": 5322
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

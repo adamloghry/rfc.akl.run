@@ -9,13 +9,162 @@
   },
   "questions": [
     "tcp soft errors",
-    "how does tcp react to icmp soft errors"
+    "how does tcp react to icmp soft errors",
+    "why does tcp abort on icmp destination unreachable",
+    "what is an icmp soft error"
+  ],
+  "tags": [
+    "TCP",
+    "ICMP",
+    "Errors"
+  ],
+  "subtitle": "Why many TCP stacks give up on a new connection at the first ICMP soft error, even though the standard says to keep trying.",
+  "tldr": {
+    "problem": "Standard TCP keeps retransmitting a SYN after an ICMP soft error, for at least 3 minutes, so a host cycling through a list of addresses can stall for a long time on an unreachable one.",
+    "mechanism": "Many TCP stacks treat soft errors as hard errors while a connection is in SYN-SENT or SYN-RECEIVED, aborting the attempt at once or after a set number of errors and SYN retransmissions.",
+    "outcome": "The RFC documents this non-standard but widely implemented behaviour without changing the standard, and lists its drawbacks and security cost.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Standard SYN retry time",
+      "value": "At least 3 minutes"
+    },
+    {
+      "label": "BSD connection-establishment timer",
+      "value": "75 seconds"
+    },
+    {
+      "label": "Linux behaviour since",
+      "value": "Version 2.0.0 (1996)"
+    },
+    {
+      "label": "BSD abort rule",
+      "value": "Second ICMP error and SYN retransmitted more than three times"
+    }
+  ],
+  "today": "<p>RFC 5461 is an Informational document published in February 2009. It describes a non-standard behaviour and states that it does not change TCP's standard reaction. The unit metadata lists no obsoleting or updating RFC.</p>",
+  "glossary": [
+    "tcp",
+    "icmp",
+    "icmpv6",
+    "retransmission",
+    "nat",
+    "middlebox",
+    "multihoming"
+  ],
+  "sections": [
+    {
+      "id": "background",
+      "number": "2",
+      "title": "How TCP Treats ICMP Errors",
+      "content": "<p>Network errors are split into <strong>soft errors</strong>, transient failures likely to be solved soon, and <strong>hard errors</strong>, which are unlikely to be solved in the near future. <a href='/1122/'>RFC 1122</a> lists the ICMP soft errors: Destination Unreachable codes 0, 1 and 5, Time Exceeded codes 0 and 1, and Parameter Problem. The RFC extrapolates the idea to ICMPv6, for example Destination Unreachable codes 0 and 3.</p><p>RFC 1122 says TCP SHOULD abort a connection on a hard error, though the RFC notes that virtually no current implementation does so for synchronized states. For soft errors, RFC 1122 says TCP MUST NOT abort. TCP keeps retransmitting until the data is acknowledged or the connection times out, and may record the error to give a more specific message on timeout.</p>",
+      "eli5": "<p>A soft error is a sign saying 'road closed for now'. A hard error says 'road gone for good'. The old rules said to wait out a soft error and try again.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "3",
+      "title": "The Problem: Long Delays",
+      "content": "<p>An application connecting to a name with several addresses usually tries them one after another. If an address is permanently unreachable and listed first, the application blocks on it. Even when a router signals the problem with an ICMP soft error, TCP keeps retransmitting the SYN segment. RFC 1122 requires the timer to allow retransmission for at least 3 minutes, so each bad address can cost several minutes, which is unacceptable for interactive uses such as the web.</p><p>A regular case is a dual-stack node with IPv6 enabled by default in an IPv4 or mixed network, where IPv6 connectivity does not exist. If packets are silently dropped, the node can only wait for a timeout. If ICMPv6 errors arrive, compliant TCP still will not abort. The RFC adds that applications could try addresses in parallel instead.</p>",
+      "eli5": "<p>If the first house on your list is empty, waiting several minutes at its door before trying the second house is a waste of time.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "The Deployed Workarounds",
+      "content": "<p>Two workarounds have been implemented in a variety of TCP/IP stacks. The TCPM working group chose to document this widespread non-standard behaviour but not to change the TCP standard.</p><p>The first treats every ICMP soft error as a hard error when the connection is in SYN-SENT or SYN-RECEIVED. The Linux kernel has done this since version 2.0.0, released in 1996. This violates section 4.2.3.9 of RFC 1122. It can also help with faulty middle-boxes that reject a SYN carrying ECN bits with an ICMP error, since the host can retry the SYN with the ECE and CWR bits cleared (<a href='/3168/'>RFC 3168</a>).</p><p>The second, more conservative approach, used in BSD systems for more than ten years, adds two parameters, <code>MAXSYNREXMIT</code> and <code>MAXSOFTERROR</code>, and counters <code>nsynrexmit</code> and <code>nsofterror</code>. The attempt is aborted only when both counters exceed their limits. BSD aborts on the second ICMP error once the SYN has been retransmitted more than three times, and a connection-establishment timer expires after 75 seconds. With <code>MAXSOFTERROR</code> set to 1 and <code>MAXSYNREXMIT</code> set to zero, the two schemes are identical.</p>",
+      "eli5": "<p>One way is to give up at the first 'nobody home' sign. The careful way is to give up only after a few signs and a few more knocks.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "5",
+      "title": "Drawbacks of the Workarounds",
+      "content": "<p>The RFC lists three ways the change makes TCP less robust than a standards-compliant stack.</p><ul><li><strong>Non-deterministic transient failures:</strong> if a short outage affects every address, such as a mobile system passing through a tunnel, the application may cycle through all addresses and fail when a retry seconds later would have worked. If a name has only one address, persistent retrying may be better.</li><li><strong>Deterministic transient failures:</strong> if upstream connectivity is only activated on demand, the connection that triggers it can deterministically get Destination Unreachable errors and be aborted.</li><li><strong>Non-compliant NATs:</strong> some NATs answer an unsolicited inbound SYN with an ICMP soft error, which can stop a TCP simultaneous open from succeeding. These NATs are not BEHAVE-compliant and should follow REQ-4 of <a href='/5382/'>RFC 5382</a>.</li></ul>",
+      "eli5": "<p>Giving up too fast can backfire if the problem was only a short hiccup, like driving through a tunnel and losing signal for a moment.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The workaround could be exploited to reset valid connections during connection establishment, so it makes TCP slightly more vulnerable to attack. The RFC points out that an attacker who wants to reset ongoing connections could already send any of the ICMP hard error messages in any connection state.</p><p>Trying the next address after an error may also inject more packets into the network than retrying the same address with a backed-off timer. Compliant implementations can already do this, because there are no recommendations for limiting the rate of SYN segments to a specific destination.</p>",
+      "eli5": "<p>A prankster could send a fake 'nobody home' note to make your computer give up. They could already send other fake notes, so this adds only a little risk.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SOFT-ERROR REACTIONS DURING CONNECTION SETUP",
+      "data": {
+        "columns": [
+          "Approach",
+          "Reaction to an ICMP soft error in SYN-SENT or SYN-RECEIVED"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Standard (RFC 1122)",
+              "Do not abort; keep retransmitting the SYN for at least 3 minutes"
+            ]
+          },
+          {
+            "cells": [
+              "Treat as hard error",
+              "Abort the attempt at once"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Repeated confirmation",
+              "Abort when nsynrexmit and nsofterror both exceed MAXSYNREXMIT and MAXSOFTERROR"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC0792]",
+      "text": "Postel, J., \"Internet Control Message Protocol\", STD 5, RFC 792, September 1981.",
+      "rfc": 792
+    },
+    {
+      "number": "[RFC1122]",
+      "text": "Braden, R., \"Requirements for Internet Hosts - Communication Layers\", STD 3, RFC 1122, October 1989.",
+      "rfc": 1122
+    },
+    {
+      "number": "[RFC3168]",
+      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
+      "rfc": 3168
+    },
+    {
+      "number": "[RFC4443]",
+      "text": "Conta, A., Deering, S., and M. Gupta, \"Internet Control Message Protocol (ICMPv6) for the Internet Protocol Version 6 (IPv6) Specification\", RFC 4443, March 2006.",
+      "rfc": 4443
+    },
+    {
+      "number": "[RFC4943]",
+      "text": "Roy, S., Durand, A., and J. Paugh, \"IPv6 Neighbor Discovery On-Link Assumption Considered Harmful\", RFC 4943, September 2007.",
+      "rfc": 4943
+    },
+    {
+      "number": "[RFC5382]",
+      "text": "Guha, S., Biswas, K., Ford, B., Sivakumar, S., and P. Srisuresh, \"NAT Behavioral Requirements for TCP\", BCP 142, RFC 5382, October 2008.",
+      "rfc": 5382
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

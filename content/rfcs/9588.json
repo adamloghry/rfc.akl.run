@@ -10,13 +10,237 @@
   "questions": [
     "kerberos spake",
     "kerberos pake preauthentication",
-    "prevent kerberos offline password guessing"
+    "prevent kerberos offline password guessing",
+    "what is kerberos spake",
+    "how does spake pre-authentication work",
+    "how does kerberos stop offline password guessing"
+  ],
+  "tags": [
+    "Kerberos",
+    "Authentication",
+    "PAKE"
+  ],
+  "subtitle": "A Kerberos login step that stops attackers from guessing your password offline, and can carry a second factor safely.",
+  "tldr": {
+    "problem": "In Kerberos, an attacker who captures a login exchange (or asks the KDC for one) can try password guesses offline against it. Sending second-factor data such as one-time passwords has the same weakness.",
+    "mechanism": "The client and the KDC run a SPAKE key exchange in which each public key is masked by a value derived from the password-based reply key. They end up with a strong, high-entropy key that replaces the reply key and protects any second-factor data.",
+    "outcome": "Weak passwords no longer make the exchange open to offline dictionary attacks, and second-factor data can be sent without a separate secure channel such as FAST. Online guessing is still possible, so the KDC should rate limit.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "PA-SPAKE padata-type",
+      "value": "151"
+    },
+    {
+      "label": "Key usage KEY_USAGE_SPAKE",
+      "value": "65"
+    },
+    {
+      "label": "Mandatory group",
+      "value": "edwards25519 (group 1)"
+    },
+    {
+      "label": "Second-factor type defined",
+      "value": "SF-NONE (1)"
+    },
+    {
+      "label": "New IANA registries",
+      "value": "Kerberos Second-Factor Types; Kerberos SPAKE Groups"
+    }
+  ],
+  "today": "<p>RFC 9588 is a Proposed Standard published in August 2024. It has not been obsoleted or updated, and it works alongside the Kerberos framework in <a href='/6113/'>RFC 6113</a>.</p>",
+  "glossary": [
+    "kerberos",
+    "kdc",
+    "pre-authentication",
+    "diffie-hellman",
+    "transcript-hash",
+    "key-derivation",
+    "der-encoding",
+    "cookie",
+    "mitm",
+    "forward-secrecy",
+    "password-authenticated-key-exchange",
+    "dictionary-attack"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "The Offline Guessing Problem",
+      "content": "<p>Kerberos normally secures the first login exchange between a client and the Key Distribution Center (KDC) with a key derived from the user's password. As RFC 4120 notes, an attacker can run an <strong>offline dictionary attack</strong> against that password. The attacker either starts an exchange for a principal that does not require pre-authentication, or eavesdrops on a legitimate exchange that uses encrypted timestamp pre-authentication.</p><p>RFC 9588 defines a pre-authentication mechanism that still authenticates with long-term keys but resists these attacks. It also lets a second factor be used without setting up a separate secure channel first, because the trust already established by the shared long-term key is enough.</p>",
+      "eli5": "<p>If a thief copies your locked diary, they can try every possible key at home. This mechanism makes the lock so that copying it does not help the thief guess your key.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "Why SPAKE and Why Two Factors",
+      "content": "<p>A password-authenticated key exchange (PAKE) has three useful properties: each side contributes entropy, passive attackers cannot determine the shared key, and active attackers cannot perform a machine-in-the-middle attack. Together these give a high-entropy key even when the password is weak.</p><p>SPAKE was chosen because it encrypts the public keys of a Diffie-Hellman exchange with a shared secret so the result stays a member of the group. That allows elliptic curve cryptography, it needs only one message from each party to compute the shared key, and it needs few group operations.</p><p>Two-factor methods often send plaintext material to the KDC, such as one-time passwords, challenge/response signatures or biometric data. If that data were encrypted under the password-derived key, it would offer a way to test password guesses. RFC 6560 solves this with FAST, but FAST needs a secondary trust relationship that has proven cumbersome to deploy. SPAKE instead builds an encrypted channel implicitly from the key exchange. The RFC says it does not replace FAST and may be used with it.</p>",
+      "eli5": "<p>SPAKE is a way for two people to build a brand-new secret key together, using a shared password only as a seasoning. The new key is much stronger than the password, and it can then carry extra proof like a code from your phone.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The PA-SPAKE Messages",
+      "content": "<p>All messages travel as PA-DATA elements of type <code>PA-SPAKE</code> (value 151). The value is empty or a DER-encoded <code>PA-SPAKE</code>, which is a choice of four messages:</p><ul><li><code>support</code>: the client lists its preferred groups, most preferred first.</li><li><code>challenge</code>: the KDC names the chosen group, gives its public key, and lists the second factors it accepts.</li><li><code>response</code>: the client sends its public key and its chosen second factor, encrypted.</li><li><code>encdata</code>: encrypted second-factor data for any further round trips.</li></ul><p>A group is an entry in the new \"Kerberos SPAKE Groups\" registry. Each group fixes the serialization, the constants M and N, and a hash function. Clients and KDCs MUST implement edwards25519, although they MAY choose not to offer or accept it by default. The initial registry also holds P-256, P-384 and P-521.</p>",
+      "eli5": "<p>There are four kinds of notes passed back and forth: \"here is what I can do\", \"here is my challenge\", \"here is my answer\", and \"here is more secret info\". Each has its own envelope.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "How the Exchange Runs",
+      "content": "<p>In the full protocol there are three passes. In the first, the client sends an AS-REQ with no pre-authentication data and the KDC replies with <code>KDC_ERR_PREAUTH_REQUIRED</code>, including an empty PA-SPAKE element to show it supports SPAKE. In the second, the client sends a <code>support</code> message, and the KDC picks a group, chooses a secret scalar x and computes its public key T = x*P + w*M. It answers with <code>KDC_ERR_MORE_PREAUTH_DATA_REQUIRED</code> and a <code>challenge</code>.</p><p>Here w is derived from the initial reply key, so it depends on the password. In the third pass the client chooses y, computes its public key S = y*P + w*N and the shared element K = y*(T - w*M), and sends a <code>response</code>. The KDC computes K = x*(S - w*N), derives a key, and decrypts the factor field. If decryption works, the first factor is validated. If either factor fails, the KDC MUST return <code>KDC_ERR_PREAUTH_FAILED</code>.</p><p>Further <code>encdata</code> round trips are allowed if the second factor needs them. On success, the reply key is replaced by a strengthened key K'[0] and the KDC continues with a KDC-REP or the next mechanism in the authentication set. Clients MUST support an optimization where the KDC sends an optimistic <code>challenge</code> in its first reply, and KDCs MUST support one where the client skips the first pass.</p><div class='callout callout-info'><p>KDCs need to remember state between requests, so they MUST have a secure way to do it. A stateless KDC will usually use an encrypted <code>PA-FX-COOKIE</code>, and clients MUST support cookies.</p></div>",
+      "eli5": "<p>The client and the server each pick a secret number and send a scrambled version, using the password as the scrambler. Each can then unscramble the other's message and work out the same new key, but a bystander cannot.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "5",
+      "title": "Transcript Hash and Key Derivation",
+      "content": "<p>The shared group element K is never used directly. Both sides keep a <strong>transcript hash</strong>, which starts as all zero bits and is updated with the client's support message plus the KDC's challenge, and then with the client's public key. Because the hash feeds every key derivation, tampering with the unauthenticated support or challenge messages makes the two sides derive different keys, so downgrade attacks fail.</p><p>Each key K'[n] comes from hashing the string \"SPAKEkey\", the group number, the encryption type, the PRF+ output used for w, K, the transcript hash, the KDC-REQ-BODY, the number n and a block counter. The result is combined with the initial reply key using KRB-FX-CF2. Different n values give different keys: K'[0] is the new reply key, K'[1] encrypts the client's response factor, K'[2] the KDC's reply, and later client and KDC messages use odd and even values respectively.</p><p>Including the KDC-REQ-BODY in the derivation also binds the request contents to the exchange.</p>",
+      "eli5": "<p>Both sides keep a running record of everything said so far and stir it into the final key. If a sneaky middleman changed even one word, the two keys would not match and the lock would not open.</p>"
+    },
+    {
+      "id": "options",
+      "number": "6",
+      "title": "Second Factors and Authentication Sets",
+      "content": "<p>The only second-factor type defined here is <code>SF-NONE</code> (1), meaning no second factor. Its data field MUST be omitted and it always validates. In that case, successful decryption of a placeholder proves the first factor. Other types can be registered in the new \"Kerberos Second-Factor Types\" registry, where 0 is reserved.</p><p>When SPAKE is offered as part of an authentication set, the KDC SHOULD give a <code>PA-SPAKE-HINT</code> listing its supported groups and second factors, so the client can judge whether choosing the set is likely to work. The hint is not part of the transcript and is never placed directly in a pa-value field.</p>",
+      "eli5": "<p>A second factor is like needing both a key and a secret knock. If no knock is needed, the mechanism just uses a dummy knock that always passes.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Implementations MUST verify that received public keys are group elements, and private scalars x and y MUST be chosen uniformly and divisible by the cofactor. They MUST NOT be reused for different initial reply keys, because reuse lets an attacker who knows one key mount an offline dictionary attack on the other. The M and N values MUST NOT have known discrete logs.</p><ul><li><strong>Side channels:</strong> timing leaks in computing w, wM and wN could reveal the long-term key, and the KDC should respond identically whether or not the factor decrypts.</li><li><strong>Downgrade:</strong> an active attacker posing as the KDC can try to push the client to encrypted timestamp, so clients SHOULD allow that mechanism to be disabled per realm.</li><li><strong>Online guessing:</strong> SPAKE does not stop it, but the KDC sees failed guesses and can rate limit.</li><li><strong>Cookies:</strong> a replayed cookie could make it appear the client authenticated within its validity period, so the KDC SHOULD limit that window with a timestamp.</li><li><strong>Other limits:</strong> no forward secrecy by design, higher computational cost that affects denial-of-service resistance, and no KDC key confirmation.</li></ul>",
+      "eli5": "<p>The password alone is not enough to unlock anything from a recording, but a thief can still try guessing at the front door, so the guard has to notice and slow them down.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE THREE-PASS SPAKE EXCHANGE (RFC 9588)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "kdc",
+            "label": "KDC"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "kdc",
+            "label": "AS-REQ (no pre-auth)",
+            "color": "neutral",
+            "note": "First pass: the client starts without pre-authentication data."
+          },
+          {
+            "from": "kdc",
+            "to": "client",
+            "label": "KDC_ERR_PREAUTH_REQUIRED",
+            "color": "neutral",
+            "note": "Carries an empty PA-SPAKE to show SPAKE is supported."
+          },
+          {
+            "from": "client",
+            "to": "kdc",
+            "label": "AS-REQ + support",
+            "color": "blue",
+            "note": "Second pass: preferred groups, most preferred first."
+          },
+          {
+            "from": "kdc",
+            "to": "client",
+            "label": "MORE_PREAUTH_DATA_REQUIRED + challenge",
+            "color": "green",
+            "note": "Chosen group, KDC public key T and second factors."
+          },
+          {
+            "from": "client",
+            "to": "kdc",
+            "label": "AS-REQ + response",
+            "color": "blue",
+            "note": "Third pass: client public key S and encrypted factor."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "INITIAL KERBEROS SPAKE GROUPS (RFC 9588)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "edwards25519",
+            "desc": "Multiplier length 32, hash SHA-256. Implementations MUST implement it.",
+            "highlight": true
+          },
+          {
+            "code": "2",
+            "label": "P-256",
+            "desc": "Multiplier length 32, hash SHA-256."
+          },
+          {
+            "code": "3",
+            "label": "P-384",
+            "desc": "Multiplier length 48, hash SHA-384."
+          },
+          {
+            "code": "4",
+            "label": "P-521",
+            "desc": "Multiplier length 48, hash SHA-512."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4120]",
+      "text": "Neuman, C., Yu, T., Hartman, S., and K. Raeburn, \"The Kerberos Network Authentication Service (V5)\", RFC 4120, July 2005.",
+      "rfc": 4120
+    },
+    {
+      "number": "[RFC6113]",
+      "text": "Hartman, S. and L. Zhu, \"A Generalized Framework for Kerberos Pre-Authentication\", RFC 6113, April 2011.",
+      "rfc": 6113
+    },
+    {
+      "number": "[RFC6560]",
+      "text": "Richards, G., \"One-Time Password (OTP) Pre-Authentication\", RFC 6560, April 2012.",
+      "rfc": 6560
+    },
+    {
+      "number": "[RFC8125]",
+      "text": "Schmidt, J., \"Requirements for Password-Authenticated Key Agreement (PAKE) Schemes\", RFC 8125, April 2017.",
+      "rfc": 8125
+    },
+    {
+      "number": "[RFC3961]",
+      "text": "Raeburn, K., \"Encryption and Checksum Specifications for Kerberos 5\", RFC 3961, February 2005.",
+      "rfc": 3961
+    },
+    {
+      "number": "[SPAKE]",
+      "text": "Abdalla, M. and D. Pointcheval, \"Simple Password-Based Encrypted Key Exchange Protocols\", CT-RSA 2005, February 2005."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

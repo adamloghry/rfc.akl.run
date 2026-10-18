@@ -9,13 +9,174 @@
   },
   "questions": [
     "what is lisp alt",
-    "how does lisp find the router that holds a mapping"
+    "how does lisp find the router that holds a mapping",
+    "what is an alt router",
+    "does lisp alt carry eid to rloc mappings"
+  ],
+  "tags": [
+    "Routing",
+    "LISP",
+    "Mapping"
+  ],
+  "subtitle": "A BGP-and-GRE overlay that steers LISP map requests to the router that owns an EID-prefix.",
+  "tldr": {
+    "problem": "A LISP ingress router that needs the locators for an endpoint identifier has to find which egress router holds that mapping.",
+    "mechanism": "LISP+ALT builds an overlay of ALT-Routers connected by tunnels, runs BGP over it to carry aggregated EID-prefixes, and forwards Map-Requests hop by hop toward the owning ETR.",
+    "outcome": "The ALT does not carry mappings itself, only a path to the router that has them. It is Experimental and the RFC lists several open questions.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Underlay protocols",
+      "value": "BGP over GRE tunnels"
+    },
+    {
+      "label": "Packets carried on the ALT",
+      "value": "Map-Requests and (discouraged) Data-Probes"
+    },
+    {
+      "label": "Default route",
+      "value": "0.0.0.0/0 or ::/0"
+    }
+  ],
+  "today": "<p>RFC 6836 is an Experimental specification from January 2013, and the unit metadata shows it has not been obsoleted or updated. The RFC itself notes that much was still uncertain about the best way to build the ALT.</p>",
+  "glossary": [
+    "lisp",
+    "endpoint-identifier",
+    "routing-locator",
+    "bgp",
+    "route-aggregation",
+    "autonomous-system",
+    "path-vector",
+    "rate-limiting"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What LISP+ALT Is",
+      "content": "<p>LISP+ALT is a simple distributed index. An ALT-Router overlay, built with BGP (<a href='/4271/'>RFC 4271</a>, <a href='/4760/'>RFC 4760</a>) and Generic Routing Encapsulation (<a href='/2784/'>RFC 2784</a>), operates on EID-prefixes and uses EIDs as forwarding destinations. Routers advertise hierarchically delegated parts of the EID namespace toward the rest of the ALT.</p><p>It is important that the ALT does <strong>not</strong> distribute actual EID-to-RLOC mappings. It only provides a forwarding path from an ITR or Map-Resolver to the ETR that holds the mapping. That ETR then answers with a Map-Reply listing the RLOCs. In most cases ITRs use a Map-Resolver and ETRs register with a Map-Server (<a href='/6833/'>RFC 6833</a>) instead of joining the overlay directly.</p><p>A design goal is to reuse off-the-shelf routers that already speak BGP and GRE. The RFC recommends keeping ALT-Routers logically and physically separate from the native Internet forwarding system.</p>",
+      "eli5": "<p>The ALT is a road map that points to the right house. It does not carry the answer itself, only tells you whose door to knock on.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3",
+      "title": "The ALT Model and ALT Datagrams",
+      "content": "<p>An ITR can originate two packet types to get a mapping. A <strong>Map-Request</strong> is sent into the ALT, and the ETR that owns the mapping replies with a Map-Reply. Because the ALT forwards only on EID destinations, the Map-Request destination must be an EID. A <strong>Data-Probe</strong> is the first data packet for an unknown EID, encapsulated and sent into the ALT; the ETR replies and also delivers the packet. Both are called <strong>ALT Datagrams</strong>, and they carry an RLOC as the outer source and an EID as the outer destination.</p><p>The RFC says Data-Probes are controversial. They avoid the first-packet drop but would need an ALT able to carry heavy traffic, which a tunneled network generally cannot. Their use is not recommended and should be enabled only for experiments.</p><p>LISP+ALT is a hybrid push and pull design: aggregated EID-prefixes are pushed among ALT-Routers, and specific mappings are pulled with LISP requests. An ITR that learns a mapping caches it, and later packets go straight to an RLOC without using the ALT until the entry expires.</p>",
+      "eli5": "<p>When a router does not know where to send something, it asks a question that is passed along the map until it reaches the one who knows, and that one answers directly.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "4",
+      "title": "Building the ALT with GRE and BGP",
+      "content": "<p>The ALT is a roughly hierarchical, partial mesh of GRE tunnels between ALT-Routers, with BGP sessions over them. Each ALT-Router acts as a separate Autonomous System hop, and the AS-path is used only for shortest-path selection and loop avoidance. Because all next hops are on tunnel interfaces, no IGP is needed, and tunnel addresses can come from any plan, including private addressing. Other tunneling mechanisms are not ruled out, and the RFC does not recommend eBGP multihop between ALT-Routers.</p><p>Prefixes are aggregated on power-of-two block boundaries. An ALT-Router should generate an aggregate only if it has BGP sessions to all originators of the more-specific components. It must not aggregate over a non-LISP hole unless it can return a Negative Map-Reply with the action <code>Natively-Forward</code>, and for an unreachable LISP hole it should return a Negative Map-Reply with the action <code>drop</code>. The RFC suggests newly assigned AS numbers unrelated to the global Internet, and says a new SAFI might be useful but it does not request one.</p>",
+      "eli5": "<p>Routers are linked by private tunnels in layers, like a company org chart, so a question about any address can climb up and down to the right office.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Connecting ITRs and ETRs to the ALT",
+      "content": "<p>An ETR can put its EID-prefixes into the ALT in three ways: registering with a Map-Server (the common case), a static route on an edge ALT-Router, or a direct tunnel and BGP connection. An ITR can send ALT Datagrams through a Map-Resolver (the common case), through a static ALT Default Route to an edge ALT-Router, or through its own tunnel and BGP connection. The RFC expects the direct cases to be rare.</p><p>Map-Replies normally do not travel over the ALT. The ETR sends the reply to one of the ITR's RLOCs over the ordinary Internet, which avoids latency and load on the ALT. An ITR should use an RLOC, not a tunnel interface, as the source address of its queries.</p><p>If an ALT-Router cannot forward a datagram, a LISP-aware one may return a Negative Map-Reply, a non-LISP one may return an ICMP message or silently drop it. A silent drop leads to retransmissions and then the source treating the destination as unreachable via LISP. Routers should aggressively rate-limit ALT Datagrams.</p>",
+      "eli5": "<p>Most people use a front desk to ask questions and to register their address. The answer always comes back by regular mail, not through the map roads.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Aggregation, Stability and Security",
+      "content": "<p>Since the ALT carries only EID-prefixes and not RLOC reachability, changes happen mainly at subscription time or when the ALT itself fails. The RFC therefore expects less flapping than in the global routing system and mappings that cannot go stale from slow propagation. Site-to-site traffic engineering is done through LISP preference and weight fields in Map-Replies, not by deaggregating routes.</p><p>On security, LISP+ALT shares the characteristics of BGP. The RFC lists vulnerabilities including bogus mappings, denial of service against ALT-Routers or ITR map-caches, reconnaissance through Map-Requests, and leaking an EID-prefix into the global routing system. Mitigations include explicit peering, TCP between elements, HMAC protection of BGP/TCP connections (<a href='/5925/'>RFC 5925</a>), nonces in messages, rate limiting, and the BGP security work then under way in the IETF SIDR working group.</p>",
+      "eli5": "<p>Because the map rarely changes, it stays steady. It is protected with the same locks used for regular internet routing.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "MAP-REQUEST VIA THE ALT (SIMPLIFIED, ILLUSTRATIVE)",
+      "data": {
+        "lanes": [
+          {
+            "key": "itr",
+            "label": "ITR"
+          },
+          {
+            "key": "mr",
+            "label": "Map-Resolver"
+          },
+          {
+            "key": "alt",
+            "label": "ALT-Routers"
+          },
+          {
+            "key": "etr",
+            "label": "ETR"
+          }
+        ],
+        "messages": [
+          {
+            "from": "itr",
+            "to": "mr",
+            "label": "Encapsulated Map-Request",
+            "color": "blue"
+          },
+          {
+            "from": "mr",
+            "to": "alt",
+            "label": "Map-Request to EID",
+            "color": "blue",
+            "note": "Forwarded over the overlay using BGP-learned EID-prefix routes."
+          },
+          {
+            "from": "alt",
+            "to": "etr",
+            "label": "Map-Request",
+            "color": "blue"
+          },
+          {
+            "from": "etr",
+            "to": "itr",
+            "label": "Map-Reply with RLOCs",
+            "color": "green",
+            "note": "Sent over the ordinary Internet to the ITR's RLOC, not over the ALT."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6830]",
+      "text": "Farinacci, D., Fuller, V., Meyer, D., and D. Lewis, \"The Locator/ID Separation Protocol (LISP)\", RFC 6830, January 2013.",
+      "rfc": 6830
+    },
+    {
+      "number": "[RFC6833]",
+      "text": "Fuller, V. and D. Farinacci, \"Locator/ID Separation Protocol (LISP) Map-Server Interface\", RFC 6833, January 2013.",
+      "rfc": 6833
+    },
+    {
+      "number": "[RFC4271]",
+      "text": "Rekhter, Y., Li, T., and S. Hares, \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "rfc": 4271
+    },
+    {
+      "number": "[RFC2784]",
+      "text": "Farinacci, D., Li, T., Hanks, S., Meyer, D., and P. Traina, \"Generic Routing Encapsulation (GRE)\", RFC 2784, March 2000.",
+      "rfc": 2784
+    },
+    {
+      "number": "[RFC6832]",
+      "text": "Lewis, D., Meyer, D., Farinacci, D., and V. Fuller, \"Interworking between Locator/ID Separation Protocol (LISP) and Non-LISP Sites\", RFC 6832, January 2013.",
+      "rfc": 6832
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

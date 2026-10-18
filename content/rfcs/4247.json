@@ -9,13 +9,163 @@
   },
   "questions": [
     "header compression over mpls",
-    "voip overhead on mpls"
+    "voip overhead on mpls",
+    "voip header overhead",
+    "mpls compression requirements",
+    "rtp header compression techniques"
+  ],
+  "tags": [
+    "VoIP",
+    "MPLS",
+    "Compression"
+  ],
+  "subtitle": "Making voice over IP more efficient when using MPLS networks.",
+  "tldr": {
+    "problem": "Voice over IP packets are small but have large headers (IP, UDP, RTP layers, plus MPLS labels). The header overhead wastes bandwidth, especially on expensive international links and low-speed lines. Normally, compression/decompression happens at every router, which requires costly processing.",
+    "mechanism": "The proposal is to compress headers once at the network edge, route the compressed packets through an MPLS tunnel to the far edge without re-compressing at each hop, then decompress once at the destination. This reuses existing compression standards (cRTP, ECRTP, ROHC) but applies them end-to-end within an MPLS path, preserving the compressed form throughout.",
+    "outcome": "This document gives requirements and goals but no solution. It identifies the technical challenges: handling out-of-order packets, managing packet loss, resynchronizing decompressor state across long delays. It acknowledges that no vendor had implemented this at the time and that standards work was still needed.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Typical header overhead",
+      "value": "48 bytes header, 20-30 bytes voice payload"
+    },
+    {
+      "label": "Hop-by-hop compression limit",
+      "value": "30-50 flows per customer router"
+    },
+    {
+      "label": "Target flow capacity",
+      "value": "300-500 simultaneous flows per high-end router"
+    },
+    {
+      "label": "MPLS fast reroute timing",
+      "value": "50 milliseconds or less"
+    }
+  ],
+  "today": "<p>RFC 4247 is an Informational RFC and has not been obsoleted. Header compression over MPLS remains a specialized area with limited deployment. Some carriers have implemented proprietary versions, but no unified standard has emerged from the IETF. The technical challenges—especially handling packet reordering robustly across vendor implementations—have slowed standardization. Modern approaches often use different techniques such as improving link capacity or using more efficient codecs.</p>",
+  "glossary": [
+    "label-switched-path",
+    "robust-header-compression",
+    "jitter"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Header Overhead Problem",
+      "content": "<p>Voice over IP (VoIP) uses encapsulation: voice data sits inside an RTP (Real-Time Transport Protocol) packet, which sits inside a UDP/IP packet. When the traffic crosses an MPLS (Multiprotocol Label Switching) network, MPLS labels are added. For an MPLS VPN, the total header is around 48 bytes, while the actual voice payload might be only 20-30 bytes. The header is larger than the data, wasting half the bandwidth.</p><p>Bandwidth is expensive, especially on international links and low-speed connections serving small offices. Saving even 30 bytes per packet multiplies across millions of calls. For a hypothetical network with 300 million calls per day, header overhead alone could consume 20-40 gigabits per second on the backbone. IPv6, with larger addresses, makes the problem worse. Header compression is a known technique; the challenge is applying it efficiently when MPLS is involved.</p>",
+      "eli5": "<p>A voice packet looks like a tiny letter in a huge envelope with lots of labels. If you shrink the envelope once instead of at every mail stop, you save space and work.</p>"
+    },
+    {
+      "id": "background",
+      "number": "2",
+      "title": "Why Hop-by-Hop Compression Does Not Scale",
+      "content": "<p><strong>Hop-by-hop compression</strong> means each router compresses packets when they arrive and decompresses them before sending them on. This is the traditional approach but has a critical limitation: compression and decompression are computationally expensive. A typical customer premise router can handle only 30-50 compressed RTP flows before running out of processing power, while a large network might need to handle 300-500 flows simultaneously. The processing bottleneck limits how many calls a router can support.</p><p>Routers in the core of a network handle even more traffic and cannot afford to compress/decompress every packet. The idea is to compress once at the ingress (edge) of an MPLS path, route the compressed packets through the network using MPLS labels, and decompress once at the egress (far edge). Intermediate routers simply forward the labeled packets without touching them, avoiding the expensive processing cycles.</p>",
+      "eli5": "<p>Shrinking the envelope at every mail stop (hop) takes a lot of work. Better to shrink it once at the start and un-shrink it once at the end.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "What a Solution Must Do",
+      "content": "<p>The requirements fall into five categories. First, the solution must use existing compression standards (cRTP, ECRTP, or ROHC) to compress RTP/UDP/IP headers, ensuring tolerance to packet loss and compatibility with existing work. Second, compression must occur on an MPLS LSP (Label Switched Path) from ingress to egress; intermediate routers forward compressed packets without decompression. Third, performance must not degrade significantly in delay, loss, or jitter.</p><p>Fourth, the solution must use standard signaling protocols (RSVP, RSVP-TE, or LDP) to coordinate between the ingress and egress routers: which compression algorithm to use, where to compress, where to decompress, and how to allocate context identifiers (the state information the decompressor needs to rebuild headers). Fifth, <strong>packet reordering must not cause errors</strong>: if two packets arrive out of sequence, the decompressor must not try to use stale context and produce corrupted packets. This is critical because MPLS can reroute packets due to link failures or route changes, causing temporary reordering.</p>",
+      "eli5": "<p>The rules: use standard compression, keep it compressed all the way through, don't slow things down, tell both ends what to do, and handle packets arriving out of order.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "4",
+      "title": "Technical Challenges",
+      "content": "<p>Three technical challenges stand out. <strong>Packet reordering</strong> is caused by MPLS fast reroute (switching to a backup path when a link fails in 50 milliseconds or less) or by IGP/LDP reconvergence when topology changes. Compression algorithms like cRTP and ECRTP can handle reordering of about 10 packets, but IGP reconvergence can take seconds—far too long. MPLS fast reroute is fast enough to work, but IGP reroutes are not.</p><p><strong>Packet loss and resynchronization</strong> happens because compression context (the state needed to decompress) can become out of sync if a packet is lost. The decompressor must detect this and ask the compressor to send full headers until they resynchronize. On a path with many routers, the round-trip delay between compressor and decompressor grows, slowing recovery. <strong>Header format identification</strong> is another puzzle: when packets are reordered or lost, the decompressor needs to know whether an incoming packet is a full header, a context state request, or a normal compressed packet. Existing standards use separate link-layer packet types for this, which do not map cleanly to MPLS.</p>",
+      "eli5": "<p>Three tricky problems: the path might change and scramble packet order, if a packet gets lost both ends get confused and need to resync, and the decompressor needs to know what kind of packet it just got.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Candidate Approaches and Signaling Needs",
+      "content": "<p>Two compression standards are candidates. <strong>ECRTP</strong> (Enhanced Compressed RTP) makes compression more tolerant to packet loss by using feedback-based error recovery. It may need extensions to identify packet types but is relatively straightforward. <strong>ROHC</strong> (Robust Header Compression) is even more loss-tolerant and achieves better compression ratios. ROHC already has packet-type identification in its header, requiring fewer extensions.</p><p>For signaling, the solution needs extensions to MPLS signaling protocols to identify which LSP carries the compression session, negotiate the compression algorithm and parameters, and allocate and signal the Session Context IDs (SCIDs) between ingress and egress routers. RSVP-TE can carry these extensions in new objects; LDP might use targeted sessions or pseudo-wire mechanisms. The RFC notes that many RFC 2547 VPN implementations use LDP, so LDP extensions are desirable for scalability. Because signaling and protocol extension work span multiple IETF areas, coordinated specification is essential.</p>",
+      "eli5": "<p>Two compression methods are strong candidates. For signaling, you need to tell the routers the plan: which algorithm, which packets, and what state numbers to use. It probably needs extensions to MPLS signaling protocols.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "VoIP packet with MPLS labels (before compression)",
+      "data": {
+        "title": "Uncompressed VoIP packet header stack",
+        "bytes": 58,
+        "width": 32,
+        "fields": [
+          {
+            "key": "rtp-header",
+            "name": "RTP Header",
+            "bits": 96,
+            "desc": "Real-time transport protocol header"
+          },
+          {
+            "key": "udp-header",
+            "name": "UDP Header",
+            "bits": 64,
+            "desc": "User datagram protocol header"
+          },
+          {
+            "key": "ip-header",
+            "name": "IP Header",
+            "bits": 160,
+            "desc": "Internet protocol (IPv4) header, typically 20 bytes"
+          },
+          {
+            "key": "mpls-labels",
+            "name": "MPLS Labels",
+            "bits": 32,
+            "desc": "MPLS label stack (one or more 4-byte labels)"
+          },
+          {
+            "key": "voice-payload",
+            "name": "Voice Payload",
+            "bits": 160,
+            "desc": "Compressed voice data, often 20-30 bytes"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2508]",
+      "text": "Casner, S. and V. Jacobson, \"Compressing IP/UDP/RTP Headers for Low-Speed Serial Links\", RFC 2508, February 1999.",
+      "rfc": 2508
+    },
+    {
+      "number": "[RFC3095]",
+      "text": "Bormann, C., et al., \"RObust Header Compression (ROHC): Framework and four profiles: RTP, UDP, ESP, and uncompressed\", RFC 3095, July 2001.",
+      "rfc": 3095
+    },
+    {
+      "number": "[RFC3545]",
+      "text": "Koren, T., Casner, S., Geevarghese, J., Thompson, B., and P. Ruddy, \"Enhanced Compressed RTP (CRTP) for Links with High Delay, Packet Loss and Reordering\", RFC 3545, July 2003.",
+      "rfc": 3545
+    },
+    {
+      "number": "[RFC3031]",
+      "text": "Rosen, E., Viswanathan, A., and R. Callon, \"Multiprotocol Label Switching Architecture\", RFC 3031, January 2001.",
+      "rfc": 3031
+    },
+    {
+      "number": "[RFC3036]",
+      "text": "Andersson, L., Doolan, P., Feldman, N., Fredette, A., and B. Thomas, \"LDP Specification\", RFC 3036, January 2001.",
+      "rfc": 3036
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

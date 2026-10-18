@@ -9,13 +9,306 @@
   },
   "questions": [
     "aaa transport profile",
-    "transport recommendations for radius and diameter"
+    "transport recommendations for radius and diameter",
+    "what is the aaa transport profile",
+    "why does radius over tcp need a watchdog",
+    "how do aaa protocols detect a failed server",
+    "what is head of line blocking in aaa"
+  ],
+  "tags": [
+    "AAA",
+    "Transport",
+    "Failover"
+  ],
+  "subtitle": "Why reliable transport behaves awkwardly for login and accounting traffic, and what AAA protocols should do about it.",
+  "tldr": {
+    "problem": "AAA protocols send small, sparse requests that do not behave like file transfers, so ordinary TCP and SCTP defaults give slow failover, useless congestion estimates, head of line blocking and duplicate transactions.",
+    "mechanism": "The RFC lists twelve transport issues and recommends a profile: servers support TCP and SCTP, one persistent connection per peer, an application layer watchdog for failover, end-to-end identifiers for duplicate detection, and SCTP streams or load balancing against head of line blocking.",
+    "outcome": "It gives AAA protocol designers concrete rules and default timers for building reliable, congestion-aware transport on top of standard TCP and SCTP.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Watchdog default (Twinit)",
+      "value": "30 seconds"
+    },
+    {
+      "label": "Minimum Twinit",
+      "value": "6 seconds"
+    },
+    {
+      "label": "Watchdog jitter",
+      "value": "-2 to 2 seconds"
+    },
+    {
+      "label": "BRINGDOWN_INTERVAL",
+      "value": "5 minutes"
+    },
+    {
+      "label": "Answers to restore a connection",
+      "value": "3 watchdog messages"
+    },
+    {
+      "label": "Max SCTP streams",
+      "value": "65535"
+    }
+  ],
+  "today": "<p>RFC 3539 is a Proposed Standard, and the unit metadata lists no RFC that obsoletes or updates it. It remains the published profile for AAA transport, and the RFC itself notes that SCTP support on clients may become required in the future.</p>",
+  "glossary": [
+    "aaa",
+    "radius",
+    "nas",
+    "tcp",
+    "sctp",
+    "nagle-algorithm",
+    "head-of-line-blocking",
+    "congestion-control",
+    "retransmission",
+    "load-balancing",
+    "proxy",
+    "failover"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Scope and Vocabulary",
+      "content": "<p>RFC 3539 discusses transport issues that arise in protocols for <strong>Authentication, Authorization and Accounting</strong> (AAA) and recommends how such protocols should use transport. It covers both standards-track RFCs and experimental proposals. It uses the key words of RFC 2119, so MUST, SHOULD and MAY carry their usual weight.</p><p>The terminology section defines the pieces of a typical AAA setup. A <strong>Network Access Server</strong> (NAS) is a device that hosts connect to in order to get onto the network. It acts as a AAA client. AAA <strong>agents</strong> sit between clients and servers: relays forward requests based on routing attributes, proxies enforce policy, re-directs point clients to the server, and store and forward proxies reply to the NAS before forwarding the request. The RFC also separates <strong>application-driven</strong> transport, where messages are sent as fast as the application produces them, from <strong>network-driven</strong> transport, where the congestion window sets the pace.</p>",
+      "eli5": "<p>This memo is about the computers that check passwords and count how long you use the network, and the helper computers that pass their messages along.</p>"
+    },
+    {
+      "id": "background",
+      "number": "2",
+      "title": "Transport Problems AAA Runs Into",
+      "content": "<p>AAA traffic is usually <strong>application-driven</strong>. The RFC's arithmetic: a 48-port NAS with an average session time of 20 minutes sends about 144 authentication and authorization requests an hour, an average spacing of 25 seconds, far larger than a typical round trip time. A 2048-port NAS with 10-minute sessions sends 3.4 requests a second, a spacing of 293 ms. Bursts still happen, for example when a NAS reboots and sends stored accounting records, and many NASes can converge on one server: 10,000 NASes of 48 ports would send 400 requests a second, or 6.4 Mbps with 1000-octet requests.</p><p>That mix leads to a list of twelve issues the RFC discusses in turn. In short:</p><ul><li><strong>Slow failover:</strong> waiting for a TCP connection to time out takes far too long. SCTP detects endpoint and path failure sooner.</li><li><strong>Nagle algorithm:</strong> useful for batching during bursts, not during sparse traffic.</li><li><strong>Multiple connections:</strong> RADIUS clients used extra UDP ports to get past a one-octet Identifier limit of 256 requests, but the same habit over reliable transport multiplies slow-start ramp-up. Ten connections with an initial window of 2 would give an effective initial window of 20.</li><li><strong>Duplicates, stale estimates, no fast retransmit, delayed ACKs, premature failover, head of line blocking and load balancing</strong> are covered in later sections.</li></ul><p>Delayed acknowledgments are a further cost: because AAA traffic rarely has data to piggyback on, ACKs can make up as much as half of the traffic, so AAA over TCP or SCTP may see about double the packets of UDP.</p>",
+      "eli5": "<p>Login traffic is a few short notes now and then, not a big download. Rules built for big downloads do not fit well, so the notes can be slow, doubled up or sent to a broken helper.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "The Baseline Transport Profile",
+      "content": "<p>The profile starts with simple rules. <strong>AAA servers MUST support TCP and SCTP.</strong> Clients SHOULD support SCTP but MUST support TCP if SCTP is not available, and agents inherit all server obligations. The RFC adds that SCTP support may be required of clients in the future.</p><p>Implementations running over TCP MUST enable the Nagle algorithm, because there are times (a reboot, a link coming back) when many messages queue up and batching helps. The Nagle algorithm is not used with SCTP.</p><p>AAA protocols SHOULD use only a single persistent connection between a client and a given agent or server, and SHOULD allow pipelining so more than one request is outstanding. A client or agent MAY close a connection that has been idle, but not before BRINGDOWN_INTERVAL, which is 5 minutes. It MAY hold connections to several peers and treat them as primary and secondary or balance load between them.</p>",
+      "eli5": "<p>Use the careful delivery services, keep one open phone line to each helper instead of lots, and do not hang up too quickly.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.4",
+      "title": "The Application Layer Watchdog",
+      "content": "<p>AAA protocols MUST support an <strong>application layer watchdog</strong> message so failures can be spotted faster than transport timeouts allow. It checks the immediate peer, and any AAA message received from that peer counts as proof it is alive. Only a missing answer to a watchdog request proves it is down, because silence alone may be caused by a problem further downstream.</p><p>Implementations SHOULD follow the RFC's algorithm. A single timer Tw starts at Twinit, which defaults to 30 seconds and MUST NOT be set lower than 6 seconds. Each time it is set, a random jitter between -2 and 2 seconds is added to avoid synchronized timers. Receiving any message resets Tw. If Tw expires with no watchdog pending, a watchdog request is sent. If it expires with one still pending, failover starts, and queued requests move to an alternate peer. The watchdog is not retransmitted by the AAA protocol, since the transport handles retransmission. Under heavy traffic, detection can take as long as 2Tw.</p><p>The client MUST NOT close the primary connection until the timer has expired twice without a response, after which it SHOULD reset or close it. A closed connection is reopened periodically, and it returns to service only after three watchdog messages have been sent and answered. Suspending the connection first lets TCP's retransmission timer recover before the connection is reused.</p><p>Watchdog failover can work with primary and secondary servers, or with load balancing across connections, where transactions are spread by weight and Pearson's hash of the Network Access Identifier keeps one user's conversation on one server. When SCTP is used, its heartbeats can stay on, since they probe other paths to the same peer rather than detect application failure.</p>",
+      "eli5": "<p>If a helper has not said anything for a while, you ask 'are you there?' If it still stays silent, you switch to the backup and check back on the first one now and then until it answers three times in a row.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "3.5",
+      "title": "Duplicates and Premature Failover",
+      "content": "<p>Failover and load balancing mean the same request can reach more than one server. AAA agents and servers MUST be prepared to handle duplicates and assume they can arrive on any connection. A hop-by-hop identifier is not enough, because it changes at each hop and a server may receive the same request through different agents. The RFC calls for an end-to-end identifier combined with the origin host to spot duplicates.</p><p>This matters because a repeated authentication request is not always harmless. If a user is allowed one simultaneous login, the first request could get an Accept and a duplicate could get a Reject from another server, and the user's access would depend on which answer arrived first. Storing the end-to-end identifier lets the server recognise the duplicate and return the right response. In accounting, duplicates are weeded out using the session identifier, event timestamp and NAS identity.</p><p>Premature failover, where a NAS gives up on an agent while packets are still in flight, can add load to a busy network and risks congestive collapse. The watchdog is the protection: if the next hop does not reply, the client first checks it is alive. Agents then only need to send a few terminal errors to push failover: <code>Busy</code> (fail over all requests), <code>Can't Locate</code> and <code>Can't Forward</code> (fail over that request).</p>",
+      "eli5": "<p>If you send the same order to two shops, both might answer. So every order gets a unique number, and the shops can say 'we already did that one'.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "3.6",
+      "title": "Loss Recovery and Congestion Control",
+      "content": "<p>Congestion control assumes steady traffic, but AAA traffic is sparse, so the estimates go stale. With TCP congestion window validation (<a href='/2861/'>RFC 2861</a>), the window decays between sends, so AAA runs in what the RFC calls <strong>perpetual slowstart</strong>. A client with an initial window of 2 and 35 requests to send would need about 6 round trips (2, 3, 3, 6, 9, 12). SCTP, which counts bytes rather than segments, would usually need fewer. The RFC also notes the retransmission timeout can stay inflated long after trouble has gone, and suggests that after the window decays, TCP implementations MAY reset the estimated RTO to 3 seconds; SCTP implementations SHOULD use heartbeats, which RFC 2960 enables by default at 30 seconds.</p><p>Because the window stays small, fast retransmit rarely gets the three duplicate ACKs it needs, so each lost packet usually costs a retransmission timeout. Implementations SHOULD support selective acknowledgment (<a href='/2018/'>RFC 2018</a>, <a href='/2883/'>RFC 2883</a>) and Limited Transmit (<a href='/3042/'>RFC 3042</a>). They MAY also use the Congestion Manager (<a href='/3124/'>RFC 3124</a>) to improve default timer estimates.</p><p>Head of line blocking, where a lost packet holds up everything behind it, matters mostly for large NASes. A 2048-port NAS with 293 ms spacing falls below the minimum 1-second RTO. With SCTP, each node SHOULD spread messages evenly across the streams agreed with its peer, and peers MUST accept messages on any stream. Relays need not preserve stream IDs. An association can have up to 65535 streams, and idle streams may cost resources.</p>",
+      "eli5": "<p>When you only send a message once in a long while, the network rulebook thinks you just arrived and makes you start slowly every time. Using several lanes means one lost message does not hold up the others.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "7",
+      "title": "How AAA Agents Affect Transport",
+      "content": "<p>Appendix B shows why agents matter. A relay, proxy or store and forward proxy sets up two separate transport connections, one from the client to the agent and one from the agent to the server. ACKs do not flow end to end, so the client cannot sense the real bottleneck, and the system does not <strong>self-clock</strong>. If the agent has a large receive buffer, a queue builds up and eventually overflows, causing heavy loss and delay. The RFC concludes that end-to-end performance with these agents is always worse in delay and loss than direct client-server communication, and that making the two connections cooperate (for example through back pressure) is impractical.</p><p>Re-directs refer the client to the server so the client talks to it directly, which does self-clock. Transport layer proxies forward ACKs and splice the two connections into one, but they cannot be built purely as applications and are rarely deployed. Store and forward proxies reply to the NAS before the accounting server has accepted the request, so the NAS may delete its record too early, and the RFC says they SHOULD NOT be used.</p>",
+      "eli5": "<p>If a middleman repeats your message to the real person, you cannot tell how busy the real person is. If the middleman just says 'go talk to them directly', you can.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "4",
+      "title": "Security Considerations",
+      "content": "<p>AAA clients, agents and servers act as gatekeepers to network access, which makes them attractive targets. The RFC's own addition is a warning about failover: because it is triggered by missing responses, an attacker who swamps a lightly loaded network can make watchdog packets drop. The client then switches to another agent, where the attack can be repeated, and users are denied service.</p><p>With TLS there is a vulnerability to spoofed reset packets and other transport-layer attacks such as SYN flooding, which SCTP resists better. With IPsec, policy should require IPsec on incoming packets. Starting a connection in the clear and then switching to IKE minimizes client configuration but increases exposure to denial of service. The RFC creates no new IANA number spaces.</p>",
+      "eli5": "<p>A bully could keep shouting so your 'are you there?' message gets lost, making you keep switching helpers. Be careful when switching.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "WATCHDOG CONNECTION STATES (RFC 3539, APPENDIX A)",
+      "data": {
+        "states": [
+          {
+            "key": "initial",
+            "label": "INITIAL",
+            "initial": true
+          },
+          {
+            "key": "okay",
+            "label": "OKAY"
+          },
+          {
+            "key": "suspect",
+            "label": "SUSPECT"
+          },
+          {
+            "key": "down",
+            "label": "DOWN"
+          },
+          {
+            "key": "reopen",
+            "label": "REOPEN"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "initial",
+            "to": "okay",
+            "label": "connection up"
+          },
+          {
+            "from": "okay",
+            "to": "suspect",
+            "label": "timer expires, watchdog pending: fail over"
+          },
+          {
+            "from": "suspect",
+            "to": "okay",
+            "label": "any message received: fail back"
+          },
+          {
+            "from": "suspect",
+            "to": "down",
+            "label": "timer expires: close connection"
+          },
+          {
+            "from": "down",
+            "to": "reopen",
+            "label": "connection up: send watchdog"
+          },
+          {
+            "from": "reopen",
+            "to": "okay",
+            "label": "three watchdog answers"
+          },
+          {
+            "from": "reopen",
+            "to": "down",
+            "label": "no answer or connection down"
+          },
+          {
+            "from": "okay",
+            "to": "down",
+            "label": "connection down"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "AAA AGENTS AND END-TO-END SELF-CLOCKING (RFC 3539, SECTION 2.8 AND APPENDIX B)",
+      "data": {
+        "columns": [
+          "Agent",
+          "Transport connections",
+          "Self-clocks end to end"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Relay",
+              "Two, de-coupled",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Proxy",
+              "Two, de-coupled",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Store and forward proxy",
+              "Two, de-coupled",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Re-direct",
+              "Direct client to server",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "Transport layer proxy",
+              "Spliced into one",
+              "Yes"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC896]",
+      "text": "Nagle, J., \"Congestion Control in IP/TCP internetworks\", RFC 896, January 1984.",
+      "rfc": 896
+    },
+    {
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S. and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC2861]",
+      "text": "Handley, M., Padhye, J. and S. Floyd, \"TCP Congestion Window Validation\", RFC 2861, June 2000.",
+      "rfc": 2861
+    },
+    {
+      "number": "[RFC2865]",
+      "text": "Rigney, C., Willens, S., Rubens, A. and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "rfc": 2865
+    },
+    {
+      "number": "[RFC2960]",
+      "text": "Stewart, R., et al., \"Stream Control Transmission Protocol\", RFC 2960, October 2000.",
+      "rfc": 2960
+    },
+    {
+      "number": "[RFC2988]",
+      "text": "Paxson, V. and M. Allman, \"Computing TCP's Retransmission Timer\", RFC 2988, November 2000.",
+      "rfc": 2988
+    },
+    {
+      "number": "[RFC3042]",
+      "text": "Allman, M., Balakrishnan H. and S. Floyd, \"Enhancing TCP's Loss Recovery Using Limited Transmit\", RFC 3042, January 2001.",
+      "rfc": 3042
+    },
+    {
+      "number": "[RFC3124]",
+      "text": "Balakrishnan, H. and S. Seshan, \"The Congestion Manager\", RFC 3124, June 2001.",
+      "rfc": 3124
+    },
+    {
+      "number": "[Congest]",
+      "text": "Jacobson, V., \"Congestion Avoidance and Control\", Computer Communication Review, vol. 18, no. 4, pp. 314-329, Aug. 1988."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

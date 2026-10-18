@@ -10,13 +10,201 @@
   "questions": [
     "diameter group signaling",
     "how to do bulk operations on diameter sessions",
-    "reduce diameter signaling load"
+    "reduce diameter signaling load",
+    "what is diameter group signaling",
+    "how to apply one command to many diameter sessions",
+    "what is group-response-action avp"
+  ],
+  "tags": [
+    "Diameter",
+    "AAA",
+    "Signaling"
+  ],
+  "subtitle": "Lets Diameter peers put sessions into groups and act on a whole group with one command instead of thousands.",
+  "tldr": {
+    "problem": "A single Diameter node can handle over a million sessions, but base commands act on one session at a time, so changing many sessions the same way takes many thousands of exchanges.",
+    "mechanism": "Nodes tag sessions with a Session-Group-Id carried in a new optional Session-Group-Info AVP, then send ordinary commands such as Re-Auth-Request with group identifiers and a Group-Response-Action AVP that says how to follow up.",
+    "outcome": "Bulk operations take a single or a few command exchanges, and any node can fall back to single-session handling by ignoring the optional AVPs.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "AVP codes",
+      "value": "671 to 675"
+    },
+    {
+      "label": "ALL_GROUPS",
+      "value": "1"
+    },
+    {
+      "label": "PER_GROUP",
+      "value": "2"
+    },
+    {
+      "label": "PER_SESSION",
+      "value": "3"
+    },
+    {
+      "label": "Control flags",
+      "value": "0x00000001 and 0x00000010"
+    },
+    {
+      "label": "New commands",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 9390 is a Proposed Standard published in April 2023. Neither an obsoleting nor an updating RFC is recorded for it, and it builds on the Diameter base protocol in <a href='/6733/'>RFC 6733</a>.</p>",
+  "glossary": [
+    "avp",
+    "diameter",
+    "sctp",
+    "tls",
+    "ipsec",
+    "proxy",
+    "requirement-keyword"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Bulk Operation Problem",
+      "content": "<p>A single Diameter node in a large deployment can support over a million concurrent sessions. Sometimes a node must apply the same operation to many of them. The RFC's example is a policy decision point that needs to change the authorized quality of service for all active users with the same type of subscription.</p><p>Base Diameter commands operate on one session, so that would mean many thousands of exchanges. RFC 9390 adds <strong>session groups</strong> and ways to apply commands such as re-authentication, re-authorization, termination and abort to a whole group. It does not define a new Diameter application. It defines mechanisms and AVPs that any application can use.</p><p>The design goals are minimal impact on existing applications, optional AVPs added to existing commands, fallback to single-session operation, and implicit capability discovery when no external method exists.</p>",
+      "eli5": "<p>If a teacher has to send every student a separate note, it takes all day. With a group announcement, one message reaches the whole class.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Session Groups and Who Owns Them",
+      "content": "<p>Once sessions are added to a group, a command that acts on the group affects every member. Either the client or the server can put a session in a group, and the assignment can change mid-session, for example when a user's subscription profile changes or the session moves to a new client during a handover.</p><p>Permissions follow ownership. The node that creates a group builds its identifier and becomes the <strong>owner</strong>. Either node can add a session to the group, but only the node that assigned a session can remove it, and only the owner can delete the group. Deleting a group means each member session is then treated individually. Applications may define a more constrained permission model.</p><p>A group identifier is carried in the <code>Session-Group-Id</code> AVP. It must be globally unique, must begin with the identity of the owning Diameter node, and has an implementation-defined part after a <code>;</code> character.</p>",
+      "eli5": "<p>Whoever starts a club owns it. Anyone can invite a kid in, but only the person who invited a kid can send that kid out, and only the owner can close the club.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Building and Changing Groups",
+      "content": "<p>Nodes should not use group operations with a peer unless it has advertised support. Support can come from a newly defined application's Application Id, from other means, or from the <code>Session-Group-Capability-Vector</code> AVP. If nothing else is used, a node SHOULD add that AVP to application messages with the <code>BASE_SESSION_GROUP_CAPABILITY</code> flag set. A receiver caches what it learns for the lifetime of the routing table entry for that peer and Application Id.</p><p>At session start, the client adds one <code>Session-Group-Info</code> AVP per group to a service-specific request such as the NASREQ AA-Request. The <code>SESSION_GROUP_ALLOCATION_ACTION</code> flag set means assign. The server may accept or reject the grouping, for example for lack of resources, and must echo the AVPs it received. It may also add groups of its own. If grouping is rejected, the session can still proceed as a single session. A client can also leave out the group identifier to let the server choose.</p><p>To remove a session, either side clears the allocation flag. With a group identifier it leaves that group only; with no identifier it leaves all groups. A group is deleted explicitly when its owner clears the <code>SESSION_GROUP_STATUS</code> flag, and implicitly when its last session is removed.</p>",
+      "eli5": "<p>Before you use the class announcement system, you check the other side has it. Then you write the club name on a kid's name tag to add them, and cross it out to remove them.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Sending and Receiving Group Commands",
+      "content": "<p>To run a command on a group, the sender appends a <code>Session-Group-Info</code> AVP for each group, with both the allocation and status flags set, plus a single <code>Group-Response-Action</code> AVP. If the command requires a <code>Session-Id</code>, it must name one session that belongs to at least one of the groups.</p><p>The Group-Response-Action value tells the receiver how to follow up. <code>ALL_GROUPS</code> (1) means one message exchange for all groups, <code>PER_GROUP</code> (2) one exchange per group, and <code>PER_SESSION</code> (3) one per impacted session. A session in several of the named groups is processed only once. With values 1 or 2, answers come only after all sessions or all sessions in a group are processed, so delay-sensitive requests SHOULD NOT use them.</p><p>If the command fails for every session, a protocol error is returned, the sender falls back to single-session processing, and the groups named are deleted. If it succeeds for some sessions, the result code SHOULD be <code>DIAMETER_LIMITED_SUCCESS</code> and the failed sessions are listed by Session-Id in a <code>Failed-AVP</code>. The sender then handles those sessions singly and removes them from the groups. Either node can also fall back to single-session mode at any time by ignoring the group AVPs, and then the response must not contain any group identifier.</p>",
+      "eli5": "<p>The teacher says to the whole class: everyone in the red group stand up. She also says whether she wants one answer from the whole class, one per group, or one from each kid.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "Commands and AVPs",
+      "content": "<p>No new commands are defined. The existing Command Code Format of a command is extended with optional AVPs. The RFC's example is a group Re-Auth-Request: the RAR gets optional <code>Session-Group-Capability-Vector</code>, repeated <code>Session-Group-Info</code> and a single <code>Group-Response-Action</code>, and the recipient starts re-authentication for all users in the named groups.</p><p>Five AVPs are defined, codes 671 to 675. <code>Session-Group-Info</code> is a Grouped AVP holding a <code>Session-Group-Control-Vector</code> and an optional <code>Session-Group-Id</code>. The control vector is a 32-bit flag field with two defined flags: <code>SESSION_GROUP_ALLOCATION_ACTION</code> (0x00000001) and <code>SESSION_GROUP_STATUS</code> (0x00000010). The capability vector has one flag, <code>BASE_SESSION_GROUP_CAPABILITY</code> (0x00000001), and the value 0 is reserved. No new Result-Code values are defined.</p>",
+      "eli5": "<p>The old messages keep their shape. Special stickers are added to them that say which group they are about and how to answer.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "6",
+      "title": "Proxies and the State Machine",
+      "content": "<p>A stateful proxy agent must act as a server toward the client and as a client toward the server, advertising grouping capabilities and keeping session states consistent. If the proxy uses groups with the server while the client does not know about them, it must present individual session operations to the client.</p><p>A stateless proxy keeps no session state, so groups are transparent to it. The group AVPs are optional and are ignored by it and should not be removed. If one removes them anyway, the endpoints notice and fall back to single-session processing.</p><p>Appendix A gives an example of extending the authorization session state machine of <a href='/6733/'>RFC 6733</a> with group commands, written with a leading G (GRAR, GASR, GSTR and so on) for group versions of the Re-Auth, Abort-Session and Session-Termination commands.</p>",
+      "eli5": "<p>A messenger who remembers things passes the group news along carefully. A messenger who remembers nothing just carries the note without opening it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The group AVPs, including the control vector and the group id, are to be treated as security-sensitive in the same way as the Session-Id AVP in <a href='/6733/'>RFC 6733</a>. Group management relies on the existing trust between client and server.</p><p>The main new risk is that a compromised client or server could launch a denial-of-service attack by terminating or changing a large number of sessions with a few commands. Diameter's transport protections cover adjacent peers only. Without end-to-end security, a Diameter agent in the path could modify the group information, and the RFC does not assume end-to-end security will be available. A proxy acting for a client or server must meet the same requirements as that client or server.</p>",
+      "eli5": "<p>A power that lets you tell a whole class what to do is dangerous in the wrong hands, so it has to stay with someone you trust.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "GROUP-RESPONSE-ACTION VALUES (RFC 9390, SECTION 7.4)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "ALL_GROUPS",
+            "desc": "A single message exchange for all impacted groups."
+          },
+          {
+            "code": "2",
+            "label": "PER_GROUP",
+            "desc": "A separate message exchange for each impacted group."
+          },
+          {
+            "code": "3",
+            "label": "PER_SESSION",
+            "desc": "A separate message exchange for each impacted session."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "AVPS DEFINED BY RFC 9390 (TABLE 1)",
+      "data": {
+        "items": [
+          {
+            "code": "671",
+            "label": "Session-Group-Info",
+            "desc": "Grouped; carries the control vector and an optional group id."
+          },
+          {
+            "code": "672",
+            "label": "Session-Group-Control-Vector",
+            "desc": "Unsigned32 flags for assignment and group status."
+          },
+          {
+            "code": "673",
+            "label": "Session-Group-Id",
+            "desc": "UTF8String; globally unique group identifier."
+          },
+          {
+            "code": "674",
+            "label": "Group-Response-Action",
+            "desc": "Unsigned32; how to follow up a group command."
+          },
+          {
+            "code": "675",
+            "label": "Session-Group-Capability-Vector",
+            "desc": "Unsigned32 flags advertising grouping support."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6733]",
+      "text": "Fajardo, V., Ed., et al., \"Diameter Base Protocol\", RFC 6733, October 2012.",
+      "rfc": 6733
+    },
+    {
+      "number": "[RFC7155]",
+      "text": "Zorn, G., Ed., \"Diameter Network Access Server Application\", RFC 7155, April 2014.",
+      "rfc": 7155
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC8174]",
+      "text": "Leiba, B., \"Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words\", BCP 14, RFC 8174, May 2017.",
+      "rfc": 8174
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -9,13 +9,296 @@
   },
   "questions": [
     "how is vvc video sent over rtp",
-    "what is the rtp payload format for h.266"
+    "what is the rtp payload format for h.266",
+    "how is vvc sent over rtp",
+    "what is rtp payload type 28 in vvc",
+    "what is a fragmentation unit in rtp video",
+    "what is the sdp media type for h.266"
+  ],
+  "tags": [
+    "Video",
+    "RTP",
+    "Codecs"
+  ],
+  "subtitle": "How to chop H.266 video into RTP packets and put it back together at the other end.",
+  "tldr": {
+    "problem": "A VVC video encoder produces NAL units of very different sizes, and RTP needs to carry them over networks with limited packet sizes, possible reordering and loss.",
+    "mechanism": "RFC 9328 defines three RTP payload structures: a single NAL unit packet, an aggregation packet that bundles small NAL units, and fragmentation units that split a large NAL unit across packets. It also defines media type parameters for SDP and use of PLI and FIR feedback.",
+    "outcome": "It is a Proposed Standard that has not been obsoleted. It deliberately mirrors the earlier H.264 and HEVC payload formats so implementers can reuse what they know.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RTP clock rate",
+      "value": "90 kHz (90000 in SDP)"
+    },
+    {
+      "label": "NAL unit header",
+      "value": "2 bytes"
+    },
+    {
+      "label": "Aggregation packet type",
+      "value": "28"
+    },
+    {
+      "label": "Fragmentation unit type",
+      "value": "29"
+    },
+    {
+      "label": "Media type",
+      "value": "video/H266"
+    },
+    {
+      "label": "sprop-max-don-diff range",
+      "value": "0 to 32767"
+    }
+  ],
+  "today": "<p>RFC 9328 is a Proposed Standard from December 2022. The unit metadata shows no RFC that obsoletes or updates it, so it remains the RTP payload format for VVC.</p>",
+  "glossary": [
+    "rtp",
+    "srtp",
+    "sdp",
+    "ssrc",
+    "payload-type",
+    "mtu",
+    "media-type",
+    "rtcp",
+    "congestion-control",
+    "nal-unit",
+    "access-unit",
+    "fragmentation"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction and Design Heritage",
+      "content": "<p>Versatile Video Coding (<strong>VVC</strong>) was published as ITU-T Recommendation H.266 and as ISO/IEC 23090-3. It is reported to give significant coding efficiency gains over HEVC (H.265). <a href='/9328/'>RFC 9328</a> specifies how to carry a VVC bitstream in <a href='/3550/'>RTP</a>.</p><p>The design is a conscious copy of earlier NAL-unit-based payload formats: <a href='/6184/'>RFC 6184</a> for H.264 (AVC), RFC 6190 for Scalable Video Coding and <a href='/7798/'>RFC 7798</a> for HEVC. The RFC says this is deliberate because at least RFC 6184 is widely deployed and well known among implementers. Some scalability mechanisms from RFC 6190 were added, because VVC version 1 supports temporal, spatial and SNR scalability.</p><p>The RFC also covers the RTP header usage, media type parameters for SDP, and RTCP feedback messages. It reminds readers that they still have to read the VVC specifications themselves to build interoperable implementations.</p>",
+      "eli5": "<p>Mailing H.266 video works much like mailing the older video formats, on purpose, so people who already know the old way can learn the new one quickly.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "NAL Units and the Two-Byte Header",
+      "content": "<p>VVC output is a stream of <strong>NAL units</strong> (Network Abstraction Layer units). Each one starts with a two-byte NAL unit header and then carries its payload. The RFC includes a long informative overview of VVC coding tools, parameter sets (DCI, VPS, SPS, PPS, APS), the picture header, scalability, slices and subpictures. For packetization, only a few things matter.</p><p>The header fields are <code>F</code> (1 bit, forbidden zero bit), <code>Z</code> (1 bit, reserved), <code>LayerId</code> (6 bits), <code>Type</code> (5 bits) and <code>TID</code> (3 bits, the temporal identifier plus 1). A <code>TID</code> of 0 is illegal. In this payload format the <code>F</code> bit may be set to 1 to flag a syntax violation, for example a NAL unit rebuilt from fragments with the last fragment missing.</p><p>VVC adds features such as reference picture resampling and subpictures, and it removes the conventional slices of HEVC and AVC. The RFC explains these as background and does not change how the payload format works.</p>",
+      "eli5": "<p>Every piece of video wears a small name tag with a few boxes on it: which layer it belongs to, what kind of piece it is, and how important it is. The mail carrier reads the tag to know what to do.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "3",
+      "title": "RTP Header and Payload Header Usage",
+      "content": "<p>The RTP header is used as in <a href='/3550/'>RFC 3550</a>. The <strong>marker bit</strong> is set on the last packet, in transmission order, of each set of packets that contain NAL units of one access unit. The payload type is not assigned by this RFC; it is set by the profile or dynamically. The <strong>timestamp</strong> uses a 90 kHz clock, which MUST be used. NAL units with no timing of their own, such as parameter sets and SEI, take the timestamp of the coded pictures of their access unit. A single SSRC is used for all parts of one bitstream.</p><p>The first two bytes of the RTP payload are the <strong>payload header</strong>. It has the same fields as the NAL unit header (<code>F</code>, <code>Z</code>, <code>LayerId</code>, <code>Type</code>, <code>TID</code>), whatever the payload structure. A lower <code>TID</code> means higher importance, and more important NAL units MAY be better protected against loss.</p><p>Receivers MUST use the RTP timestamp for the display process, even if the bitstream contains picture timing SEI messages.</p>",
+      "eli5": "<p>The outside of the envelope has a time stamp so the receiver knows when to show each picture, and the first two bytes inside repeat the name tag so everyone can tell what kind of piece it is.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "4",
+      "title": "The Three Payload Structures",
+      "content": "<p>A receiver finds out which structure a packet uses from the <code>Type</code> field of the payload header. There are three.</p><p>A <strong>single NAL unit packet</strong> holds exactly one NAL unit, and its own NAL unit header doubles as the payload header. Whenever exactly one NAL unit goes in a packet, this structure MUST be used.</p><p>An <strong>aggregation packet</strong> (AP) has <code>Type</code> 28 and carries two or more aggregation units, each a 16-bit size followed by a whole NAL unit. All of them must come from one access unit and be in decoding order. The AP's <code>LayerId</code> and <code>TID</code> are the lowest of the contained values. APs MUST NOT be nested and MUST NOT contain fragmentation units. The packet SHOULD be small enough that the IP packet stays under the MTU.</p><p>A <strong>fragmentation unit</strong> (FU) has <code>Type</code> 29 and carries a piece of one NAL unit. The one-byte FU header has an <code>S</code> bit (start), an <code>E</code> bit (end), a <code>P</code> bit (last FU of the last VCL NAL unit of a picture) and a 5-bit <code>FuType</code> copied from the fragmented NAL unit. Fragments MUST be sent in consecutive order with ascending sequence numbers, and <code>S</code> and <code>E</code> must not both be 1. The original NAL unit header is not sent as such; its fields are rebuilt from the FU headers. If an FU is lost, the receiver SHOULD discard the remaining FUs of that NAL unit unless its decoder copes with incomplete NAL units.</p>",
+      "eli5": "<p>Small pieces can share one envelope. A piece that is too big gets cut up and sent in several envelopes, each marked as first, middle or last, so the receiver can glue it back together.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Packetization, Ordering and De-packetization",
+      "content": "<p>The packetization rules say that small NAL units SHOULD be aggregated, and that each non-VCL NAL unit (parameter sets, SEI, delimiters) SHOULD, when it fits the MTU, travel with its VCL NAL unit, since it is meaningless without it.</p><p>Decoding order matters. If the parameter <code>sprop-max-don-diff</code> is 0, NAL units MUST be sent in decoding order. If it is greater than 0, transmission order MAY differ, and a 16-bit <strong>DONL</strong> field (decoding order number, low bits) is added to single NAL unit packets, to the first aggregation unit of an AP and to the first FU (the one with <code>S</code> set). The receiver derives an absolute value, <code>AbsDon</code>, using modulo 65536 arithmetic, to compare any two NAL units.</p><p>Receivers extract NAL units from single packets, aggregation units and concatenated FU payloads. Types 28 to 31 MUST NOT be passed to the decoder. With <code>sprop-max-don-diff</code> equal to 0 the de-packetization buffer is zero bytes. Otherwise there is initial buffering until the spread of AbsDon values reaches <code>sprop-max-don-diff</code>, after which the NAL unit with the smallest AbsDon is released whenever the spread is again at least that value. The RFC says the process is implementation dependent and gives it as an example.</p>",
+      "eli5": "<p>If the envelopes might arrive out of order, each piece gets a number. The receiver keeps a small pile and hands pieces over in number order, so the video plays correctly.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "6",
+      "title": "Media Type and SDP Parameters",
+      "content": "<p>The RFC registers the media type <code>video/H266</code>. In <a href='/8866/'>SDP</a> the media name MUST be <code>video</code>, the encoding name in <code>a=rtpmap</code> MUST be <code>H266</code> and the clock rate MUST be <code>90000</code>. Receivers MUST ignore parameters that are not defined here.</p><p>Optional parameters describe the stream or the receiver. They include <code>profile-id</code>, <code>tier-flag</code>, <code>level-id</code>, <code>sub-profile-id</code> and <code>interop-constraints</code>, layer controls such as <code>sprop-sublayer-id</code> and <code>sprop-ols-id</code>, and out-of-band parameter sets <code>sprop-dci</code>, <code>sprop-vps</code>, <code>sprop-sps</code>, <code>sprop-pps</code> and <code>sprop-sei</code> (base64 encoded). There are also <code>max-lsr</code>, <code>max-fps</code> and the ordering and buffer parameters <code>sprop-max-don-diff</code>, <code>sprop-depack-buf-bytes</code> and <code>depack-buf-cap</code>.</p><p>Defaults when a parameter is absent: <code>profile-id</code> is 1 (Main 10), <code>tier-flag</code> is 0 and <code>level-id</code> is 51. In an <a href='/3264/'>offer/answer</a> exchange the tier, profile, sub-profile and interop constraints MUST be used symmetrically in the usual case, while the level may be lowered by the answerer. Parameter sets MAY be sent out of band and still also in-band.</p>",
+      "eli5": "<p>Before the video call starts, each side tells the other what kind of video it can handle, like saying how big a picture book you can read. They agree on something both can manage.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "7",
+      "title": "Feedback and Congestion Control",
+      "content": "<p>The RFC defines use of two RTCP feedback messages. On a Picture Loss Indication (PLI, <a href='/4585/'>RFC 4585</a>), a VVC sender SHOULD send an IRAP picture and the relevant parameter sets, unless it knows they are already established. On a Full Intra Request (FIR, <a href='/5104/'>RFC 5104</a>), the sender MUST send an IDR picture, and parameter sets too, except when it is known they were correctly established. A sender MUST NOT send Slice Loss Indication or Reference Picture Selection Indication, and a receiver SHOULD treat a received SLI as a PLI.</p><p>Congestion control follows RTP and its profile. Users on best-effort service MUST monitor packet loss. For pre-encoded content, the sender can drop NAL units of higher temporal sublayers or higher spatial and SNR layers until the rate is acceptable, usually without renegotiation. A MANE (media-aware network element) MAY remove unusable packets, for example later FUs of a NAL unit whose leading FUs were lost.</p>",
+      "eli5": "<p>If the receiver misses part of the video, it can send a note asking for a fresh, complete picture to start over from. If the road is crowded, the sender can mail less detailed video.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The RFC finds no threats beyond those common to RTP payload formats, with one exception: the user data SEI message in VVC, which can carry an arbitrary bitstring, possibly including JavaScript or machine code. Decoders cannot naively trust its content. The safest handling is to discard it.</p><p>There is also a denial-of-service concern. Compressed video has uneven decoding load, and VVC is described as particularly vulnerable, because it is easy to craft NAL units that affect the decoding of many later ones. Data origin authentication and integrity protection of at least the RTP packet is therefore RECOMMENDED but NOT REQUIRED. Encryption must happen after compression.</p><p>End-to-end security prevents a MANE from doing media-aware work, so a MANE that is to do it must be a trusted part of the security context. The RFC points to <a href='/7202/'>RFC 7202</a> for why a payload format does not mandate a security solution.</p>",
+      "eli5": "<p>A video file can hide strange extras, so the receiver should not trust or run them, and should check that the envelopes really came from the sender.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "VVC NAL UNIT HEADER (RFC 9328, FIGURE 1)",
+      "data": {
+        "title": "NAL unit header",
+        "bytes": 2,
+        "width": 16,
+        "fields": [
+          {
+            "key": "f",
+            "name": "F",
+            "bits": 1,
+            "desc": "Forbidden zero bit; required to be zero in VVC."
+          },
+          {
+            "key": "z",
+            "name": "Z",
+            "bits": 1,
+            "desc": "Reserved zero bit."
+          },
+          {
+            "key": "layer-id",
+            "name": "LayerId",
+            "bits": 6,
+            "desc": "Layer the NAL unit belongs to."
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 5,
+            "desc": "NAL unit type."
+          },
+          {
+            "key": "tid",
+            "name": "TID",
+            "bits": 3,
+            "desc": "Temporal identifier plus 1; 0 is illegal."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "packet-format",
+      "position": "before",
+      "caption": "PAYLOAD HEADER TYPE VALUES IN THIS FORMAT",
+      "data": {
+        "items": [
+          {
+            "code": "0-27",
+            "label": "Single NAL unit",
+            "desc": "The payload is one NAL unit with its own NAL unit type."
+          },
+          {
+            "code": "28",
+            "label": "Aggregation packet",
+            "desc": "Two or more NAL units of one access unit.",
+            "highlight": true
+          },
+          {
+            "code": "29",
+            "label": "Fragmentation unit",
+            "desc": "A piece of one NAL unit.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "FRAGMENTATION UNIT HEADER (RFC 9328, FIGURE 10)",
+      "data": {
+        "title": "FU header",
+        "bytes": 1,
+        "width": 8,
+        "fields": [
+          {
+            "key": "s",
+            "name": "S",
+            "bits": 1,
+            "desc": "Start of a fragmented NAL unit."
+          },
+          {
+            "key": "e",
+            "name": "E",
+            "bits": 1,
+            "desc": "End of a fragmented NAL unit."
+          },
+          {
+            "key": "p",
+            "name": "P",
+            "bits": 1,
+            "desc": "Last FU of the last VCL NAL unit of a coded picture."
+          },
+          {
+            "key": "fu-type",
+            "name": "FuType",
+            "bits": 5,
+            "desc": "Equal to the Type of the fragmented NAL unit."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "GENERAL SDP USAGE (FROM THE RFC)",
+      "data": {
+        "title": "SDP media description",
+        "lang": "text",
+        "code": "m=video 49170 RTP/AVP 98\na=rtpmap:98 H266/90000\na=fmtp:98 profile-id=1;\n  sprop-vps=<video parameter sets data>;\n  sprop-sps=<sequence parameter set data>;\n  sprop-pps=<picture parameter set data>;"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3550]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "rfc": 3550
+    },
+    {
+      "number": "[RFC3711]",
+      "text": "Baugher, M., et al., \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
+      "rfc": 3711
+    },
+    {
+      "number": "[RFC4585]",
+      "text": "Ott, J., et al., \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
+      "rfc": 4585
+    },
+    {
+      "number": "[RFC5104]",
+      "text": "Wenger, S., et al., \"Codec Control Messages in the RTP Audio-Visual Profile with Feedback (AVPF)\", RFC 5104, February 2008.",
+      "rfc": 5104
+    },
+    {
+      "number": "[RFC6184]",
+      "text": "Wang, Y.-K., et al., \"RTP Payload Format for H.264 Video\", RFC 6184, May 2011.",
+      "rfc": 6184
+    },
+    {
+      "number": "[RFC7798]",
+      "text": "Wang, Y.-K., et al., \"RTP Payload Format for High Efficiency Video Coding (HEVC)\", RFC 7798, March 2016.",
+      "rfc": 7798
+    },
+    {
+      "number": "[RFC7202]",
+      "text": "Perkins, C. and M. Westerlund, \"Securing the RTP Framework: Why RTP Does Not Mandate a Single Media Security Solution\", RFC 7202, April 2014.",
+      "rfc": 7202
+    },
+    {
+      "number": "[RFC8866]",
+      "text": "Begen, A., et al., \"SDP: Session Description Protocol\", RFC 8866, January 2021.",
+      "rfc": 8866
+    },
+    {
+      "number": "[VVC]",
+      "text": "ITU-T, \"Versatile Video Coding\", ITU-T Recommendation H.266, April 2022."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

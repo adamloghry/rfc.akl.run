@@ -9,13 +9,232 @@
   },
   "questions": [
     "vcdiff",
-    "delta compression format"
+    "delta compression format",
+    "what is vcdiff",
+    "how does vcdiff encode differences",
+    "what are vcdiff add copy and run instructions",
+    "what is the vcdiff header magic number"
+  ],
+  "tags": [
+    "Compression",
+    "Differencing",
+    "Data Format"
+  ],
+  "subtitle": "A portable byte format for describing a new file as a short list of copy, add and run instructions against an old one.",
+  "tldr": {
+    "problem": "Differencing and compression tools usually tie their file formats to the string matching and windowing algorithms they use, so a decoder has to know how the encoder worked.",
+    "mechanism": "VCDIFF describes a target file as a sequence of ADD, COPY and RUN instructions over windows of source and target data, using byte-aligned, byte-order-independent encoding and a 256-entry instruction code table.",
+    "outcome": "Any conforming decoder can rebuild the target without knowing the encoder's algorithms, which lets implementations compete on encoding while sharing one decoder.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Magic bytes",
+      "value": "0xD6 0xC3 0xC4"
+    },
+    {
+      "label": "Code table entries",
+      "value": "256"
+    },
+    {
+      "label": "Default near/same cache sizes",
+      "value": "4 and 3"
+    },
+    {
+      "label": "Default minimum COPY size",
+      "value": "4 bytes"
+    },
+    {
+      "label": "Secondary compressor IDs",
+      "value": "1..255"
+    }
+  ],
+  "today": "<p>RFC 3284 is a Proposed Standard and the metadata lists no obsoleting or updating RFC. It describes the use of VCDIFF with HTTP/1.1 delta encoding as in <a href='/3229/'>RFC 3229</a>.</p>",
+  "glossary": [
+    "lossless-compression",
+    "lz77",
+    "magic-number",
+    "huffman-coding",
+    "delta-encoding"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a Generic Delta Format",
+      "content": "<p><strong>Data differencing</strong> computes a compact, invertible encoding of a <em>target file</em> given a <em>source file</em>. <strong>Data compression</strong> is the same idea without source data. The RFC calls the output a <em>delta file</em> in both cases, and treats compression as differencing against an empty source. It calls the combination <em>delta compression</em>.</p><p>The problem it targets is that existing tools tie their storage formats to the string matching and windowing algorithms they implement. That is a poor fit for client-server uses where the server does not know the capabilities of its clients. VCDIFF claims four properties: compact output, data portability (free from byte order and word size issues), algorithm genericity (the decoder is independent of the encoder's matching and windowing), and decoding efficiency (time proportional to the target file size, space proportional to the maximal window size, using only byte-aligned data).</p>",
+      "eli5": "<p>Many tools write their 'what changed' notes in a private shorthand only they can read. VCDIFF is a shared shorthand, so anyone can read the note without knowing how it was written.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Bytes, Integers and Delta Instructions",
+      "content": "<p>The basic unit is a byte, limited to its lower eight bits. Unsigned integers use a variable-sized format that treats the value as a number in <strong>base 128</strong>: each digit sits in the lower seven bits of a byte, and every byte except the last has its most significant bit turned on to say more digits follow. The RFC's example is 123456789, which becomes four bytes with 7-bit digits 58, 111, 26 and 21. Small values stay compact and the format works on any system with 8-bit bytes.</p><p>A large target file is cut into non-overlapping <strong>target windows</strong>, processed in order. Each target window T may be compared with a source segment S taken from the source file or from an earlier part of the target file. S and T are treated as one string U (S followed by T), and an address is a position in U, so the address of <code>T[k]</code> is <code>s+k</code>.</p><p>Three delta instructions describe a window:</p><ul><li><code>ADD</code>: a size and that many literal bytes.</li><li><code>COPY</code>: a size and an address in U; the substring copied must lie entirely in S or in T.</li><li><code>RUN</code>: a size and one byte to repeat that many times.</li></ul><p>A COPY may overlap the data being produced, as long as the copied data starts earlier. That makes periodic sequences cheap to encode, and RUN is the period-1 case.</p>",
+      "eli5": "<p>There are only three moves: copy a piece from the old picture or from what you already drew, add a few new bits, or repeat one dot many times. Rebuilding the picture is just doing the moves in order.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Layout of a Delta File",
+      "content": "<p>A delta file is a Header section followed by one or more Window sections. The header starts with the bytes <code>0xD6 0xC3 0xC4</code>, which are the ASCII letters V, C and D with their top bits set, then a fourth byte currently set to zero (it might later indicate a version). Next comes <code>Hdr_Indicator</code>, whose bit 0 (<code>VCD_DECOMPRESS</code>) says a secondary compressor ID byte follows, and whose bit 1 (<code>VCD_CODETABLE</code>) says an application-defined code table follows. If both bits are set, the compressor ID comes before the code table data.</p><p>Each window begins with <code>Win_Indicator</code>. Bit 0 (<code>VCD_SOURCE</code>) means the source segment comes from the source file, and bit 1 (<code>VCD_TARGET</code>) means it comes from the target file. The byte MUST NOT have more than one of these bits set, and MAY have none. If one is set, the segment length and position follow; if none is set, the window was compressed on its own.</p><p>The delta encoding of a window holds the length of the delta encoding, the target window length, a <code>Delta_Indicator</code> byte, three section lengths, and then three byte arrays: data for ADDs and RUNs, instructions and sizes, and addresses for COPYs. The decoder can use the target window length to allocate memory. In <code>Delta_Indicator</code>, <code>VCD_DATACOMP</code> is 1, <code>VCD_INSTCOMP</code> is 2 and <code>VCD_ADDRCOMP</code> is 4, and each marks a section that was compressed by the secondary compressor and MUST be decompressed first.</p>",
+      "eli5": "<p>A delta file is like a package. It has a label on the front saying what it is, then boxes. Each box holds a few new bits, a list of steps, and a list of places to copy from.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "4",
+      "title": "Address Caches and the Code Table",
+      "content": "<p>Good compression depends on encoding COPY addresses and instruction sizes well. Encoder and decoder both keep two address caches, updated after every COPY so they stay in step. The <strong>near cache</strong> has <code>s_near</code> slots in a circular buffer of recent addresses and codes new addresses as an offset from one of them (forward only). The <strong>same cache</strong> has <code>s_same</code> times 256 slots, indexed by address modulo that size, and codes a repeated exact address as one byte. Defaults are 4 and 3; an encoder MAY change them but then MUST encode the new values. All slots are zeroed at the start of each target window.</p><p>The address mode of a COPY is one of: <code>VCD_SELF</code> (0, the address as an integer), <code>VCD_HERE</code> (1, the value <code>here - addr</code>), near modes (2 up to <code>s_near+1</code>, the offset from <code>near[m-2]</code>), and same modes (the following range, one byte indexing the same cache). With the defaults there are 9 modes.</p><p>An <strong>instruction code table</strong> has 256 entries, each with <code>inst1, size1, mode1, inst2, size2, mode2</code>, so one byte can name one instruction or a combined pair. A size of zero means the size is coded separately as an integer in the instructions section; a nonzero size is at most 255. The decoder reads one index at a time, looks it up, and consumes sizes, data bytes and addresses as the entry directs. The default table gives COPY a minimum size of 4, a choice the RFC says came from experiments showing that excluding matches shorter than 4 bytes improved compression.</p>",
+      "eli5": "<p>The note keeps a short list of 'places I copied from recently', so it can say 'same place as before' with one tiny number. It also has a menu of 256 common combos, so a whole step fits in one byte.</p>"
+    },
+    {
+      "id": "extensibility",
+      "number": "5",
+      "title": "Custom Code Tables and Secondary Compressors",
+      "content": "<p>The default code table suits general-purpose encoders, but an application may do better with its own. For example, a file with many identical segments could use a COPY with exactly that size so it fits in one byte. Such a table MUST be carried in the delta file, as the sizes of the near and same caches plus compressed code table data.</p><p>That data is itself a delta. The new table is turned into a 1536-byte string (six runs of 256 bytes: first-instruction types, second-instruction types, sizes, then modes), and the same is done for the default table. The new string is encoded as a target window against the default string as source, and that encoding MUST use the default code table. A decoder reverses this using the default table.</p><p>Separately, the three data sections of a window may be compressed by a <strong>secondary compressor</strong> identified in the header. The RFC leaves those formats open (Huffman, arithmetic and splay tree encoding are given as possibilities) and says the basic format is adequate for most purposes.</p>",
+      "eli5": "<p>If you often make the same kind of move, you can add your own shortcut to the menu. You tell the reader about it using the standard menu, so they can always learn your shortcut.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "6",
+      "title": "Measured Performance",
+      "content": "<p>The RFC compares compress, gzip and Vcdiff on tar archives of three gcc versions: 55,746,560, 55,797,760 and 55,787,520 bytes. For compression only, Vcdiff beats compress and trails gzip. For gcc-2.95.2 compressed against gcc-2.95.1, the differencing runs give results of roughly 100 thousand bytes, against 12,973,443 for gzip.</p><p>When files are rearranged, as between gcc-2.95.2 and gcc-2.95.3, aligning windows by file offset (Vcdiff-d) gives 26,383,849 bytes. The content-based window selection run (Vcdiff-dcw) gives 1,248,543 bytes and wins overall. The numbers come from the authors' Vcodex/Vcdiff software.</p>",
+      "eli5": "<p>When two versions are almost the same, the note is tiny compared with the whole file. If things got shuffled, you need to be smart about which old part to copy from.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and IANA Notes",
+      "content": "<p>The RFC says VCDIFF only provides a format for compressed and differenced data and does not address how the data is stored or held in memory, so it anticipates no security issues.</p><p>IANA administers Secondary Compressor ID values, which are legal in the range 1..255. Assignments are First Come, First Served and require documentation in an RFC or similarly permanent reference. This document defines no values.</p><p>The RFC also notes a limit it does not solve: a delta computed on a system with large file offsets (64-bit) may not be fully decodable on one with smaller offsets (32-bit), and suggests handling this with a negotiation mechanism in the protocol that carries the data.</p>",
+      "eli5": "<p>The note is just a format, like a recipe card, so the RFC sees no safety problems in it. One catch: a very big file's note may not work on a very small computer.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "THE THREE DELTA INSTRUCTIONS",
+      "data": {
+        "items": [
+          {
+            "title": "ADD",
+            "text": "A size x followed by x literal bytes."
+          },
+          {
+            "title": "COPY",
+            "text": "A size x and an address in the source-plus-target string."
+          },
+          {
+            "title": "RUN",
+            "text": "A size x and one byte repeated x times."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "DELTA FILE ORGANIZATION",
+      "data": {
+        "root": {
+          "label": "Delta file",
+          "children": [
+            {
+              "label": "Header",
+              "children": [
+                {
+                  "label": "Header1-4 (0xD6 0xC3 0xC4 0x00)"
+                },
+                {
+                  "label": "Hdr_Indicator"
+                },
+                {
+                  "label": "Optional compressor ID and code table"
+                }
+              ]
+            },
+            {
+              "label": "Window1, Window2, ...",
+              "children": [
+                {
+                  "label": "Win_Indicator"
+                },
+                {
+                  "label": "Optional source segment size and position"
+                },
+                {
+                  "label": "Delta encoding of the target window"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "COPY ADDRESS MODES WITH DEFAULT CACHE SIZES",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "VCD_SELF",
+            "desc": "Address encoded by itself as an integer."
+          },
+          {
+            "code": "1",
+            "label": "VCD_HERE",
+            "desc": "Encoded as here minus addr."
+          },
+          {
+            "code": "2-5",
+            "label": "Near modes",
+            "desc": "Offset from an entry in the near cache."
+          },
+          {
+            "code": "6-8",
+            "label": "Same modes",
+            "desc": "One byte indexing the same cache."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[11]",
+      "text": "Mogul, J., Krishnamurthy, B., Douglis, F., Feldmann, A., Goland, Y. and A. Van Hoff, \"Delta Encoding in HTTP\", RFC 3229, January 2002.",
+      "rfc": 3229
+    },
+    {
+      "number": "[12]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[13]",
+      "text": "Narten, T. and H. Alvestrand, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 2434, October 1998.",
+      "rfc": 2434
+    },
+    {
+      "number": "[1]",
+      "text": "D.G. Korn and K.P. Vo, Vdelta: Differencing and Compression, Practical Reusable Unix Software, Editor B. Krishnamurthy, John Wiley & Sons, Inc., 1995."
+    },
+    {
+      "number": "[2]",
+      "text": "J. Ziv and A. Lempel, A Universal Algorithm for Sequential Data Compression, IEEE Trans. on Information Theory, 23(3):337-343, 1977."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

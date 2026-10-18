@@ -9,13 +9,284 @@
   },
   "questions": [
     "http/2 server push for events",
-    "how to push real-time events over http"
+    "how to push real-time events over http",
+    "what is http web push",
+    "how does http/2 server push deliver events",
+    "what is the ttl header in web push",
+    "what is a push message urgency"
+  ],
+  "tags": [
+    "HTTP",
+    "Push",
+    "Mobile"
+  ],
+  "subtitle": "How a phone or device gets real-time events through one shared push service, using plain HTTP and HTTP/2 server push.",
+  "tldr": {
+    "problem": "Mobile and embedded devices need real-time events such as incoming calls or messages, but every application keeping its own connection alive wastes radio power.",
+    "mechanism": "A single push service holds one connection to the device. Application servers POST messages to it, and the device receives them as HTTP/2 server pushes on a long-lived GET.",
+    "outcome": "Subscriptions, delivery, expiry, replacement and optional delivery receipts are all done with ordinary HTTP resources, so the pieces can be standardized instead of being proprietary.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default port",
+      "value": "443/TCP, shared with HTTPS"
+    },
+    {
+      "label": "Registered port",
+      "value": "1001/TCP, service name webpush"
+    },
+    {
+      "label": "Required request header",
+      "value": "TTL"
+    },
+    {
+      "label": "Urgency values",
+      "value": "very-low, low, normal, high"
+    },
+    {
+      "label": "Topic length",
+      "value": "At most 32 characters"
+    },
+    {
+      "label": "Body size never rejected",
+      "value": "4096 bytes or less"
+    }
+  ],
+  "today": "<p>RFC 8030 is a Proposed Standard published in December 2016. The unit metadata shows no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "http-2",
+    "server-push",
+    "http-status-code",
+    "header-field",
+    "middlebox",
+    "alt-svc",
+    "bearer-token",
+    "retry-after",
+    "tls",
+    "push-service"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why a Shared Push Service",
+      "content": "<p>Many applications on mobile and embedded devices need continuous access to the network so that real-time events, such as incoming calls or messages, can be <strong>pushed</strong> to them in a timely way. These devices have limited power, and the radio uses a large part of the energy budget.</p><p>If each application keeps its own persistent connection, each one pays its own overhead. Keep-alive traffic that stops middleboxes from timing out sessions tends to dominate over the long term, because events are relatively rare. The RFC's answer is a single service that consolidates all events and distributes them to applications as they arrive, over just one session.</p><p>The W3C Push API describes how web applications use such a service. This RFC adds a protocol to request delivery of a push message, to create subscriptions and to monitor for new messages. Those functions were, at the time, done by proprietary protocols. How a push service is discovered is left out on purpose: user agents are expected to be configured with a URL for one.</p>",
+      "eli5": "<p>Ten apps each checking for news would wear out the battery. One shared helper that listens for all of them saves a lot of energy.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Actors and Resources",
+      "content": "<p>There are three actors: the <strong>user agent</strong> (the device and its software), the <strong>push service</strong> and the <strong>application server</strong>. The user agent creates a subscription and hands the push resource to its application server. Later the application server sends a message to the push service, which delivers it to the user agent.</p><p>Each subscription is modeled as two resources with different powers. The <strong>subscription resource</strong> is used to receive messages and to delete the subscription, and it stays private to the user agent. The <strong>push resource</strong> is used to send messages and is shared with the application server.</p><p>The protocol defines further resources: a subscription set that groups subscriptions, a push message resource for each accepted message, and a receipt subscription for delivery confirmations. They are identified by link relations such as <code>urn:ietf:params:push</code>, <code>urn:ietf:params:push:set</code> and <code>urn:ietf:params:push:receipt</code>. Subscriptions have a limited lifetime and either side can end them at any time, so both user agents and application servers must be prepared for that.</p>",
+      "eli5": "<p>You get a private key to read your mail and a separate public slot that anyone you trust can use to drop mail in. Only you hold the key.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "3",
+      "title": "Connecting and Subscribing",
+      "content": "<p>The push service MUST use HTTP over TLS. It shares the default port 443/TCP with HTTPS, but MAY also advertise the IANA-allocated TCP System Port 1001 through HTTP alternative services. The default port reaches almost everywhere, but middleboxes often give it a short idle timeout, which forces extra radio traffic. A separate port lets middleboxes use idle timeouts suited to infrequent push traffic.</p><p>To subscribe, the user agent sends a <code>POST</code> to the configured push service resource. A <code>201 (Created)</code> response must carry the subscription URI in the <code>Location</code> header field, and the push resource URI in a <code>Link</code> header with relation <code>urn:ietf:params:push</code>. The user agent then passes the push URI to the application server by some application-specific method, which must use confidentiality protection and application server authentication.</p><p>A push service MAY also return a subscription set URI. The user agent SHOULD include that set in later subscription requests, so many subscriptions can be monitored together. The service MUST answer an invalid set with <code>400 (Bad Request)</code> and MAY use <code>429 (Too Many Requests)</code> against requests that omit one.</p>",
+      "eli5": "<p>You ask the helper for a mailbox. It gives you a private key and a drop-off address, and you give the drop-off address to the people who should be able to message you.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Sending and Receiving Messages",
+      "content": "<p>An application server sends a message by <code>POST</code>ing to the push resource, with the content in the request body. A <code>201 (Created)</code> reply with a <code>Location</code> for the new push message resource means the message was accepted, not that it was delivered. Including <code>Prefer: respond-async</code> asks for delivery confirmation; the service then answers <code>202 (Accepted)</code> and provides a receipt subscription URI.</p><p>The user agent receives messages by making a <code>GET</code> request to its subscription resource (or the subscription set). The push service does not answer that request. Instead it uses HTTP/2 server push: each message arrives as a <code>PUSH_PROMISE</code> for a synthesized GET to the push message resource, followed by the message as the response.</p><p>The user agent MUST acknowledge each message by sending <code>DELETE</code> to the push message resource. If no acknowledgement arrives in a reasonable time, the service SHOULD keep retrying until the advertised expiration. A GET with <code>Prefer: wait=0</code> makes the service push all undelivered messages at once, and a <code>204 (No Content)</code> with no pushes means nothing is waiting. Application servers watch receipts the same way, with a GET to the receipt subscription, and a failed delivery produces a pushed <code>410 (Gone)</code>.</p>",
+      "eli5": "<p>You tell the helper you are waiting by the door. When a letter comes, the helper hands it over, and you tell it you got it so it can stop trying.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "5",
+      "title": "TTL, Urgency and Topic",
+      "content": "<p>Three header fields control how a message is handled. The <code>TTL</code> header field is REQUIRED on every delivery request. It is a number of seconds that suggests how long the service keeps the message. The service MAY keep it for less time and says so by returning a lower <code>TTL</code>, and once it elapses the service MUST NOT try to deliver. A request without <code>TTL</code> gets <code>400 (Bad Request)</code>. A zero TTL means deliver now if the device is available, otherwise the message expires.</p><p>The optional <code>Urgency</code> header field takes <code>very-low</code>, <code>low</code>, <code>normal</code> or <code>high</code>, with <code>normal</code> as the default. A user agent can send <code>Urgency</code> when monitoring to set the lowest urgency it wants, so a battery-powered device can stay asleep for trivial messages. The service MUST NOT forward the header to the user agent.</p><p>The <code>Topic</code> header field lets a new message replace an outstanding one for the same subscription with the same topic. It is limited to 32 characters from the URL and filename-safe Base 64 alphabet, and it is neither encrypted nor authenticated. A replacement also replaces the stored TTL, urgency and receipt subscription.</p>",
+      "eli5": "<p>You can write an expiry date on a letter, mark how important it is, and give it a label so a newer letter with the same label throws away the old one.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "6",
+      "title": "Operating a Push Service",
+      "content": "<p>A push service may hold a very large number of open TCP connections. A user agent MUST support the <code>307 (Temporary Redirect)</code> status code, which the service can use to spread load when a new subscription is requested. Alternative services can also move load while keeping the same URIs.</p><p>Storing messages costs space. The service may expire messages early, and if a receipt was requested it MUST report the failure. It MAY answer <code>413 (Payload Too Large)</code> for big bodies but MUST NOT do so for a body of 4096 bytes or less. Stored messages SHOULD carry a <code>Last-Modified</code> header field.</p><p>A push service MAY expire a subscription at any time. Outstanding requests to it then get <code>404 (Not Found)</code>, as do attempts to send to it. Expiring a subscription set also expires every subscription in the set. If the service requires subscription sets, it MAY limit concurrent HTTP/2 streams, possibly to one for managing subscriptions plus one per set.</p><p>The RFC also argues for delivery receipts: without reliable delivery, developers are tempted to add polling or a backup channel, which negates most of the benefit of push. Reliability matters less for transient messages like an incoming call.</p>",
+      "eli5": "<p>The helper has limited shelf space, so it may throw away old letters or close a mailbox, and it has to tell you honestly when it does.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and Privacy",
+      "content": "<p>All communication, between user agent and push service and between application server and push service, MUST use HTTP over TLS. TLS does not hide content from the push service itself, so applications MUST use end-to-end confidentiality, integrity and data origin authentication. The W3C Push API adopted Message Encryption for WebPush for this.</p><p>Authorization uses <strong>capability URLs</strong>: knowing a URL is the permission. Knowing the subscription URI lets you receive messages or delete the subscription, knowing the push URI lets you send, and knowing a receipt subscription URI lets you receive receipts. The RFC suggests at least 120 bits of random entropy in the path so URLs are hard to guess.</p><p>For privacy, push resource URIs MUST NOT allow two of them to be correlated from their contents, and user or device information MUST NOT appear in them. A user agent MUST be able to create new subscriptions with new identifiers at any time. For denial of service, push services SHOULD limit the rate of messages to a user agent and MAY return <code>429</code> with a <code>Retry-After</code> header. The Topic field can aid traffic analysis, and request logs can reveal subscription URIs, so log retention and access should be limited.</p>",
+      "eli5": "<p>Whoever knows the secret address can use it, so the addresses must be long and secret, and the letters inside should be sealed so even the helper cannot read them.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "IANA Registrations",
+      "content": "<p>The RFC registers three HTTP header fields, <code>TTL</code>, <code>Urgency</code> and <code>Topic</code>, in the permanent message header field registry. It creates a new \"Web Push Identifiers\" registry under the IETF Review policy, with the URN prefix <code>urn:ietf:params:push</code>, and enters the three link relation URNs described earlier as its initial content.</p><p>IANA also assigned System Port number 1001 over TCP and the service name <code>webpush</code> to this protocol.</p>",
+      "eli5": "<p>The rule book got new entries for the special labels and one special door number, so everyone uses the same ones.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "WEBPUSH ARCHITECTURE (RFC 8030, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "ua",
+            "label": "User agent"
+          },
+          {
+            "key": "push",
+            "label": "Push service"
+          },
+          {
+            "key": "app",
+            "label": "Application server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "ua",
+            "to": "push",
+            "label": "Subscribe",
+            "color": "blue",
+            "note": "Creates the subscription."
+          },
+          {
+            "from": "ua",
+            "to": "push",
+            "label": "Monitor",
+            "color": "neutral",
+            "note": "Long-lived request that stays open."
+          },
+          {
+            "from": "ua",
+            "to": "app",
+            "label": "Distribute Push Resource",
+            "color": "blue",
+            "note": "The push URI is given to the application server."
+          },
+          {
+            "from": "app",
+            "to": "push",
+            "label": "Push Message",
+            "color": "green"
+          },
+          {
+            "from": "push",
+            "to": "ua",
+            "label": "Push Message",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "URGENCY VALUES, LOWEST TO HIGHEST (RFC 8030, TABLE 1)",
+      "data": {
+        "items": [
+          {
+            "code": "very-low",
+            "label": "On power and Wi-Fi",
+            "desc": "Example: advertisements."
+          },
+          {
+            "code": "low",
+            "label": "On either power or Wi-Fi",
+            "desc": "Example: topic updates."
+          },
+          {
+            "code": "normal",
+            "label": "On neither power nor Wi-Fi",
+            "desc": "Example: chat or calendar message. The default.",
+            "highlight": true
+          },
+          {
+            "code": "high",
+            "label": "Low battery",
+            "desc": "Example: incoming phone call or time-sensitive alert."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "THE RESOURCES THE PROTOCOL DEFINES",
+      "data": {
+        "items": [
+          {
+            "title": "Push service",
+            "text": "Where the user agent creates subscriptions."
+          },
+          {
+            "title": "Subscription",
+            "text": "Private to the user agent; read to receive messages, delete to cancel."
+          },
+          {
+            "title": "Push resource",
+            "text": "Shared with the application server; POST here to send."
+          },
+          {
+            "title": "Subscription set",
+            "text": "Groups many subscriptions so one request can monitor them all."
+          },
+          {
+            "title": "Push message",
+            "text": "Created per accepted message; the user agent deletes it to acknowledge."
+          },
+          {
+            "title": "Receipt subscription",
+            "text": "Lets the application server learn of delivery."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7540]",
+      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol Version 2 (HTTP/2)\", RFC 7540, May 2015.",
+      "rfc": 7540
+    },
+    {
+      "number": "[RFC7838]",
+      "text": "Nottingham, M., McManus, P., and J. Reschke, \"HTTP Alternative Services\", RFC 7838, April 2016.",
+      "rfc": 7838
+    },
+    {
+      "number": "[RFC7240]",
+      "text": "Snell, J., \"Prefer Header for HTTP\", RFC 7240, June 2014.",
+      "rfc": 7240
+    },
+    {
+      "number": "[RFC6585]",
+      "text": "Nottingham, M. and R. Fielding, \"Additional HTTP Status Codes\", RFC 6585, April 2012.",
+      "rfc": 6585
+    },
+    {
+      "number": "[RFC7231]",
+      "text": "Fielding, R., Ed. and J. Reschke, Ed., \"Hypertext Transfer Protocol (HTTP/1.1): Semantics and Content\", RFC 7231, June 2014.",
+      "rfc": 7231
+    },
+    {
+      "number": "[RFC7525]",
+      "text": "Sheffer, Y., Holz, R., and P. Saint-Andre, \"Recommendations for Secure Use of Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)\", BCP 195, RFC 7525, May 2015.",
+      "rfc": 7525
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

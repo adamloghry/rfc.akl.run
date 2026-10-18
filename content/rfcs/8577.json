@@ -10,13 +10,200 @@
   "questions": [
     "rsvp-te tunnels shared labels",
     "reduce mpls label state",
-    "rsvp-te scaling"
+    "rsvp-te scaling",
+    "what is a te link label",
+    "how does rsvp-te shared forwarding plane work",
+    "what is etld in rsvp-te"
+  ],
+  "tags": [
+    "MPLS",
+    "RSVP-TE",
+    "Traffic Engineering"
+  ],
+  "subtitle": "Preinstalled per-link labels let many RSVP-TE tunnels share forwarding state on MPLS routers.",
+  "tldr": {
+    "problem": "Earlier fixes reduced RSVP-TE control-plane state, but the number of labels a transit router needs in the forwarding plane still grows with the number of LSPs, so the label space can limit scaling.",
+    "mechanism": "Each router preinstalls one 'TE link label' per TE link, with a pop-and-forward action. Tunnels learn these labels through Resv messages and the Record Route Object, and the ingress pushes a stack of them. Delegation hops help when the stack would be too deep.",
+    "outcome": "LSPs that cross the same TE link share one label, so forwarding state no longer grows per LSP, and setup, teardown and make-before-break need no forwarding-plane programming. It pairs RSVP-TE signaling with a Segment Routing style MPLS forwarding plane.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "TE Link Label flag",
+      "value": "Attribute Flags bit 16"
+    },
+    {
+      "label": "LSI-D flag",
+      "value": "Attribute Flags bit 17"
+    },
+    {
+      "label": "LSI-D-S2E flag",
+      "value": "Attribute Flags bit 18"
+    },
+    {
+      "label": "ETLD Attribute TLV type",
+      "value": "6"
+    },
+    {
+      "label": "Error codes",
+      "value": "Routing Problem (24), values 70 and 71"
+    }
+  ],
+  "today": "<p>RFC 8577 is a Proposed Standard, and the metadata lists no RFC that obsoletes or updates it. It leaves node protection and segment routed bypass tunnels for further study.</p>",
+  "glossary": [
+    "rsvp-te",
+    "label-switched-path",
+    "mpls",
+    "label-stack",
+    "label-switching-router"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Label Scaling Problem and the Idea",
+      "content": "<p>RFC 2961 and RFC 8370 improve RSVP-TE control-plane scaling, but they do not affect the forwarding-plane state, which stays directly proportional to the number of LSPs. This RFC describes a way to keep the size of an LSR's label space from limiting control-plane scaling.</p><p>The idea is <strong>per-TE link labels</strong>. Each is installed in advance in the MPLS forwarding plane with a pop operation and instructions to forward the packet over the TE link. An LSR advertises the label in the Label object of a Resv message and it is recorded hop by hop in the Record Route Object (RRO). The ingress Label Edge Router (LER) pushes a stack built from those labels. This is the same forwarding behavior as Segment Routing with an MPLS data plane using adjacency segments.</p><p>The RFC lists four benefits: shared labels, faster LSP setup (no forwarding state is programmed at setup or teardown), hitless rerouting during make-before-break when the path is unchanged, and mix-and-match with regular labels. It does not apply to point-to-multipoint tunnels.</p>",
+      "eli5": "<p>Every road between two routers gets one permanent signpost that says 'take this road'. Every tunnel using that road just reuses the signpost.</p>"
+    },
+    {
+      "id": "terminology",
+      "number": "2",
+      "title": "TE Link Labels and Setup",
+      "content": "<p>An LSR in a shared MPLS forwarding plane MUST allocate a unique TE link label for each TE link. When it sees one at the top of the label stack, it MUST pop it and forward the packet over the TE link to the downstream neighbor. Several labels MAY be allocated for one link to serve tunnels that request protection. An implementation that does per-label bandwidth accounting must aggregate the reservations of all LSPs that use the label.</p><p>In the RFC's example, tunnel T1 runs A-B-C-D-E and T2 runs F-B-C-D-E. When the Resv comes back from E, LSR D supplies label 250 for link D-E, C supplies 200 and B supplies 150. Both ingress routers push the same stack {150, 200, 250}. A third tunnel from F to I over F-B-C-D-E-I would push {150, 200, 250, 850}. A transit LSR never swaps the label; it only pops and forwards.</p>",
+      "eli5": "<p>Two tunnels that both drive along the same three roads end up holding the same three signposts, no matter where they started.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Delegating Label Stack Imposition",
+      "content": "<p>A long path may need more labels than the ingress can push. In that case, one or more transit LSRs become <strong>delegation hops</strong>. A delegation hop allocates a <strong>delegation label</strong> that stands for a set of labels. When a packet arrives with it, the LSR pops it and pushes the set.</p><p>The ingress chooses between two stacking approaches. With <em>stack to reach delegation hop</em>, a delegation label includes the next delegation hop's label, so it can be shared only among LSPs to the same egress over the same downstream path. With <em>stack to reach egress</em>, all delegation labels are in the ingress stack, so a label can be shared among all LSPs crossing the segment, but the number of hops is limited by the ingress push limit. In the RFC's example, the first approach has A push {150, 200, 1250}, while the second has A push {150, 200, 1250, 1500}.</p><p>Delegation can be <strong>explicit</strong>, where the ingress picks the hops and must know each transit LSR's label stack push limit, or <strong>automatic</strong>, which SHOULD be used if the explicit route has loose hops.</p>",
+      "eli5": "<p>If a trip has too many turns to write on one ticket, a helper along the way hands you a second ticket with the remaining turns.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4",
+      "title": "Automatic Delegation with ETLD",
+      "content": "<p>Automatic delegation uses the <strong>Effective Transport Label-Stack Depth</strong> (ETLD), signaled per hop in the Path message. The ingress MUST set it to the maximum number of transport labels it can potentially send downstream, and it is decremented at each hop, by 1 or by an amount set by local policy.</p><p>A node where the incoming ETLD is 1 MUST select itself as a delegation hop. So must a node that cannot receive more than one transport label, and the first ETLD-capable hop after nodes that do not support ETLD. A node that cannot support automatic delegation MUST NOT use TE link labels and uses regular labels. At each delegation hop the ETLD is reset to the maximum it can send. In the RFC's Figure 5, A can push three labels and the others five, so D and I become delegation hops. If facility backup is also requested, the ETLD is one less than for an unprotected LSP when a regular bypass tunnel is used.</p>",
+      "eli5": "<p>Each router passes along a counter that says how many more directions you can still hold. When the counter runs out, that router becomes the helper.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "5",
+      "title": "Mixing Labels, Stacks and Link Protection",
+      "content": "<p>TE link labels and regular labels can be mixed in one tunnel, which allows backward compatibility with LSRs that return regular labels. A regular label means a swap to the downstream label; a TE link label means pop and forward. Penultimate hop popping is unchanged.</p><p>The node building the stack processes each RRO label sub-object starting with the first downstream hop. The first hop's label is always pushed. If a label is a TE link label, the next hop's label is also pushed. If it is a regular label, the next hop's label is not pushed. For delegation labels, the chosen stacking approach decides.</p><p>For link protection with facility backup, the LSR MUST allocate a separate TE link label for tunnels that request it. No new signaling is needed. If link B-C is up, B pops label 151 and sends the packet to C; if it is down, B pops 151 and sends it through the facility backup, since the backup ends at the merge point. Node protection and segment routed bypass tunnels are not covered.</p>",
+      "eli5": "<p>Old routers that still use ordinary tickets and new ones that use signposts can work on the same trip, as long as the ingress reads each one correctly.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "Protocol Extensions",
+      "content": "<p>The signaling uses Attribute Flags and TLVs.</p><ul><li><strong>TE Link Label</strong> flag (bit 16) in LSP_ATTRIBUTES or LSP_REQUIRED_ATTRIBUTES asks for TE link labels at all hops. An ingress that sets it MUST also set the label recording desired flag.</li><li><strong>LSI-D</strong> (bit 17) requests automatic delegation, or in an ERO HOP_ATTRIBUTES sub-object marks an explicit delegation hop.</li><li><strong>LSI-D-S2E</strong> (bit 18) selects stack to reach egress; its absence means stack to reach delegation hop.</li><li>The <strong>ETLD</strong> Attributes TLV (type 6) carries the depth in a 32-bit word with a Reserved field and an ETLD field. ETLD MUST be non-zero; Reserved SHOULD be zero and MUST be ignored on receipt.</li><li>RRO label sub-object flags mark a label as a TE link label (0x02) or a delegation label (0x04).</li></ul><p>A node that recognizes a mandatory request but will not comply MUST send a PathErr with code Routing Problem (24) and value 70, TE link label usage failure, or 71, Label stack imposition failure.</p>",
+      "eli5": "<p>These are little tick boxes on the setup message: 'use signposts', 'help me carry directions', and 'which way to hand them out'.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "OAM, IANA and Security",
+      "content": "<p>MPLS LSP ping and traceroute (<a href='/8029/'>RFC 8029</a>) apply to Segment Routed RSVP-TE tunnels. The label stack imposed at a delegation hop can be reported in the Label Stack Sub-TLV of the MPLS echo reply for traceroute.</p><p>IANA allocates the three attribute flags (bits 16, 17, 18), the ETLD Attribute TLV (type 6), a new subregistry of Record Route label sub-object flags (0x1 Global Label, 0x02 TE Link Label, 0x04 Delegation Label), and error values 70 and 71 under Routing Problem (24).</p><p>The RFC says it does not introduce new security issues, and the considerations of RSVP, RSVP-TE and the MPLS security framework remain relevant.</p>",
+      "eli5": "<p>The usual tools for checking a route still work, and the new idea does not add new safety worries of its own.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "STACK TO REACH DELEGATION HOP, FIGURES 2 AND 3 (RFC 8577)",
+      "data": {
+        "lanes": [
+          {
+            "key": "a",
+            "label": "Ingress A"
+          },
+          {
+            "key": "d",
+            "label": "Delegation hop D"
+          },
+          {
+            "key": "i",
+            "label": "Delegation hop I"
+          }
+        ],
+        "messages": [
+          {
+            "from": "a",
+            "to": "d",
+            "label": "push {150, 200, 1250}",
+            "color": "blue",
+            "note": "Ingress pushes labels to reach the first delegation hop."
+          },
+          {
+            "from": "d",
+            "to": "i",
+            "label": "pop 1250, push {300, 350, 400, 450, 1500}",
+            "color": "green",
+            "note": "Delegation label 1250 expands."
+          },
+          {
+            "from": "i",
+            "to": "i",
+            "label": "pop 1500, push {550, 600}",
+            "color": "neutral",
+            "note": "Delegation label 1500 expands."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3209]",
+      "text": "Awduche, D., et al., \"RSVP-TE: Extensions to RSVP for LSP Tunnels\", RFC 3209, December 2001.",
+      "rfc": 3209
+    },
+    {
+      "number": "[RFC3031]",
+      "text": "Rosen, E., Viswanathan, A., and R. Callon, \"Multiprotocol Label Switching Architecture\", RFC 3031, January 2001.",
+      "rfc": 3031
+    },
+    {
+      "number": "[RFC4090]",
+      "text": "Pan, P., Ed., et al., \"Fast Reroute Extensions to RSVP-TE for LSP Tunnels\", RFC 4090, May 2005.",
+      "rfc": 4090
+    },
+    {
+      "number": "[RFC5420]",
+      "text": "Farrel, A., Ed., et al., \"Encoding of Attributes for MPLS LSP Establishment Using RSVP-TE\", RFC 5420, February 2009.",
+      "rfc": 5420
+    },
+    {
+      "number": "[RFC7570]",
+      "text": "Margaria, C., Ed., et al., \"Label Switched Path (LSP) Attribute in the Explicit Route Object (ERO)\", RFC 7570, July 2015.",
+      "rfc": 7570
+    },
+    {
+      "number": "[RFC8029]",
+      "text": "Kompella, K., et al., \"Detecting Multiprotocol Label Switched (MPLS) Data-Plane Failures\", RFC 8029, March 2017.",
+      "rfc": 8029
+    },
+    {
+      "number": "[RFC8370]",
+      "text": "Beeram, V., Ed., et al., \"Techniques to Improve the Scalability of RSVP-TE Deployments\", RFC 8370, May 2018.",
+      "rfc": 8370
+    },
+    {
+      "number": "[RFC8402]",
+      "text": "Filsfils, C., Ed., et al., \"Segment Routing Architecture\", RFC 8402, July 2018.",
+      "rfc": 8402
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

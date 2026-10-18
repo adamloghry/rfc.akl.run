@@ -9,13 +9,231 @@
   },
   "questions": [
     "radius/1.1",
-    "how to remove md5 from radius"
+    "how to remove md5 from radius",
+    "what is radius 1.1",
+    "how does radius use alpn",
+    "how to remove md5 from radius over tls",
+    "what is the radius token field"
+  ],
+  "tags": [
+    "Security",
+    "AAA",
+    "TLS"
+  ],
+  "subtitle": "A way for RADIUS over TLS to negotiate a variant that drops MD5 and the shared secret entirely.",
+  "tldr": {
+    "problem": "RADIUS carried over TLS or DTLS still used MD5 and a shared secret to authenticate packets and hide some attributes, which blocks use in systems that ban MD5.",
+    "mechanism": "Client and server negotiate the ALPN name radius/1.1 during the TLS handshake. In that mode the shared secret and all MD5-based authentication and obfuscation are removed, and a 4-octet Token replaces the Identifier.",
+    "outcome": "It is an Experimental RFC that updates six older RADIUS RFCs. RADIUS/UDP and RADIUS/TCP are not changed.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "ALPN name",
+      "value": "radius/1.1"
+    },
+    {
+      "label": "Port",
+      "value": "2083 (tcp and udp)"
+    },
+    {
+      "label": "Token field",
+      "value": "4 octets"
+    },
+    {
+      "label": "Reserved-2 field",
+      "value": "12 octets"
+    },
+    {
+      "label": "TLS version",
+      "value": "1.3 or later"
+    },
+    {
+      "label": "No-protocol alert",
+      "value": "no_application_protocol (120)"
+    }
+  ],
+  "today": "<p>RFC 9765 is an Experimental RFC from April 2025. It updates RFC 2865, RFC 2866, RFC 5176, RFC 6613, RFC 6614 and RFC 7360, and nothing has obsoleted or updated it. RADIUS/UDP and RADIUS/TCP are unchanged.</p>",
+  "glossary": [
+    "radius",
+    "alpn",
+    "tls",
+    "md5-hash",
+    "shared-secret",
+    "proxy",
+    "hop-by-hop"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Remove MD5 from RADIUS over TLS",
+      "content": "<p>The original RADIUS protocol (<a href='/2865/'>RFC 2865</a>) uses MD5 to authenticate packets and to obfuscate certain attributes. When RADIUS was later carried over TCP, TLS and DTLS, those transports kept MD5 and the shared secret, because the aim was to change the basic RADIUS encoding and validation as little as possible.</p><p>The RFC says that MD5 use in RADIUS/TLS has not been proven insecure, but it has not been proven secure either. Organizations that forbid digests with known weaknesses (it cites FIPS 140) therefore struggle to use RADIUS. MD5 inside (D)TLS adds no security or privacy over what TLS already gives. The author calls the original decision to keep it likely wrong.</p><p>The fix is described as a <strong>transport profile</strong> for RADIUS over TLS, not a new protocol. It is named <strong>RADIUS/1.1</strong>.</p>",
+      "eli5": "<p>Some places will not allow an old, doubtful lock. The tunnel already keeps messages safe, so this lets everyone take the old lock off.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "2",
+      "title": "Negotiating RADIUS/1.1 with ALPN",
+      "content": "<p>RADIUS/1.1 is selected with Application-Layer Protocol Negotiation (ALPN, <a href='/7301/'>RFC 7301</a>) during the TLS handshake. The client lists the protocol names it supports in the ClientHello, and the server answers with one of them or with none. The ALPN names are <code>radius/1.0</code> (historic RADIUS/TLS) and <code>radius/1.1</code>. If ALPN is not used, implementations MUST NOT use RADIUS/1.1, and TLS 1.3 or later is required.</p><p>A configuration variable called Version holds the permitted versions. If it is unset, no ALPN strings are sent. Implementations that support both SHOULD default to <code>1.0, 1.1</code>. Servers that find no common name MUST send the TLS alert <code>no_application_protocol</code> (120) and close the connection. Once both ends are known to work, administrators SHOULD change configuration to require RADIUS/1.1.</p><p>If an alert cannot be sent, an end that requires ALPN MAY send a Protocol-Error packet (<a href='/7930/'>RFC 7930</a>) carrying Error-Cause 406 inside the tunnel and then MUST close the connection.</p><p>On session resumption, a session that negotiated <code>radius/1.1</code> MUST be resumed as <code>radius/1.1</code>, which prevents down-bidding attacks.</p>",
+      "eli5": "<p>When they first say hello, each side says which version of the conversation it knows. They pick the newest one both know, and if they share none, they hang up.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "3",
+      "title": "The RADIUS/1.1 Packet Header",
+      "content": "<p>The header keeps the same size as in RADIUS but some fields change meaning. Code and Length are unchanged. The one-octet Identifier becomes <strong>Reserved-1</strong>, set to zero when sending and ignored on receipt. The Request and Response Authenticator fields become a four-octet <strong>Token</strong> followed by a twelve-octet <strong>Reserved-2</strong>, also zero on send and ignored on receipt.</p><p>The Token must change for every new unique packet on a connection. It is generated from a 32-bit counter per connection, which SHOULD start at a random value. A retransmitted duplicate on DTLS keeps its Token, unless its contents change. Receivers treat the Token as opaque and deduplicate on it alone, per connection. A server that sees Token values reused for distinct outstanding packets MUST close the connection.</p>",
+      "eli5": "<p>Each message gets a ticket number from a counter. The number is how the reply finds its question, like a coat-check ticket.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "4",
+      "title": "How Attributes Change",
+      "content": "<p>Attributes that were hidden with the shared secret are now sent as their plain data type, because TLS already protects them. <code>User-Password</code> is sent as a string of 1 to 128 octets, and <code>Tunnel-Password</code> loses its Salt and Data-Length fields. The MS-MPPE-Send-Key and MS-MPPE-Recv-Key attributes are also sent as plain strings.</p><p>Several attributes no longer apply. <code>Message-Authenticator</code>, <code>Message-Authentication-Code</code>, <code>MAC-Randomizer</code> and <code>Original-Packet-Code</code> MUST NOT be sent; if received, they are treated as invalid attributes. A client that sends <code>CHAP-Password</code> MUST also send <code>CHAP-Challenge</code>, since the Request Authenticator can no longer serve as the challenge.</p><p>CHAP, MS-CHAP and similar attributes are unchanged and travel as opaque data. The RFC notes that MS-CHAP has been broken for decades, so it should only run over a secure transport or inside a tunnel. Which authentication methods to accept stays a local choice.</p>",
+      "eli5": "<p>Messages used to be wrapped in scrambled paper inside the tunnel. Now they are sent plainly, since the tunnel itself hides them.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Protocol-Error, Status-Server and Proxies",
+      "content": "<p>When a RADIUS/1.1 server cannot process an Access-Request or Accounting-Request, it MUST reply with a Protocol-Error packet containing an Error-Cause attribute. Before this, the client could not tell an unable server from a dead one. A proxy that cannot forward MUST use 502 or 505, and a home server with no matching cause MUST use 506. The client then tries another server, and MUST NOT resend over the same connection.</p><p>The old practice of reserving Identifier 0 for Status-Server MUST NOT be used, since the Token allows 2^32 outstanding packets. Proxies can negotiate RADIUS/1.1 independently with each client and server, and pass attributes unchanged. A proxy that receives Access-Request over RADIUS/1.1 and forwards it over UDP or TCP SHOULD add Message-Authenticator.</p><p>The RFC also updates <a href='/5176/'>RFC 5176</a> so that Error-Cause may appear in Access-Reject packets.</p>",
+      "eli5": "<p>If a helper cannot answer, it now says so, instead of staying silent. Then you can ask a different helper.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security and Compatibility",
+      "content": "<p>The RFC relies on TLS and ALPN for security and advises letting the TLS library do the negotiation. It argues that a version mismatch is safe: RADIUS/1.0 and RADIUS/1.1 are not compatible, so most requests are discarded by the server and all responses by the client. It also states that no new attributes may be defined that are only secure over TLS.</p><p>For privacy, RADIUS/1.1 has the benefits of RADIUS/TLS and RADIUS/DTLS. The RFC warns that sending passwords is still risky with multi-hop proxies, since each proxy can read the packet, and suggests dynamic peer discovery or password-free methods such as EAP-pwd.</p><p>IANA registered the two ALPN protocol IDs <code>radius/1.0</code> and <code>radius/1.1</code>.</p>",
+      "eli5": "<p>If the two sides pick different versions, nothing gets through. That is annoying but safe, and the logs tell an adult what went wrong.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "RADIUS/1.1 PACKET FORMAT (RFC 9765)",
+      "data": {
+        "title": "RADIUS/1.1 header",
+        "width": 32,
+        "fields": [
+          {
+            "key": "code",
+            "name": "Code",
+            "bits": 8,
+            "desc": "Packet type; meaning unchanged."
+          },
+          {
+            "key": "reserved-1",
+            "name": "Reserved-1",
+            "bits": 8,
+            "desc": "Former Identifier; zero on send, ignored on receipt."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Meaning unchanged."
+          },
+          {
+            "key": "token",
+            "name": "Token",
+            "bits": 32,
+            "desc": "Matches requests to replies and detects duplicates."
+          },
+          {
+            "key": "reserved-2",
+            "name": "Reserved-2",
+            "bits": 96,
+            "desc": "Twelve octets, zero on send, ignored on receipt."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "VERSION SETTINGS AND ALPN STRINGS (RFC 9765, TABLE 1)",
+      "data": {
+        "columns": [
+          "Value",
+          "ALPN strings",
+          "Meaning"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "unset",
+              "none",
+              "No ALPN strings are sent"
+            ]
+          },
+          {
+            "cells": [
+              "1.0",
+              "radius/1.0",
+              "Require historic RADIUS/TLS"
+            ]
+          },
+          {
+            "cells": [
+              "1.0, 1.1",
+              "radius/1.0, radius/1.1",
+              "Allow either"
+            ]
+          },
+          {
+            "cells": [
+              "1.1",
+              "radius/1.1",
+              "Require RADIUS/1.1"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2865]",
+      "text": "Rigney, C., Willens, S., Rubens, A., and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "rfc": 2865
+    },
+    {
+      "number": "[RFC6614]",
+      "text": "Winter, S., McCauley, M., Venaas, S., and K. Wierenga, \"Transport Layer Security (TLS) Encryption for RADIUS\", RFC 6614, May 2012.",
+      "rfc": 6614
+    },
+    {
+      "number": "[RFC7301]",
+      "text": "Friedl, S., Popov, A., Langley, A., and E. Stephan, \"Transport Layer Security (TLS) Application-Layer Protocol Negotiation Extension\", RFC 7301, July 2014.",
+      "rfc": 7301
+    },
+    {
+      "number": "[RFC7360]",
+      "text": "DeKok, A., \"Datagram Transport Layer Security (DTLS) as a Transport Layer for RADIUS\", RFC 7360, September 2014.",
+      "rfc": 7360
+    },
+    {
+      "number": "[RFC7930]",
+      "text": "Hartman, S., \"Larger Packets for RADIUS over TCP\", RFC 7930.",
+      "rfc": 7930
+    },
+    {
+      "number": "[RFC6421]",
+      "text": "Nelson, D., Ed., \"Crypto-Agility Requirements for Remote Authentication Dial-In User Service (RADIUS)\", RFC 6421, November 2011.",
+      "rfc": 6421
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

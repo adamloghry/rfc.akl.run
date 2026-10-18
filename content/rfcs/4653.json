@@ -10,13 +10,172 @@
   "questions": [
     "tcp-ncr",
     "tcp reordering robustness",
-    "tcp duplicate acknowledgments reordering"
+    "tcp duplicate acknowledgments reordering",
+    "what is tcp-ncr",
+    "why does packet reordering hurt tcp",
+    "what is extended limited transmit"
+  ],
+  "tags": [
+    "TCP",
+    "Loss Recovery",
+    "Reordering"
+  ],
+  "subtitle": "TCP-NCR waits roughly one round trip before deciding that out-of-order segments mean loss, so reordering stops triggering needless retransmissions.",
+  "tldr": {
+    "problem": "TCP treats three duplicate acknowledgments as a sign of loss, but packet reordering produces them too, causing an unnecessary retransmission and rate cut.",
+    "mechanism": "TCP-NCR raises the trigger from three duplicate ACKs to about a congestion window's worth of data having left the network, and keeps sending new data in the meantime using Extended Limited Transmit.",
+    "outcome": "It is an Experimental sender-side change built on SACK. The RFC asks for more experience before wide use, and notes costs such as extra receiver buffering and up to one RTT of delay.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Standard trigger",
+      "value": "3 duplicate ACKs"
+    },
+    {
+      "label": "NCR trigger",
+      "value": "about one cwnd of data left the network, minimum 3"
+    },
+    {
+      "label": "LT_F, Careful",
+      "value": "2/3"
+    },
+    {
+      "label": "LT_F, Aggressive",
+      "value": "1/2"
+    },
+    {
+      "label": "Added delay",
+      "value": "roughly one RTT"
+    }
+  ],
+  "today": "<p>RFC 4653 is an Experimental document, and the metadata shows no RFC that obsoletes or updates it. The text itself asks for implementation and experimentation before any large-scale use on the Internet.</p>",
+  "glossary": [
+    "tcp",
+    "congestion-control",
+    "retransmission",
+    "nagle-algorithm",
+    "sequence-number",
+    "duplicate-acknowledgment",
+    "selective-acknowledgment"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Three Duplicate ACKs Fall Short",
+      "content": "<p>TCP receivers send cumulative acknowledgments. When segments arrive out of order they generate <strong>duplicate ACKs</strong>, and as specified in <a href='/2581/'>RFC 2581</a> a sender takes three duplicate ACKs as a sign of segment loss. It then retransmits the segment and cuts its sending rate by roughly half.</p><p>The RFC's example: a sender transmits segments 1 to 10 and segment 3 is dropped. The receiver keeps acknowledging sequence number 3, and the third duplicate ACK triggers the retransmission. If segment 3 was only delayed and arrived after segment 10, exactly the same thing happens, so TCP cannot tell reordering from loss and makes an unnecessary retransmission and rate reduction.</p><p>The authors argue that reordering is not rare, citing measurement studies, and that TCP's need for nearly in-order delivery limits the design of routing, switches, link-layer retransmission and other future components.</p>",
+      "eli5": "<p>Imagine numbered cards handed to you, and card 3 shows up last. You might wrongly think it got lost and ask for another. TCP does just that, and slows down for no good reason.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "The Idea Behind TCP-NCR",
+      "content": "<p>TCP-NCR (Non-Congestion Robustness) raises the retransmission trigger from three duplicate ACKs to approximately a congestion window of data having left the network, but never less than three. Since cwnd is what a flow can send in one round-trip time (RTT), this delays the retransmission and the congestion response by roughly one RTT. That is about the longest TCP can wait before the costly retransmission timeout may fire.</p><p>A higher threshold alone makes TCP brittle: with a cwnd of 10 segments and one lost segment, at most 9 duplicate ACKs can arrive, so a threshold of 10 would never be met. To fix this, TCP-NCR extends Limited Transmit (<a href='/3042/'>RFC 3042</a>) so the sender keeps sending new data while it works out whether it is seeing loss or reordering. That new data produces more duplicate ACKs.</p><p>The RFC offers two variants because it is unclear how delayed rate reductions behave on the Internet. <strong>Careful Limited Transmit</strong> sends one new segment for every two segments known to have left the network, which halves the rate immediately and restores state if it was only reordering. <strong>Aggressive Limited Transmit</strong> sends one new segment for every segment that left the network, keeping the rate roughly unchanged until loss is concluded. Which variant is best is called an open question.</p>",
+      "eli5": "<p>Instead of panicking after three late cards, you wait about as long as a full round of cards takes to arrive. While waiting, you keep dealing out new cards, either at half speed (careful) or at full speed (aggressive).</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "The Algorithm",
+      "content": "<p>An implementation MUST use either Careful or Aggressive Limited Transmit and set a constant <code>LT_F</code> accordingly: 2/3 for Careful and 1/2 for Aggressive. It is the fraction of outstanding data (including data sent during Extended Limited Transmit) that must be SACKed before retransmission. The algorithm builds on SACK (<a href='/2018/'>RFC 2018</a>) and the loss recovery of <a href='/3517/'>RFC 3517</a>. Only the sender needs changes, although both ends must support SACK. TCP connections using the Nagle algorithm MAY use TCP-NCR; those not using it SHOULD NOT, because the number of outstanding segments cannot be calculated accurately.</p><p><strong>Entering.</strong> A sender enters Extended Limited Transmit on the first ACK with a SACK block after an ACK that had no SACK information and advanced the cumulative ACK point. It saves <code>FlightSizePrev = FlightSize</code>, sets <code>Skipped = 0</code> and sets <code>DupThresh = max (LT_F * (FlightSize / SMSS),3)</code>.</p><p><strong>While active.</strong> On each ACK with SACK information the sender recomputes <code>pipe</code> and, if <code>(pipe + Skipped) &lt;= (FlightSizePrev - SMSS)</code> and new data is available, sends one segment, repeating as needed. Careful Limited Transmit also adds to <code>Skipped</code> so only every second duplicate ACK triggers a send. Then <code>DupThresh</code> is recomputed.</p><p><strong>Ending by reordering.</strong> An ACK that advances the cumulative ACK point ends Extended Limited Transmit, since it signals reordering rather than congestion. To prevent bursts the sender sets <code>cwnd = min (FlightSize + SMSS,FlightSizePrev)</code> and <code>ssthresh = FlightSizePrev</code>.</p><p><strong>Ending by loss.</strong> When RFC 3517 deems a segment lost, loss recovery takes over, with one change: <code>ssthresh = cwnd = (FlightSizePrev / 2)</code>. <code>DupThresh</code> is then held constant until recovery ends.</p>",
+      "eli5": "<p>The sender remembers how much was in flight, keeps sending carefully while it waits, and decides based on what comes back. If the missing card turns up, it carries on as before. If not, it asks for a resend and slows down based on how much it had out before waiting.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "4",
+      "title": "Advantages, Disadvantages and Related Work",
+      "content": "<p><strong>Advantages.</strong> TCP-NCR could open the design space for network components that currently must preserve packet order, and it can improve TCP performance under reordering. The RFC cites simulations of a precursor called TCP-DCR and emulations in which its performance was similar to a Linux scheme that undoes wrong decisions using DSACK feedback (<a href='/2883/'>RFC 2883</a>) when packets are reordered by less than one RTT, with simpler changes.</p><p><strong>Disadvantages.</strong> The receiver may need to buffer up to an extra cwnd, when the sender uses Aggressive Limited Transmit and loss really occurs. Delivery of data to the application can be delayed by up to one RTT, so delay-sensitive applications should turn the option off, for instance through a socket option. Recovery from congestion becomes more sluggish; simulation results cited suggest the impact is minimal, but further Internet experimentation is required.</p><p><strong>Related work.</strong> Other schemes either try to prevent spurious retransmits by estimating the right threshold, which may be more precise but is more complex, or detect them afterwards and undo the changes (for example <a href='/3522/'>RFC 3522</a>, <a href='/3708/'>RFC 3708</a>, <a href='/4015/'>RFC 4015</a> and <a href='/4138/'>RFC 4138</a>). TCP-NCR could be used together with these.</p>",
+      "eli5": "<p>Waiting longer means fewer false alarms, but it costs a little speed, a bigger waiting area at the receiver, and a slower reaction when something really is lost.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>General attacks on TCP congestion control are described in <a href='/2581/'>RFC 2581</a>. SACK-based loss recovery (<a href='/3517/'>RFC 3517</a>) mitigates some duplicate ACK attacks, and the Extended Limited Transmit algorithms were designed to thwart the ACK division problems described in <a href='/3465/'>RFC 3465</a>. The RFC also advises against non-SACK variants partly because of the security implications of only roughly knowing how many segments are outstanding.</p>",
+      "eli5": "<p>Because the sender counts what it has really sent and had acknowledged, a cheater cannot easily trick it into speeding up by sending fake replies.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THE TWO EXTENDED LIMITED TRANSMIT VARIANTS",
+      "data": {
+        "columns": [
+          "Variant",
+          "New data sent",
+          "LT_F"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Careful Limited Transmit",
+              "1 new segment per 2 segments that left the network",
+              "2/3"
+            ]
+          },
+          {
+            "cells": [
+              "Aggressive Limited Transmit",
+              "1 new segment per segment that left the network",
+              "1/2"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, \"TCP Selective Acknowledgement Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC2581]",
+      "text": "Allman, M., Paxson, V., and W. Stevens, \"TCP Congestion Control\", RFC 2581, April 1999.",
+      "rfc": 2581
+    },
+    {
+      "number": "[RFC3042]",
+      "text": "Allman, M., Balakrishnan, H., and S. Floyd, \"Enhancing TCP's Loss Recovery Using Limited Transmit\", RFC 3042, January 2001.",
+      "rfc": 3042
+    },
+    {
+      "number": "[RFC3517]",
+      "text": "Blanton, E., Allman, M., Fall, K., and L. Wang, \"A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP\", RFC 3517, April 2003.",
+      "rfc": 3517
+    },
+    {
+      "number": "[RFC2883]",
+      "text": "Floyd, S., Mahdavi, J., Mathis, M., and M. Podolsky, \"An Extension to the Selective Acknowledgement (SACK) Option for TCP\", RFC 2883, July 2000.",
+      "rfc": 2883
+    },
+    {
+      "number": "[RFC3465]",
+      "text": "Allman, M., \"TCP Congestion Control with Appropriate Byte Counting (ABC)\", RFC 3465, February 2003.",
+      "rfc": 3465
+    },
+    {
+      "number": "[RFC3522]",
+      "text": "Ludwig, R. and M. Meyer, \"The Eifel Detection Algorithm for TCP\", RFC 3522, April 2003.",
+      "rfc": 3522
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

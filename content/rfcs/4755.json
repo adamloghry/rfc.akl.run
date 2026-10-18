@@ -9,13 +9,220 @@
   },
   "questions": [
     "ip over infiniband connected mode",
-    "how to run ip on infiniband"
+    "how to run ip on infiniband",
+    "what is ipoib connected mode",
+    "ipoib cm default mtu",
+    "difference between ipoib ud and cm",
+    "how does ipoib connection setup work"
+  ],
+  "tags": [
+    "InfiniBand",
+    "IP",
+    "Link Layer"
+  ],
+  "subtitle": "How IP packets travel over InfiniBand connections, with MTUs far larger than the datagram mode allows.",
+  "tldr": {
+    "problem": "IP over InfiniBand's datagram mode is limited to 4096-octet messages, but InfiniBand's connected modes can carry far larger ones.",
+    "mechanism": "IPoIB-CM keeps the datagram queue pair for address resolution and multicast, adds mode flags to the link-layer address, then sets up a separate InfiniBand connection per peer whose private data carries the sender's UD QPN and a Receive MTU.",
+    "outcome": "Unicast IP traffic can use a much larger MTU, up to message sizes of 2^31 octets. The extension is optional, and the RC mode needs care because its reliability can interact badly with TCP timers.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Connected mode max message",
+      "value": "2^31 octets"
+    },
+    {
+      "label": "Datagram mode limit",
+      "value": "4096 octets"
+    },
+    {
+      "label": "Default IPoIB-CM MTU",
+      "value": "2044 octets"
+    },
+    {
+      "label": "Encapsulation header",
+      "value": "4 octets"
+    },
+    {
+      "label": "Service-ID size",
+      "value": "64 bits"
+    },
+    {
+      "label": "EtherTypes",
+      "value": "0x800 (IPv4), 0x86DD (IPv6)"
+    }
+  ],
+  "today": "<p>RFC 4755 is a Proposed Standard and the unit metadata lists no obsoleting or updating RFC. It extends <a href='/4391/'>RFC 4391</a>.</p>",
+  "glossary": [
+    "mtu",
+    "multicast",
+    "link-layer",
+    "ethertype",
+    "ipv4",
+    "ipv6",
+    "tcp",
+    "retransmission",
+    "congestion-control",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Use Connected Modes",
+      "content": "<p>InfiniBand Architecture (IBA) offers several transports. The unreliable datagram (UD) mode best matches IP, and <a href='/4391/'>RFC 4391</a> describes IP over InfiniBand (IPoIB) on top of it. RFC 4755 covers the two <strong>connected modes</strong>: Reliable Connected (RC) and Unreliable Connected (UC). Together they are called <strong>IPoIB-CM</strong>, while the datagram version is IPoIB-UD.</p><p>The motivation is size. Connected modes offer link MTUs of up to 2^31 octets, while the datagram modes are limited to 4096 octets. IBA requires Host Channel Adapters to support both connected modes, but it is optional for Target Channel Adapters. The connected modes also allow \"automatic path migration\" to improve reliability.</p>",
+      "eli5": "<p>The regular way of sending is like mailing small envelopes. The connected way is like a private delivery truck that can carry huge boxes.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "How IPoIB-CM Is Layered on IPoIB-UD",
+      "content": "<p>IPoIB-CM is an <strong>optional</strong> extension. Every IPoIB implementation MUST support <a href='/4391/'>RFC 4391</a> and MAY support this document. IP encapsulation, default MTU, link-layer address format and IPv6 stateless autoconfiguration work as in RFC 4391.</p><p>Connected modes form a non-broadcast, multiple-access network and do not support multicast. So each IPoIB-CM interface MUST have one UD queue pair (QP) plus one or more connected-mode QPs. Multicast mapping, sending, receiving and routing MUST use the UD QP, and all address resolution responses (ARP or Neighbor Discovery) MUST be sent in a UD packet. Unicast can then use the connected QPs.</p>",
+      "eli5": "<p>The old noticeboard is still used for announcements to everyone. The private pipe is only for talking to one friend at a time.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "3",
+      "title": "Link-Layer Address and Service-ID",
+      "content": "<p>RFC 4391 describes the link-layer address as a reserved octet, a QP number and a GID. RFC 4755 turns the reserved octet into a one-octet <code>Flags</code> field, giving <code>&lt;Flags&gt;:QPN:GID</code>. Bit 0 says the interface supports RC and bit 1 says it supports UC. Both MAY be set. All other bits MUST be 0 on transmit and ignored on receive. An implementation that only supports IPoIB-UD MUST ignore the flags on reception and send them as zeros.</p><p>The QPN is the UD queue pair number on which unicast address resolution replies are received. It also forms the <strong>Service-ID</strong> used to set up the connection. The Service-ID is a 64-bit value from a block InfiniBand reserves for IETF use: a first octet of <code>00000001</code>, a <code>Type</code> field that MUST be 0, a reserved field that MUST be zeros, and the QPN.</p>",
+      "eli5": "<p>The address gets a small tag saying which kinds of big pipes the computer can use. The phone number of its mailbox is also used to build the name of the pipe.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "4",
+      "title": "Setting Up and Tearing Down Connections",
+      "content": "<p>After address resolution, either peer may open the IB connection. An implementation is NOT REQUIRED to connect just because the peer advertises support. A Management Datagram goes to the peer's communication manager, and the handshake is <code>REQ</code>, then <code>REP</code> (or <code>REJ</code>), then <code>RTA</code>. The request always carries a Service-ID.</p><p>The receiver cannot otherwise know the initiator's link address, so every CM message in the setup, including every <code>REJ</code>, MUST carry the sender's IPoIB-UD QPN in the private data field.</p><p>To avoid two connections when two <code>REQ</code> messages cross, the receiver builds the remote link-layer address from the private data and the sender's GID, with the connection mode flags zeroed. If it has an outstanding <code>REQ</code> to that address, it numerically compares the two addresses from the most significant octet. If the local address is smaller, the connection is accepted. Otherwise it is rejected with the \"Consumer Reject\" code.</p><p>Connections are part of the IPoIB interface, so they SHOULD be torn down when the interface is. Either peer MAY tear one down when the address resolution entry expires.</p>",
+      "eli5": "<p>To open the pipe, one computer knocks and the other answers. If both knock at once, the one with the smaller address wins, so only one pipe gets built.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "5",
+      "title": "Frame Format and Private Data",
+      "content": "<p>All IP datagrams carried over InfiniBand have the 4-octet encapsulation header from RFC 4391: a 16-bit <code>Type</code> and 16 reserved bits. Type <code>0x800</code> means IPv4 and <code>0x86DD</code> means IPv6, taken from the IANA \"ETHER TYPE\" numbers.</p><p>The private data field of every CM connection-setup message MUST carry two values: the sender's UD QPN (24 bits after one reserved octet) and the 32-bit Receive MTU the sender supports. The reserved octet MUST be zero on transmit and ignored on receive.</p>",
+      "eli5": "<p>Each package gets a small label saying whether it holds an IPv4 or IPv6 letter. The knock on the door also says which mailbox to reply to and how big a box the sender can take.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "6",
+      "title": "Maximum Transmission Unit",
+      "content": "<p>The default MTU of an IPoIB-CM interface is 2044 octets: the 2048-octet IPoIB link MTU minus the 4-octet encapsulation header. Connected modes allow messages up to 2^31 octets, so a much larger unicast MTU is possible. The usable size depends on the implementation, the channel adapter and configured resources.</p><p>An implementation MAY exchange the optimal size using the <strong>Receive MTU</strong> in the CM REQ private data. The requester MUST be able to accept smaller sizes too. Both peers use the smaller of the two Receive MTU values, reduced by the 4-octet header.</p><p>Because interfaces on one subnet may end up with different MTUs, an implementation might keep the MTU per destination, such as in a route or neighbor cache. It may instead always use the IPoIB-UD MTU from the broadcast GID.</p>",
+      "eli5": "<p>Each side says how big a box it can take, and they agree on the smaller size, minus a bit for the label.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "7",
+      "title": "Reliability Caveat and Security",
+      "content": "<p>The RC mode guarantees in-order delivery and breaks messages into physical-MTU packets, retransmitting lost ones. An upper-layer timer can therefore expire while RC is still working. TCP treats a timeout as congestion and enters slow-start, which can hurt throughput drastically, and other protocols may add retransmissions to an already congested fabric. The RFC says RC reliability suits fabrics with short latencies, not wide area, and RC timers should be short compared with the starting minimum values used by end-to-end transports.</p><p>For security, the RFC notes that an impostor may return false flags or wrong QPN values during address resolution. This may cause unnecessary connection attempts and some delay or disruption. Future use of reserved bits and octets in the address, Service-ID and private data MUST be published as RFCs.</p>",
+      "eli5": "<p>The reliable pipe keeps retrying until everything arrives. That can make other programs think something broke and slow down. A fake computer could also give wrong details and cause delays.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "IB CONNECTION SETUP HANDSHAKE (RFC 4755, SECTION 3.2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator"
+          },
+          {
+            "key": "peer",
+            "label": "Peer"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "peer",
+            "label": "REQ",
+            "color": "blue",
+            "note": "Carries Service-ID, UD QPN and Receive MTU."
+          },
+          {
+            "from": "peer",
+            "to": "initiator",
+            "label": "REP (or REJ)",
+            "color": "green",
+            "note": "Returns the connected mode QPN."
+          },
+          {
+            "from": "initiator",
+            "to": "peer",
+            "label": "RTA",
+            "color": "blue"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "CM PRIVATE DATA FORMAT (RFC 4755, SECTION 6)",
+      "data": {
+        "title": "Private data",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 8,
+            "desc": "Zero on transmit, ignored on receive."
+          },
+          {
+            "key": "ud-qpn",
+            "name": "UD QPN",
+            "bits": 24,
+            "desc": "UD queue pair number of the sender."
+          },
+          {
+            "key": "receive-mtu",
+            "name": "Receive MTU",
+            "bits": 32,
+            "desc": "Largest packet the sender can accept."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4391]",
+      "text": "Chu, J. and V. Kashyap, \"Transmission of IP over InfiniBand (IPoIB)\", RFC 4391, April 2006.",
+      "rfc": 4391
+    },
+    {
+      "number": "[RFC4392]",
+      "text": "Kashyap, V., \"IP over InfiniBand (IPoIB) Architecture\", RFC 4392, April 2006.",
+      "rfc": 4392
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC2581]",
+      "text": "Allman, M., Paxson, V., and W. Stevens, \"TCP Congestion Control\", RFC 2581, April 1999.",
+      "rfc": 2581
+    },
+    {
+      "number": "[IB_ARCH]",
+      "text": "InfiniBand Architecture Specification, version 1.2."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

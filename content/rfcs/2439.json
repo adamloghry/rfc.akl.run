@@ -20,13 +20,236 @@
   },
   "questions": [
     "what is bgp route flap damping",
-    "how does route dampening work"
+    "how does route dampening work",
+    "how does route flap damping work",
+    "what is a bgp figure of merit",
+    "why not damp ibgp routes"
+  ],
+  "tags": [
+    "Routing",
+    "BGP",
+    "Stability"
+  ],
+  "subtitle": "How a BGP router can quietly stop listening to routes that keep going up and down, without slowing down the stable ones.",
+  "tldr": {
+    "problem": "Some routes are advertised and withdrawn again and again. Each change makes every BGP router along the path run its decision process and update forwarding entries, and the extra load can make routers fail.",
+    "mechanism": "Each route learned from an external peer gets a figure of merit that goes up when the route is withdrawn and decays exponentially while it is stable. Above a cutoff the route is suppressed, and below a reuse value it is used again.",
+    "outcome": "Unstable routes are held back while stable routes are not delayed. The RFC says the technique was already widely deployed, and warns that it must never be applied to routes learned over IBGP.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "MinRouteAdvertisementInterval",
+      "value": "30 seconds (BGP-4 recommendation)"
+    },
+    {
+      "label": "MinASOriginationInterval",
+      "value": "15 seconds (BGP-4 recommendation)"
+    },
+    {
+      "label": "Suggested reuse list defaults",
+      "value": "30 seconds and 64 list heads"
+    },
+    {
+      "label": "Sample cutoff and reuse",
+      "value": "1.25 and 0.5"
+    },
+    {
+      "label": "Sample decay half lives",
+      "value": "5 min reachable, 15 min unreachable"
+    },
+    {
+      "label": "First implementations",
+      "value": "1995"
+    }
+  ],
+  "today": "<p>RFC 2439 is a Proposed Standard, and the metadata for this site lists no RFC that obsoletes or updates it. The text itself says that in 1998 the technique was already widely deployed.</p>",
+  "glossary": [
+    "bgp",
+    "autonomous-system",
+    "ibgp-and-ebgp",
+    "nlri",
+    "as-path",
+    "prefix",
+    "route-aggregation",
+    "route-flap-damping"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem: Route Flap",
+      "content": "<p>An excessive rate of updates to the reachability of some Internet prefixes was seen widely in the early 1990s. The updates are not necessarily periodic, so the RFC avoids the word oscillation and uses the informal term <strong>route flap</strong>. The technique it describes is called <strong>route flap damping</strong>.</p><p>The main cost of BGP updates is the BGP decision process plus adding and removing forwarding entries. The RFC gives a worst-case story: a widely deployed implementation may fail under high update volume, its failure adds load on other routers, and in the worst case a stable oscillation results. It says such cases have already been observed in practice.</p><p>The goals are to cut router processing load, prevent sustained oscillations, and avoid slowing convergence for well-behaved routes, while still packing changes into few updates, keeping routing consistent and using little extra space. The RFC notes that damping does not remove the need for robust, efficient implementations.</p>",
+      "eli5": "<p>A route that flips on and off all day makes every router along the way redo its homework each time. Damping tells the routers to stop redoing it for the troublemakers.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "Two Ways to Limit Advertisements",
+      "content": "<p>The RFC describes two methods. <strong>Fixed timers</strong> need no space per route, but they slow convergence even for routes with no history of trouble. BGP-4 already describes two fixed timers: <code>MinRouteAdvertisementInterval</code> with a recommended value of 30 seconds, and <code>MinASOriginationInterval</code> with 15 seconds. In practice such timers are set very short, which helps pack routes into fewer updates, but they are seldom set to the tens of minutes to hours needed to really damp flap.</p><p>The second method is <strong>stability-sensitive suppression</strong>. It keeps a little state per route, so well-behaved routes pass through quickly and only routes with a bad recent history are held back. The RFC says it is possible and desirable to combine both.</p><p>The RFC argues that recent history is the best available guide to future stability. The measure should be cumulative, and older instability should count for less. It prefers to suppress the acceptance and use of a flapping route rather than only its redistribution, and to suppress announcements rather than withdrawals. It chose an exponential decay and says these choices are suggestions for implementers.</p><div class='callout callout-info'><p>Exponential decay has a handy property: decaying for time t1 and then t2 gives the same result as decaying for t1 plus t2. A long gap can therefore be handled with one lookup and one multiply.</p></div>",
+      "eli5": "<p>There are two ways to calm a noisy friend: make everyone wait a minute before talking, or only quiet the ones who have been loud lately. The second is fairer to everyone else.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "4",
+      "title": "The Figure of Merit and Suppression",
+      "content": "<p>For each route the router keeps a <strong>figure of merit</strong>. Each time the route is withdrawn, it goes up by 1 (a penalty), and it is clipped to a ceiling. While the route is not changing, the value decays exponentially, with separate decay rates for a route that is reachable and one that is unreachable. A slower decay while unreachable is recommended, and not decaying at all is allowed.</p><p>Above the <strong>cutoff</strong> threshold the route is suppressed. A suppressed route is used again only when its value falls below the lower <strong>reuse</strong> threshold. The RFC says this is applied only to routes received from external peers (EBGP). Applying it to IBGP-learned routes, or to advertisement to peers after route selection, can result in routing loops.</p><p>The RFC points out that the decay half life should be well above the period of the flap it targets. Its example: with a ten-minute decay and a route withdrawn and readvertised every ten minutes, the route would keep flapping if the cutoff were 2 or more. Its Figure 1 plots the value under constant-rate flap. It rises like a sawtooth and, with a ceiling of 4.5 and cutoff and reuse thresholds of 1.5 and 0.75, routes are suppressed after 2 to 3 withdrawals and used again after about 2 half lives of stability.</p>",
+      "eli5": "<p>Each time the light blinks it earns a point, and the points slowly fade. Too many points and you stop looking at it. Once the points fade low enough, you start looking again.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4.2",
+      "title": "Parameters and Per-Route State",
+      "content": "<p>The RFC suggests configuration parameters expressed in units meaningful to the operator: a <code>cut</code> threshold, a <code>reuse</code> threshold, a maximum hold down time (<code>T-hold</code>), a decay half life while reachable (<code>decay-ok</code>), a decay half life while unreachable (<code>decay-ng</code>) and a decay memory limit. System-wide settings include the time granularity <code>delta-t</code> for decay computations and the reuse list settings.</p><p>Several parameter sets may be used. Examples given include one set for short severe flap and another for chronic mild flap, selection by <code>LOCAL_PREF</code>, by whether an alternate route exists, or by prefix length. The prefix length rule treats longer prefixes as less important, and the RFC notes that multihomed small sites tend to dispute it while advocates say it encourages better aggregation.</p><p>A route is tracked as a tuple. The prefix and length are required. The AS path is included by default. The last AS set in the path, the next hop and the MED are excluded by default and can be included as options. A trailing AS set in a path is generally for an aggregate, so changes to it should be ignored.</p><p>Per route the router stores the figure of merit for each applicable parameter set, the time it was last updated, a pointer to the parameter set if several exist, and two list pointers if doubly linked reuse lists are used.</p>",
+      "eli5": "<p>The knobs are like a game's rules: how many points get you benched, how few let you back in, and how fast points fade. You can have different rules for different players.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4.5",
+      "title": "Decay Arrays and Reuse Lists",
+      "content": "<p>Recomputing the decay for every route at every tick would defeat the purpose. The RFC instead defers work. It precomputes a <strong>decay array</strong> where each element is the per-tick decay raised to the i-th power, so any elapsed time is handled by an array bound check, a lookup and one multiply.</p><p>Suppressed routes are kept on <strong>reuse lists</strong>, a circular array of list heads. Each list holds routes due for reevaluation at about the same time. A <strong>reuse index array</strong> maps the ratio of the current figure of merit to the cutoff onto the right list without computing a logarithm. If the index falls off the end, the last list is used. The RFC suggests defaults of 30 seconds between list evaluations and 64 list heads.</p><p>When the reuse timer fires, the first list is taken off, the offset is advanced to rotate the circle, and each route on it is decayed again. A route whose value is below the reuse threshold is used, and any other route is put back on a list. The RFC says the reuse timer should be coarser than the decay timer.</p>",
+      "eli5": "<p>Instead of checking every benched player every second, the coach sorts them into buckets by when they could come back, and only opens one bucket at a time.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4.8",
+      "title": "Handling Routing Events",
+      "content": "<p>When a route is withdrawn and has no history, the router allocates a damping structure, sets the figure of merit to 1 and withdraws the route. If there is a history, it decays the old value, adds 1, clips to the ceiling, removes the route from any reuse list, withdraws it unless it is already suppressed, records the time and queues it on a reuse list.</p><p>When a route is readvertised with no damping structure, it is simply used. Otherwise the figure of merit is decayed. A route that is not suppressed and is below the cutoff is used. A suppressed route that has fallen below the reuse value is released. Anything else is suppressed and queued. If the value reaches zero, the structure is freed.</p><p>When a peer replaces a route with a new path, the old route is treated as if it were withdrawn. The reason given is that there is no way to know whether one AS path is stable or both are flapping, so both are penalized. When a peer session breaks, either all routes from that peer or the session itself can be marked unstable. Marking the peer saves considerable memory.</p>",
+      "eli5": "<p>Every time a route disappears, it gets a point. If it comes back, the router checks its score first and only lets it in if it has cooled off.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "5",
+      "title": "Implementation Experience and Advice",
+      "content": "<p>The first implementations were the route server daemon (rsd) by Ramesh Govindan at ISI and the Cisco IOS implementation by Ravi Chandra. Both first became available in 1995. The RFC reports more than 2 years of deployment experience, with problems that were solvable by careful implementation and careful deployment.</p><p>Its main warnings and advice:</p><ul><li>Never apply damping to IBGP-learned routes, since this can create persistent route loops, and implementations should disallow configuring it on IBGP peers.</li><li>Apply penalties only when a route is removed or replaced, not when a route is added.</li><li>Damp near the source of the flap. Single-homed destinations can be covered by static routes, and aggregation is another means of damping.</li><li>Operators should publish their damping parameters and be willing to manually clear damping on request, once the problem is truly fixed.</li></ul><p>If damping is inconsistent, flapping of a primary path can suppress the secondary path. The fixes are consistent parameters near the source, or having a distant AS penalize only complete withdrawals.</p>",
+      "eli5": "<p>Do the calming down close to the noisy friend, tell everyone the rules, and be willing to let someone back in when they have truly settled.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The Security Considerations section is brief. It says these practices do not further weaken the security of the routing protocols. Denial of service is possible in an already insecure routing environment, and damping only contributes to the persistence of such attacks. It does not affect the methods of prevention or of determining the source.</p>",
+      "eli5": "<p>Damping does not make routing any less safe than it already was, but a troublemaker's effects may last a little longer.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THE TWO METHODS OF LIMITING ADVERTISEMENTS",
+      "data": {
+        "columns": [
+          "Method",
+          "Space per route",
+          "Effect on stable routes"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Fixed timers",
+              "None",
+              "Slows convergence even for normal routes"
+            ]
+          },
+          {
+            "cells": [
+              "Stability-sensitive suppression",
+              "A small amount of state",
+              "Does not delay well-behaved routes"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "SUGGESTED CONFIGURATION PARAMETERS",
+      "data": {
+        "items": [
+          {
+            "code": "cut",
+            "label": "Cutoff threshold",
+            "desc": "Above this value a route is suppressed.",
+            "highlight": true
+          },
+          {
+            "code": "reuse",
+            "label": "Reuse threshold",
+            "desc": "Below this value a suppressed route is used again.",
+            "highlight": true
+          },
+          {
+            "code": "T-hold",
+            "label": "Maximum hold down time",
+            "desc": "The longest a route can be suppressed."
+          },
+          {
+            "code": "decay-ok",
+            "label": "Half life while reachable",
+            "desc": "Time for the value to halve when the route is reachable."
+          },
+          {
+            "code": "decay-ng",
+            "label": "Half life while unreachable",
+            "desc": "Time for the value to halve when unreachable; zero or unset means no decay."
+          },
+          {
+            "code": "Tmax",
+            "label": "Decay memory limit",
+            "desc": "Longest time any memory of past instability is kept."
+          },
+          {
+            "code": "delta-t",
+            "label": "Time granularity",
+            "desc": "Time step in seconds for decay computations."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Gross, P., and Y. Rekhter, \"Application of the border gateway protocol in the internet\", RFC 1268, October 1991.",
+      "rfc": 1268
+    },
+    {
+      "number": "[3]",
+      "text": "Lougheed, K., and Y. Rekhter, \"A border gateway protocol 3 (BGP-3)\", RFC 1267, October 1991.",
+      "rfc": 1267
+    },
+    {
+      "number": "[4]",
+      "text": "Rekhter, Y., and P. Gross, \"Application of the border gateway protocol in the internet\", RFC 1772, March 1995.",
+      "rfc": 1772
+    },
+    {
+      "number": "[5]",
+      "text": "Rekhter, Y., and T. Li, \"A border gateway protocol 4 (BGP-4)\", RFC 1771, March 1995.",
+      "rfc": 1771
+    },
+    {
+      "number": "[7]",
+      "text": "Traina, P., \"BGP-4 protocol analysis\", RFC 1774, March 1995.",
+      "rfc": 1774
+    },
+    {
+      "number": "[8]",
+      "text": "Traina, P., \"Experience with the BGP-4 protocol\", RFC 1773, March 1995.",
+      "rfc": 1773
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

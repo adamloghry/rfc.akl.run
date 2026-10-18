@@ -9,13 +9,176 @@
   },
   "questions": [
     "tcp sack loss recovery",
-    "how does tcp recover from multiple losses"
+    "how does tcp recover from multiple losses",
+    "what is sack loss recovery",
+    "when are multiple tcp packets lost at once",
+    "how does sack improve tcp performance"
+  ],
+  "tags": [
+    "Transport",
+    "TCP",
+    "Loss Recovery"
+  ],
+  "subtitle": "How to recover efficiently when TCP loses multiple packets from the same window",
+  "tldr": {
+    "problem": "TCP's standard loss recovery procedure assumes only one packet is lost at a time. When multiple packets are lost from a single window of data, the sender resends packets inefficiently and the throughput suffers.",
+    "mechanism": "When the receiver supports selective acknowledgment (SACK), it tells the sender exactly which packets have arrived and which are missing. The sender uses a scoreboard to track this information and resends only the lost packets, rather than retransmitting from the first missing packet forward.",
+    "outcome": "TCP can maintain a better estimate of how much data is in flight and recover faster when multiple packets are dropped, improving performance on high-loss paths. This was later updated by RFC 6675.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Duplicate ACK threshold",
+      "value": "3"
+    },
+    {
+      "label": "Loss detection method",
+      "value": "3 discontiguous SACKs or 3 segment lengths"
+    },
+    {
+      "label": "Recovery state variable",
+      "value": "RecoveryPoint"
+    },
+    {
+      "label": "Key data structure",
+      "value": "Scoreboard"
+    }
+  ],
+  "today": "<p>RFC 3517 was a Proposed Standard published in April 2003. It was obsoleted by <a href='/6675/'>RFC 6675</a>, which refined the SACK-based loss recovery algorithm with a more robust approach to loss detection.</p>",
+  "glossary": [
+    "tcp",
+    "congestion-control",
+    "retransmission",
+    "scoreboard"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Loss Recovery Without SACK",
+      "content": "<p>The TCP congestion control specification RFC 2581 assumes that a sender learns of lost segments through duplicate acknowledgments or a retransmission timeout. When a sender receives three duplicate ACKs for the same sequence number, it infers that one packet has been lost and immediately retransmits that packet. However, this algorithm was designed for the case where at most one packet is lost from a window of data.</p><p>When multiple packets are lost from a single window, the sender cannot tell which packets are actually missing. Standard TCP must retransmit from the first unacknowledged byte forward, even though some of those packets may have already arrived at the receiver. This causes unnecessary retransmissions and reduces throughput, especially on high-loss network paths or when congestion causes multiple simultaneous losses.</p><p>The selective acknowledgment (SACK) option [RFC 2018] allows the receiver to explicitly inform the sender about which segments have arrived. By using this information, the sender can make better retransmission decisions and recover more quickly. This specification defines one conservative and interoperable method for using SACK information in the loss recovery algorithm.</p>",
+      "eli5": "<p>Normally TCP says, \"I got up to byte 5000 but I am still missing 5001\". With SACK the receiver can say, \"I got up to 5000, and I also got 5100-5200, and 5300-5400, but I am still missing 5001-5099 and 5200-5299\".</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "The Scoreboard and State Variables",
+      "content": "<p>To implement SACK-based loss recovery, the sender maintains a <strong>scoreboard</strong>, a data structure that tracks which octets of data have been cumulatively acknowledged and which have been selectively acknowledged. The scoreboard allows the sender to mark ranges of sequence numbers as received and query whether a particular sequence number should be considered lost.</p><p>The algorithm uses four key variables: <strong>HighACK</strong> is the highest sequence number that has been cumulatively acknowledged. <strong>HighData</strong> is the highest sequence number that has been transmitted so far. <strong>HighRxt</strong> is the highest sequence number that has been retransmitted during the current loss recovery phase. <strong>Pipe</strong> is the sender's estimate of how many bytes are currently outstanding in the network, which the sender uses to avoid sending too much data during recovery.</p><p>When the sender receives an ACK with SACK information, it updates the scoreboard to mark which octets have been selectively acknowledged. The sender can then query the scoreboard to determine whether a sequence number should be considered lost and what to retransmit next.</p>",
+      "eli5": "<p>The sender keeps a table of which pieces have arrived at the receiver. When a new ACK comes in, the table is updated. If a piece is too far behind other pieces that arrived, it is marked as lost.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Loss Detection and Retransmission",
+      "content": "<p>The algorithm uses the <code>IsLost()</code> routine to determine whether a sequence number should be considered lost. A sequence number is considered lost when either three discontiguous SACK ranges have arrived beyond it, or three full-sized segments worth of data beyond it have been selectively acknowledged. This conservative approach aligns with TCP's fast retransmit algorithm, which retransmits upon receiving three duplicate ACKs.</p><p>When the sender enters loss recovery, it records the highest data transmitted as the <strong>RecoveryPoint</strong>. Recovery continues until a cumulative ACK reaches or passes the RecoveryPoint. During recovery, each time an ACK arrives, the sender uses the <code>NextSeg()</code> routine to determine what segment to transmit. NextSeg() first tries to retransmit the smallest sequence number that is marked as lost. If no lost segments remain, it sends new, previously unsent data. As a last resort, it may retransmit segments that have not been definitively marked as lost to keep the ACK clock running.</p><p>The algorithm uses the Pipe variable to calculate how much data can be sent during recovery. The sender sends data only when <code>cwnd - Pipe >= 1 SMSS</code> (the congestion window minus the bytes in flight is at least one segment), which prevents the sender from overwhelming the network during recovery.</p>",
+      "eli5": "<p>If the receiver has not acknowledged something and a bunch of stuff after it arrived, then that something is probably lost. The sender retransmits the lost piece, then sends new data if possible. It only sends when there is room in the window.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4",
+      "title": "Recovery Phase and Timeouts",
+      "content": "<p>When the sender receives a duplicate ACK after three duplicate ACKs have arrived, it enters the loss recovery phase. The sender reduces the congestion window and slow-start threshold to half of FlightSize (the amount of data in flight), retransmits the first presumed lost segment, and initializes the Pipe estimate. On each subsequent ACK that does not advance past RecoveryPoint, the sender updates the scoreboard, recalculates Pipe, and sends data if allowed by the Pipe calculation.</p><p>When a cumulative ACK advances beyond RecoveryPoint, the loss recovery phase ends. At this point, the congestion window can begin growing according to standard congestion control rules. The algorithm does not clear the scoreboard when exiting recovery, so information about which segments were selectively acknowledged is preserved.</p><p>If a retransmission timeout occurs during loss recovery, the sender exits the SACK-based algorithm and enters slow start. The sender clears the SACK information and sets RecoveryPoint to HighData, then resends from that point during slow start. After slow start ends, the sender can again use SACK information for more intelligent retransmissions.</p>",
+      "eli5": "<p>When losses are detected, the sender slows down but uses the SACK information to send the right packets. When it gets an ACK that covers all the lost data, it can go back to normal speed. If nothing arrives for a long time, it starts completely over.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "5",
+      "title": "Efficiency and RTO Management",
+      "content": "<p>The algorithm is more efficient than standard TCP when multiple packets are lost. Research cited in the RFC shows that SACK-based recovery significantly reduces transfer time compared to standard TCP Reno, especially as the number of dropped packets increases. The algorithm proves particularly effective on high-loss paths such as satellite links, where multiple losses in a single window are common.</p><p>However, SACK-based loss recovery is more computationally expensive than previous TCP loss recovery strategies because the sender must maintain and query the scoreboard on each packet. The RFC notes that the scoreboard can be implemented efficiently in terms of both computation and memory on most systems, using sequence number ranges rather than tracking individual octets.</p><p>The RFC gives implementers latitude in managing the retransmission timeout timer. Standard RTO management resumes the timer on each ACK that advances the cumulative ACK point, but because SACK recovery can keep the ACK clock running through significant loss events, the RTO might expire prematurely. Implementers may optionally use a more conservative variant that resumes the RTO on each retransmission sent during recovery to avoid these spurious timeouts.</p>",
+      "eli5": "<p>This way is faster when several things get lost at once. It costs more CPU to track what arrived, but usually it is worth it. The timeout timer needs careful handling so it does not fire too early.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "caption": "Loss recovery with selective acknowledgments",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "Sender"
+          },
+          {
+            "key": "receiver",
+            "label": "Receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Segments 1-5",
+            "color": "blue"
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "ACK 1, SACK [3-4, 5-6]",
+            "color": "green",
+            "note": "Segments 2 and 3 are missing"
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Retransmit segment 2",
+            "color": "blue"
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "ACK 6",
+            "color": "green",
+            "note": "All data up to 6 is now acknowledged"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[2]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[3]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[4]",
+      "text": "Allman, M., Paxson, V., and R. Stevens, \"TCP Congestion Control\", RFC 2581, April 1999.",
+      "rfc": 2581
+    },
+    {
+      "number": "[5]",
+      "text": "Floyd, S. and T. Henderson, \"The NewReno Modification to TCP's Fast Recovery Algorithm\", RFC 2582, April 1999.",
+      "rfc": 2582
+    },
+    {
+      "number": "[6]",
+      "text": "Paxson, V. and M. Allman, \"Computing TCP's Retransmission Timer\", RFC 2988, November 2000.",
+      "rfc": 2988
+    },
+    {
+      "number": "[7]",
+      "text": "Allman, M., Balakrishnan, H., and S. Floyd, \"Enhancing TCP's Loss Recovery Using Limited Transmit\", RFC 3042, January 2001.",
+      "rfc": 3042
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

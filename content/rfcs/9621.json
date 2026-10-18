@@ -10,13 +10,192 @@
   "questions": [
     "transport services architecture",
     "taps architecture",
-    "transport services api"
+    "transport services api",
+    "what is the transport services architecture",
+    "what is a preconnection",
+    "what is candidate racing in transport services"
+  ],
+  "tags": [
+    "Transport",
+    "API",
+    "Architecture"
+  ],
+  "subtitle": "An architecture for a socket replacement where apps state what they need and the system picks protocols, paths and addresses.",
+  "tldr": {
+    "problem": "Transport APIs such as the Socket API name things differently for each protocol, so an application cannot even use the same send and receive calls on plain TCP and on TLS over TCP. Applications also end up re-implementing address, protocol and path fallback themselves.",
+    "mechanism": "The Transport Services architecture has applications describe their needs as Properties on an abstract Connection. An asynchronous, event-driven, Message-based API sits on top of an implementation that gathers candidate paths and protocol stacks and races them.",
+    "outcome": "New transport protocols and features can be deployed behind a stable API without application changes. This is the architecture document; the concrete API is RFC 9622.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Status",
+      "value": "Standards Track (Proposed Standard)"
+    },
+    {
+      "label": "Published",
+      "value": "January 2025"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    },
+    {
+      "label": "Companion RFCs",
+      "value": "RFC 9622 (API), RFC 9623 (implementation)"
+    }
+  ],
+  "today": "<p>RFC 9621 is a Proposed Standard published in January 2025 and has not been obsoleted or updated. It is the architecture that the API in <a href='/9622/'>RFC 9622</a> and the implementation guidance in <a href='/9623/'>RFC 9623</a> build on.</p>",
+  "glossary": [
+    "socket",
+    "message-framing",
+    "tcp",
+    "udp",
+    "quic",
+    "tls",
+    "nat-traversal",
+    "byte-stream",
+    "stream-multiplexing"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a New Transport Interface",
+      "content": "<p>Many transport APIs exist, and the best known is the <strong>Socket API</strong>. Their naming is inconsistent. The RFC points out that sending and receiving a stream is the same idea for plain TCP and for TLS over TCP, yet an application cannot use the same socket <code>send()</code> and <code>recv()</code> calls on both. Words such as flow, stream, message and connection also mean different things in different protocols.</p><p>The goal is a flexible, reusable system with one common interface to transport protocols. An application talks to an abstract <strong>Connection</strong> (capitalized to tell it apart from, say, a TCP connection) and requests or requires a set of Properties. The system can then optimize its behavior for the application's needs and the network conditions, without application changes.</p><p>The document builds on the survey of transport services in <a href='/8095/'>RFC 8095</a>, the minimal feature set in <a href='/8923/'>RFC 8923</a> and the security survey in <a href='/8922/'>RFC 8922</a>. It was developed alongside the API specification (<a href='/9622/'>RFC 9622</a>) and the implementation guidelines (<a href='/9623/'>RFC 9623</a>).</p>",
+      "eli5": "<p>Today every kind of delivery service has its own order form. This plan makes one order form that works for all of them, and the system chooses the service.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "The API Model Compared with Sockets",
+      "content": "<p>With sockets, applications call a Stream API or Datagram API backed by TCP or UDP in the kernel. Sockets are bound to addresses found in a separate resolution step, usually by a DNS stub resolver. The Transport Services System instead folds name resolution, Connection establishment and data transfer into one API, so the implementation can pick protocols and paths on the application's behalf.</p><p>The RFC lists three key differences. The API is <strong>asynchronous and event-driven</strong>: even receiving works by asking for data and then getting an event that carries it, and errors arrive as events too. It uses <strong>Messages</strong> rather than an unstructured byte stream, which allows deadlines, per-Message reliability control and automatic use of multistreaming. And the implementation can resolve identifiers to use multiple IP addresses, protocols and paths.</p><p>Messages do not change any protocol's wire format. For protocols that present a byte stream, <strong>Framers</strong> bridge the gap. The architecture can also run alongside, or on top of, an existing Socket API; only applications built on the Transport Services API are managed by it.</p>",
+      "eli5": "<p>Instead of standing at the counter waiting, you drop off a note and get called when your parcel is ready. And you send whole letters, not a long ribbon of words.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "Requirements for APIs and Implementations",
+      "content": "<p>Common functionality across protocols SHOULD be exposed through a unified set of calls, and at least the minimal feature set of <a href='/8923/'>RFC 8923</a> SHOULD be reachable. Applications express constraints through Properties: <strong>Selection Properties</strong> (which paths and stacks are allowed or preferred), <strong>Connection Properties</strong> (tuning during and after establishment) and <strong>Message Properties</strong> (per Message). Defaults ought to be chosen for correctness for the widest set of applications, so reliability is on by default.</p><p>Specialized, protocol-specific features SHOULD be available too, and an application can say that a feature is prohibited, avoided, ignored, preferred or required. A preference for the TCP User Timeout Option, for example, must not make communication fail if UDP is chosen.</p><p>The implementation may only race Protocol Stacks that are <strong>equivalent</strong>. A UDP stack is not equivalent to a TCP stack if the application needs Message boundaries preserved, and UDP without a reliability layer cannot replace TCP when reliability is required. Racing SHOULD only happen between stacks with identical security protocols, and an implementation MUST NOT fall back from secure to insecure protocols or to weaker versions.</p><p>The system MUST NOT require the peer to use the same API or implementation, and it SHOULD make consistent selections for the same conditions. It should also offer monitoring functions, because more automation makes problems harder to diagnose.</p>",
+      "eli5": "<p>You can tell the system what you must have and what you would like, but it may only swap one choice for another if the swap still gives you what you asked for.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "4",
+      "title": "API Concepts from Preconnection to Close",
+      "content": "<p>A <strong>Preconnection</strong> represents a Connection that does not exist yet. It holds a Local Endpoint Identifier, a Remote Endpoint Identifier, Transport Properties and Security Parameters. It can be fully specified or describe a family of possible Connections. The remote endpoint is required to initiate, the local endpoint is required to listen, and both are required for a peer-to-peer rendezvous.</p><p>From a Preconnection an application takes one of three establishment actions. <code>Initiate</code> creates an outbound Connection. <code>Listen</code> creates a Listener that produces Connections as they arrive. <code>Rendezvous</code> attempts to connect and listen at once for peer-to-peer use, and may race candidates in the style of ICE when STUN-style candidates are present.</p><p>Once established, an application uses <code>Send</code> and <code>Receive</code> with Messages and handles events: Connection Ready, Connection Closed, Connection Received, Message Received, Message Sent and Path Properties Changed. A Framer can be added to define how Messages are encoded onto a protocol that has no Message boundaries, such as TCP. <code>Close</code> ends a Connection after delivery requirements are met, while <code>Abort</code> drops it immediately.</p><p>Connections can also be created from another Connection by cloning. They then form a <strong>Connection Group</strong> that shares Connection Properties (except Connection Priority) and cached state, and only Connections in the same group may be multiplexed together.</p>",
+      "eli5": "<p>You fill in an order form first, then choose to call someone, wait for calls, or call each other at the same time. Once the line is open you send letters and listen for news.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "5",
+      "title": "Candidate Gathering and Racing",
+      "content": "<p>Inside the <strong>Transport Services Implementation</strong>, a Path is an available set of properties for reaching the remote endpoint (routes, addresses, interfaces), and a Protocol Stack is a set of protocol instances used together. A stack can be simple, such as one stream over TCP over IP, or complex, such as many streams over a multipath transport with several subflows.</p><p>Establishment starts with <strong>candidate gathering</strong>: choosing candidate paths and candidate protocol stacks that fit the Selection Properties, the endpoints and the System Policy. Then comes <strong>racing</strong>, which borrows its name from Happy Eyeballs (<a href='/8305/'>RFC 8305</a>). Attempts may run simultaneously, serially or in some mix. The RFC names three kinds: protocol option racing, path racing and remote endpoint racing.</p><p>The implementation keeps <strong>Cached State</strong> per set of endpoints, which can include DNS results, TLS session state and the past success of protocols over paths. Applications SHOULD NOT rely on specific caching behavior and should request required properties explicitly. System Policy comes from the operating system or other global preferences, and the API defines no interface for it.</p>",
+      "eli5": "<p>The system finds several roads and several kinds of vehicle that would work, sends a few off at once, and uses whichever arrives first. It remembers what worked last time.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security and Privacy",
+      "content": "<p>The system does not recommend particular security protocols or algorithms. It offers a generic interface that translates into the interfaces of existing security protocols, for example trust verification callbacks like those in TLS APIs.</p><p>Applications control whether cached information from earlier racing or communication is used. This trades efficiency against privacy, since cache reuse can leak to an on-path observer and allow linking of connections. The RFC suggests <strong>Connection Contexts</strong> to separate caches, for instance one per browser tab, which also stops Connections being multiplexed together in an HTTP/2 or QUIC stream and revealing a common application.</p><p>Keying material must be scoped. A certificate given only for client authentication of outbound TLS and QUIC connections MUST NOT be used automatically in other contexts. Finally, the system MUST NOT automatically fall back to insecure protocols or weaker versions: if the requested TLS version is unavailable, the connection fails. The document has no IANA actions.</p>",
+      "eli5": "<p>You choose how much the system may remember about your past trips. And it will never switch to an unlocked door just because the locked one is busy.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "layers",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "TRANSPORT SERVICES API MODEL (RFC 9621, FIGURE 2)",
+      "data": {
+        "layers": [
+          {
+            "label": "Application",
+            "detail": "Creates Connections and transfers data"
+          },
+          {
+            "label": "Transport Services API",
+            "detail": "Asynchronous, event-driven, Message-based",
+            "highlight": true
+          },
+          {
+            "label": "Transport Services Implementation",
+            "detail": "Uses DNS, UDP, TCP, SCTP, DCCP, TLS, QUIC, etc."
+          },
+          {
+            "label": "Network-Layer Interface",
+            "detail": "Interfaces and paths"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "THREE KINDS OF RACING",
+      "data": {
+        "items": [
+          {
+            "title": "Protocol option racing",
+            "text": "Stacks that differ in protocol composition or options."
+          },
+          {
+            "title": "Path racing",
+            "text": "Stacks that differ by the available path chosen; each path may do its own DNS resolution."
+          },
+          {
+            "title": "Remote endpoint racing",
+            "text": "Stacks that differ by the Remote Endpoint, such as one IP address resolved from a hostname."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8095]",
+      "text": "Fairhurst, G., Ed., Trammell, B., Ed., and M. Kuehlewind, Ed., \"Services Provided by IETF Transport Protocols and Congestion Control Mechanisms\", RFC 8095, March 2017.",
+      "rfc": 8095
+    },
+    {
+      "number": "[RFC8923]",
+      "text": "Welzl, M. and S. Gjessing, \"A Minimal Set of Transport Services for End Systems\", RFC 8923, October 2020.",
+      "rfc": 8923
+    },
+    {
+      "number": "[RFC8922]",
+      "text": "Enghardt, T., et al., \"A Survey of the Interaction between Security Protocols and Transport Services\", RFC 8922, October 2020.",
+      "rfc": 8922
+    },
+    {
+      "number": "[RFC8305]",
+      "text": "Schinazi, D. and T. Pauly, \"Happy Eyeballs Version 2: Better Connectivity Using Concurrency\", RFC 8305, December 2017.",
+      "rfc": 8305
+    },
+    {
+      "number": "[RFC8445]",
+      "text": "Keranen, A., Holmberg, C., and J. Rosenberg, \"Interactive Connectivity Establishment (ICE)\", RFC 8445, July 2018.",
+      "rfc": 8445
+    },
+    {
+      "number": "[RFC9622]",
+      "text": "Trammell, B., Ed., et al., \"An Abstract Application Programming Interface (API) for Transport Services\", RFC 9622, January 2025.",
+      "rfc": 9622
+    },
+    {
+      "number": "[RFC9623]",
+      "text": "Brunstrom, A., Ed., et al., \"Implementing Interfaces to Transport Services\", RFC 9623, January 2025.",
+      "rfc": 9623
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

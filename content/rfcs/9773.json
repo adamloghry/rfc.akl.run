@@ -9,13 +9,205 @@
   },
   "questions": [
     "acme renewal information",
-    "when should acme clients renew certificates"
+    "when should acme clients renew certificates",
+    "what is acme renewal information",
+    "what is the acme replaces field",
+    "how does acme ari retry-after work"
+  ],
+  "tags": [
+    "ACME",
+    "Certificates",
+    "Renewal"
+  ],
+  "subtitle": "Lets a certificate authority tell ACME clients when to renew, smoothing load and speeding up emergency replacements.",
+  "tldr": {
+    "problem": "ACME clients pick their own renewal times, by cron, by expiry date or by a share of validity. That blocks CAs from changing certificate lifetimes and can pile renewals into load spikes.",
+    "mechanism": "The server publishes a renewalInfo resource. Clients fetch a suggested renewal window for a certificate, pick a random time inside it, and re-check on the Retry-After schedule. A new replaces field on orders links renewals to the old certificate.",
+    "outcome": "CAs can spread renewals out or ask clients to renew early, for example before a mass revocation.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New directory field",
+      "value": "renewalInfo"
+    },
+    {
+      "label": "New order field",
+      "value": "replaces"
+    },
+    {
+      "label": "New error type",
+      "value": "alreadyReplaced (HTTP 409)"
+    },
+    {
+      "label": "Fallback after long-term error",
+      "value": "About six hours"
+    },
+    {
+      "label": "Example Retry-After",
+      "value": "21600"
+    }
+  ],
+  "today": "<p>RFC 9773 is a Proposed Standard published in June 2025. It has not been obsoleted or updated.</p>",
+  "glossary": [
+    "acme",
+    "certificate-authority",
+    "certificate",
+    "x509-certificate",
+    "rate-limiting",
+    "http-status-code"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem with Client-Chosen Renewal Times",
+      "content": "<p>Most clients of the Automated Certificate Management Environment (<a href='/8555/'>ACME</a>) choose when to renew in one of three ways: at a fixed interval such as a cron job, a set time before the certificate's expiration, or when some percentage of its validity has passed. The first two make it hard for the issuing Certification Authority (CA) to change certificate lifetimes. All three can cluster load on the CA, because it cannot schedule renewals.</p><p>The <strong>ACME Renewal Information (ARI)</strong> extension lets the CA suggest a renewal window. The RFC gives two examples: asking clients to renew ahead of a mass-revocation event to reduce its impact, or asking them to renew earlier than usual to shrink an upcoming mass-renewal spike. Clients can also tell the server that they have renewed and replaced a certificate.</p><p>Here, \"renewal\" covers Renewal, Re-Key and Modification as defined in RFC 3647. The RFC assumes certificates conform to RFC 5280 and contain the Authority Key Identifier extension with its <code>keyIdentifier</code> field.</p>",
+      "eli5": "<p>If everyone returns library books on whatever day they like, the desk gets swamped some days. If the librarian can say when to come back, the line stays short.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "The renewalInfo Resource and Certificate Identifier",
+      "content": "<p>A server that offers ARI MUST add a <code>renewalInfo</code> field to its directory object, holding the URL for renewal information. This is a new resource type in ACME.</p><p>To ask about a certificate, the client sends an <strong>unauthenticated GET</strong> to a path under that URL. The path is a unique certificate identifier: the base64url encoding of the Authority Key Identifier's <code>keyIdentifier</code>, then a period, then the base64url encoding of the DER-encoded Serial Number field (without tag and length bytes). All trailing <code>=</code> padding MUST be stripped from both parts.</p><p>The RFC works an example with the certificate in its appendix, giving the identifier <code>aYhba4dGQEHhs3uEe6CuLN4ByNQ.AIdlQyE</code>. The serial number's DER bytes start with a zero byte so the number stays positive.</p>",
+      "eli5": "<p>To ask the librarian about your book, you give two things: the shelf label and the book's own number, joined by a dot.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "RenewalInfo Objects",
+      "content": "<p>A RenewalInfo object is a JSON object with two fields.</p><ul><li><code>suggestedWindow</code> (required): an object with <code>start</code> and <code>end</code> timestamps in <a href='/3339/'>RFC 3339</a> format, bounding the time in which the CA recommends renewing.</li><li><code>explanationURL</code> (optional): a URL for a page that may explain the window, such as the CA's load-balancing strategy or the certificates affected by a mass revocation. Clients SHOULD show it to their operator.</li></ul><p>A response where the end timestamp equals or precedes the start is invalid. Servers MUST NOT serve one, and clients MUST treat it as if no response had been received, for example by retrying later or renewing on a fallback schedule.</p>",
+      "eli5": "<p>The answer is two times, like \"come back between Tuesday and Wednesday\", plus an optional note saying why.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Choosing a Renewal Time",
+      "content": "<p>Clients MUST attempt renewal at a time of their choosing based on the suggested window. The RECOMMENDED algorithm is:</p><ol><li>Fetch the suggested window.</li><li>Pick a uniform random time inside it.</li><li>If that time is already past, renew immediately.</li><li>If the client can schedule itself for exactly that time, do so.</li><li>Otherwise, if the time falls before the client's next normal wake-up, renew immediately.</li><li>Otherwise sleep until the time given by <code>Retry-After</code> and go back to step 1.</li></ol><p>Renewal attempts stay subject to the client's usual error backoff and retry intervals. Cron-based clients may need to run more often to check ARI, and so should record failures (the number of failures for an order and the time of the latest one) so that running more often does not mean retrying failures without backoff.</p>",
+      "eli5": "<p>Pick a random moment inside the librarian's window so not everybody arrives on the same minute. If you cannot wait that long, go now.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "When and How Often to Check",
+      "content": "<p>Clients SHOULD fetch a certificate's RenewalInfo right after issuance. The server uses the <code>Retry-After</code> header to say how often to check again. Unlike many HTTP uses, here it means the desired wait: both the requested minimum and maximum. Clients MUST NOT check after the certificate has expired or after they consider it replaced.</p><p>Servers set <code>Retry-After</code> based on how fast they must act. The RFC's example is a server that must revoke within 24 hours of a problem notice: it might reserve twelve hours for investigation, six hours for clients to fetch updated information and six hours for clients to renew. A small value lets clients react faster but costs the server more load, and third parties may also watch these endpoints.</p><p>Clients MUST fetch again as soon as possible after the <code>Retry-After</code> time, though error backoff takes priority, and MUST set reasonable limits on the interval. For example, values under one minute could be treated as one minute, and values over one day as one day.</p>",
+      "eli5": "<p>The librarian says \"ask me again in six hours\". You come back about then, not much sooner and not much later.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "Handling Errors",
+      "content": "<p>Temporary errors are connection timeouts, request timeouts and 5xx HTTP errors. On one, clients SHOULD back off exponentially with a capped number of tries. When tries run out, the failure is treated as a long-term error.</p><p>Long-term errors include a missing or invalid <code>Retry-After</code>, an invalid RenewalInfo object, a DNS lookup failure, a refused connection and a non-5xx HTTP error. After one, clients MUST make the next request as soon as possible after six hours have passed, or some other locally configured default.</p>",
+      "eli5": "<p>If the library is closed, try again a bit later, then a bit later still. If something is really broken, check back in about six hours.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "7",
+      "title": "The replaces Field on Orders",
+      "content": "<p>The Order object gains an optional string field, <code>replaces</code>, holding the identifier (built as in the GET path) of the previously issued certificate that the order is meant to replace. Clients SHOULD include it in newOrder requests when there is a clear predecessor, and SHOULD NOT include it if the server has not advertised <code>renewalInfo</code> in its directory.</p><p>Servers SHOULD check that the old certificate and the new order belong to the same ACME account, share at least one identifier, and that the old certificate is not already marked as replaced by another order that is not <code>invalid</code>. Stricter checks are server policy. If a check fails, the server SHOULD reject the request. If it is because the certificate was already replaced, the server MUST return HTTP 409 (Conflict) with a problem document of type <code>alreadyReplaced</code>. An accepted <code>replaces</code> value MUST be reflected in the response and in later reads of the Order.</p><p>The RFC lists uses for this information: giving orders inside the suggested window higher priority or letting them bypass rate limits, tracking replacements of certificates affected by a compliance incident so they can be revoked right after replacement, and tying together certificates issued under the same External Account Binding contract.</p>",
+      "eli5": "<p>When you hand in the new book, you say which old one it replaces, so the librarian can tick the old one off.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and IANA Considerations",
+      "content": "<p>RenewalInfo is fetched by unauthenticated GET, unlike the POST-as-GET requests that RFC 8555 requires elsewhere. The RFC's reasons are that the information is not confidential and that easy caching helps shed load from clients that ignore <code>Retry-After</code>. Servers should still guard against denial of service, for example by keeping superfluous headers and query parameters out of the cache key and by using IP-based rate limits.</p><p>Significant clock skew between client and server can cause odd behavior. A client with a slow clock may see a window the server put wholly in the past as still in the future. Server operators should take that into account.</p><p>IANA added the <code>renewalInfo</code> resource type, created an ACME RenewalInfo Object Fields registry (initial entries <code>suggestedWindow</code> and <code>explanationURL</code>, registration by Specification Required), added <code>replaces</code> to the ACME Order Object Fields registry, and added the <code>alreadyReplaced</code> error type.</p>",
+      "eli5": "<p>The renewal times are not secret, so anyone can ask. The librarian just has to make sure a crowd of askers cannot knock the desk over, and remember that a wrong clock makes you arrive at the wrong time.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "ARI RENEWAL FLOW (SIMPLIFIED FROM RFC 9773 SECTIONS 4 AND 5)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "ACME client"
+          },
+          {
+            "key": "server",
+            "label": "ACME server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "GET renewalInfo/{id}",
+            "color": "blue",
+            "note": "Unauthenticated request for the suggested window."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "200 + suggestedWindow + Retry-After",
+            "color": "green",
+            "note": "Window start and end, and how long to wait before asking again."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "newOrder with replaces",
+            "color": "blue",
+            "note": "Sent at a random time in the window, naming the old certificate."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "EXAMPLE RENEWALINFO RESPONSE (FROM RFC 9773 SECTION 4.2)",
+      "data": {
+        "title": "RenewalInfo response",
+        "lang": "text",
+        "code": "HTTP/1.1 200 OK\nContent-Type: application/json\nRetry-After: 21600\n\n{\n  \"suggestedWindow\": {\n    \"start\": \"2025-01-02T04:00:00Z\",\n    \"end\": \"2025-01-03T04:00:00Z\"\n  },\n  \"explanationURL\": \"https://acme.example.com/docs/ari\"\n}"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8555]",
+      "text": "Barnes, R., Hoffman-Andrews, J., McCarney, D., and J. Kasten, \"Automatic Certificate Management Environment (ACME)\", RFC 8555, March 2019.",
+      "rfc": 8555
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC9110]",
+      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP Semantics\", STD 97, RFC 9110, June 2022.",
+      "rfc": 9110
+    },
+    {
+      "number": "[RFC3339]",
+      "text": "Klyne, G. and C. Newman, \"Date and Time on the Internet: Timestamps\", RFC 3339, July 2002.",
+      "rfc": 3339
+    },
+    {
+      "number": "[RFC4648]",
+      "text": "Josefsson, S., \"The Base16, Base32, and Base64 Data Encodings\", RFC 4648, October 2006.",
+      "rfc": 4648
+    },
+    {
+      "number": "[RFC3647]",
+      "text": "Chokhani, S., et al., \"Internet X.509 Public Key Infrastructure Certificate Policy and Certification Practices Framework\", RFC 3647, November 2003.",
+      "rfc": 3647
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

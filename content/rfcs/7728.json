@@ -9,13 +9,319 @@
   },
   "questions": [
     "how to pause an rtp stream",
-    "rtp pause resume feedback message"
+    "rtp pause resume feedback message",
+    "what is rtcp pause and resume",
+    "what is pauseid in rtp",
+    "tmmbr 0 pause video stream",
+    "what does refused mean in rtcp pause"
+  ],
+  "tags": [
+    "RTP",
+    "Multimedia",
+    "Feedback"
+  ],
+  "subtitle": "Four small RTCP feedback messages that let a receiver ask a sender to stop sending a stream and start again, without renegotiating the session.",
+  "tldr": {
+    "problem": "In a video call or conference, a receiver or a mixer sometimes does not need a stream for a while. Stopping it by renegotiating the whole session (for example with SIP and SDP) is slow and heavy, and resuming needs to be fast.",
+    "mechanism": "RFC 7728 adds a transport-layer RTCP feedback message (FMT 9) with four subtypes: PAUSE and RESUME from the receiver, PAUSED from the sender, and REFUSED when the sender cannot comply. A PauseID keeps requests in order, and TMMBR/TMMBN with a bitrate of 0 can do the same job in point-to-point sessions.",
+    "outcome": "A stream can be paused and resumed in the media plane, directly between the nodes involved, while other receivers of a shared stream get a chance to object. It updates RFC 5104.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "RTCP payload type",
+      "value": "205 (RTPFB)"
+    },
+    {
+      "label": "FMT value",
+      "value": "9 (PAUSE-RESUME)"
+    },
+    {
+      "label": "PauseID size",
+      "value": "16 bits, modulo 2^16"
+    },
+    {
+      "label": "Hold-off period",
+      "value": "2 * RTT + T_dither_max"
+    },
+    {
+      "label": "Default RTT if unknown",
+      "value": "500 ms"
+    },
+    {
+      "label": "PAUSED repeats",
+      "value": "In the next two regular RTCP reports"
+    }
+  ],
+  "today": "<p>RFC 7728 is a Proposed Standard and has not been obsoleted. It updates <a href='/5104/'>RFC 5104</a> by adding pause and resume semantics to TMMBR and TMMBN.</p>",
+  "glossary": [
+    "rtp",
+    "rtcp",
+    "ssrc",
+    "rtp-mixer",
+    "rtp-translator",
+    "sdp",
+    "sequence-number",
+    "srtp",
+    "multicast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Pause an RTP Stream",
+      "content": "<p>In a multimedia conference, a participant or a central node may want to temporarily stop an incoming <strong>RTP</strong> stream and resume it later. Tearing down the session and negotiating it again with SIP and SDP offer/answer would be needlessly expensive.</p><p>The motivating case is a conferencing node such as an RTP Mixer or Multipoint Control Unit. If there are more participants than the conference logic shows at once, some streams do not need to be forwarded and could be paused. That saves resources in the sender and in the network. This is especially useful with simulcast or scalable video coding, where some encodings or layers are unused part of the time.</p><p>The RFC argues that the signaling should be in the media plane and go directly between the affected nodes, so it builds on the RTCP feedback profile (RTP/AVPF) and defines the solution as an extension of the Codec Control Messages (CCM) of <a href='/5104/'>RFC 5104</a>.</p>",
+      "eli5": "<p>Sometimes you do not need a video for a little while. Instead of hanging up and calling again, you just say 'hold on' and later 'go ahead'.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "3",
+      "title": "Use Cases",
+      "content": "<p>The RFC walks through five situations. In the <strong>point-to-point</strong> case, two endpoints exchange streams, and a receiver may not display or record a stream (for example a minimized application). Only the sender and that one receiver are affected.</p><p>In the <strong>RTP Mixer to media sender</strong> case, the Mixer asks a sender to pause streams it is not currently forwarding, and must be able to resume them with minimal delay. A mixer may also pause its own streams to a client without being asked, for example because of limited resources. An explicit indication helps here, because a receiver that simply stops getting packets may treat it as an error and try to repair it.</p><p>When the Mixer sits in a multicast domain, several receivers share one stream, so the Mixer must take care not to pause a stream that is still wanted. The reverse direction, a receiver asking a Mixer, behaves the same way. The fifth case, a receiver pausing a sender's stream across a Mixer using a CSRC, is rejected: the Mixer may not include CSRC, the CSRC may not identify a mixed stream, and the endpoint cannot tell whether others still need it.</p>",
+      "eli5": "<p>Pausing is useful when one person wants a break, but if many people share the same video, nobody should stop it while someone else is still watching.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "Design Considerations",
+      "content": "<p>The design starts from a few principles. Resuming is more time critical than pausing, because it directly affects the quality the user perceives. PAUSE and RESUME apply to <strong>single streams identified by SSRC</strong>, so a sender that starts a new SSRC must be paused again. Receivers send PAUSE and RESUME; the sender is responsible for indicating that a stream is paused.</p><p>For shared streams there is a <strong>consensus</strong> rule: a sender should not pause an SSRC that some receiver still wants, and any single receiver wanting a stream resumed should cause it to be resumed. The exception is a sender that has local reasons to pause, which take precedence over receiver wishes.</p><p>RTCP usually runs over UDP, so messages can be lost. Normally no acknowledgment is needed, because the arrival or non-arrival of RTP packets shows whether a request worked. A negative acknowledgment is needed only when the sender cannot comply. Requests get sequence numbers so retransmissions can be told from new requests, and RESUME shares that number space with PAUSE because RESUME always takes precedence.</p><p>The RFC also compares this with carrying pause information in SIP/SDP, noting that the signaling bandwidth would be at least 10 times that of an RTCP-based solution, and so chooses RTCP.</p>",
+      "eli5": "<p>If lots of kids share one TV, one kid cannot turn it off while another is watching. And if you shout 'stop' and nothing happens, you just shout again.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "6",
+      "title": "Sender States",
+      "content": "<p>The RFC defines three new states for a stream in an RTP sender, beside the normal <strong>Playing</strong> state.</p><ul><li><strong>Pausing:</strong> at least one PAUSE has arrived. The sender waits a hold-off period, <code>2 * RTT + T_dither_max</code>, so another receiver can object with a RESUME. The hold-off may be set to 0 when there is only a single receiver, such as in point-to-point sessions.</li><li><strong>Paused:</strong> the hold-off passed with no RESUME. The sender stops at an appropriate media boundary, sends PAUSED to all known receivers and repeats it in the next two regular RTCP reports. RTP keepalive is not affected.</li><li><strong>Local Paused:</strong> the sender pauses on its own decision. It also sends PAUSED. This state has higher precedence than Paused, so RESUME alone cannot end it.</li></ul><p>When a stream returns to Playing, the current PauseID is incremented by one. The first packet after a pause gets the next RTP sequence number, and its timestamp should reflect capture time so the gap shows the time paused. If the receiver that caused a pause sends an RTCP BYE, or times out, the sender resumes the stream.</p>",
+      "eli5": "<p>A sender is either playing, waiting a moment to see if anyone objects, or paused. It can also pause itself, and then only it can start again.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "7",
+      "title": "The PAUSE-RESUME Message",
+      "content": "<p>The messages are a new RTCP transport-layer feedback message. It uses RTCP payload type RTPFB (205) with <strong>FMT value 9</strong>. The common header's media source SSRC is set to 0, because each entry in the feedback control information (FCI) names its own <strong>Target SSRC</strong>. One message may carry several entries, so a single packet can pause several streams.</p><p>Each FCI entry has the Target SSRC (32 bits), a 4-bit Type, a 4-bit reserved field that is set to 0, an 8-bit Parameter Len in 32-bit words, and a 16-bit PauseID, followed by optional type-specific data. Types 0 to 3 are PAUSE, RESUME, PAUSED and REFUSED. Types 4 to 15 are reserved and are ignored on reception. The PauseID is incremented by one modulo 2^16 for each new PAUSE (not for retransmissions), starts at 0 by default and is shared by PAUSE, RESUME and PAUSED for a given Target SSRC.</p><p>PAUSED carries one extra 32-bit parameter: the extended RTP sequence number of the last packet sent before the pause. IANA registered FMT 9 as PAUSE-RESUME and the value <code>pause</code> for the <code>ccm</code> feedback value in SDP.</p>",
+      "eli5": "<p>Each note says which stream it is about, what kind of note it is (pause, resume, paused or refused), and a counter so old notes are not mistaken for new ones.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "How the Messages Work",
+      "content": "<p>A receiver may send <strong>PAUSE</strong> at any time with the current PauseID. A receiver that does not know it may use a random PauseID, and a REFUSED reply will tell it the current one. If nothing happens within <code>2 * RTT + T_dither_max</code>, the PAUSE may be retransmitted with the same PauseID. A receiver without an RTT estimate should use 500 ms.</p><p>The sender replies to a successful PAUSE with <strong>PAUSED</strong>, or sends PAUSED unsolicited if it pauses locally. A <strong>RESUME</strong> with the current PauseID restarts the stream at the earliest opportunity. A RESUME with the same PauseID during the hold-off cancels the pending pause. If the sender cannot comply, or a request has a PauseID that is not current, it sends <strong>REFUSED</strong> carrying the current PauseID. The requester should wait before repeating: suggested 2-5 regular RTCP intervals after a PAUSE is opposed or refused, and 1-2 after a refused RESUME.</p><p>Timing follows the AVPF rules. PAUSE and RESUME should use Early or Immediate timing, since RESUME is often time critical, with Regular timing for repeated PAUSED and REFUSED.</p><p>In point-to-point sessions only, <strong>TMMBR 0</strong> can stand in for PAUSE, a TMMBR above 0 for RESUME, and <strong>TMMBN 0</strong> for PAUSED. This is mainly for interworking with implementations that lack the new messages. When resuming video, a receiver can send a FIR request to get an intra picture if it needs one.</p>",
+      "eli5": "<p>You say 'pause' with a number. The sender waits a moment in case someone shouts 'no', then stops and tells everyone. If it cannot stop, it says 'refused' and tells you the right number to use.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "9",
+      "title": "Signaling Support in SDP",
+      "content": "<p>Support is announced with the existing <code>rtcp-fb</code> attribute by adding a <code>pause</code> parameter to <code>ccm</code>. It has two optional attributes. <code>nowait</code> allows the hold-off period to be 0, for sessions with a single receiver. <code>config</code> declares partial support, which suits roles such as a Mixer that sends PAUSE and RESUME and a media sender that receives them.</p><p>The <code>config</code> values are 1 to 8. Value 1 is the full implementation and the default when <code>config</code> is missing. Values 2 to 5 split the roles between the party sending PAUSE and RESUME and the party receiving them, and values 6 to 8 cover support only for local pause and PAUSED. In offer/answer, the answer may change the value only to the permitted set; for example, an offer of 7 can only be answered with 8, and the other way round. Implementing subsets other than the defined ones is NOT RECOMMENDED. An answerer may drop the line to say it does not want pause support.</p><p>A <code>nowait</code> in the answer is only allowed if the offer had it. If both <code>pause</code> and <code>tmmbr</code> are present, TMMBR/TMMBN MUST NOT be used with a bitrate of 0 for pause, to avoid ambiguity. Messages SHOULD NOT be sent to receivers that did not declare support.</p>",
+      "eli5": "<p>Before the call, each side says which of the pause messages it understands, a bit like telling a friend which games you know how to play.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "12",
+      "title": "Security Considerations",
+      "content": "<p>The messages can hurt media quality if misused. An attacker who injects PAUSE requests can stop media from flowing, especially with a zero hold-off period. This needs only the SSRC and the PauseID. An on-path attacker sees both unless RTCP is encrypted, and even an off-path attacker can often learn the SSRC from signaling and then has to guess the 16-bit PauseID.</p><p>The defence is source authentication with message integrity and replay protection, since a long-lived session could wrap the PauseID and let an attacker replay old messages. SRTP is the most common way to secure RTP, and <a href='/7201/'>RFC 7201</a> discusses the options. Most methods do not authenticate each individual participant in a multiparty session, so a malicious participant can still cause damage from inside. A middlebox is RECOMMENDED to check that each participant only uses its own SSRCs, and it can decline to forward a PAUSE when another participant still wants the stream.</p><p>A malicious RESUME mainly defeats the savings from pausing. Tampering with session signaling can also prevent pause and resume from being enabled at all.</p>",
+      "eli5": "<p>Someone sneaky could keep shouting 'pause' to ruin a call, so the messages need to be locked so only real participants can send them.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "RTP PAUSE STATES IN SENDER (RFC 7728, FIGURE 4)",
+      "data": {
+        "states": [
+          {
+            "key": "playing",
+            "label": "Playing",
+            "initial": true
+          },
+          {
+            "key": "pausing",
+            "label": "Pausing"
+          },
+          {
+            "key": "paused",
+            "label": "Paused"
+          },
+          {
+            "key": "local-paused",
+            "label": "Local Paused"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "playing",
+            "to": "pausing",
+            "label": "received PAUSE"
+          },
+          {
+            "from": "pausing",
+            "to": "playing",
+            "label": "received RESUME"
+          },
+          {
+            "from": "pausing",
+            "to": "paused",
+            "label": "hold-off period"
+          },
+          {
+            "from": "paused",
+            "to": "playing",
+            "label": "received RESUME"
+          },
+          {
+            "from": "playing",
+            "to": "local-paused",
+            "label": "PAUSE decision"
+          },
+          {
+            "from": "pausing",
+            "to": "local-paused",
+            "label": "PAUSE decision"
+          },
+          {
+            "from": "paused",
+            "to": "local-paused",
+            "label": "PAUSE decision"
+          },
+          {
+            "from": "local-paused",
+            "to": "playing",
+            "label": "RESUME decision"
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "FCI ENTRY IN THE PAUSE AND RESUME MESSAGE (RFC 7728, FIGURE 6)",
+      "data": {
+        "title": "FCI entry (fixed part)",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "target-ssrc",
+            "name": "Target SSRC",
+            "bits": 32,
+            "desc": "The SSRC the message is intended for."
+          },
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 4,
+            "desc": "0 PAUSE, 1 RESUME, 2 PAUSED, 3 REFUSED."
+          },
+          {
+            "key": "res",
+            "name": "Res",
+            "bits": 4,
+            "desc": "Reserved; set to 0 by senders.",
+            "value": "0"
+          },
+          {
+            "key": "param-len",
+            "name": "Parameter Len",
+            "bits": 8,
+            "desc": "Length of the Type Specific field in 32-bit words."
+          },
+          {
+            "key": "pauseid",
+            "name": "PauseID",
+            "bits": 16,
+            "desc": "Sequence identification for the pause and resume operation."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "PAUSE FEEDBACK TYPES (RFC 7728)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "PAUSE",
+            "desc": "Request from a receiver to pause a stream."
+          },
+          {
+            "code": "1",
+            "label": "RESUME",
+            "desc": "Request from a receiver to resume a paused stream, or to object to a pause."
+          },
+          {
+            "code": "2",
+            "label": "PAUSED",
+            "desc": "Indication from the sender that a stream is paused."
+          },
+          {
+            "code": "3",
+            "label": "REFUSED",
+            "desc": "Notification that a PAUSE or RESUME will not be honored."
+          },
+          {
+            "code": "4-15",
+            "label": "Reserved",
+            "desc": "Ignored on reception; not to be sent."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3550]",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "rfc": 3550
+    },
+    {
+      "number": "[RFC4585]",
+      "text": "Ott, J., Wenger, S., Sato, N., Burmeister, C., and J. Rey, \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
+      "rfc": 4585
+    },
+    {
+      "number": "[RFC5104]",
+      "text": "Wenger, S., Chandra, U., Westerlund, M., and B. Burman, \"Codec Control Messages in the RTP Audio-Visual Profile with Feedback (AVPF)\", RFC 5104, February 2008.",
+      "rfc": 5104
+    },
+    {
+      "number": "[RFC3264]",
+      "text": "Rosenberg, J. and H. Schulzrinne, \"An Offer/Answer Model with Session Description Protocol (SDP)\", RFC 3264, June 2002.",
+      "rfc": 3264
+    },
+    {
+      "number": "[RFC4566]",
+      "text": "Handley, M., Jacobson, V., and C. Perkins, \"SDP: Session Description Protocol\", RFC 4566, July 2006.",
+      "rfc": 4566
+    },
+    {
+      "number": "[RFC7667]",
+      "text": "Westerlund, M. and S. Wenger, \"RTP Topologies\", RFC 7667, November 2015.",
+      "rfc": 7667
+    },
+    {
+      "number": "[RFC7201]",
+      "text": "Westerlund, M. and C. Perkins, \"Options for Securing RTP Sessions\", RFC 7201, April 2014.",
+      "rfc": 7201
+    },
+    {
+      "number": "[RFC7478]",
+      "text": "Holmberg, C., Hakansson, S., and G. Eriksson, \"Web Real-Time Communication Use Cases and Requirements\", RFC 7478, March 2015.",
+      "rfc": 7478
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

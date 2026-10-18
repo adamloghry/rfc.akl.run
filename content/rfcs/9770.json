@@ -9,13 +9,267 @@
   },
   "questions": [
     "revoked access tokens in ace",
-    "how to notify devices of token revocation"
+    "how to notify devices of token revocation",
+    "how to revoke access tokens in ace",
+    "what is a token revocation list",
+    "what is a token hash in ace",
+    "how do iot devices learn about revoked tokens"
+  ],
+  "tags": [
+    "Authorization",
+    "IoT",
+    "CoAP"
+  ],
+  "subtitle": "How an ACE authorization server tells constrained devices that an access token was revoked before it expired.",
+  "tldr": {
+    "problem": "Access tokens for constrained, intermittently connected devices can live a long time, yet may need to be revoked early, for example when a device is compromised or decommissioned.",
+    "mechanism": "The authorization server keeps a Token Revocation List of token hashes behind a CoAP endpoint. Registered devices fetch only the part that concerns them, with full or diff queries, and can subscribe with CoAP Observe to be notified of changes.",
+    "outcome": "Devices learn of revocations without exposing extra endpoints, and the method complements token introspection. It is a Proposed Standard and is not obsoleted.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default TRL endpoint path",
+      "value": "/revoke/trl"
+    },
+    {
+      "label": "Content-Format",
+      "value": "application/ace-trl+cbor"
+    },
+    {
+      "label": "CWT CBOR tag",
+      "value": "61"
+    },
+    {
+      "label": "Mandatory hash function",
+      "value": "sha-256"
+    },
+    {
+      "label": "Methods on TRL endpoint",
+      "value": "GET only"
+    },
+    {
+      "label": "Observe option to subscribe",
+      "value": "0 (register)"
+    }
+  ],
+  "today": "<p>RFC 9770 is a Proposed Standard published in June 2025, and no later RFC obsoletes or updates it. It builds on the ACE framework in <a href='/9200/'>RFC 9200</a>.</p>",
+  "glossary": [
+    "access-token",
+    "authorization-server",
+    "resource-server",
+    "jwt",
+    "base64url"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Revoking Tokens Early in ACE",
+      "content": "<p>The Authentication and Authorization for Constrained Environments (ACE) framework (<a href='/9200/'>RFC 9200</a>) controls access to Internet of Things devices acting as resource servers (RSs). Clients and RSs register with an authorization server (AS) and become <strong>registered devices</strong>. A client gets an access token from the AS and presents it to the RS, which validates and stores it.</p><p>Tokens have expiration times, but sometimes they must be revoked sooner: a device is compromised or suspected of it, a device is decommissioned, or its ACE profile, access policies or policy evaluation outcome change. OAuth 2.0 only specifies client-initiated revocation (<a href='/7009/'>RFC 7009</a>), on the assumption that tokens are short-lived. That assumption does not hold for constrained, intermittently connected devices that need long-lived tokens.</p><p>This RFC lets registered devices read, and optionally subscribe to, a <strong>Token Revocation List</strong> (TRL) on the AS using the Constrained Application Protocol (CoAP) and its resource observation feature. Unlike token introspection, a device does not hand the AS a token to ask about. It only needs one request/response exchange with the AS and a lightweight hash computation, and no new endpoints of its own. How tokens come to be declared revoked is out of scope.</p>",
+      "eli5": "<p>Passes can be cancelled before their end date, for example if one is lost. Small devices need a simple way to hear about cancelled passes.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "How the Protocol Works",
+      "content": "<p>The AS creates a single TRL at startup. At any time it lists all revoked access tokens issued by the AS that are not yet expired. When a device registers, it also receives the url-path of the <strong>TRL endpoint</strong>, which is <code>/revoke/trl</code> by default.</p><p>A registered device sends a GET request to that endpoint to ask for the current list of its own revoked tokens or for the most recent updates to it. If the request carries the CoAP Observe option set to 0 (register), the device subscribes: the AS adds it to the list of observers and sends a notification whenever the part of the TRL concerning that device changes.</p><p>When a token is revoked, the AS adds its hash to the TRL. When a revoked token expires, the AS removes the hash. An <strong>administrator</strong>, who need not be a registered device, can read and subscribe to the whole TRL in the same way.</p>",
+      "eli5": "<p>There is a noticeboard at the front desk. Each device can ask for the cancelled passes that belong to it, or ask to be told whenever the board changes.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "Rules for Issuing Access Tokens",
+      "content": "<p>An AS that supports this method MUST put all intended header parameters in integrity-protected fields, so nobody can alter them unnoticed.</p><ul><li>For a CWT (a CBOR Web Token), every <code>unprotected</code> field MUST be the empty CBOR map <code>0xa0</code>. The COSE CBOR tag matching the COSE object MUST be used, then the CWT tag with number 61, and the result MUST NOT be tagged further. Tag numbers use definite lengths and the shortest possible encoding.</li><li>For tokens using a JSON object, the RFC considers JWTs, which use the JWS or JWE Compact Serialization. Alternative tokens in JSON Serialization MUST NOT include the unprotected headers.</li></ul><p>These rules matter because the token hash is computed over the encoded token. If an attacker could change unprotected parts or tags without breaking validation, an RS would compute a different hash from the one the AS and client use and would never recognize a revocation.</p>",
+      "eli5": "<p>Passes must be made so nobody can scribble on them without it showing. Otherwise the desk and the guard might read the same pass differently.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4",
+      "title": "Computing the Token Hash",
+      "content": "<p>The TRL does not list tokens themselves but <strong>token hashes</strong>, binary identifiers of tokens. The AS, the client and the RS must all compute the same hash for a token, so the input is built from the <code>access_token</code> parameter of the AS-to-Client response, which is what all three can see.</p><ul><li><strong>Client and AS, CBOR response:</strong> the input is the base64url text encoding of the bytes in the <code>access_token</code> byte string.</li><li><strong>Client and AS, JSON response:</strong> the input is the text string in <code>access_token</code>, as UTF-8.</li><li><strong>RS with CWTs:</strong> the RS works back from the token information it received to the same input, so it needs only one hash.</li><li><strong>RS with JWTs:</strong> the RS cannot tell whether the client got the token via CBOR or JSON, so it computes and stores two hashes, unless it is certain only one encoding is used.</li></ul><p>The hash is produced as in <a href='/6920/'>RFC 6920</a>, so its first byte identifies the hash function. The function MUST be collision resistant and come from the Named Information Hash Algorithm Registry, and <code>sha-256</code> is mandatory to implement. The AS tells each device which function is used at registration.</p>",
+      "eli5": "<p>Instead of writing the whole pass on the noticeboard, the desk writes a short fingerprint of it. Everyone must make the fingerprint the same way, or it will not match.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "The TRL Endpoint and Its Queries",
+      "content": "<p>The TRL is a CBOR array of byte strings, treated as a set and starting empty. The TRL endpoint supports only GET, and all communication with it MUST be encrypted, integrity protected and replay protected, with responses bound to requests. Only registered devices and authorized administrators may reach it. Success responses use Content-Format <code>application/ace-trl+cbor</code>, a CBOR map with numeric keys.</p><p>A <strong>full query</strong>, which the AS MUST support, returns the token hashes currently in the TRL that concern the requester, in a <code>full_set</code> array. An administrator gets all hashes.</p><p>A <strong>diff query</strong>, which the AS MAY support, is requested with the <code>diff</code> query parameter. The AS returns up to N diff entries in <code>diff_set</code>, newest first. Each entry is a pair of arrays, <code>removed</code> and <code>added</code>, describing one TRL update. The AS keeps at most MAX_N entries per requester and discards the oldest when full, so a device that waits too long can miss an update.</p><p>An AS that supports diff queries MAY also support the <strong>Cursor</strong> extension. Each stored entry gets an index, and the response carries <code>cursor</code> and <code>more</code> parameters. This lets the AS send a long update history in several smaller responses, and lets a requester ask for entries after a reference point using the <code>cursor</code> query parameter. A response never holds more than MAX_DIFF_BATCH entries. Bad parameters produce a 4.00 response in the concise problem details format.</p>",
+      "eli5": "<p>A device can ask for the whole list of its cancelled passes, or just for what changed lately. If there is a lot of news, the desk gives it in small batches and tells the device where to continue.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Registration and Handling Revoked Tokens",
+      "content": "<p>At registration, a device or administrator receives the url-path of the TRL endpoint, the hash function to use, MAX_N if diff queries are supported, and MAX_DIFF_BATCH if the Cursor extension is supported. The AS and device must be mutually authenticated over a secure association. Administrators are checked against something like an access control list.</p><p>When a registered device receives a response, it MUST expunge every stored access token whose hash appears in it. An RS MUST NOT delete the stored hash at that point. It keeps the hash until it has seen the token and knows the token has expired, for instance because the hash was removed from the TRL, the <code>exp</code> claim passed, or introspection says so. This stops a revoked token from being accepted if it is uploaded later. An RS MUST NOT accept a token whose hash it already stores, or one that breaks the rules from Section 3.</p><p>If a request gets no response or an error response, the requester must not conclude anything about its tokens and MAY retry. Because diff queries can miss updates, a requester SHOULD NOT rely on them alone and SHOULD also send full queries regularly according to an application policy.</p>",
+      "eli5": "<p>When a device hears that a pass is cancelled, it throws the pass away. A guard keeps the fingerprint around a bit longer so a cancelled pass cannot sneak back in.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Each device can only retrieve its own part of the TRL, and only the AS changes the TRL. An attacker outside the AS therefore cannot remove a hash to revive a revoked token, or add one to block a valid token. The AS SHOULD avoid excessively long token lifetimes, because many revocations make the list large.</p><ul><li><strong>Suppressed notifications:</strong> an attacker on the network could block Observe notifications, so a requester SHOULD also poll the TRL endpoint regularly.</li><li><strong>Vulnerable window:</strong> a client may use a revoked token before the RS learns of the revocation. An RS that only polls SHOULD balance polling frequency against that window.</li><li><strong>New tokens:</strong> after a 4.01 (Unauthorized) from an RS, a client that believes its token is valid SHOULD check the TRL endpoint first rather than asking for a new token at once, since the response may be forged.</li><li><strong>Tampering with tokens:</strong> the issuing rules in Section 3 stop an attacker from altering a token in transit so that the RS stores a wrong hash.</li><li><strong>Two hashes for JWTs:</strong> a dishonest client could otherwise trick an RS using JWTs into a mismatched hash, which is why such an RS stores two.</li></ul><p>Devices learn that a token was revoked, but not why. The entity that declares a device compromised or decommissioned should also trigger further steps such as deregistering the device from the AS.</p>",
+      "eli5": "<p>Only the front desk can write on the noticeboard, so nobody can sneak in a fake cancellation. Devices should still check the board now and then in case somebody blocks the news.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "SUBSCRIBING TO THE TRL (RFC 9770, SECTION 2)",
+      "data": {
+        "lanes": [
+          {
+            "key": "device",
+            "label": "Registered device"
+          },
+          {
+            "key": "as",
+            "label": "Authorization server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "device",
+            "to": "as",
+            "label": "GET /revoke/trl, Observe 0",
+            "color": "blue",
+            "note": "Registers as an observer of the TRL endpoint."
+          },
+          {
+            "from": "as",
+            "to": "device",
+            "label": "2.05 Content",
+            "color": "green",
+            "note": "Current list or recent updates for this device."
+          },
+          {
+            "from": "as",
+            "to": "device",
+            "label": "Observe notification",
+            "color": "green",
+            "note": "Sent when a pertaining token hash is added or removed."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "TRL RESPONSE PARAMETERS AND CBOR KEYS (RFC 9770, SECTION 12)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "full_set",
+            "desc": "Array of token hashes from a full query.",
+            "highlight": true
+          },
+          {
+            "code": "1",
+            "label": "diff_set",
+            "desc": "Array of diff entries from a diff query."
+          },
+          {
+            "code": "2",
+            "label": "cursor",
+            "desc": "Null or unsigned integer used by the Cursor extension."
+          },
+          {
+            "code": "3",
+            "label": "more",
+            "desc": "True or false, used by the Cursor extension."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "TRL ERROR IDENTIFIERS (RFC 9770, SECTION 13)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Invalid parameter value",
+            "desc": "A query parameter has a bad value."
+          },
+          {
+            "code": "1",
+            "label": "Invalid set of parameters",
+            "desc": "For example, cursor sent without diff."
+          },
+          {
+            "code": "2",
+            "label": "Out of bound cursor value",
+            "desc": "The cursor is beyond the last index."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC9200]",
+      "text": "Seitz, L., Selander, G., Wahlstroem, E., Erdtman, S., and H. Tschofenig, \"Authentication and Authorization for Constrained Environments Using the OAuth 2.0 Framework (ACE-OAuth)\", RFC 9200, August 2022.",
+      "rfc": 9200
+    },
+    {
+      "number": "[RFC7009]",
+      "text": "Lodderstedt, T., Ed., Dronia, S., and M. Scurtescu, \"OAuth 2.0 Token Revocation\", RFC 7009, August 2013.",
+      "rfc": 7009
+    },
+    {
+      "number": "[RFC7252]",
+      "text": "Shelby, Z., Hartke, K., and C. Bormann, \"The Constrained Application Protocol (CoAP)\", RFC 7252, June 2014.",
+      "rfc": 7252
+    },
+    {
+      "number": "[RFC7641]",
+      "text": "Hartke, K., \"Observing Resources in the Constrained Application Protocol (CoAP)\", RFC 7641, September 2015.",
+      "rfc": 7641
+    },
+    {
+      "number": "[RFC8392]",
+      "text": "Jones, M., Wahlstroem, E., Erdtman, S., and H. Tschofenig, \"CBOR Web Token (CWT)\", RFC 8392, May 2018.",
+      "rfc": 8392
+    },
+    {
+      "number": "[RFC7519]",
+      "text": "Jones, M., Bradley, J., and N. Sakimura, \"JSON Web Token (JWT)\", RFC 7519, May 2015.",
+      "rfc": 7519
+    },
+    {
+      "number": "[RFC9052]",
+      "text": "Schaad, J., \"CBOR Object Signing and Encryption (COSE): Structures and Process\", STD 96, RFC 9052, August 2022.",
+      "rfc": 9052
+    },
+    {
+      "number": "[RFC6920]",
+      "text": "Farrell, S., et al., \"Naming Things with Hashes\", RFC 6920, April 2013.",
+      "rfc": 6920
+    },
+    {
+      "number": "[RFC9290]",
+      "text": "Fossati, T. and C. Bormann, \"Concise Problem Details for Constrained Application Protocol (CoAP) APIs\", RFC 9290, October 2022.",
+      "rfc": 9290
+    },
+    {
+      "number": "[RFC6749]",
+      "text": "Hardt, D., Ed., \"The OAuth 2.0 Authorization Framework\", RFC 6749, October 2012.",
+      "rfc": 6749
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

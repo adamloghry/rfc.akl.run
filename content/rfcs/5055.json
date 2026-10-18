@@ -10,13 +10,315 @@
   "questions": [
     "what is scvp",
     "how to delegate certificate validation to a server",
-    "certificate path validation protocol"
+    "certificate path validation protocol",
+    "what is delegated path validation",
+    "scvp vs ocsp"
+  ],
+  "tags": [
+    "PKI",
+    "Certificates",
+    "Validation"
+  ],
+  "subtitle": "Let a server build and check certificate paths for you, using a validation policy the server and client agree on.",
+  "tldr": {
+    "problem": "Building and validating a certification path is complex, and many applications do not want the overhead of doing it, or cannot reliably find the certificates and revocation data they need.",
+    "mechanism": "The client sends one signed or MAC-protected request naming the certificate, the checks it wants, the information it wants back and a validation policy. The server replies with one response about each certificate.",
+    "outcome": "Clients can fully delegate validation (DPV) or only path building (DPD), and organizations can manage validation policies centrally. A client that trusts the server trusts it as much as its own validation software.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Request version",
+      "value": "1"
+    },
+    {
+      "label": "Default clock skew",
+      "value": "10 minutes"
+    },
+    {
+      "label": "Required message protection",
+      "value": "SignedData (AuthenticatedData SHOULD)"
+    },
+    {
+      "label": "HTTP method",
+      "value": "POST, 200 on success"
+    },
+    {
+      "label": "Loop detection status code",
+      "value": "40 (relayingLoop)"
+    }
+  ],
+  "today": "<p>RFC 5055 is a Proposed Standard published in December 2007. The unit metadata shows no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "certification-path",
+    "certificate",
+    "trust-anchor",
+    "crl",
+    "ocsp",
+    "nonce",
+    "replay-attack",
+    "pki",
+    "mime-type",
+    "digital-signature",
+    "diffie-hellman"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem and the Two Kinds of Client",
+      "content": "<p>Certificate validation is complex. If certificates are to be widely deployed, the processing an application needs before it can accept one has to shrink. <strong>SCVP</strong> (Server-Based Certificate Validation Protocol) lets a client hand part of that work to a server, and it serves two classes of application.</p><ul><li><strong>Delegated path validation (DPV).</strong> The client only wants to know that the public key belongs to the named identity and may be used for the intended purpose, so it delegates both path construction and validation.</li><li><strong>Delegated path discovery (DPD).</strong> The client can validate a path itself but lacks a reliable or efficient way to build one, so it delegates only construction.</li></ul><p>The goals are to ease the deployment of PKI-enabled applications and to allow central administration of validation policies within an organization. An untrusted server can supply paths and revocation data such as CRLs and OCSP responses. A trusted server can do the whole job, in which case the client trusts it as much as it would its own validation software.</p>",
+      "eli5": "<p>Some devices just want a yes or no about an ID card. Others can check cards themselves but cannot find the paperwork needed, so they ask the helper to fetch it.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "Protocol Overview and Transport",
+      "content": "<p>SCVP is a simple request and response exchange: the client sends a request and the server creates a single response. Typical use is over HTTP, but it can also be used with email or any protocol that can carry digitally signed objects.</p><p>There are two request and response pairs. The primary pair handles certificate validation (CVRequest and CVResponse). The secondary pair (ValPolRequest and ValPolResponse) lets a client learn which validation policies and default parameters a server supports.</p><p>Messages are wrapped in Cryptographic Message Syntax (CMS). A request is either unprotected or protected. A protected request uses <code>SignedData</code> for a digital signature, or <code>AuthenticatedData</code> for a message authentication code (MAC) whose key comes from a key agreement algorithm such as Diffie-Hellman. All clients and servers MUST support <code>SignedData</code> and SHOULD support <code>AuthenticatedData</code>. A server MAY require all requests to be protected, and MAY discard unprotected ones.</p><p>Over HTTP, clients MUST use the POST method and servers MUST use the 200 response code for success. The Content-Type values are <code>application/scvp-cv-request</code>, <code>application/scvp-cv-response</code>, <code>application/scvp-vp-request</code> and <code>application/scvp-vp-response</code>. Servers MUST NOT assume support for HTTP authentication such as cookies, Basic or Digest.</p>",
+      "eli5": "<p>You send one letter asking your question and get one letter back. You can seal the letter with your signature so the helper knows it is really from you.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The Validation Request",
+      "content": "<p>A request is one <code>CVRequest</code>, DER encoded so it can be referenced by hash. It holds a <code>cvRequestVersion</code> (the value MUST be 1 for this specification) and a <code>query</code>, and may add <code>requestorRef</code>, <code>requestNonce</code>, <code>requestorName</code>, <code>responderName</code>, <code>requestExtensions</code>, <code>signatureAlg</code>, <code>hashAlg</code> and <code>requestorText</code>.</p><p>The <code>query</code> MUST contain a <code>queriedCerts</code> item, a <code>checks</code> item and a <code>validationPolicy</code> item. It MAY also carry the following.</p><ul><li><code>wantBack</code>: extra objects the client wants returned.</li><li><code>responseFlags</code>: optional response features.</li><li><code>serverContextInfo</code>: opaque state from an earlier exchange, used to ask for another certification path.</li><li><code>validationTime</code>: a past time, as GeneralizedTime in UTC with seconds and no fractions, at which to evaluate the certificate. The default clock skew is 10 minutes.</li><li><code>intermediateCerts</code> and <code>revInfos</code>: certificates, CRLs, delta CRLs and OCSP responses the server MAY use, though it does not treat the certificates as valid just because they are present.</li><li><code>producedAt</code>: the earliest acceptable time for a cached response.</li></ul><p>Certificates in <code>queriedCerts</code> are either public key certificates or attribute certificates, not a mix. Each is included directly or referenced by an <code>SCVPCertID</code>, which carries a hash of the whole DER-encoded certificate.</p>",
+      "eli5": "<p>The question form has blanks for which ID card, what to check, what to send back, and which rule book to use. Everything else on the form is optional.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Checks, Want-Backs and Validation Policy",
+      "content": "<p>The <code>checks</code> item lists object identifiers (OIDs) naming the work the server must do, or return an error. For public key certificates there are three.</p><ul><li><code>id-stc-build-pkc-path</code>: build a prospective path to a trust anchor.</li><li><code>id-stc-build-valid-pkc-path</code>: build a validated path, with revocation checking not required.</li><li><code>id-stc-build-status-checked-pkc-path</code>: build a validated path and perform revocation status checks.</li></ul><p>Four more checks cover attribute certificates. The <code>wantBack</code> item names extra objects to return, such as the certificate (<code>id-swb-pkc-cert</code>), the best path (<code>id-swb-pkc-best-cert-path</code>), proof of revocation status (<code>id-swb-pkc-revocation-info</code>), the public key (<code>id-swb-pkc-public-key-info</code>) or all paths (<code>id-swb-pkc-all-cert-paths</code>). A request that asks only to build a path and wants the path back suits a DPD client. One that asks for a full status-checked validation and no wantBack suits a DPV client.</p><p>A <strong>validation policy</strong> is named by an OID in <code>validationPolRef</code> and MUST define default values for every parameter. The client may override parameters the policy allows: the validation algorithm, <code>userPolicySet</code>, <code>inhibitPolicyMapping</code>, <code>requireExplicitPolicy</code>, <code>inhibitAnyPolicy</code>, <code>trustAnchors</code>, <code>keyUsages</code>, <code>extendedKeyUsages</code> and <code>specifiedKeyUsages</code>. A conflict between the policy and supplied values MUST produce an error. Servers MUST support the default validation policy, <code>id-svp-defaultValPolicy</code>, which follows standard PKIX path processing with server-chosen defaults.</p><p>Two validation algorithms are defined. The basic algorithm implements PKIX path validation. The name validation algorithm adds a required name check against the end certificate: a directory name, a DNS name (where <code>*.a.com</code> matches <code>foo.a.com</code> but not <code>bar.foo.a.com</code>), or an email address.</p>",
+      "eli5": "<p>You choose how thorough the helper should be: just find the paperwork, check it is valid, or also check nobody has cancelled it. You also pick which rule book the helper uses.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "The Validation Response",
+      "content": "<p>A reply is a single <code>CVResponse</code>. It MUST contain <code>cvResponseVersion</code>, <code>serverConfigurationID</code>, <code>producedAt</code> and <code>responseStatus</code>, and it carries one <code>CertReply</code> per queried certificate, in the same order as the request. Success responses to requests that leave <code>protectResponse</code> at its default are protected with <code>SignedData</code> or <code>AuthenticatedData</code>, and the server MUST include its own certificate in <code>SignedData</code>.</p><p>The overall <code>responseStatus</code> has a numeric code. Examples include 0 (<code>okay</code>), 10 (<code>tooBusy</code>), 21 (<code>unsupportedVersion</code>), 27 (<code>unsupportedChecks</code>), 40 (<code>relayingLoop</code>) and 50 (<code>unrecognizedValPol</code>).</p><p>Each <code>CertReply</code> has its own <code>replyStatus</code>, a <code>replyChecks</code> result for every requested check and a <code>replyWantBacks</code> list. For a status-checked path, the check result can be 0 (valid), 1 (not valid), 2 (revocation off-line), 3 (revocation unavailable) or 4 (no known source for revocation information). Optional <code>validationErrors</code> identify why validation failed, for example expired, not yet valid, revoked or a wrong trust anchor.</p><p>The response flags let the client tune the reply. By default the response carries a hash of the request, a reference to the policy rather than its full parameters, protection, and permission to be a cached response. A client that insists on a fresh answer MUST send a <code>requestNonce</code> and set <code>cachedResponse</code> to FALSE.</p>",
+      "eli5": "<p>The helper writes back one answer per ID card: good, bad, or could not tell, plus the reason. It signs the reply so you know it came from the real helper.</p>"
+    },
+    {
+      "id": "management",
+      "number": "6",
+      "title": "Policy Discovery and Server Relay",
+      "content": "<p>A client can ask what a server offers with a <code>ValPolRequest</code>, which holds a version and a <code>requestNonce</code> and is not signed. Servers MUST recognize it. The signed <code>ValPolResponse</code> lists supported checks, wantBacks, validation policies and algorithms, response types, revocation information types, signature and hash algorithms, optional server key agreement public keys, default policy values and the <code>clockSkew</code> (default 10).</p><p>A server may relay a request to other SCVP servers, for example behind a firewall. A relaying server MUST put a <code>requestorRef</code> in the relayed request, appending its own identifier such as its DNS name. A server that finds its own identifier in an incoming <code>requestorRef</code> MUST answer with status code 40 to break the loop.</p>",
+      "eli5": "<p>Before asking questions, you can ask the helper for its menu of services. Helpers can also pass questions to other helpers, writing their name on the note so a question never goes in circles.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>A client that trusts a server's answer trusts it as much as its own validation software. If an attacker compromises a trusted server, the attacker can change validation for every client relying on it, so the server must be protected at least as well as the trust anchors it uses.</p><ul><li>Clients MUST check that the response matches their request and, when using the response to judge validity, MUST validate the signature or MAC. Otherwise a man-in-the-middle could alter answers.</li><li>Without a <code>requestNonce</code> that the client checks, an attacker can replay old responses.</li><li>A server that does not require authorization lets attackers send arbitrary requests and learn about its weaknesses or how timely its checking is. State kept for <code>serverContextInfo</code> invites denial-of-service attacks.</li><li>SCVP has no confidentiality mechanism. Use a lower-layer protocol such as TLS if it is needed.</li><li>A client that sets <code>userPolicySet</code> to something other than anyPolicy should also set <code>requireExplicitPolicy</code>, or the server may approve paths matching none of the policies.</li><li>Historical validation reports only what was known at that time, so a later revocation with an earlier invalidity date can be missed. A client may choose a <code>validationTime</code> later than the time of interest.</li></ul>",
+      "eli5": "<p>The helper is only as trustworthy as its lock and key. If a bad person takes over the helper, every device that relies on it gets fooled, so the helper must be guarded very carefully.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THE TWO SCVP REQUEST AND RESPONSE PAIRS",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "SCVP client"
+          },
+          {
+            "key": "server",
+            "label": "SCVP server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "ValPolRequest",
+            "color": "blue",
+            "note": "Optional: ask which policies and defaults the server supports."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "ValPolResponse",
+            "color": "green",
+            "note": "Signed list of policies, algorithms and defaults."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "CVRequest",
+            "color": "blue",
+            "note": "Certificate, checks, wantBacks and validation policy."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "CVResponse",
+            "color": "green",
+            "note": "A status and one CertReply per certificate."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "WHAT EACH KIND OF CLIENT DELEGATES",
+      "data": {
+        "columns": [
+          "Mode",
+          "Server builds the path",
+          "Server validates the path"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Delegated path discovery (DPD)",
+              "Yes",
+              "No, the client validates"
+            ]
+          },
+          {
+            "cells": [
+              "Delegated path validation (DPV)",
+              "Yes",
+              "Yes"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "CHECKS DEFINED FOR PUBLIC KEY CERTIFICATES",
+      "data": {
+        "items": [
+          {
+            "code": "id-stc 1",
+            "label": "id-stc-build-pkc-path",
+            "desc": "Build a prospective certification path to a trust anchor."
+          },
+          {
+            "code": "id-stc 2",
+            "label": "id-stc-build-valid-pkc-path",
+            "desc": "Build a validated path; revocation checking not required."
+          },
+          {
+            "code": "id-stc 3",
+            "label": "id-stc-build-status-checked-pkc-path",
+            "desc": "Build a validated path and perform revocation status checks.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "PER-CERTIFICATE REPLY STATUS VALUES",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "success",
+            "desc": "All checks were performed successfully.",
+            "highlight": true
+          },
+          {
+            "code": "1",
+            "label": "malformedPKC",
+            "desc": "The public key certificate was malformed."
+          },
+          {
+            "code": "2",
+            "label": "malformedAC",
+            "desc": "The attribute certificate was malformed."
+          },
+          {
+            "code": "3",
+            "label": "unavailableValidationTime",
+            "desc": "No historical data for the requested validation time."
+          },
+          {
+            "code": "4",
+            "label": "referenceCertHashFail",
+            "desc": "Referenced certificate not found or hash did not match."
+          },
+          {
+            "code": "5",
+            "label": "certPathConstructFail",
+            "desc": "No certification path could be constructed."
+          },
+          {
+            "code": "6",
+            "label": "certPathNotValid",
+            "desc": "The path is not valid under the validation policy."
+          },
+          {
+            "code": "7",
+            "label": "certPathNotValidNow",
+            "desc": "Not valid now, but a later query may succeed."
+          },
+          {
+            "code": "8",
+            "label": "wantBackUnsatisfied",
+            "desc": "Checks passed but one or more wantBacks could not be satisfied."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RQMTS]",
+      "text": "Pinkas, D. and R. Housley, \"Delegated Path Validation and Delegated Path Discovery Protocol Requirements\", RFC 3379, September 2002.",
+      "rfc": 3379
+    },
+    {
+      "number": "[PKIX-1]",
+      "text": "Housley, R., Polk, W., Ford, W., and D. Solo, \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 3280, April 2002.",
+      "rfc": 3280
+    },
+    {
+      "number": "[PKIX-AC]",
+      "text": "Farrell, S. and R. Housley, \"An Internet Attribute Certificate Profile for Authorization\", RFC 3281, April 2002.",
+      "rfc": 3281
+    },
+    {
+      "number": "[CMS]",
+      "text": "Housley, R., \"Cryptographic Message Syntax (CMS)\", RFC 3852, July 2004.",
+      "rfc": 3852
+    },
+    {
+      "number": "[OCSP]",
+      "text": "Myers, M., et al., \"X.509 Internet Public Key Infrastructure Online Certificate Status Protocol - OCSP\", RFC 2560, June 1999.",
+      "rfc": 2560
+    },
+    {
+      "number": "[HTTP]",
+      "text": "Fielding, R., et al., \"Hypertext Transfer Protocol -- HTTP/1.1\", RFC 2616, June 1999.",
+      "rfc": 2616
+    },
+    {
+      "number": "[TLS]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.1\", RFC 4346, April 2006.",
+      "rfc": 4346
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

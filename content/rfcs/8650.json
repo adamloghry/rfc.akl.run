@@ -10,13 +10,285 @@
   "questions": [
     "restconf dynamic subscription",
     "yang push over restconf",
-    "subscribe to events in restconf"
+    "subscribe to events in restconf",
+    "what is restconf dynamic subscription",
+    "how does yang push work over restconf",
+    "how to subscribe to notifications over restconf"
+  ],
+  "tags": [
+    "Network Management",
+    "RESTCONF",
+    "Streaming"
+  ],
+  "subtitle": "How a client asks a network device for a live feed of events and data changes using plain HTTP requests.",
+  "tldr": {
+    "problem": "RFC 8639 and RFC 8641 define dynamic subscriptions to YANG events and datastore updates, but not how to carry them over RESTCONF, the HTTP-based management protocol.",
+    "mechanism": "The subscriber sends a RESTCONF POST to run the establish-subscription RPC, gets back a subscription ID and a URI, then sends an HTTP GET to that URI so the publisher streams notification messages back as Server-Sent Events.",
+    "outcome": "It adds one leaf, uri, to three places in the subscription model, and fixes the error codes, QoS handling and access rules for RESTCONF. It is a Proposed Standard and has not been obsoleted.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Success status",
+      "value": "HTTP 200"
+    },
+    {
+      "label": "Second GET on same URI",
+      "value": "Rejected with HTTP 409"
+    },
+    {
+      "label": "YANG module",
+      "value": "ietf-restconf-subscribed-notifications"
+    },
+    {
+      "label": "New data node",
+      "value": "One leaf, uri, augmented into 3 places"
+    },
+    {
+      "label": "HTTP/2 exclusive flag",
+      "value": "Set to 0"
+    }
+  ],
+  "today": "<p>RFC 8650 is a Proposed Standard published in November 2019. The metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "restconf",
+    "server-sent-events",
+    "yang",
+    "tls",
+    "http",
+    "http-2",
+    "http2-stream",
+    "http-status-code",
+    "dscp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What This Document Adds",
+      "content": "<p>RFC 8639 defines mechanisms for event subscription, and RFC 8641 adds YANG datastore subscription and <strong>YANG-Push</strong>. Neither says how to carry a subscription over a particular transport. RFC 8650 is that transport specification for <strong>dynamic subscriptions</strong> over <strong>RESTCONF</strong> (<a href='/8040/'>RFC 8040</a>). The requirements behind the mechanisms are captured in <a href='/7923/'>RFC 7923</a>.</p><p>The streaming of the notifications themselves uses the mechanism in Section 6.3 of RFC 8040. The terms subscriber, publisher, receiver, event stream and notification message are taken from RFC 8639.</p>",
+      "eli5": "<p>Other documents say what a subscription is. This one says how to ask for one using ordinary web requests.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Setting Up a Subscription: POST, then GET",
+      "content": "<p>Subscribing to event streams uses the RPCs from RFC 8639, Section 2.4, sent as RESTCONF <code>POST</code> requests. Datastore subscription works through the augmentations described in RFC 8641.</p><p>A subscriber cannot know the URI of a subscription in advance, because it only exists after the <code>establish-subscription</code> RPC has been accepted. So the POST takes the place of the GET that RFC 8040 would use to discover the URI. The response carries both a subscription ID and a URI. The subscriber then sends a <code>GET</code> to that URI to start the flow of notification messages. Per RFC 8639, the subscription does not become active until that GET is received.</p><p>The notifications come back as <strong>Server-Sent Events</strong> (SSE) in the response to the GET. Two connections are involved: (a) carries the RPC requests and (b) carries the GET and the resulting stream. Each can be a TCP connection or an HTTP/2 stream. RESTCONF servers SHOULD NOT send the SSE <code>event</code> or <code>id</code> fields.</p><div class='callout callout-info'><p>There cannot be two simultaneous GET requests on one subscription URI. A second GET while one is current MUST be rejected with HTTP error code 409.</p></div>",
+      "eli5": "<p>First you fill in a sign-up form (the POST) and get a ticket with a special address. Then you go to that address (the GET), and the news starts to arrive.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "2",
+      "title": "Transport, Discovery and Lifetime Rules",
+      "content": "<p>If no RESTCONF session exists, the subscriber starts a new one. The subscriber MUST run HTTP over TLS (RFC 8446) so content is secure in transit. HTTP sessions alone do not notice quickly when the path to the publisher is lost. Where fast detection is needed, the subscriber SHOULD use a TLS heartbeat (<a href='/6520/'>RFC 6520</a>) from subscriber to publisher. Loss of the heartbeat MUST tear down any subscription-related TCP sessions between those endpoints, and the subscriber can then try to re-establish the subscription.</p><p>Subscribers learn the supported event streams by querying the <code>streams</code> container of <code>ietf-subscribed-notifications.yang</code>. They learn the supported datastores by following Section 2 of RFC 8527.</p><p>A publisher MUST terminate a subscription when it receives a <code>delete-subscription</code> or <code>kill-subscription</code> RPC for it, or when the TLS heartbeat is lost. It MAY terminate a subscription at any time.</p>",
+      "eli5": "<p>The connection must be locked and private. If the line goes quiet, both sides hang up the subscription, and you can sign up again.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "3.3",
+      "title": "Errors and HTTP Status Codes",
+      "content": "<p>A successful RPC from RFC 8639 or RFC 8641 gets HTTP status <code>200</code>. When a request fails, the reply MUST carry an <code>rpc-error</code> element with an <code>error-type</code> of <code>application</code>, an <code>error-tag</code> chosen to match the error identity, and an <code>error-app-tag</code> naming the identity in the form <code>modulename:identityname</code>, for example <code>ietf-subscribed-notifications:no-such-subscription</code>.</p><p>The RFC gives tables mapping each error identity to an <code>error-tag</code> and an HTTP code. For example, <code>dscp-unavailable</code> maps to <code>invalid-value</code> and 400, <code>no-such-subscription</code> to <code>invalid-value</code> and 404, <code>insufficient-resources</code> to <code>resource-denied</code> and 409, and <code>replay-unsupported</code> to <code>operation-not-supported</code> and 501. Datastore-specific identities such as <code>unchanging-selection</code> map to <code>operation-failed</code> and 500.</p><p>Failed <code>establish-subscription</code> and <code>modify-subscription</code> requests may also carry an <code>error-info</code> node with hints for parameters that might work next time. That yang-data SHOULD NOT include the optional <code>reason</code> leaf, since the <code>error-app-tag</code> already says it.</p>",
+      "eli5": "<p>When a request fails, the device answers with a number and a short label saying what went wrong, and sometimes a hint on what to try instead.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3.4",
+      "title": "Rules for Modifying, Deleting and Prioritising",
+      "content": "<p>Subscription state notifications, such as <code>subscription-modified</code>, MUST be sent in the separate SSE stream of the subscription they refer to. RPCs MUST NOT use the connection that currently delivers that subscription's notifications. For <code>modify-subscription</code>, besides the RPC response on (a), a <code>subscription-modified</code> notification MUST be sent on (b), so the receiver knows exactly where in the stream the new terms took effect.</p><p>The RPCs <code>modify-subscription</code>, <code>resync-subscription</code> and <code>delete-subscription</code> SHOULD only be allowed for the same RESTCONF username that invoked <code>establish-subscription</code>, which preserves users' privacy. Administrators may be an exception. <code>kill-subscription</code> can be invoked by any user with the required administrative permissions.</p><p>For QoS, if HTTP/2 is used the publisher MUST copy the <code>weighting</code> leaf into the HTTP/2 stream weight, use the parent subscription's HTTP/2 stream as the stream dependency for any <code>dependency</code>, and set the exclusive flag to 0. Subscriptions with the same DSCP value to one publisher should share an HTTP/2 session, and a subscriber cannot use a common session for subscriptions with different DSCP values.</p>",
+      "eli5": "<p>Only the person who signed up can change or cancel their subscription, unless an administrator steps in. Important feeds can be given a bigger share of the line.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "6",
+      "title": "The YANG Module and Notification Encoding",
+      "content": "<p>Notification messages over RESTCONF are encoded as in Section 6.4 of RFC 8040. The module <code>ietf-restconf-subscribed-notifications</code> (prefix <code>rsn</code>) is very small: one read-only leaf, <code>uri</code>, of type <code>inet:uri</code>, that augments three nodes of RFC 8639. These are the output of <code>establish-subscription</code>, each entry in <code>subscriptions/subscription</code>, and the <code>subscription-modified</code> notification.</p><p>Appendix A is non-normative. It mirrors the NETCONF examples of <a href='/8640/'>RFC 8640</a> in JSON, covering establishing, modifying and deleting subscriptions, the state notifications, and an XPath filter example based on VRRP protocol events.</p>",
+      "eli5": "<p>The only new thing is a single label that holds the special address of your subscription, added in the three places where it is useful.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The mandatory-to-implement secure transport for RESTCONF is TLS, and for NETCONF it is SSH. The Network Configuration Access Control Model (<a href='/8341/'>RFC 8341</a>) can restrict users to a subset of operations and content.</p><p>The new <code>uri</code> leaf may be sensitive, because it shows where subscribed resources might be on a publisher. Only the same user credentials that invoked <code>establish-subscription</code> should be able to access it. The URI is implementation specific and protected by TLS, so even a guessed URI is useless without a username with the required permissions, but it is recommended that URI values not be easily predictable.</p><p>A buggy or compromised subscriber could send many <code>establish-subscription</code> requests and use up system resources. The publisher MAY then suspend or terminate some of that subscriber's subscriptions to protect the rest.</p>",
+      "eli5": "<p>The special address should be hard to guess and only usable by whoever signed up. If someone signs up too many times, the device may cancel some.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SERVER-SENT EVENTS CALL FLOW (RFC 8650, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "subscriber",
+            "label": "Subscriber"
+          },
+          {
+            "key": "publisher",
+            "label": "Publisher"
+          }
+        ],
+        "messages": [
+          {
+            "from": "subscriber",
+            "to": "publisher",
+            "label": "POST establish-subscription",
+            "color": "blue",
+            "note": "Sent on connection (a)."
+          },
+          {
+            "from": "publisher",
+            "to": "subscriber",
+            "label": "HTTP 200 OK (ID, URI)",
+            "color": "green"
+          },
+          {
+            "from": "subscriber",
+            "to": "publisher",
+            "label": "HTTP GET (URI)",
+            "color": "blue",
+            "note": "Sent on a separate connection (b); starts the flow."
+          },
+          {
+            "from": "publisher",
+            "to": "subscriber",
+            "label": "HTTP 200 OK",
+            "color": "green"
+          },
+          {
+            "from": "publisher",
+            "to": "subscriber",
+            "label": "SSE notification message",
+            "color": "green"
+          },
+          {
+            "from": "subscriber",
+            "to": "publisher",
+            "label": "POST modify-subscription",
+            "color": "blue"
+          },
+          {
+            "from": "publisher",
+            "to": "subscriber",
+            "label": "SSE subscription-modified",
+            "color": "green",
+            "note": "Required on (b) in addition to the RPC response."
+          },
+          {
+            "from": "subscriber",
+            "to": "publisher",
+            "label": "POST delete-subscription",
+            "color": "blue"
+          },
+          {
+            "from": "publisher",
+            "to": "subscriber",
+            "label": "HTTP 200 OK",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "SAMPLE ERROR MAPPINGS (RFC 8650, TABLES 1 AND 2)",
+      "data": {
+        "columns": [
+          "Error identity",
+          "error-tag",
+          "HTTP code"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "dscp-unavailable",
+              "invalid-value",
+              "400"
+            ]
+          },
+          {
+            "cells": [
+              "no-such-subscription",
+              "invalid-value",
+              "404"
+            ]
+          },
+          {
+            "cells": [
+              "insufficient-resources",
+              "resource-denied",
+              "409"
+            ]
+          },
+          {
+            "cells": [
+              "replay-unsupported",
+              "operation-not-supported",
+              "501"
+            ]
+          },
+          {
+            "cells": [
+              "unchanging-selection",
+              "operation-failed",
+              "500"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8639]",
+      "text": "Voit, E., et al., \"Subscription to YANG Notifications\", RFC 8639, September 2019.",
+      "rfc": 8639
+    },
+    {
+      "number": "[RFC8641]",
+      "text": "Clemm, A. and E. Voit, \"Subscription to YANG Notifications for Datastore Updates\", RFC 8641, September 2019.",
+      "rfc": 8641
+    },
+    {
+      "number": "[RFC8040]",
+      "text": "Bierman, A., Bjorklund, M., and K. Watsen, \"RESTCONF Protocol\", RFC 8040, January 2017.",
+      "rfc": 8040
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[RFC7540]",
+      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol Version 2 (HTTP/2)\", RFC 7540, May 2015.",
+      "rfc": 7540
+    },
+    {
+      "number": "[RFC8640]",
+      "text": "Voit, E., et al., \"Dynamic Subscription to YANG Events and Datastores over NETCONF\", RFC 8640, September 2019.",
+      "rfc": 8640
+    },
+    {
+      "number": "[RFC7923]",
+      "text": "Voit, E., Clemm, A., and A. Gonzalez Prieto, \"Requirements for Subscription to YANG Datastores\", RFC 7923, June 2016.",
+      "rfc": 7923
+    },
+    {
+      "number": "[W3C-20150203]",
+      "text": "Hickson, I., \"Server-Sent Events\", W3C Recommendation, 3 February 2015."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -9,13 +9,261 @@
   },
   "questions": [
     "rpki publication protocol",
-    "how to publish rpki objects"
+    "how to publish rpki objects",
+    "what is the rpki publication protocol",
+    "how do ca engines publish rpki objects",
+    "what is a bpki",
+    "what error codes does the rpki publication protocol use"
+  ],
+  "tags": [
+    "RPKI",
+    "Routing Security",
+    "Publication"
+  ],
+  "subtitle": "The XML-over-HTTP protocol a certificate engine uses to publish, replace and withdraw RPKI objects at a repository.",
+  "tldr": {
+    "problem": "RPKI participants issue many certificates and other objects, and it is operationally useful to publish them in a few consolidated repositories, possibly run by someone else or on a different machine.",
+    "mechanism": "A CA engine sends CMS-signed XML queries (publish, withdraw, list) in an HTTP POST, and the repository answers with a signed success, list or error reply. A SHA-256 hash lets both sides detect disagreement.",
+    "outcome": "A Proposed Standard that separates running a certificate engine from running a publication repository. Relying parties never see this protocol; they fetch objects by rsync or RRDP.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Protocol version",
+      "value": "4"
+    },
+    {
+      "label": "Media type",
+      "value": "application/rpki-publication"
+    },
+    {
+      "label": "Transport",
+      "value": "HTTP POST"
+    },
+    {
+      "label": "Hash algorithm",
+      "value": "SHA-256"
+    },
+    {
+      "label": "Query PDUs",
+      "value": "publish, withdraw, list"
+    },
+    {
+      "label": "Reply PDUs",
+      "value": "success, list, report_error"
+    }
+  ],
+  "today": "<p>RFC 8181 is a Proposed Standard published in July 2017, and the unit metadata lists no RFC that obsoletes or updates it. It is meant to be used with <a href='/8182/'>RFC 8182</a> on the distribution side and <a href='/8183/'>RFC 8183</a> for setup.</p>",
+  "glossary": [
+    "pki",
+    "certificate-authority",
+    "base64",
+    "uri",
+    "http",
+    "bgp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Separate Publication From Certification",
+      "content": "<p>The Resource Public Key Infrastructure (RPKI, see <a href='/6480/'>RFC 6480</a>) supports improved routing security. Having a few consolidated repositories for RPKI objects saves every participant from running a new service, and relying parties can retrieve what they need from fewer places faster and more reliably.</p><p>Operating a <strong>publication repository</strong> is conceptually separate from operating a Certification Authority (CA). Some resource holders want to control their own private keys but lack the resources to run a 24x7 repository. Even when one party runs both, the two functions have somewhat different operational and security requirements, so it can be useful to run them on different machines.</p><p>The protocol makes fairly minimal demands on both the CA engine and the publication service. It started as an informal collaboration among early RPKI implementers and keeps the original XML namespace and version scheme for backwards compatibility.</p>",
+      "eli5": "<p>Writing the papers and keeping them in a public filing room are two different jobs. This lets different people or computers do each job.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "1.2",
+      "title": "Where the Protocol Sits",
+      "content": "<p>Several CAs talk to one publication repository using this protocol. Relying parties do not see it: they see the repository's public interface, which is an rsync or RPKI Repository Delta Protocol (RRDP, <a href='/8182/'>RFC 8182</a>) server. <a href='/8183/'>RFC 8183</a> can help set up the pairwise relationships, but its use is not required.</p><p>Authentication and message integrity follow the same architecture as <a href='/6492/'>RFC 6492</a>, so the same <strong>Business PKI</strong> (BPKI) can be reused. The BPKI is a PKI separate from the RPKI that is used to authenticate clients to the publication engine. Authorization, meaning which engine may publish which objects, is a matter of external configuration and a private matter between the operators.</p>",
+      "eli5": "<p>The people who write papers talk to the filing office in one way. The public reads the papers in a different way. The two ways do not mix.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "Messages and Transport",
+      "content": "<p>The protocol uses XML messages wrapped in signed Cryptographic Message Syntax (CMS) objects and carried over HTTP. The client starts an exchange with an HTTP POST with content type <code>application/rpki-publication</code>, and the server's response uses the same type. The CMS encapsulation is identical to that in Section 3.1 of <a href='/6492/'>RFC 6492</a>. Query messages are signed by the client and replies by the server.</p><p>The outer element is <code>msg</code> with attribute <code>type</code> set to <code>query</code> or <code>reply</code> and attribute <code>version</code> set to <code>4</code>. An implementation that only understands this version MUST reject other versions.</p><p>A query PDU is one of <code>&lt;publish/&gt;</code>, <code>&lt;withdraw/&gt;</code> or <code>&lt;list/&gt;</code>. A reply PDU is one of <code>&lt;success/&gt;</code>, <code>&lt;list/&gt;</code> or <code>&lt;report_error/&gt;</code>. The <code>publish</code> and <code>withdraw</code> PDUs carry a mandatory <code>tag</code> attribute that makes bulk operations easier to match with errors; a client with no use for tags MAY use any syntactically legal value, including the empty string.</p>",
+      "eli5": "<p>Each message is a signed envelope with a short note inside saying what you want. The reply comes back in a signed envelope too.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2.2",
+      "title": "Publish, Withdraw and List",
+      "content": "<p>Both <code>&lt;publish/&gt;</code> and <code>&lt;withdraw/&gt;</code> carry a tag and an rsync URI. A <code>publish</code> also carries the DER object, Base64 encoded. Both can have a <code>hash</code> attribute, a hexadecimal SHA-256 hash of the existing object at that URI, chosen to ease comparison with RPKI manifest hashes.</p><ul><li>For <code>withdraw</code>, the hash MUST be present.</li><li>For <code>publish</code>, the hash MUST be present when overwriting an existing object and MUST NOT be present when writing to a new URI.</li></ul><p>Any mismatch is an error reported with <code>&lt;report_error/&gt;</code>. The hash lets client and server detect disagreement about what a PDU will do. Every publish or withdraw requires a new manifest, so it involves at least two objects.</p><p>A query is processed atomically: either all of it succeeds or none of it does, and the server may have to roll back earlier PDUs. On success the server returns a single <code>&lt;success/&gt;</code>.</p><p>The <code>&lt;list/&gt;</code> query asks for every object the server believes this client has published, mainly so the client can recover after losing synchronization. It MUST be the only PDU in its query. The reply has one PDU per object, with its URI and hash.</p>",
+      "eli5": "<p>To replace a paper you must say which old paper you mean, using its fingerprint. That way both sides notice if they disagree. If you get confused, you can ask for a list of all your papers.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "2.4",
+      "title": "Errors and Error Codes",
+      "content": "<p>Errors that make it impossible to decode a query or encode a response are handled at the HTTP layer with 4xx and 5xx codes. All other errors produce an XML <code>&lt;report_error/&gt;</code> PDU, which appears only in replies. Because it is CMS-signed it can be archived as an audit trail.</p><p>The PDU's <code>tag</code> MUST match the tag of the PDU that caused the error, and the <code>error_code</code> attribute gives the specific error. The body may hold an optional <code>&lt;error_text/&gt;</code> for humans and an optional <code>&lt;failed_pdu/&gt;</code> containing a verbatim copy of the failed query PDU. A server typically reports only the first failure, but MAY return several.</p>",
+      "eli5": "<p>If something goes wrong, the filing office sends back a signed note saying which request failed and why.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>The publication protocol and the data it publishes use entirely separate PKIs. The published data is authenticated within the RPKI, and this protocol neither depends on that nor requires published objects to be valid in the RPKI. Messages are authenticated by the BPKI through CMS signatures.</p><p>Since messages are signed and the data is public, the protocol does not strictly require HTTPS. A repository operator may still prefer it as a matter of BPKI CA policy, but message authentication still rests on the CMS signatures. The SHA-256 hashes are not particularly security sensitive, and changing the digest algorithm would mean incrementing the protocol version.</p><p>Compromise of a publication server, for example through mismanaged BPKI private keys, could lead to a denial-of-service attack on the RPKI: an attacker could withdraw RPKI objects, causing routing changes or failures. Good key management is therefore important.</p>",
+      "eli5": "<p>The filing office checks the signature on every envelope. If a thief got the signing stamp, they could take papers out of the files, so keep the stamp safe.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "A PUBLISH EXCHANGE (ILLUSTRATIVE, BASED ON RFC 8181)",
+      "data": {
+        "lanes": [
+          {
+            "key": "ca",
+            "label": "CA engine"
+          },
+          {
+            "key": "repo",
+            "label": "Publication server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "ca",
+            "to": "repo",
+            "label": "POST query: publish / withdraw",
+            "color": "blue",
+            "note": "CMS-signed XML in an HTTP POST."
+          },
+          {
+            "from": "repo",
+            "to": "ca",
+            "label": "success",
+            "color": "green",
+            "note": "The whole query succeeded."
+          },
+          {
+            "from": "repo",
+            "to": "ca",
+            "label": "report_error",
+            "color": "neutral",
+            "note": "Sent instead of success if a PDU failed."
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "WHO TALKS TO WHOM (RFC 8181)",
+      "data": {
+        "layers": [
+          {
+            "label": "Certification Authorities",
+            "detail": "Create RPKI objects"
+          },
+          {
+            "label": "Publication protocol",
+            "detail": "This RFC: signed XML over HTTP",
+            "highlight": true
+          },
+          {
+            "label": "Publication repository",
+            "detail": "Stores the objects"
+          },
+          {
+            "label": "rsync or RRDP",
+            "detail": "How relying parties fetch"
+          },
+          {
+            "label": "Relying parties",
+            "detail": "Retrieve and use the objects"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "ERROR CODES (RFC 8181)",
+      "data": {
+        "items": [
+          {
+            "code": "xml_error",
+            "label": "XML problem",
+            "desc": "Some may be reported at the HTTP layer instead."
+          },
+          {
+            "code": "permission_failure",
+            "label": "No permission",
+            "desc": "Client may not update this URI."
+          },
+          {
+            "code": "bad_cms_signature",
+            "label": "Bad signature",
+            "desc": "The CMS signature is bad."
+          },
+          {
+            "code": "object_already_present",
+            "label": "Object exists",
+            "desc": "An object is at the URI but no hash was given."
+          },
+          {
+            "code": "no_object_present",
+            "label": "No object",
+            "desc": "A hash was given but nothing is at the URI."
+          },
+          {
+            "code": "no_object_matching_hash",
+            "label": "Hash mismatch",
+            "desc": "The hash does not match the object at the URI."
+          },
+          {
+            "code": "consistency_problem",
+            "label": "Consistency",
+            "desc": "Update looks like it will cause a consistency problem; servers need not check."
+          },
+          {
+            "code": "other_error",
+            "label": "Other",
+            "desc": "Anything else."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6480]",
+      "text": "Lepinski, M. and S. Kent, \"An Infrastructure to Support Secure Internet Routing\", RFC 6480, February 2012.",
+      "rfc": 6480
+    },
+    {
+      "number": "[RFC6492]",
+      "text": "Huston, G., et al., \"A Protocol for Provisioning Resource Certificates\", RFC 6492, February 2012.",
+      "rfc": 6492
+    },
+    {
+      "number": "[RFC8182]",
+      "text": "Bruijnzeels, T., et al., \"The RPKI Repository Delta Protocol (RRDP)\", RFC 8182, July 2017.",
+      "rfc": 8182
+    },
+    {
+      "number": "[RFC8183]",
+      "text": "Austein, R., \"An Out-of-Band Setup Protocol for Resource Public Key Infrastructure (RPKI) Production Services\", RFC 8183, July 2017.",
+      "rfc": 8183
+    },
+    {
+      "number": "[RFC5652]",
+      "text": "Housley, R., \"Cryptographic Message Syntax (CMS)\", STD 70, RFC 5652, September 2009.",
+      "rfc": 5652
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

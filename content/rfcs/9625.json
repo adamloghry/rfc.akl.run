@@ -10,13 +10,310 @@
   "questions": [
     "evpn oism",
     "inter-subnet multicast evpn",
-    "evpn multicast routing"
+    "evpn multicast routing",
+    "what is evpn oism",
+    "what is the supplementary broadcast domain",
+    "what is an ipmg in evpn"
+  ],
+  "tags": [
+    "EVPN",
+    "Multicast",
+    "Routing"
+  ],
+  "subtitle": "Routing IP multicast between the subnets of one EVPN tenant without hairpinning, while keeping same-subnet multicast bridged.",
+  "tldr": {
+    "problem": "Sending multicast between subnets of an Ethernet VPN with a conventional multicast router forces traffic through that one router, which causes sub-optimal paths and duplicate copies.",
+    "mechanism": "Each tenant gets a Supplementary Broadcast Domain, SMET routes are advertised per tenant instead of per subnet, and every PE routes multicast locally through its IRB interfaces while frames travel between PEs unchanged.",
+    "outcome": "Inter-subnet multicast is routed optimally inside the tenant, intra-subnet multicast still looks bridged, and gateways handle non-OISM PEs, MVPN and PIM networks.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Mandatory extra domain",
+      "value": "One SBD per Tenant Domain"
+    },
+    {
+      "label": "TTL on inter-subnet routing",
+      "value": "Decremented by 1"
+    },
+    {
+      "label": "MPLS label entry for BIER",
+      "value": "4 octets"
+    },
+    {
+      "label": "New IANA flag bits",
+      "value": "7, 9, 10, 11, 12"
+    },
+    {
+      "label": "Gateway BDs with external PIM routers",
+      "value": "No more than one"
+    }
+  ],
+  "today": "<p>RFC 9625 is a Proposed Standard published in August 2024. The unit metadata shows that no later RFC obsoletes or updates it.</p>",
+  "glossary": [
+    "multicast",
+    "igmp",
+    "multihoming",
+    "ttl",
+    "designated-router",
+    "mac-address",
+    "route-target",
+    "irb-interface"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Inter-Subnet Multicast Problem",
+      "content": "<p>In EVPN (<a href='/7432/'>RFC 7432</a>), a <strong>Broadcast Domain</strong> (BD) is an emulated Ethernet, and each one is a single IP subnet owned by one tenant. A tenant with several BDs forms a <strong>Tenant Domain</strong>. For unicast, <a href='/9135/'>RFC 9135</a> lets traffic be routed between BDs using Integrated Routing and Bridging (IRB). <a href='/9251/'>RFC 9251</a> optimizes multicast inside one subnet. Neither covers multicast between subnets.</p><p>The workaround is to attach a conventional multicast router to every BD. But a multicast flow then has to pass through that router. In the RFC's example, a source and a receiver both sit on PE1, yet the traffic goes S to PE1 to PE2 to the tenant router and back through PE2 to PE1. A second receiver causes two copies to cross the backbone.</p><p>The RFC sets requirements for the fix. Same-subnet multicast must stay truly bridged: the source MAC address is not rewritten and the IP TTL is not decremented. Different-subnet delivery must look routed, with TTL decremented by 1. No Rendezvous Point may be required inside the tenant, MAC addresses must not be assumed unique across BDs, and the design must interwork with non-OISM PEs, MVPN and PIM networks.</p>",
+      "eli5": "<p>Passing a note to a friend in the next classroom should not mean sending it down to the principal and back. This RFC lets the note go straight across.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "The Supplementary Broadcast Domain",
+      "content": "<p>The core idea is the <strong>Supplementary Broadcast Domain</strong> (SBD). Each Tenant Domain has one SBD. The control plane treats it as a real BD, but it has no attachment circuits. Every PE attached to the tenant is provisioned with the SBD, and it has its own Route Target, the <code>SBD-RT</code>, which MUST NOT be the RT of any other BD. The SBD SHOULD be in an EVI of its own.</p><p>The SBD lets PEs exchange multicast even when they share no ordinary BD. If an egress PE does not have the source BD, it treats the SBD as the frame's <strong>apparent source BD</strong>. That is how a frame from BD1 reaches a receiver on BD3 when the egress PE is not configured for BD1.</p><p>A receiving PE works out which BD an IMET, SMET, S-PMSI or Leaf route belongs to from its Route Targets and Tag ID. The RFC lists five cases. Three are errors (routes carrying SBD-RTs of several tenants, RTs of two different ordinary BDs, or an ordinary BD of one tenant plus the SBD of another), and the route is then treated as withdrawn under <a href='/7606/'>RFC 7606</a>. In the other two, a route carrying only the SBD-RT is tied to the SBD, and a route with one ordinary BD-RT plus the SBD-RT is tied to the ordinary BD.</p>",
+      "eli5": "<p>The SBD is like a school-wide loudspeaker channel. Classrooms that do not share a room can still hear the same announcement over it.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Forwarding Through IRB Interfaces",
+      "content": "<p>When an ingress PE receives an (S,G) frame from an attachment circuit in BD1, it does three things. It sends the frame unchanged, with its original MAC source address and IP header, to other interested PEs. It sends the frame up the BD1 IRB interface to the local L3 routing instance, which decapsulates it, decrements the TTL, adjusts the checksum and does other IP processing. That routing instance then sends the packet down the IRB interface of any other BD with local interested receivers, using its own MAC address as source.</p><p>A packet sent down an ordinary IRB interface goes only to local attachment circuits, because other PEs already got it in the first step. The SBD IRB interface is the exception: packets sent down it may be distributed to other PEs. That is how traffic from outside the tenant, such as a physical link or an L3VPN, enters the tenant domain.</p><p>At an egress PE, if the PE has the source BD, intra-subnet forwarding to that BD's circuits keeps the frame unchanged. All other circuits get the routed treatment. If the apparent source BD is the SBD, the inter-subnet procedure applies to all interested circuits. Multihoming is handled by existing EVPN procedures, so a frame is never sent back to its source segment.</p>",
+      "eli5": "<p>The sender hands the unchanged note to every interested school. Each school's office makes local copies for its other classrooms and stamps them, so each copy looks like it came from the office.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "Control Plane: Tunnels and SMET Routes",
+      "content": "<p>Which tunnels carry the frames depends on the type. With Ingress Replication, each PE originates an SBD-IMET route with a downstream-assigned label for the SBD, and it also originates an IMET route per BD. The ingress PE uses the label for the source BD if the egress PE advertised one, and otherwise the SBD label. Assisted Replication works the same way with the AR-REPLICATOR also attached to the SBD.</p><p>With BIER, IMET routes MUST carry the SBD-RT and a PTA with an upstream-assigned label that maps to the BD. The frame gets a four-octet MPLS label stack entry and is then encapsulated per <a href='/8296/'>RFC 8296</a> and <a href='/9624/'>RFC 9624</a>. If an egress PE does not recognise the label because it has no matching IMET route, it MUST discard the packet. With P2MP tunnels the RFC RECOMMENDS separate IP multicast tunnels instead of reusing the BUM tunnels, announced with wildcard S-PMSI A-D routes. Link-local IP multicast MUST always travel only on the BUM tunnels.</p><p>For interest signalling, SMET routes are originated per Tenant Domain, as SBD-SMET routes, instead of per BD. A PE merges IGMP/MLD state across all its BDs into the smallest set of SBD-SMET routes that covers it. Three cases depend on whether tenant multicast routers exist: none, more than one BD, or exactly one BD. The PEs MUST be provisioned to know which applies. Anycast sources are not supported for groups with (*,G) receivers.</p>",
+      "eli5": "<p>Each PE posts a notice board saying which channels its listeners want. One board per school, not one per classroom, so everyone knows where to send what.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "5",
+      "title": "Interworking with Non-OISM PEs",
+      "content": "<p>A Tenant Domain may contain PEs that do not support OISM. They may lack IRB and <a href='/9251/'>RFC 9251</a> support, and a non-OISM PE cannot move multicast from one BD to another. To bridge the gap, one or more <strong>IP Multicast Gateways</strong> (IPMGs) are needed. An IPMG is an OISM PE that signals its role with a flag in the Multicast Flags Extended Community on its IMET routes.</p><p>For each BD, one IPMG is chosen as the IPMG Designated Forwarder (IPMG-DF), using the DF election framework of <a href='/8584/'>RFC 8584</a>. When a frame arrives from a non-OISM PE, the IPMG-DF forwards it unchanged to OISM PEs that lack the source BD, using the SBD label. It does the IP processing and re-encapsulates it for non-OISM PEs that want it on other BDs, one copy per BD. When the frame comes from an OISM PE, the IPMG-DF relays it to non-OISM PEs on their other BDs.</p><p>An IPMG MUST originate a wildcard SMET route for each BD so it sees all multicast sourced in the tenant. The RFC specifies the Ingress Replication case. For P2MP tunnels it says it is not clear that a use case exists, and procedures may be defined in a separate document. BIER is not considered here.</p>",
+      "eli5": "<p>If some schools still use the old system, a translator is needed. The translator hears every announcement and passes it on in the old style.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "6",
+      "title": "Traffic To and From Outside the Tenant",
+      "content": "<p>To exchange multicast with the outside, one or more OISM PEs act as <strong>L3 Gateways</strong>: a MEG for MVPN, or a PEG for PIM. A gateway exports unicast routes to local sources, imports routes to external sources, and pulls in externally sourced traffic wanted by local receivers. One gateway is elected as the DR for the SBD and handles receivers and sources that no gateway is attached to. External traffic it receives is sent down the SBD IRB interface, so other PEs see it as coming from the SBD. Gateways SHOULD prefer an EVPN route to a source over an IP or VPN-IP route, so traffic inside the tenant stays inside.</p><p>For MVPN, a MEG originates VPN-IP host routes for sources it sees transmitting and subnet routes for each BD, and it creates MVPN C-multicast joins on behalf of receivers. For PIM, a PEG DR acts as First Hop Router and sends PIM Register messages for ASM groups. Another option is a single gateway BD with external PIM routers, with the OISM PEs running no PIM. There MUST NOT be more than one gateway BD.</p><p>When a tenant's BDs are used as a transit network, a PE attached to a BD with tenant multicast routers MUST enable PIM on its IRB interface. All OISM PEs MUST enable PIM on their SBD IRB interfaces. PIM control messages are treated as link-local and sent over the BUM tunnels.</p>",
+      "eli5": "<p>To talk to other towns, a few doors are chosen as gateways. Outside news comes in through one door and is announced on the loudspeaker for everyone inside.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "7",
+      "title": "IANA Registrations",
+      "content": "<p>IANA assigned five new flags in the Multicast Flags Extended Community registry, with change controller IETF. They identify the OISM SBD, the IPMG, the MEG, the PEG, and plain OISM support. Bits 7, 9, 10, 11 and 12 are used.</p>",
+      "eli5": "<p>Five new check-boxes were added to a shared form so routers can say which job they do.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The RFC inherits the security considerations of the documents it builds on. It adds that wrong flags or Extended Communities cause the procedures to malfunction, with possible loss or diversion of traffic, and that implementations should provide tools to debug such mistakes.</p><p>An attacker with access to a gateway could influence the DF election and change how multicast flows between the OISM network and the outside, so management access to gateways should be limited to authorized operators. SMET routes are now distributed to every PE in the Tenant Domain, so an attacker with access to one BD on one PE might force advertisements that burden all PEs. Implementations should provide ways to filter or control the IGMP/MLD reports received from attached hosts.</p>",
+      "eli5": "<p>If someone puts the wrong sticker on a message, traffic can get lost or sent to the wrong place. Guard the gateway doors and watch who can sign up for channels.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "APPARENT SOURCE BD AT AN EGRESS PE (RFC 9625)",
+      "data": {
+        "columns": [
+          "Egress PE situation",
+          "Apparent source BD"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Attached to the actual source BD",
+              "The actual source BD"
+            ]
+          },
+          {
+            "cells": [
+              "Not attached to the actual source BD",
+              "The SBD"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THREE CASES FOR ADVERTISING INTEREST WITH SMET ROUTES (RFC 9625)",
+      "data": {
+        "columns": [
+          "Case",
+          "Multicast routers in the tenant",
+          "What the egress PE originates"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "1",
+              "No BD has one",
+              "An SBD-SMET route only"
+            ]
+          },
+          {
+            "cells": [
+              "2",
+              "More than one BD may have one",
+              "An SBD-SMET route only; per-BD SMET routes must not be originated"
+            ]
+          },
+          {
+            "cells": [
+              "3",
+              "Exactly one BD has one",
+              "An SBD-SMET route, and MAY also a SMET route for that BD"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "section-1",
+      "position": "after",
+      "caption": "GATEWAY ROLES DEFINED IN RFC 9625",
+      "data": {
+        "columns": [
+          "Role",
+          "Connects to",
+          "Purpose"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "IPMG",
+              "Non-OISM EVPN PEs",
+              "Interworks OISM PEs with PEs that lack OISM support"
+            ]
+          },
+          {
+            "cells": [
+              "MEG",
+              "MVPN domain",
+              "MVPN/EVPN Gateway, an L3 Gateway using MVPN procedures"
+            ]
+          },
+          {
+            "cells": [
+              "PEG",
+              "PIM domain",
+              "PIM/EVPN Gateway, an L3 Gateway using PIM procedures"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "MULTICAST FLAGS EXTENDED COMMUNITY BITS ASSIGNED BY RFC 9625",
+      "data": {
+        "items": [
+          {
+            "code": "7",
+            "label": "OISM SBD",
+            "desc": "Set in the IMET route for the SBD."
+          },
+          {
+            "code": "9",
+            "label": "IPMG",
+            "desc": "Sender acts as an IP Multicast Gateway."
+          },
+          {
+            "code": "10",
+            "label": "MEG",
+            "desc": "Sender acts as an MVPN/EVPN Gateway."
+          },
+          {
+            "code": "11",
+            "label": "PEG",
+            "desc": "Sender acts as a PIM/EVPN Gateway."
+          },
+          {
+            "code": "12",
+            "label": "OISM-supported",
+            "desc": "Sender supports OISM procedures.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7432]",
+      "text": "Sajassi, A., Ed., et al., \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
+      "rfc": 7432
+    },
+    {
+      "number": "[RFC9135]",
+      "text": "Sajassi, A., et al., \"Integrated Routing and Bridging in Ethernet VPN (EVPN)\", RFC 9135, October 2021.",
+      "rfc": 9135
+    },
+    {
+      "number": "[RFC9136]",
+      "text": "Rabadan, J., Ed., et al., \"IP Prefix Advertisement in Ethernet VPN (EVPN)\", RFC 9136, October 2021.",
+      "rfc": 9136
+    },
+    {
+      "number": "[RFC9251]",
+      "text": "Sajassi, A., et al., \"Internet Group Management Protocol (IGMP) and Multicast Listener Discovery (MLD) Proxies for Ethernet VPN (EVPN)\", RFC 9251, June 2022.",
+      "rfc": 9251
+    },
+    {
+      "number": "[RFC9572]",
+      "text": "Zhang, Z., et al., \"Updates to EVPN Broadcast, Unknown Unicast, or Multicast (BUM) Procedures\", RFC 9572, May 2024.",
+      "rfc": 9572
+    },
+    {
+      "number": "[RFC9574]",
+      "text": "Rabadan, J., Ed., et al., \"Optimized Ingress Replication Solution for Ethernet VPNs (EVPNs)\", RFC 9574, May 2024.",
+      "rfc": 9574
+    },
+    {
+      "number": "[RFC9624]",
+      "text": "Zhang, Z., et al., \"EVPN Broadcast, Unknown Unicast, or Multicast (BUM) Using Bit Index Explicit Replication (BIER)\", RFC 9624, August 2024.",
+      "rfc": 9624
+    },
+    {
+      "number": "[RFC6514]",
+      "text": "Aggarwal, R., et al., \"BGP Encodings and Procedures for Multicast in MPLS/BGP IP VPNs\", RFC 6514, February 2012.",
+      "rfc": 6514
+    },
+    {
+      "number": "[RFC7761]",
+      "text": "Fenner, B., et al., \"Protocol Independent Multicast - Sparse Mode (PIM-SM): Protocol Specification (Revised)\", STD 83, RFC 7761, March 2016.",
+      "rfc": 7761
+    },
+    {
+      "number": "[RFC8584]",
+      "text": "Rabadan, J., Ed., et al., \"Framework for Ethernet VPN Designated Forwarder Election Extensibility\", RFC 8584, April 2019.",
+      "rfc": 8584
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

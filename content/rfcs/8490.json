@@ -9,13 +9,344 @@
   },
   "questions": [
     "dns stateful operations",
-    "dso dns session keepalive"
+    "dso dns session keepalive",
+    "what is dns stateful operations",
+    "what is a dso session",
+    "how does dso keepalive work",
+    "what is the dso retry delay tlv"
+  ],
+  "tags": [
+    "DNS",
+    "Sessions",
+    "Transport"
+  ],
+  "subtitle": "A new DNS message type that lets a client and server keep one connection open, agree on timeouts and send each other messages.",
+  "tldr": {
+    "problem": "DNS over TCP or TLS can hold long-lived connections, but plain DNS has no way to set session parameters such as timeouts, and a server cannot send messages on its own. EDNS(0) only works per message and only in answer to a query.",
+    "mechanism": "RFC 8490 defines a new DNS OPCODE (6) for DNS Stateful Operations (DSO). DSO messages carry Type Length Value (TLV) data in a persistent session, and three base TLVs manage keepalives, server-requested disconnects and encryption padding.",
+    "outcome": "It gives DNS a framework for stateful sessions that later specifications can extend with new TLVs. It is a Proposed Standard and updates RFC 1035 and RFC 7766.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "DNS OPCODE",
+      "value": "6"
+    },
+    {
+      "label": "DSOTYPENI RCODE",
+      "value": "11"
+    },
+    {
+      "label": "Default timeouts",
+      "value": "15 seconds for both"
+    },
+    {
+      "label": "Minimum keepalive interval",
+      "value": "10 seconds"
+    },
+    {
+      "label": "Recommended keepalive interval",
+      "value": "60 minutes"
+    },
+    {
+      "label": "Base TLV types",
+      "value": "1 Keepalive, 2 Retry Delay, 3 Encryption Padding"
+    }
+  ],
+  "today": "<p>RFC 8490 is a Proposed Standard and the text records no obsoleting or updating RFC. It updates <a href='/1035/'>RFC 1035</a> by adding the DSO OPCODE and a new result code, and updates <a href='/7766/'>RFC 7766</a> by redefining a session and adding a new idle-timeout mechanism.</p>",
+  "glossary": [
+    "dns",
+    "tcp",
+    "tls",
+    "dns-over-tls",
+    "edns0",
+    "opcode",
+    "rcode",
+    "middlebox",
+    "nagle-algorithm",
+    "tlv",
+    "keepalive"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why DNS Needs Stateful Sessions",
+      "content": "<p>DNS usually runs over UDP, but it can also run over streaming transports: DNS-over-TCP and DNS-over-TLS. Those transports allow persistent, long-lived sessions, so it helps to have a way to set session parameters such as timeouts, and to let the server start messages (for example DNS Push Notifications).</p><p>The existing <strong>EDNS(0)</strong> mechanism is defined to have only per-message meaning. A server can send EDNS(0) options only in answer to a query that contained them, so it cannot, for instance, tell a client to close a connection whenever it likes.</p><p>RFC 8490 therefore defines a new DNS <strong>OPCODE</strong> with the value <code>6</code> for <strong>DNS Stateful Operations</strong> (DSO). DSO messages use Type Length Value (<strong>TLV</strong>) syntax. The RFC deliberately avoids an RR-based format so that stateful operations are never mixed up with normal DNS or EDNS(0), and so that it avoids the middlebox trouble that has hit EDNS(0).</p><p>DSO always runs over a connection-oriented transport, so there is no reason to pack several operations into one message. Each DSO request message carries one primary operation, and the RCODE of its response says whether it worked.</p>",
+      "eli5": "<p>Plain DNS is like sending one-off postcards. DSO is like a phone call that stays open, where either side can talk and both agree how long silence is allowed.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "2",
+      "title": "Starting and Ending a DSO Session",
+      "content": "<p>DSO is only usable on transports with in-order delivery and clean session semantics. The RFC names DNS-over-TCP and DNS-over-TLS as the two that qualify. DNS-over-UDP cannot be used, and neither can DNS-over-HTTP, because HTTP has its own session management.</p><p>A client establishes a <strong>DSO Session</strong> by sending a DSO request message and getting back a response with a matching MESSAGE ID and RCODE NOERROR. The Keepalive request is the natural choice, because every DSO server must answer it successfully. Until a session is established, a server MUST NOT send DSO requests or unidirectional messages, and a client MUST NOT send unidirectional ones. If both ends already know DSO is supported, the session can be implicit and exists as soon as the connection does.</p><p>If the server replies with NOTIMP or another unexpected code, the client MUST assume the server has no DSO support and not send further DSO messages on that connection. A reply of DSOTYPENI (RCODE 11) means the server speaks DSO but not that particular type. If the server stays silent, the client SHOULD wait 30 seconds and then MUST forcibly abort the connection. If the server drops the connection, the client SHOULD treat that service instance as not supporting DSO for at least an hour.</p><p>A session ends when the connection closes. <strong>Close gracefully</strong> means a TLS close_notify (if TLS is used) followed by a TCP FIN, and the client does this so the TCP TIME-WAIT burden falls on the client. <strong>Forcibly abort</strong> means a TCP RST. Any fatal protocol error requires an immediate forcible abort.</p>",
+      "eli5": "<p>To start, one side says something only a DSO-speaking friend would understand. If the friend answers properly, you are both in the call. If not, you carry on without it.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The DSO Message and TLV Format",
+      "content": "<p>A DSO message begins with the standard twelve-byte DNS header with OPCODE <code>6</code>. The four count fields (QDCOUNT, ANCOUNT, NSCOUNT, ARCOUNT) MUST be zero, so there are no question or record sections. The DSO data, written as TLVs, follows the header. As with DNS-over-TCP, a 16-bit length at the start of each message frames it. A message with a non-zero count gets FORMERR.</p><p>What a message is depends on two things: the QR bit and the MESSAGE ID. A <strong>DSO request message</strong> has QR=0 and a unique non-zero MESSAGE ID, and MUST be answered. A <strong>DSO unidirectional message</strong> has QR=0 and MESSAGE ID zero, and MUST NOT be answered, even on error. A <strong>DSO response</strong> has QR=1 and copies the request's MESSAGE ID. QR=1 with MESSAGE ID zero is a fatal error. The Z bits MUST be zero on transmission and ignored on reception.</p><p>Each direction has its own MESSAGE ID space, so client and server can use the same ID at the same time. An initiator MUST NOT reuse an ID that is still awaiting a response or is held by an active long-lived operation.</p><p>Each TLV has a 16-bit <code>DSO-TYPE</code>, a 16-bit <code>DSO-LENGTH</code> and the <code>DSO-DATA</code>. The first TLV in a request or unidirectional message is the <strong>Primary TLV</strong> and decides what the operation is. Later ones are Additional TLVs. An unrecognized Primary TLV in a request gets a DSOTYPENI reply, while unrecognized Additional TLVs are silently ignored. In a unidirectional message an unrecognized Primary TLV is fatal.</p><p>Because ARCOUNT must be zero, a DSO message cannot carry EDNS(0) options or a TSIG record. The edns-tcp-keepalive option is explicitly prohibited anywhere on a DSO Session, and its use there is a fatal error.</p>",
+      "eli5": "<p>Every DSO message has a label saying whether it is a question that needs an answer, an answer, or a note that needs no reply. The rest is a list of labelled boxes, each saying what it is and how big it is.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Timeouts and Keepalives",
+      "content": "<p>Each session has two independent timers, both set by the <strong>Keepalive TLV</strong>. The <strong>inactivity timeout</strong> is how long a client may keep an idle session open hoping for future requests. The <strong>keepalive interval</strong> is the longest permitted gap between messages if the client wants the session to stay alive. If no Keepalive exchange has happened, both default to 15 seconds.</p><p>Any complete DNS message resets both timers, except that a DSO Keepalive message resets only the keepalive timer. This avoids a livelock where keepalives would be sent forever just to justify more keepalives. An outstanding operation (a query awaiting a response, or an active long-lived operation) keeps the inactivity timer cleared, so a quiet session with an active subscription is not idle.</p><p>When the inactivity timeout elapses with nothing active, the client MUST close gracefully. If the client does not, the server MUST consider it delinquent and forcibly abort after five seconds or twice the timeout, whichever is greater (30 seconds at the default). A timeout of zero tells the client not to keep idle connections at all, and <code>0xFFFFFFFF</code> means infinity.</p><p>For the keepalive interval, the client MUST send a Keepalive when it elapses, and the server SHOULD abort if twice the interval passes with no messages. Servers MUST NOT send an interval below ten seconds; a client that receives one MUST forcibly abort. The recommended default is 60 minutes, chosen to suit NAT and firewall idle timeouts of at least 2 hours and 4 minutes. Corporate servers with no NAT in the path can use longer intervals and public servers serving home users can use shorter ones.</p>",
+      "eli5": "<p>There are two alarm clocks. One says how long you may sit around with nothing to do. The other says how often you must wave to prove you are still there.</p>"
+    },
+    {
+      "id": "options",
+      "number": "5",
+      "title": "The Three Base TLVs",
+      "content": "<p>All three TLVs are mandatory for every DSO implementation, and more may be defined in other specifications. Each TLV's definition says whether it is a request or unidirectional message, and whether it may be sent as TLS early data.</p><p>The <strong>Keepalive TLV</strong> (DSO-TYPE 1) holds two 32-bit millisecond values: INACTIVITY TIMEOUT and KEEPALIVE INTERVAL. A client sends it as a request with a non-zero MESSAGE ID, asking for the values it wants; the server's reply holds the values the client MUST then use, much like a DHCP lease request. A server may also send it as a unidirectional message to change the values at any time. The largest finite value is <code>0xFFFFFFFE</code> milliseconds, about 49.7 days.</p><p>The <strong>Retry Delay TLV</strong> (DSO-TYPE 2) holds one 32-bit RETRY DELAY in milliseconds. As a Primary TLV it is a server-to-client unidirectional message telling the client to close the session and not reconnect for that long. The RCODE gives the reason: NOERROR for routine shutdown or restart, FORMERR for a badly malformed client request, SERVFAIL for overload, REFUSED or NOTAUTH when reconfiguration means long-lived operations can no longer be served. Clients MUST NOT send it. As a Response Additional TLV, either side may attach it to an error response, and it then applies only to the failed operation.</p><p>The <strong>Encryption Padding TLV</strong> (DSO-TYPE 3) can only be an Additional or Response Additional TLV and only applies on encrypted transports such as TLS. It carries a variable number of padding bytes, which SHOULD be 0x00 and which receivers MUST accept with any value. A DSO-LENGTH of 0 gives 4 bytes of padding, the minimum. If a request carries it, the response MUST also.</p>",
+      "eli5": "<p>There are three kinds of boxes. One sets the alarm clocks, one says please go away and come back later, and one is just stuffing so outsiders cannot guess the size of what is inside.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "6",
+      "title": "Server Shutdown, Reconnection and Deployment Notes",
+      "content": "<p>Closing a session is normally the client's job. A server ends one only in exceptional cases, such as shutdown, reconfiguration, overload, a client that skips required keepalives, or a badly broken client. Instead of just aborting, which would likely make the client reconnect straight away, the server SHOULD send a Retry Delay message and then send nothing more. It SHOULD give the client five seconds to close before forcibly aborting. When many sessions end at once, the server should give different delays so clients do not all return together, and clients SHOULD NOT randomize them. The largest delay, <code>0xFFFFFFFF</code> milliseconds, is about 49.7 days.</p><p>A responder can also cancel a single long-lived operation by sending a response with a non-zero RCODE and the operation's MESSAGE ID, leaving the rest of the session intact.</p><p>When a client finds that several services are on the same service instance, it SHOULD share one DSO Session for them. Servers MUST still accept several connections from different source ports on the same client address. Application-layer middleboxes can break DSO: a DNS load balancer that splits a stream across servers would let session establishment succeed while no coherent session exists. Acceptable middleboxes either do not forward DSO, act as a DSO server, or keep a 1:1 correspondence between connections.</p><p>The RFC also discusses TCP delayed acknowledgement. DSO unidirectional messages and responses get no reply to piggyback an ack on, which can interact badly with Nagle's algorithm and add a 200 ms stall. Disabling either feature is NOT RECOMMENDED. Instead, receivers SHOULD use any networking API facility that signals that no response will follow.</p>",
+      "eli5": "<p>If a shop must close, it hands you a card saying come back in an hour, rather than slamming the door, so everybody does not rush in at once when it reopens.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and IANA Considerations",
+      "content": "<p>DSO over DNS-over-TLS is subject to the same rules as any DNS-over-TLS traffic, and its messages MUST NOT be sent in the clear before the TLS session is up. The data in the Encryption Padding TLV could serve as a covert channel, and designers of new TLVs should avoid data that could act as a tracking identifier. Without TLS, an attacker could inject a unidirectional Retry Delay with a very large delay, a denial-of-service against the client. Servers can limit or close sessions, so resource exhaustion should not be a concern.</p><p>DSO may use TCP Fast Open with TLS 1.3 early data. Only response-requiring messages from clients may be early data, which must be safe to replay, and the Keepalive TLV may be sent that way while Retry Delay may not. A new TLV that could make a server do significant work from the first packet must be marked as not permitted in zero round-trip messages.</p><p>IANA assigned OPCODE 6 to DSO and RCODE 11 to DSOTYPENI, and created the 16-bit \"DSO Type Codes\" registry. Types 4 to 0x3F are reserved for session-management TLVs, 0x40 to 0xF7FF are available after Expert Review, and 0xF800 to 0xFBFF are experimental or local use.</p>",
+      "eli5": "<p>Anyone listening could fake the come-back-later card unless the line is private, so the call should be locked with TLS first.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "DSO MESSAGE HEADER (RFC 8490)",
+      "data": {
+        "title": "DSO message header",
+        "bytes": 12,
+        "width": 32,
+        "fields": [
+          {
+            "key": "message-id",
+            "name": "MESSAGE ID",
+            "bits": 16,
+            "desc": "Zero for unidirectional messages, unique and non-zero for requests, copied in the response."
+          },
+          {
+            "key": "flags",
+            "name": "QR, OPCODE, Z, RCODE",
+            "bits": 16,
+            "desc": "QR is 0 or 1, OPCODE is 6, Z is zero, RCODE depends on the message."
+          },
+          {
+            "key": "qdcount",
+            "name": "QDCOUNT",
+            "bits": 16,
+            "desc": "MUST be zero.",
+            "value": "0"
+          },
+          {
+            "key": "ancount",
+            "name": "ANCOUNT",
+            "bits": 16,
+            "desc": "MUST be zero.",
+            "value": "0"
+          },
+          {
+            "key": "nscount",
+            "name": "NSCOUNT",
+            "bits": 16,
+            "desc": "MUST be zero.",
+            "value": "0"
+          },
+          {
+            "key": "arcount",
+            "name": "ARCOUNT",
+            "bits": 16,
+            "desc": "MUST be zero.",
+            "value": "0"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "QR BIT AND MESSAGE ID (RFC 8490, SECTION 8.1)",
+      "data": {
+        "columns": [
+          "QR bit",
+          "MESSAGE ID zero",
+          "MESSAGE ID nonzero"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "QR=0",
+              "DSO unidirectional message",
+              "DSO request message"
+            ]
+          },
+          {
+            "cells": [
+              "QR=1",
+              "Invalid, fatal error",
+              "DSO response message"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "ESTABLISHING A SESSION WITH KEEPALIVE (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Keepalive request (MESSAGE ID nonzero)",
+            "color": "blue",
+            "note": "Asks for the timeout values the client prefers."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Keepalive response (NOERROR)",
+            "color": "green",
+            "note": "Session established; these timeouts now apply."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Retry Delay (MESSAGE ID zero)",
+            "color": "neutral",
+            "note": "Later, the server asks the client to close and wait."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "options",
+      "position": "after",
+      "caption": "KEEPALIVE TLV DSO-DATA (RFC 8490, SECTION 7.1)",
+      "data": {
+        "title": "Keepalive TLV data",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "inactivity",
+            "name": "INACTIVITY TIMEOUT",
+            "bits": 32,
+            "desc": "Milliseconds before the client must begin closing an inactive session."
+          },
+          {
+            "key": "keepalive",
+            "name": "KEEPALIVE INTERVAL",
+            "bits": 32,
+            "desc": "Milliseconds between keepalive traffic; MUST NOT be less than ten seconds."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "options",
+      "position": "after",
+      "caption": "INITIAL DSO TYPE CODES (RFC 8490)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "Keepalive",
+            "desc": "Sets session timeouts and keeps the session alive. May be sent as early data.",
+            "highlight": true
+          },
+          {
+            "code": "2",
+            "label": "Retry Delay",
+            "desc": "Server asks the client to close and wait before reconnecting. Not early data."
+          },
+          {
+            "code": "3",
+            "label": "Encryption Padding",
+            "desc": "Padding bytes for encrypted transports; Additional TLV only."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC7766]",
+      "text": "Dickinson, J., et al., \"DNS Transport over TCP - Implementation Requirements\", RFC 7766, March 2016.",
+      "rfc": 7766
+    },
+    {
+      "number": "[RFC7858]",
+      "text": "Hu, Z., et al., \"Specification for DNS over Transport Layer Security (TLS)\", RFC 7858, May 2016.",
+      "rfc": 7858
+    },
+    {
+      "number": "[RFC7828]",
+      "text": "Wouters, P., et al., \"The edns-tcp-keepalive EDNS0 Option\", RFC 7828, April 2016.",
+      "rfc": 7828
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC7830]",
+      "text": "Mayrhofer, A., \"The EDNS(0) Padding Option\", RFC 7830, May 2016.",
+      "rfc": 7830
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[RFC7413]",
+      "text": "Cheng, Y., et al., \"TCP Fast Open\", RFC 7413, December 2014.",
+      "rfc": 7413
+    },
+    {
+      "number": "[Push]",
+      "text": "Pusateri, T. and S. Cheshire, \"DNS Push Notifications\", Work in Progress, draft-ietf-dnssd-push-18, March 2019."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

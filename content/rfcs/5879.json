@@ -10,13 +10,182 @@
   "questions": [
     "detect esp-null packets",
     "is esp traffic encrypted",
-    "esp-null heuristics"
+    "esp-null heuristics",
+    "how to detect esp-null packets",
+    "ipsec traffic inspection heuristics",
+    "intermediate device firewall detection"
+  ],
+  "tags": [
+    "Security",
+    "IPsec",
+    "Intrusion Detection"
+  ],
+  "subtitle": "Techniques for intermediate devices to detect unencrypted IPsec traffic without modifying endpoints.",
+  "tldr": {
+    "problem": "Deep-inspection devices like firewalls and intrusion detectors need to identify whether IPsec traffic is encrypted or unencrypted (ESP-NULL), but cannot inspect encrypted packets and cannot rely on modifying all deployed endpoints.",
+    "mechanism": "The RFC describes heuristics using probabilistic pattern matching on packet padding, header fields, and protocol indicators that intermediate devices can use to detect ESP-NULL traffic with high confidence without any changes to IPsec endpoints.",
+    "outcome": "These heuristics enable traffic inspection during the transition to Wrapped ESP (WESP), a standards-track protocol that provides deterministic detection. Both approaches coexist for years during endpoint migration.",
+    "outcomeLabel": "Interim solution"
+  },
+  "facts": [
+    {
+      "label": "Standard ICV lengths",
+      "value": "96, 128, 192, 256 bits"
+    },
+    {
+      "label": "False positive rate (padding alone)",
+      "value": "3.1% upper bound"
+    },
+    {
+      "label": "Common next-header protocols",
+      "value": "6 (TCP, UDP, ICMP, SCTP, IPv4, IPv6)"
+    },
+    {
+      "label": "UDP encapsulation port",
+      "value": "4500 (NAT-T)"
+    }
+  ],
+  "today": "<p>RFC 5879 remains informational and describes techniques widely deployed in enterprise firewalls and intrusion detection systems. RFC 5840 (Wrapped ESP) provides a standards-track approach with deterministic detection, but heuristics continue to be used for traffic where at least one endpoint has not been updated to support WESP. Both coexist in production networks.</p>",
+  "glossary": [
+    "flow-cache",
+    "ipsec",
+    "security-association",
+    "authentication-method"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Detecting Unencrypted IPsec Traffic",
+      "content": "<p><strong>ESP (Encapsulating Security Payload)</strong> can be used with <strong>NULL encryption</strong> to provide authentication and integrity protection without confidentiality. Organizations sometimes use ESP-NULL inside their networks where they trust the network but want to prevent tampering. Unlike <strong>AH (Authentication Header)</strong>, which has a distinct protocol number, ESP-NULL packets look like regular encrypted ESP to external observers—making detection nondeterministic.</p><p>Deep-inspection devices—firewalls, intrusion detection systems, virus scanners—need to distinguish encrypted from unencrypted ESP packets so they can inspect the latter's contents. The RFC provides heuristics that intermediate devices can use without modifying any endpoints. This approach bridges the gap until <strong>Wrapped ESP (WESP)</strong>, a standards-track protocol for deterministic detection, becomes widely deployed.</p>",
+      "eli5": "<p>Some messages are sealed tight and locked, others are just sealed with a regular envelope. Network devices need to tell the difference so they can check for viruses, but they can't ask the sender to change how they seal messages.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "The Detection Challenge and Approach",
+      "content": "<p>ESP packets have a fixed header structure containing SPI (Security Parameter Index), sequence number, optional initialization vector (IV), payload data, padding, and integrity check value (ICV). However, the variable-length fields make algorithmic detection impossible. Instead, heuristics rely on statistical properties: random encrypted data has only a 1.5–1.6% chance of matching the byte patterns expected by ESP-NULL headers.</p><p>Intermediate devices maintain a stateful flow cache keyed by source address, destination address, SPI, and (for UDP-encapsulated traffic) port numbers. When a new flow arrives, heuristics inspect the first few packets to determine if the flow is encrypted or ESP-NULL. Once determined, the result is cached and subsequent packets are processed without re-running heuristics, improving performance.</p>",
+      "eli5": "<p>The heuristics look for specific patterns in packet data—like looking for the return address on an envelope—and keep track of which flows are which so they don't have to guess every time.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "3",
+      "title": "Detection Methods Using Padding and Protocol Patterns",
+      "content": "<p>The first heuristic checks the <strong>self-describing padding</strong>. ESP-NULL always includes padding bytes from 0x01 to the pad length, followed by the pad length itself (for example, 4 bytes of padding: 0x01 0x02 0x03 0x04 0x04). Different ICV lengths place padding in different byte positions; checking all four standard ICV lengths (96, 128, 192, or 256 bits) against this pattern identifies valid ESP-NULL packets with high confidence.</p><p>When padding matches, the heuristic reads the next-header field to determine the encapsulated protocol (TCP, UDP, ICMP, IPv4, IPv6, or SCTP). Each protocol has characteristic fields the heuristic can verify: TCP and UDP have port numbers; IPv4 has a 4-bit version field that must be 4; IPv6 has a version field that must be 6. Multiple packets in a flow provide additional confirmation, as retransmissions of the same packet strengthen the evidence that the heuristic classified the flow correctly.</p>",
+      "eli5": "<p>The patterns in unencrypted messages follow specific rules—like the way real mail has a return address in the right place. If the heuristics see these expected patterns repeatedly in the same flow, they're confident the traffic isn't encrypted.</p>"
+    },
+    {
+      "id": "section-1",
+      "number": "4",
+      "title": "Handling Unknown Protocols and Misclassification",
+      "content": "<p>When the heuristics detect a next-header value they don't recognize, they return \"unsure\", as there is no way to validate the protocol without understanding it. The intermediate device caches this uncertain state and re-examines the next packet from that flow. If multiple \"unsure\" packets arrive with consistent, unknown protocol numbers in the expected padding location, local policy can eventually classify the flow as ESP-NULL with a known ICV length.</p><p>Random encrypted packets have a small probability (under 3%) of appearing to match ESP-NULL patterns. When this happens, the deep-inspection engine rejects the packet as garbage, signaling a classification error. If too many packets in a cached flow are rejected as garbage, the device invalidates and re-runs detection, as the flow may have been an encrypted ESP that was misclassified as ESP-NULL.</p>",
+      "eli5": "<p>Sometimes the heuristics can't be sure if a message is encrypted, so they mark it as \"maybe\" and look at more messages. Very rarely, encrypted messages accidentally look unencrypted, but when that happens, the inspector rejects the junk data and the device tries again.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "5",
+      "title": "Implementation in Stateful Devices",
+      "content": "<p>Hardware implementations can perform flow lookup based on protocol 50 (ESP), source/destination addresses, and SPI using existing networking hardware. The heuristic logic can be implemented in software for easier updates when new protocols need support. UDP-encapsulated ESP traffic arriving on port 4500 requires special handling: port translation by NAT may change the port, so flows are identified by source/destination IP, source/destination port, and SPI.</p><p>The RFC includes pseudocode examples for fastpath processing (hardware-friendly flow lookup and caching) and slowpath processing (software heuristics). Fastpath identifies the packet type and looks up the SPI cache. Slowpath runs heuristics on uncached flows, testing ICV lengths from shortest to longest and using protocol-specific checks to build confidence incrementally.</p>",
+      "eli5": "<p>The actual networks devices can check packets quickly by remembering which flows are which, and they only do the careful checking once per new connection, then use the cached answer for all later packets.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "discussion",
+      "position": "after",
+      "caption": "ESP-NULL packet structure used by heuristics",
+      "data": {
+        "title": "ESP-NULL format",
+        "bytes": 16,
+        "width": 32,
+        "fields": [
+          {
+            "key": "spi",
+            "name": "SPI",
+            "bits": 32,
+            "desc": "Security Parameter Index identifying the security association."
+          },
+          {
+            "key": "seq",
+            "name": "Sequence Number",
+            "bits": 32,
+            "desc": "Counter to prevent replay attacks."
+          },
+          {
+            "key": "iv",
+            "name": "IV (optional)",
+            "bits": 32,
+            "desc": "Initialization vector, present for some algorithms."
+          },
+          {
+            "key": "payload",
+            "name": "Payload Data",
+            "bits": 32,
+            "desc": "Unencrypted data such as TCP, UDP, or IPv4/IPv6 headers."
+          },
+          {
+            "key": "padding",
+            "name": "Padding (0-255 bytes)",
+            "bits": 8,
+            "desc": "Padding bytes incrementing from 1 to pad length."
+          },
+          {
+            "key": "pad-len",
+            "name": "Pad Length",
+            "bits": 8,
+            "desc": "Number of padding bytes; value from 0 to 255."
+          },
+          {
+            "key": "next-hdr",
+            "name": "Next Header",
+            "bits": 8,
+            "desc": "Protocol number of encapsulated data (TCP=6, UDP=17, etc)."
+          },
+          {
+            "key": "icv",
+            "name": "ICV",
+            "bits": 32,
+            "desc": "Integrity Check Value of 96, 128, 192, or 256 bits."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4303]",
+      "text": "Kent, S., \"IP Encapsulating Security Payload (ESP)\", RFC 4303, December 2005.",
+      "rfc": 4303
+    },
+    {
+      "number": "[RFC2410]",
+      "text": "Glenn, R. and S. Kent, \"The NULL Encryption Algorithm and Its Use With IPsec\", RFC 2410, November 1998.",
+      "rfc": 2410
+    },
+    {
+      "number": "[RFC4301]",
+      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
+      "rfc": 4301
+    },
+    {
+      "number": "[RFC5840]",
+      "text": "Grewal, K., Montenegro, G., and M. Bhatia, \"Wrapped Encapsulating Security Payload (ESP) for Traffic Visibility\", RFC 5840, April 2010.",
+      "rfc": 5840
+    },
+    {
+      "number": "[RFC3948]",
+      "text": "Huttunen, A., Swander, B., Volpe, V., DiBurro, L., and M. Stenberg, \"UDP Encapsulation of IPsec ESP Packets\", RFC 3948, January 2005.",
+      "rfc": 3948
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

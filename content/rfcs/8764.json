@@ -9,13 +9,242 @@
   },
   "questions": [
     "what is dns long-lived queries",
-    "how did apple notify clients of dns changes"
+    "how did apple notify clients of dns changes",
+    "what is apple llq",
+    "how does llq setup work",
+    "what replaced dns llq"
+  ],
+  "tags": [
+    "DNS",
+    "Notifications",
+    "Apple"
+  ],
+  "subtitle": "Apple's old way for DNS servers to tell clients about changes instead of making them poll, now replaced by DNS Push Notifications.",
+  "tldr": {
+    "problem": "DNS-based service discovery needs clients to learn quickly when records appear, disappear or change. Polling a unicast DNS server either leaves clients with stale data or loads the network and server.",
+    "mechanism": "LLQ lets a client ask a server to remember a query for a lease period. The client sets it up with a four-way handshake, and the server then sends unsolicited add and remove events that the client must acknowledge.",
+    "outcome": "LLQ ran from 2005 to 2020 and was superseded in 2020 by the standards-track RFC 8765. This RFC documents it for background and to ease migration, and recommends that new implementations support only DNS Push Notifications.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "EDNS(0) option code",
+      "value": "1"
+    },
+    {
+      "label": "LLQ option length",
+      "value": "18"
+    },
+    {
+      "label": "Typical LLQ port",
+      "value": "5352"
+    },
+    {
+      "label": "Setup attempts",
+      "value": "3 in total"
+    },
+    {
+      "label": "Refresh point",
+      "value": "80% of the lease"
+    },
+    {
+      "label": "In use",
+      "value": "2005 to 2020"
+    }
+  ],
+  "today": "<p>RFC 8764 is an Informational, independent-submission RFC that describes a protocol superseded in 2020 by the standards-track <a href='/8765/'>RFC 8765</a>, DNS Push Notifications. It exists as background and to help migration, and new implementations are recommended to support only the newer protocol.</p>",
+  "glossary": [
+    "edns0",
+    "opt-record",
+    "srv-record",
+    "service-discovery",
+    "mdns",
+    "lease",
+    "udp",
+    "handshake",
+    "server-push",
+    "retransmission",
+    "rate-limiting",
+    "nat-traversal"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why Long-Lived Queries Exist",
+      "content": "<p>DNS-based Service Discovery works best when a client can do a \"live browse\": learn when a service instance appears, learn when it disappears, and watch status changes such as printer ink levels. Multicast DNS does this natively on a local network. <strong>DNS Long-Lived Queries</strong> (LLQ) is an Apple extension to unicast DNS that gives the same kind of timely update.</p><p>The RFC argues that polling is a poor fit. A low polling rate leaves the client with stale information, while a high polling rate hurts the network and the server. From 2005 onwards LLQ was implemented in Apple products including Mac OS X, Bonjour for Windows and AirPort wireless base stations.</p>",
+      "eli5": "<p>Imagine waiting for a friend to arrive. You can keep running to the door to check, or you can ask them to ring the bell. LLQ is the bell.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "How LLQ Rides on DNS Messages",
+      "content": "<p>LLQ uses the ordinary DNS message format plus an EDNS(0) OPT pseudo-RR carrying a new option with <code>OPTION-CODE</code> 1. A server that does not know LLQ and follows EDNS(0) silently ignores the option and answers as a normal DNS query, with no long-lived state.</p><p>The LLQ option is fixed-size, so <code>OPTION-LENGTH</code> is always 18. It holds <code>LLQ-VERSION</code>, <code>LLQ-OPCODE</code>, <code>LLQ-ERROR</code>, a 64-bit <code>LLQ-ID</code> and a 32-bit <code>LLQ-LEASE</code> in seconds. The opcodes are <code>LLQ-SETUP</code> (1), <code>LLQ-REFRESH</code> (2) and <code>LLQ-EVENT</code> (3). Error codes run from <code>NO-ERROR</code> (0) through <code>SERV-FULL</code>, <code>STATIC</code>, <code>FORMAT-ERR</code>, <code>NO-SUCH-LLQ</code> and <code>BAD-VERS</code> to <code>UNKNOWN-ERR</code> (6).</p><p>The protocol is designed for data sets of a few dozen resource records at most and change rates no more than once every 10 seconds on average.</p>",
+      "eli5": "<p>LLQ writes its request on a small extra note stuck to a normal DNS question. Servers that cannot read the note just answer the question and ignore it.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "4",
+      "title": "Finding the Server and Setting Up",
+      "content": "<p>The client first finds the zone apex by querying for SOA, then queries the SRV record <code>_dns-llq._udp.&lt;zone&gt;</code>. The SRV answer names the server and port, typically 53 or 5352. Servers may listen on a different port because some firewalls block direct communication with a name server on port 53.</p><p>Setup is a <strong>four-way handshake</strong>: the client sends a Setup Request, the server returns a Setup Challenge with an LLQ-ID and granted lease, the client echoes them in a Challenge Response, and the server sends an ACK plus the current answers. The handshake gives resilience to packet loss, shows the client is reachable and reduces denial-of-service opportunities.</p><p>The client retries up to two more times, for 3 attempts in all, waiting at least 2 seconds before the first retransmission and 4 seconds before the second. Servers do not retransmit setup messages; retransmission is client driven.</p>",
+      "eli5": "<p>It is like a secret handshake. You say hello, they give you a password, you say it back, and only then do they start telling you things.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Events, Leases and Refresh",
+      "content": "<p>When a zone changes, the server sends a gratuitous DNS response to each client whose LLQ is affected. An <strong>Add Event</strong> carries a new record. A <strong>Remove Event</strong> carries a deleted record with its TTL set to -1. Every event includes the LLQ-ID, which reduces the chance of spoofed events.</p><p>The client must acknowledge each event. If it does not, the server resends, for 3 transmissions in total, then treats the client as unreachable and deletes its LLQ.</p><p>An LLQ lasts only for its lease. The client SHOULD send a Refresh Request when 80% of the lease has elapsed, and it ends an LLQ early by asking for a lease of 0. Asking to refresh an expired or unknown LLQ gets <code>NO-SUCH-LLQ</code>. If setup fails with <code>STATIC</code>, the client must not poll; for other failures it may poll, but no more than once every 15 minutes for a given query.</p>",
+      "eli5": "<p>The server taps you whenever the answer changes, and you tap back to say you got it. Every so often you renew your subscription, or cancel it by saying zero.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations and Known Problems",
+      "content": "<p>LLQ needs servers to keep state for each query, so a server can return <code>SERV-FULL</code> to limit the number of LLQs, preferably with token-bucket rate limiting. The four-way handshake and the required acknowledgments limit how far an attacker can use a server to flood a client. A large random LLQ-ID makes it harder for an off-path attacker to inject spoofed events or requests.</p><p>Appendix A lists problems found since 2005 and calls them a cautionary tale about building a protocol directly on datagrams. Examples: a late duplicate Setup Challenge looks like an ACK with no answers and could make a client clear its cache; keeping half-finished setups until the lease elapses invites resource exhaustion; and NAT or firewall mappings for UDP expire, so clients used NAT-PMP or PCP to extend them.</p>",
+      "eli5": "<p>Because the server has to remember everybody who asked, a crowd of fake askers could swamp it. LLQ has ways to say no and to check people are real, but its makers later found some weak spots.</p>"
+    },
+    {
+      "id": "migration",
+      "number": "1.1",
+      "title": "Moving to DNS Push Notifications",
+      "content": "<p>The RFC says no further work is being done on LLQ and it will not be updated to fix its problems. All existing LLQ implementations are RECOMMENDED to migrate to DNS Push Notifications, and new implementations are RECOMMENDED to support only that protocol.</p><p>Existing LLQ servers are RECOMMENDED to add DNS Push Notifications. Existing clients are RECOMMENDED to query for <code>_dns-push-tls._tcp.&lt;zone&gt;</code> first and fall back to <code>_dns-llq._udp.&lt;zone&gt;</code> only if that fails. Clients SHOULD NOT remember that a server speaks only LLQ, because the server may be updated later.</p>",
+      "eli5": "<p>The old doorbell still works, but a better one has been invented. New houses should get the new one, and visitors should try the new bell first.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "connection-management",
+      "position": "after",
+      "caption": "THE LLQ FOUR-WAY SETUP HANDSHAKE",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Setup Request",
+            "color": "blue",
+            "note": "LLQ-SETUP with LLQ-ID 0 and the desired lease."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Setup Challenge",
+            "color": "green",
+            "note": "Grants a random LLQ-ID and a lease, or returns an error."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Challenge Response",
+            "color": "blue",
+            "note": "Echoes the LLQ-ID and lease to prove reachability."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "ACK + Answers",
+            "color": "green",
+            "note": "Confirms setup and gives the current answers."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "LLQ ERROR CODES",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "NO-ERROR",
+            "desc": "The request succeeded."
+          },
+          {
+            "code": "1",
+            "label": "SERV-FULL",
+            "desc": "Server overloaded or rate limit hit; the lease field gives a retry time."
+          },
+          {
+            "code": "2",
+            "label": "STATIC",
+            "desc": "Data not expected to change often; client must not poll sooner than the TTLs allow."
+          },
+          {
+            "code": "3",
+            "label": "FORMAT-ERR",
+            "desc": "The LLQ option was improperly formatted."
+          },
+          {
+            "code": "4",
+            "label": "NO-SUCH-LLQ",
+            "desc": "Refresh attempted for an expired or non-existent LLQ."
+          },
+          {
+            "code": "5",
+            "label": "BAD-VERS",
+            "desc": "Protocol version not supported by the server."
+          },
+          {
+            "code": "6",
+            "label": "UNKNOWN-ERR",
+            "desc": "Refused for some other reason."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8765]",
+      "text": "Pusateri, T. and S. Cheshire, \"DNS Push Notifications\", RFC 8765, June 2020.",
+      "rfc": 8765
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC6763]",
+      "text": "Cheshire, S. and M. Krochmal, \"DNS-Based Service Discovery\", RFC 6763, February 2013.",
+      "rfc": 6763
+    },
+    {
+      "number": "[RFC6762]",
+      "text": "Cheshire, S. and M. Krochmal, \"Multicast DNS\", RFC 6762, February 2013.",
+      "rfc": 6762
+    },
+    {
+      "number": "[RFC2782]",
+      "text": "Gulbrandsen, A., Vixie, P., and L. Esibov, \"A DNS RR for specifying the location of services (DNS SRV)\", RFC 2782, February 2000.",
+      "rfc": 2782
+    },
+    {
+      "number": "[RFC8490]",
+      "text": "Bellis, R., et al., \"DNS Stateful Operations\", RFC 8490, March 2019.",
+      "rfc": 8490
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

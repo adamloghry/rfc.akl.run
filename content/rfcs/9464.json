@@ -10,13 +10,273 @@
   "questions": [
     "ikev2 encrypted dns configuration",
     "vpn assign doh resolver",
-    "ikev2 dns over quic attribute"
+    "ikev2 dns over quic attribute",
+    "how does ikev2 configure encrypted dns",
+    "what is encdns_ip6",
+    "what is authentication domain name in ikev2"
+  ],
+  "tags": [
+    "VPN",
+    "DNS",
+    "IKEv2",
+    "Privacy"
+  ],
+  "subtitle": "How a VPN server tells a connecting client which encrypted DNS resolvers to use, and how to trust them.",
+  "tldr": {
+    "problem": "IKEv2 could hand a VPN client plain DNS server addresses, but had no way to describe resolvers that speak DoH, DoT or DoQ, or to name them so their certificates can be checked.",
+    "mechanism": "Three new IKEv2 Configuration Payload attributes carry the resolver's IP addresses, its Authentication Domain Name, service parameters, and optionally a hash of the resolver's public key.",
+    "outcome": "A VPN client can be provisioned with encrypted DNS resolvers directly during tunnel setup, including private-address resolvers that only VPN clients can reach.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Attribute types",
+      "value": "27 (ENCDNS_IP4), 28 (ENCDNS_IP6), 29 (ENCDNS_DIGEST_INFO)"
+    },
+    {
+      "label": "Default DoT port",
+      "value": "853"
+    },
+    {
+      "label": "Default DoH port",
+      "value": "443"
+    },
+    {
+      "label": "Default DoQ port",
+      "value": "853"
+    },
+    {
+      "label": "Mandatory hash",
+      "value": "SHA2-256"
+    }
+  ],
+  "today": "<p>RFC 9464 is a Proposed Standard published in November 2023, and the metadata lists no RFC that obsoletes or updates it. It is meant to be used alongside <a href='/9463/'>RFC 9463</a>, which defines the DHCP and Router Advertisement options for discovering network-designated resolvers.</p>",
+  "glossary": [
+    "ike",
+    "ipsec",
+    "doh",
+    "dns-over-tls",
+    "quic",
+    "resolver",
+    "spki-pin",
+    "split-horizon",
+    "certificate-authority"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why IKEv2 Needs Encrypted DNS Attributes",
+      "content": "<p>RFC 9464 specifies how to assign encrypted DNS configurations to an <strong>IKEv2</strong> initiator (the VPN client side, see <a href='/7296/'>RFC 7296</a>). It assigns one or more <strong>Authentication Domain Names</strong> (ADNs) of DNS resolvers that support encrypted DNS protocols, described with the Service Parameters format of <a href='/9460/'>RFC 9460</a>. The protocols named are DNS over HTTPS (DoH), DNS over TLS (DoT) and DNS over QUIC (DoQ).</p><p>The RFC points out a benefit: a resolver hosted by a VPN provider can get a domain-validated certificate from a public Certificate Authority, so the client does not need the root certificate of a private CA. The resolver can run on private IP addresses with access restricted to clients connected to the VPN.</p><div class='callout callout-note'><p>Older designs often assumed the resolver sat inside the protected domain. With encrypted DNS it becomes plausible to place it outside, and existing VPN clients might not expect resolver addresses outside the IP ranges covered by the tunnel.</p></div>",
+      "eli5": "<p>A VPN already tells your device where to find a phone book for looking up names. This adds a way to say the phone book is a locked one, and how to check it is the real one.</p>"
+    },
+    {
+      "id": "terminology",
+      "number": "2",
+      "title": "Terms Used",
+      "content": "<p>The RFC uses the DNS terms of RFC 8499 and the IKEv2 terms \"initiator\" and \"responder\" from <a href='/7296/'>RFC 7296</a>. It adds three terms of its own: <strong>Do53</strong> means unencrypted DNS, <strong>Encrypted DNS</strong> means DNS messages sent over an encrypted channel (DoT, DoH and DoQ are examples), and <code>ENCDNS_IP*</code> means either of the two address attribute types defined in Section 3.1.</p>",
+      "eli5": "<p>Do53 is talking out loud in a crowded room. Encrypted DNS is whispering through a private tube.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The ENCDNS_IP4 and ENCDNS_IP6 Attributes",
+      "content": "<p>These two attribute types, numbered 27 and 28, share one format. After the usual reserved bit, 15-bit Attribute Type and 2-octet Length, the attribute carries a <strong>Service Priority</strong> (2 octets), <strong>Num Addresses</strong> (1 octet), <strong>ADN Length</strong> (1 octet), the IP addresses (4-octet IPv4 or 16-octet IPv6 each), the ADN itself and the service parameters (SvcParams).</p><p>Service Priority follows the rules of <a href='/9460/'>RFC 9460</a>, with a smaller value meaning a higher preference. AliasMode is not supported, so the field MUST NOT be 0; the RFC explains that AliasMode would trigger extra Do53 queries when the data can be supplied directly in the IKE response.</p><p>The ADN is a fully qualified domain name in DNS presentation format using an IDNA A-label, and it MUST NOT contain terminators such as NULL or CR. The SvcParams use the wire format of RFC 9460 and MUST NOT include <code>ipv4hint</code> or <code>ipv6hint</code>, since the included addresses supersede them. With no <code>port</code> parameter, default ports apply: 853 for DoT, 443 for DoH and 853 for DoQ. The parameters apply to every address in the attribute.</p>",
+      "eli5": "<p>Each attribute is like a contact card: a ranking, the phone numbers, the resolver's official name, and notes on how to call it, such as which language to speak.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "4",
+      "title": "The ENCDNS_DIGEST_INFO Attribute",
+      "content": "<p>Attribute type 29, <code>ENCDNS_DIGEST_INFO</code>, lets a responder give a certificate digest that the client can use when validating TLS connections to encrypted resolvers. The initiator can also send it to request particular hash algorithms.</p><p>In a <code>CFG_REQUEST</code> it holds a list of 16-bit hash algorithm identifiers taken from the IANA \"IKEv2 Hash Algorithms\" registry, with the ADN Length set to 0. SHA2-256 is mandatory to implement. In a <code>CFG_REPLY</code> or <code>CFG_SET</code> the Num Hash Algs field MUST be 1, and the attribute carries one hash algorithm identifier and the certificate digest. An ADN is included only when multiple ADNs appear in the ENCDNS_IP* attribute; otherwise the digest applies to the ADN there.</p><p>The digest is the <strong>Subject Public Key Info (SPKI) hash</strong>: the output of a cryptographic hash whose input is the DER-encoded ASN.1 representation of the SPKI. Implementations MUST support SHA2-256.</p>",
+      "eli5": "<p>The digest is like a fingerprint of the resolver's lock. The server tells you the fingerprint up front, so you can check that the lock you meet later matches.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "The IKEv2 Exchange",
+      "content": "<p>An initiator that supports encrypted DNS includes <code>ENCDNS_IP4</code>, <code>ENCDNS_IP6</code> or both in its <code>CFG_REQUEST</code>. If it has no preference it sets Length to 0; otherwise it may send a list of distinct suggested resolvers. It MAY also include <code>ENCDNS_DIGEST_INFO</code> with the hash algorithms it supports.</p><p>The responder, absent policy restrictions, answers each attribute whose address family it supports with one or more ENCDNS_IP* attributes in the <code>CFG_REPLY</code>. The address list MUST contain at least one address and the service parameters SHOULD include at least <code>alpn</code>. The responder MAY ignore suggestions, and MAY return several instances when distinct ADNs or service parameters are needed. They must be presented to the local DNS client by service priority. If a requested address family is missing from the reply, that family is not supported or not configured.</p><p>If the initiator gets both ENCDNS_IP* and INTERNAL_IP6_DNS (or INTERNAL_IP4_DNS), it is RECOMMENDED to use the encrypted resolvers. The DNS client then connects with DoT, DoH or DoQ and authenticates the resolver certificate against the ADN using the mechanisms of Section 8 of RFC 8310. If a digest was supplied and the computed SPKI hash does not match, the client MUST treat this as a non-recoverable error. The RFC likens this to certificate usage PKIX-EE(1) with selector SPKI(1) in RFC 7671, but without PKIX validation.</p><p>For split-tunnel setups where the initiator negotiated INTERNAL_DNS_DOMAIN (<a href='/8598/'>RFC 8598</a>), internal names are resolved using the ENCDNS_IP* resolvers. This RFC relaxes the RFC 8598 rule so that INTERNAL_DNS_DOMAIN can be present even without INTERNAL_IP6_DNS or INTERNAL_IP4_DNS when ENCDNS_IP* attributes are supplied.</p>",
+      "eli5": "<p>Your device asks, \"Do you have a private phone book for me?\" The server answers with a ranked list of cards. Your device tries the best-ranked one and checks the fingerprint before trusting it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security and Privacy",
+      "content": "<p>The RFC adheres to the security considerations of <a href='/7296/'>RFC 7296</a> and does not alter the trust the initiator places in the DNS configuration from a responder. It argues that hosting encrypted resolvers, even in split-VPN setups, can reduce the attack surface, for example by preventing a compromised network device from monitoring or modifying DNS traffic.</p><p>If the responder authenticated itself with the NULL Authentication method (RFC 7619), the initiator MUST NOT use the returned ENCDNS_IP* configuration unless it is preconfigured, for example in the operating system or application. The specification does not extend the acceptance of DNSSEC trust anchors beyond Section 6 of RFC 8598.</p><p>On privacy, the RFC notes that encrypted DNS does not reduce the data available in the resolver itself, and refers to RFC 9076, RFC 8484 and RFC 9250 for discussion.</p>",
+      "eli5": "<p>A locked tube keeps outsiders from listening in, but the person at the end of the tube still hears your question. And if the doorman is a stranger, do not trust his cards.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "ENCRYPTED DNS CONFIGURATION IN IKEV2 (SIMPLIFIED)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator (VPN client)"
+          },
+          {
+            "key": "responder",
+            "label": "Responder (VPN server)"
+          },
+          {
+            "key": "resolver",
+            "label": "Encrypted DNS resolver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "CFG_REQUEST: ENCDNS_IP*, ENCDNS_DIGEST_INFO",
+            "color": "blue",
+            "note": "Empty attributes, or suggested resolvers and supported hash algorithms."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "CFG_REPLY: ENCDNS_IP*, ENCDNS_DIGEST_INFO",
+            "color": "green",
+            "note": "Addresses, ADN, service parameters and optional certificate digest."
+          },
+          {
+            "from": "initiator",
+            "to": "resolver",
+            "label": "DoT, DoH or DoQ session",
+            "color": "neutral",
+            "note": "Certificate checked against the ADN, and against the digest if one was sent."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "ENCDNS_IP4 / ENCDNS_IP6 ATTRIBUTE (RFC 9464, FIGURE 1)",
+      "data": {
+        "title": "ENCDNS_IP* attribute",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "reserved",
+            "name": "R",
+            "bits": 1,
+            "desc": "Reserved; MUST be zero and ignored on receipt."
+          },
+          {
+            "key": "type",
+            "name": "Attribute Type",
+            "bits": 15,
+            "desc": "27 for ENCDNS_IP4 or 28 for ENCDNS_IP6."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "Length of the enclosed data in octets."
+          },
+          {
+            "key": "priority",
+            "name": "Service Priority",
+            "bits": 16,
+            "desc": "Smaller means more preferred; MUST NOT be 0."
+          },
+          {
+            "key": "num-addr",
+            "name": "Num Addresses",
+            "bits": 8,
+            "desc": "Number of enclosed IP addresses."
+          },
+          {
+            "key": "adn-len",
+            "name": "ADN Length",
+            "bits": 8,
+            "desc": "Length of the ADN in octets; 0 means none."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "NEW IKEV2 CONFIGURATION ATTRIBUTE TYPES (IANA)",
+      "data": {
+        "items": [
+          {
+            "code": "27",
+            "label": "ENCDNS_IP4",
+            "desc": "Encrypted DNS resolver reachable over IPv4."
+          },
+          {
+            "code": "28",
+            "label": "ENCDNS_IP6",
+            "desc": "Encrypted DNS resolver reachable over IPv6."
+          },
+          {
+            "code": "29",
+            "label": "ENCDNS_DIGEST_INFO",
+            "desc": "Certificate digest and hash algorithm information.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7296]",
+      "text": "Kaufman, C., Hoffman, P., Nir, Y., Eronen, P., and T. Kivinen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", STD 79, RFC 7296, October 2014.",
+      "rfc": 7296
+    },
+    {
+      "number": "[RFC9460]",
+      "text": "Schwartz, B., Bishop, M., and E. Nygren, \"Service Binding and Parameter Specification via the DNS (SVCB and HTTPS Resource Records)\", RFC 9460, November 2023.",
+      "rfc": 9460
+    },
+    {
+      "number": "[RFC9463]",
+      "text": "Boucadair, M., Ed., Reddy.K, T., Ed., Wing, D., Cook, N., and T. Jensen, \"DHCP and Router Advertisement Options for the Discovery of Network-designated Resolvers (DNR)\", RFC 9463, November 2023.",
+      "rfc": 9463
+    },
+    {
+      "number": "[RFC8598]",
+      "text": "Pauly, T. and P. Wouters, \"Split DNS Configuration for the Internet Key Exchange Protocol Version 2 (IKEv2)\", RFC 8598, May 2019.",
+      "rfc": 8598
+    },
+    {
+      "number": "[RFC8310]",
+      "text": "Dickinson, S., Gillmor, D., and T. Reddy, \"Usage Profiles for DNS over TLS and DNS over DTLS\", RFC 8310, March 2018.",
+      "rfc": 8310
+    },
+    {
+      "number": "[RFC7858]",
+      "text": "Hu, Z., et al., \"Specification for DNS over Transport Layer Security (TLS)\", RFC 7858, May 2016.",
+      "rfc": 7858
+    },
+    {
+      "number": "[RFC8484]",
+      "text": "Hoffman, P. and P. McManus, \"DNS Queries over HTTPS (DoH)\", RFC 8484, October 2018.",
+      "rfc": 8484
+    },
+    {
+      "number": "[RFC9250]",
+      "text": "Huitema, C., Dickinson, S., and A. Mankin, \"DNS over Dedicated QUIC Connections\", RFC 9250, May 2022.",
+      "rfc": 9250
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -10,13 +10,229 @@
   "questions": [
     "bgp long-lived graceful restart",
     "llgr_stale community",
-    "keep stale bgp routes longer"
+    "keep stale bgp routes longer",
+    "what is bgp long-lived graceful restart",
+    "what is the llgr_stale community",
+    "how long does bgp graceful restart keep routes"
+  ],
+  "tags": [
+    "BGP",
+    "Routing",
+    "Resilience"
+  ],
+  "subtitle": "A BGP extension that lets routers keep stale routes for much longer after a session fails, as a last resort.",
+  "tldr": {
+    "problem": "BGP Graceful Restart can keep stale routes for at most 4095 seconds, which is too short for uses such as tunneled networks or BGP carrying configuration-like data.",
+    "mechanism": "A new capability carries a per-address-family Long-Lived Stale Time. After the Graceful Restart period ends, the helper router keeps the stale routes, tags them with the LLGR_STALE community and treats them as least preferred.",
+    "outcome": "Operators can retain state for far longer, but it must be enabled explicitly per address family and is risky in networks that use hop-by-hop forwarding. It updates RFC 6368.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "LLGR capability code",
+      "value": "71"
+    },
+    {
+      "label": "LLGR_STALE community",
+      "value": "0xFFFF0006"
+    },
+    {
+      "label": "NO_LLGR community",
+      "value": "0xFFFF0007"
+    },
+    {
+      "label": "Long-Lived Stale Time field",
+      "value": "24 bits, in seconds"
+    },
+    {
+      "label": "Graceful Restart upper bound",
+      "value": "4095 seconds"
+    }
+  ],
+  "today": "<p>RFC 9494 is a Proposed Standard published in November 2023 and has not been obsoleted. It updates <a href='/6368/'>RFC 6368</a> by requiring that the LLGR_STALE community be propagated between PE and CE routers.</p>",
+  "glossary": [
+    "bgp",
+    "nlri",
+    "local-pref",
+    "mpls",
+    "ibgp-and-ebgp",
+    "graceful-restart",
+    "stale-route",
+    "bgp-community"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Keep Stale Routes Longer",
+      "content": "<p>BGP was designed around correctness, which meant removing state advertised by a router that went down as quickly as possible. BGP Graceful Restart (GR) relaxed this somewhat, but the aim stayed the same. RFC 9494 notes two trends that weaken the old assumption: the wide adoption of tunneled forwarding such as MPLS, which removes some kinds of forwarding loops, and the growing use of BGP to carry data less tied to forwarding, such as VPLS auto-discovery and Flow Specification filters, which is closer to configuration than to routing.</p><p>Graceful Restart has a 4095-second upper bound on how long stale information can be kept. The <strong>Long-Lived Graceful Restart</strong> (LLGR) capability removes that limit by letting stale information be kept longer across a session reset.</p>",
+      "eli5": "<p>Normally a router forgets a neighbour's information the moment the neighbour disappears. Sometimes it is smarter to remember it for a long while, in case the neighbour comes back.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "The Capability and Two Communities",
+      "content": "<p>The <strong>LLGR Capability</strong> (value 71) is a BGP capability that a speaker uses to say it can preserve state as this document describes. Its value is zero or more tuples of Address Family Identifier (16 bits), Subsequent AFI (8 bits), Flags (8 bits) and <strong>Long-Lived Stale Time</strong> (24 bits, in seconds). The most significant flag bit is the <code>F</code> bit, which says state for that address family was preserved across the previous restart. The other flag bits are reserved. There is no suggested default for the stale time.</p><p>Two well-known communities are introduced. <code>LLGR_STALE</code> (<code>0xFFFF0006</code>) marks stale routes kept for a longer period. <code>NO_LLGR</code> (<code>0xFFFF0007</code>) marks routes that should not get this treatment. Implementations MAY let users write policies based on either community.</p>",
+      "eli5": "<p>The capability is a router saying, \"I can remember old routes for this long.\" The two community tags are sticky notes: one says \"this is old,\" the other says \"do not keep this one.\"</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "What Happens When a Session Resets",
+      "content": "<p>LLGR only works together with Graceful Restart. If the LLGR capability is advertised, the GR capability MUST also be advertised, and if LLGR arrives without GR it MUST be ignored. Stale routes for an address family are kept for at most the GR Restart Time plus the Long-Lived Stale Time. If both are nonzero the two phases run one after the other: first GR, with route preference unchanged, then LLGR, with routes treated as least preferred. A zero value skips that phase.</p><p>When the LLGR period begins, the helper router MUST start a timer for each address family with a nonzero stale time and attach the LLGR_STALE community to the retained routes. It MUST NOT keep routes marked NO_LLGR. If the timer expires before the session is back, the stale routes are deleted.</p><p>Once the session is re-established, the helper removes the stale routes at once if the F bit is not set for that address family, the address family is missing, or the capabilities are not received at all. Otherwise the timer keeps running until the End-of-RIB marker arrives or the Selection_Deferral_Timer expires.</p>",
+      "eli5": "<p>First the router waits a short time as usual. If the neighbour is still silent, it switches to \"long wait\" mode, marks the old routes as old, and keeps them until a timer runs out or the neighbour returns.</p>"
+    },
+    {
+      "id": "routing",
+      "number": "4",
+      "title": "Using and Spreading Stale Routes",
+      "content": "<p>A speaker that advertised the LLGR capability to a neighbour MUST treat a route carrying LLGR_STALE as <strong>least preferred</strong> in route selection. A least preferred route is worse than any other route that is not also least preferred, and ties between two such routes use normal tiebreaking. Such routes would normally be chosen only when nothing else is available.</p><p>The route SHOULD NOT be advertised to a neighbour that has not sent the LLGR capability, which means it should be withdrawn from that neighbour. The LLGR_STALE community MUST NOT be removed when the route is passed on.</p><p>For partial deployment, stale routes MAY be sent to internal (IBGP or Confederation) neighbours without LLGR support, if they carry the NO_EXPORT community and have LOCAL_PREF set to zero. In VPN deployments using EBGP between provider edge and customer edge routers, a stale route MAY be sent over such a session when explicitly configured, and NO_EXPORT SHOULD be attached by default. For IBGP in a VPN, the PE router MUST propagate LLGR_STALE into or out of the attributes exchanged, which is how this RFC updates RFC 6368.</p>",
+      "eli5": "<p>Old routes are put at the very bottom of the list, and are only told to neighbours who understand the \"old\" tag.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "5",
+      "title": "Deployment Cautions",
+      "content": "<p>Implementations MUST NOT enable LLGR by default. Enabling it needs affirmative configuration per address family. If it is used for an address family that carries ordinary reachability data, a long-lived stale route could cause loss of connectivity for the prefix, and a stale route chosen as best is used even if a non-stale less specific route exists.</p><p>The main danger is inconsistent route selection. Routers in an AS may disagree on whether a session is up, so one may depreference a route that another still prefers, and this can form a forwarding loop. The RFC walks through a four-router example. Its cardinal rule is that if routes are used for hop-by-hop forwarding within an AS, enabling LLGR is not recommended, while tunneled forwarding such as MPLS, or use of routes for purposes other than forwarding, calls for less caution.</p><p>The RFC also discusses the F bit. For configuration-like routes and control-plane-only route reflectors it makes sense to always set it, while elsewhere it should reflect whether state was truly retained.</p>",
+      "eli5": "<p>Keeping old directions is handy, but if every driver follows slightly different old directions, cars can end up going in circles. So you should turn this on only where that is safe.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security and Examples",
+      "content": "<p>Longer retention widens the window for attacks that rely on stale information, especially for MPLS VPN labels. If an egress PE withdraws a label and reassigns it to a different VPN while ingress PEs still use the old route, traffic isolation can be broken. The RFC says operators should make sure the lower bound for label reuse is greater than the upper bound on the stale time before enabling LLGR for a VPN address family.</p><p>The RFC also gives example timelines. When the GR Restart Time is 1 second and the stale time is 3600 seconds, the border router ASBR1 keeps the routes through GR, tags them at t+1 and drops them at t+1+3600. If the session returns early, ASBR1 removes the community and re-announces the routes. If the external peer lacks LLGR, ASBR1 withdraws the routes from it.</p>",
+      "eli5": "<p>Remembering old information for a long time gives sneaky people more time to take advantage of it, so the rules say to wait before reusing old labels.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "code",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "SESSION FAILURE TIMELINE (FROM THE RFC 9494 SECTION 7 EXAMPLE, ABRIDGED)",
+      "data": {
+        "title": "Example timeline",
+        "lang": "text",
+        "code": "t         session fails; routes retained under GR\nt+1       Restart Time expires; LLGR_STALE attached, routes depreferenced\nt+1+3600  stale time expires; stale routes removed"
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "LLGR CAPABILITY TUPLE (RFC 9494, SECTION 3.1)",
+      "data": {
+        "title": "AFI/SAFI tuple",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "afi",
+            "name": "AFI",
+            "bits": 16,
+            "desc": "Address Family Identifier."
+          },
+          {
+            "key": "safi",
+            "name": "SAFI",
+            "bits": 8,
+            "desc": "Subsequent Address Family Identifier."
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 8,
+            "desc": "F bit is the most significant; the rest are reserved."
+          },
+          {
+            "key": "llst",
+            "name": "Long-Lived Stale Time",
+            "bits": 24,
+            "desc": "Seconds the receiver may keep stale routes."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "GRACEFUL RESTART VS LLGR",
+      "data": {
+        "columns": [
+          "Procedure",
+          "Route preference",
+          "Bound on retention"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Graceful Restart (RFC 4724)",
+              "Unchanged",
+              "Up to 4095 seconds"
+            ]
+          },
+          {
+            "cells": [
+              "LLGR (this RFC)",
+              "Least preferred",
+              "Long-Lived Stale Time (24 bits)"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4724]",
+      "text": "Sangli, S., Chen, E., Fernando, R., Scudder, J., and Y. Rekhter, \"Graceful Restart Mechanism for BGP\", RFC 4724, January 2007.",
+      "rfc": 4724
+    },
+    {
+      "number": "[RFC4271]",
+      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "rfc": 4271
+    },
+    {
+      "number": "[RFC5492]",
+      "text": "Scudder, J. and R. Chandra, \"Capabilities Advertisement with BGP-4\", RFC 5492, February 2009.",
+      "rfc": 5492
+    },
+    {
+      "number": "[RFC1997]",
+      "text": "Chandra, R., Traina, P., and T. Li, \"BGP Communities Attribute\", RFC 1997, August 1996.",
+      "rfc": 1997
+    },
+    {
+      "number": "[RFC6368]",
+      "text": "Marques, P., Raszuk, R., Patel, K., Kumaki, K., and T. Yamagata, \"Internal BGP as the Provider/Customer Edge Protocol for BGP/MPLS IP Virtual Private Networks (VPNs)\", RFC 6368, September 2011.",
+      "rfc": 6368
+    },
+    {
+      "number": "[RFC4364]",
+      "text": "Rosen, E. and Y. Rekhter, \"BGP/MPLS IP Virtual Private Networks (VPNs)\", RFC 4364, February 2006.",
+      "rfc": 4364
+    },
+    {
+      "number": "[RFC4781]",
+      "text": "Rekhter, Y. and R. Aggarwal, \"Graceful Restart Mechanism for BGP with MPLS\", RFC 4781, January 2007.",
+      "rfc": 4781
+    },
+    {
+      "number": "[RFC8538]",
+      "text": "Patel, K., Fernando, R., Scudder, J., and J. Haas, \"Notification Message Support for BGP Graceful Restart\", RFC 8538, March 2019.",
+      "rfc": 8538
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -9,13 +9,332 @@
   },
   "questions": [
     "what is network time security",
-    "how to secure ntp with tls"
+    "how to secure ntp with tls",
+    "what port does nts-ke use",
+    "how does nts protect ntp",
+    "what is an nts cookie",
+    "what is an nts nak"
+  ],
+  "tags": [
+    "Security",
+    "Time",
+    "Cryptography"
+  ],
+  "subtitle": "How clocks can check that the time they are told really comes from the server they asked, using TLS once and light symmetric crypto after that.",
+  "tldr": {
+    "problem": "The Network Time Protocol has no strong way to prove that a time reply is authentic, unmodified and a response to this client's own request.",
+    "mechanism": "A one-time key establishment over TLS (NTS-KE) hands the client keys and a supply of opaque cookies. Later NTP packets carry extension fields with a cookie and an AEAD authenticator, so the server keeps no per-client state.",
+    "outcome": "Client-server mode of NTPv4 gains authentication, replay detection and optional encryption of extension fields. It is a Standards Track document, and it does not stop delay attacks.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "NTS-KE port",
+      "value": "TCP 4460"
+    },
+    {
+      "label": "ALPN identifier",
+      "value": "ntske/1"
+    },
+    {
+      "label": "Minimum TLS version",
+      "value": "1.3"
+    },
+    {
+      "label": "Mandatory AEAD",
+      "value": "AEAD_AES_SIV_CMAC_256 (15)"
+    },
+    {
+      "label": "Unique Identifier length",
+      "value": "At least 32 octets"
+    },
+    {
+      "label": "Cookies per response",
+      "value": "Servers SHOULD send eight"
+    }
+  ],
+  "today": "<p>RFC 8915 is a Standards Track document (Proposed Standard). It has not been obsoleted or updated by another RFC.</p>",
+  "glossary": [
+    "ntp",
+    "tls",
+    "aead",
+    "cookie",
+    "alpn",
+    "hkdf",
+    "kiss-o-death",
+    "replay-protection",
+    "nonce",
+    "x509-certificate",
+    "unlinkability"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Goals and Scope of NTS",
+      "content": "<p><strong>Network Time Security</strong> (NTS) is a cryptographic security mechanism for network time synchronization. This RFC specifies it for the client-server mode of the Network Time Protocol (NTP) version 4. Other NTP modes (symmetric peers, control, broadcast) are not covered; for them the RFC points to the symmetric message authentication code feature of NTP.</p><p>The listed objectives are identity (through an X.509 public key infrastructure), authentication of time packets, optional confidentiality for extension fields, replay prevention, request-response consistency, unlinkability for mobile clients, non-amplification, scalability without per-client server state, and no significant loss of timing quality.</p><div class='callout callout-info'><p>Only the client needs replay protection in client-server mode, because it is harmless for a stateless server to process a replayed packet. That is what lets NTS keep all state on the client.</p></div>",
+      "eli5": "<p>NTS makes sure the answer you get to \"what time is it?\" really came from the clock you asked, and that nobody changed it on the way.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Two Loosely Coupled Sub-Protocols",
+      "content": "<p>NTS is a suite of two protocols. <strong>NTS Key Establishment</strong> (NTS-KE) runs over TLS to authenticate the server, establish key material, give the client an initial supply of cookies, and negotiate options. After one round trip the server closes the connection and discards the state. Then the <strong>NTS Extension Fields for NTPv4</strong> protect the actual time exchange using that key material.</p><p>The NTS-KE server and the NTP servers may be different machines. How they share the secret used to build cookies is implementation dependent, and the cookie format is not part of the normative text.</p>",
+      "eli5": "<p>First you do a secret handshake once and get a bag of tickets. After that, every time you ask for the time, you hand over one ticket.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "3",
+      "title": "NTS Key Establishment over TLS",
+      "content": "<p>The key establishment runs over TCP port <code>4460</code>. The endpoints do a TLS handshake, with the client offering and the server accepting the ALPN protocol <code>ntske/1</code>. Implementations MUST NOT negotiate TLS versions earlier than 1.3. Right after the handshake the client sends a single request, the server sends a single response, and both send <code>close_notify</code> alerts.</p><p>Each message is a sequence of records, ending with an End of Message record, which makes the messages self-delimiting. A server MUST accept requests of at least 1024 octets, and clients SHOULD accept responses of at least 65536 octets.</p><p>Both sides then use TLS key export with the label <code>EXPORTER-network-time-security</code> to derive two AEAD keys for NTPv4: a client-to-server (C2S) key and a server-to-client (S2C) key. The context value is five octets: the two-octet Protocol ID, the two-octet AEAD algorithm identifier and a final octet that is <code>0x00</code> for C2S or <code>0x01</code> for S2C.</p><p>If key establishment fails, clients SHOULD back off exponentially: an initial interval of 10 seconds, a base of 1.5 and a maximum of 5 days.</p>",
+      "eli5": "<p>You and the server whisper a password once through a secure tube, agree on two secret keys, and the server gives you a stack of tickets to use later.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "4",
+      "title": "NTS-KE Records",
+      "content": "<p>Each NTS-KE record has a Critical Bit, a 15-bit Record Type, a 16-bit Body Length and a body. A receiver ignores an unrecognized record if the Critical Bit is 0 and treats it as an error if the bit is 1.</p><ul><li><code>0</code> End of Message: exactly once, last, zero-length body.</li><li><code>1</code> NTS Next Protocol Negotiation: lists Protocol IDs; ID <code>0</code> is NTPv4.</li><li><code>2</code> Error and <code>3</code> Warning: a two-octet code. Error codes are 0 (Unrecognized Critical Record), 1 (Bad Request) and 2 (Internal Server Error). No warning codes are defined.</li><li><code>4</code> AEAD Algorithm Negotiation: the client lists algorithms in preference order and the server picks at most one. Servers MUST support AEAD_AES_SIV_CMAC_256 (identifier 15).</li><li><code>5</code> New Cookie for NTPv4: opaque to the client. Servers MUST send at least one and SHOULD send eight.</li><li><code>6</code> NTPv4 Server Negotiation and <code>7</code> NTPv4 Port Negotiation: name the NTP server and UDP port to use. The default port is 123.</li></ul>",
+      "eli5": "<p>The handshake is a short list of labelled notes: which language to speak, which lock to use, where to go next, and the tickets themselves.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "5",
+      "title": "NTS Extension Fields in NTP Packets",
+      "content": "<p>An NTS-protected NTPv4 packet has the usual 48-octet NTP header (authenticated, not encrypted), some authenticated extension fields, one field carrying the AEAD output, and possibly extra fields that are neither encrypted nor authenticated and are normally discarded by the receiver.</p><ul><li><strong>Unique Identifier</strong> (<code>0x0104</code>): at least 32 octets from a secure random generator. The server echoes it, so the client can detect replays and mismatched replies.</li><li><strong>NTS Cookie</strong> (<code>0x0204</code>): carries what the server needs to recompute the keys. Clients MUST NOT interpret it.</li><li><strong>NTS Cookie Placeholder</strong> (<code>0x0304</code>): asks for one more cookie and has the same body length as the cookie, so the response cannot be bigger than the request.</li><li><strong>NTS Authenticator and Encrypted Extension Fields</strong> (<code>0x0404</code>): holds a nonce and the AEAD ciphertext. The associated data is the NTP header plus all extension fields before this one.</li></ul>",
+      "eli5": "<p>Each time-question carries a random ID, a ticket and a tamper-proof seal. The answer must repeat the ID and carry a valid seal, or it is thrown away.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Protocol Details and Cookie Handling",
+      "content": "<p>A client request carries exactly one Unique Identifier, one NTS Cookie and one Authenticator field, and optionally cookie placeholders (no more than seven). The server uses the cookie to recover the AEAD algorithm and both keys, checks the request, and replies with the echoed identifier, an authenticator, and cookies that are authenticated and encrypted. The number of cookies SHOULD equal one plus the number of placeholders, and MUST NOT exceed it.</p><p>The client SHOULD avoid reusing a cookie, so that passive observers cannot link its traffic. It MUST discard responses that lack a matching Unique Identifier or a valid authenticator, including unprotected replies to protected requests.</p><p>If a server cannot validate a cookie, it SHOULD answer with a Kiss-o'-Death packet with kiss code <code>NTSN</code> (an NTS NAK). The client then waits for the next poll and, if no valid reply comes, reruns key establishment.</p><p>Section 6 of the RFC suggests, non-normatively, that a cookie be a tuple of a key identifier, a nonce and ciphertext holding the AEAD algorithm and both keys, with the master key rotated periodically (for example once daily).</p>",
+      "eli5": "<p>Every answer comes with fresh tickets. You use each ticket once, so nobody watching can tell that two questions came from the same person.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>If the suggested cookie format is used, an attacker who gets the secret cookie key can impersonate the NTP server and mint cookies, so operators SHOULD remove compromised keys quickly. Asymmetric cryptography is needed only during NTS-KE, so a DDoS on a separate NTS-KE server does not affect clients that already hold cookies.</p><p>A client with a wrong clock cannot reliably check a certificate's validity period. The RFC lists mitigations, such as checking whether the system time is trusted, remembering the last known time, and using multiple time sources.</p><p><strong>Delay attacks</strong> are not stopped by cryptography, because they do not modify packets. The error an attacker can add is bounded by half of the round-trip delay. Implementations SHOULD NOT fall back from NTS to plain NTP without explicit user action, to resist \"NTS stripping\".</p>",
+      "eli5": "<p>The seals stop liars from changing the time, but a sneaky helper could still hold your letter for a while before passing it on. Asking several clocks helps.</p>"
+    },
+    {
+      "id": "privacy-considerations",
+      "number": "8",
+      "title": "Privacy and Unlinkability",
+      "content": "<p>The unlinkability goal is that NTS leaks nothing extra that would let an observer tell that two packets from different networks came from the same device. This is the reason for constantly refreshing cookies. It does not fix linkability issues that already exist in NTP, and it does not stop a client from being tracked by its own time servers.</p><p>NTS does not protect the confidentiality of NTP header fields. It does offer a way to encrypt extension fields that might hold sensitive data in the future.</p>",
+      "eli5": "<p>Using each ticket only once means a snoop cannot tell it is the same kid asking every time, even after you move to a new school.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "THE TWO PHASES OF NTS (RFC 8915, FIGURE 1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "ke",
+            "label": "NTS-KE server"
+          },
+          {
+            "key": "ntp",
+            "label": "NTP server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "ke",
+            "label": "TLS handshake + NTS-KE request",
+            "color": "blue",
+            "note": "Offers ALPN ntske/1 on TCP port 4460."
+          },
+          {
+            "from": "ke",
+            "to": "client",
+            "label": "NTS-KE response",
+            "color": "green",
+            "note": "Cookies, AEAD choice, optional NTP server and port."
+          },
+          {
+            "from": "client",
+            "to": "ntp",
+            "label": "NTP request (mode 3)",
+            "color": "blue",
+            "note": "Unique Identifier, cookie, authenticator."
+          },
+          {
+            "from": "ntp",
+            "to": "client",
+            "label": "NTP response (mode 4)",
+            "color": "green",
+            "note": "Echoed identifier, authenticator, fresh encrypted cookies."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "NTS-KE RECORD FORMAT (RFC 8915, FIGURE 2)",
+      "data": {
+        "title": "NTS-KE record",
+        "width": 32,
+        "fields": [
+          {
+            "key": "critical",
+            "name": "C",
+            "bits": 1,
+            "desc": "Critical Bit: decides how an unrecognized Record Type is treated."
+          },
+          {
+            "key": "record-type",
+            "name": "Record Type",
+            "bits": 15,
+            "desc": "Record Type number in network byte order."
+          },
+          {
+            "key": "body-length",
+            "name": "Body Length",
+            "bits": 16,
+            "desc": "Length of the Record Body in octets."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "NTS-KE RECORD TYPES (RFC 8915, TABLE 4)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "End of Message",
+            "desc": "Final record of every request and response."
+          },
+          {
+            "code": "1",
+            "label": "NTS Next Protocol Negotiation",
+            "desc": "Protocol IDs the parties will speak next."
+          },
+          {
+            "code": "2",
+            "label": "Error",
+            "desc": "Two-octet error code; client discards negotiated keys."
+          },
+          {
+            "code": "3",
+            "label": "Warning",
+            "desc": "Two-octet warning code; none are defined."
+          },
+          {
+            "code": "4",
+            "label": "AEAD Algorithm Negotiation",
+            "desc": "Algorithms offered by the client; one chosen by the server."
+          },
+          {
+            "code": "5",
+            "label": "New Cookie for NTPv4",
+            "desc": "Opaque cookie for later NTP requests.",
+            "highlight": true
+          },
+          {
+            "code": "6",
+            "label": "NTPv4 Server Negotiation",
+            "desc": "Host name or address of the NTP server."
+          },
+          {
+            "code": "7",
+            "label": "NTPv4 Port Negotiation",
+            "desc": "UDP port of the NTP server."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "NTP EXTENSION FIELD TYPES ADDED BY NTS (RFC 8915, TABLE 3)",
+      "data": {
+        "items": [
+          {
+            "code": "0x0104",
+            "label": "Unique Identifier",
+            "desc": "Random string to detect replays and match replies."
+          },
+          {
+            "code": "0x0204",
+            "label": "NTS Cookie",
+            "desc": "Opaque state held by the client for the server."
+          },
+          {
+            "code": "0x0304",
+            "label": "NTS Cookie Placeholder",
+            "desc": "Asks the server for another cookie."
+          },
+          {
+            "code": "0x0404",
+            "label": "NTS Authenticator and Encrypted Extension Fields",
+            "desc": "AEAD nonce and ciphertext.",
+            "highlight": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5905]",
+      "text": "Mills, D., Martin, J., Ed., Burbank, J., and W. Kasch, \"Network Time Protocol Version 4: Protocol and Algorithms Specification\", RFC 5905, June 2010.",
+      "rfc": 5905
+    },
+    {
+      "number": "[RFC5116]",
+      "text": "McGrew, D., \"An Interface and Algorithms for Authenticated Encryption\", RFC 5116, January 2008.",
+      "rfc": 5116
+    },
+    {
+      "number": "[RFC5297]",
+      "text": "Harkins, D., \"Synthetic Initialization Vector (SIV) Authenticated Encryption Using the Advanced Encryption Standard (AES)\", RFC 5297, October 2008.",
+      "rfc": 5297
+    },
+    {
+      "number": "[RFC5705]",
+      "text": "Rescorla, E., \"Keying Material Exporters for Transport Layer Security (TLS)\", RFC 5705, March 2010.",
+      "rfc": 5705
+    },
+    {
+      "number": "[RFC5869]",
+      "text": "Krawczyk, H. and P. Eronen, \"HMAC-based Extract-and-Expand Key Derivation Function (HKDF)\", RFC 5869, May 2010.",
+      "rfc": 5869
+    },
+    {
+      "number": "[RFC7301]",
+      "text": "Application-Layer Protocol Negotiation Extension, RFC 7301.",
+      "rfc": 7301
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Transport Layer Security (TLS) Protocol Version 1.3, RFC 8446.",
+      "rfc": 8446
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

@@ -9,13 +9,207 @@
   },
   "questions": [
     "rpc rdma transport",
-    "rpc over rdma"
+    "rpc over rdma",
+    "what is rdma transport for rpc",
+    "rpc over rdma protocol",
+    "how does rdma improve rpc performance",
+    "rdma chunk lists"
+  ],
+  "tags": [
+    "RPC",
+    "Transport",
+    "Data Transfer"
+  ],
+  "subtitle": "Efficient bulk data transfer for remote procedure calls over high-speed networks.",
+  "tldr": {
+    "problem": "Remote Procedure Call (RPC) traditionally uses TCP or UDP for transport, which works but is not optimized for transferring large data chunks. RPC applications like NFS need efficient bulk data movement over high-speed networks.",
+    "mechanism": "This RFC defines RDMA (Remote Direct Memory Access) as a transport for RPC, allowing data to be moved directly between memory buffers on client and server with a specialized header and flow control, minimizing host CPU overhead.",
+    "outcome": "RDMA transport provides high-performance bulk data transfer for RPC-based protocols like NFS without requiring changes to the RPC protocol itself. RFC 8166 later updated this specification.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Protocol version",
+      "value": "1"
+    },
+    {
+      "label": "Message types",
+      "value": "5 (RDMA_MSG, RDMA_NOMSG, RDMA_MSGP, RDMA_DONE, RDMA_ERROR)"
+    },
+    {
+      "label": "Steering tag size",
+      "value": "32 bits"
+    },
+    {
+      "label": "Memory address size",
+      "value": "Up to 64 bits"
+    }
+  ],
+  "today": "<p>RFC 5666 is Proposed Standard and defines RDMA as a transport for RPC, enabling efficient bulk data transfer for protocols like NFS over high-speed networks. It has been obsoleted by <a href='/8166/'>RFC 8166</a>, which provides updated specifications.</p>",
+  "glossary": [
+    "xdr"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "RDMA and RPC",
+      "content": "<p>Remote Direct Memory Access (RDMA) is a technique for efficient movement of data between end nodes. By directing data into destination buffers as it is sent over a network, and placing it via direct memory access by hardware, RDMA achieves faster transfers and reduced host overhead compared to traditional transport.</p><p>Open Network Computing RPC (ONC RPC or simply RPC) is a remote procedure call protocol that has been used with UDP and TCP. RPC messages are defined in eXternal Data Representation (XDR) format, which provides canonical data representation across host architectures. Different transports carry XDR differently: UDP encapsulates RPC in datagrams, TCP uses record marking, and RDMA requires a new approach.</p><p>This RFC describes how to bind RDMA as an RPC transport, combining RDMA's efficient bulk transfer with RPC's message-oriented semantics while maintaining backward compatibility with RPC applications.</p>",
+      "eli5": "<p>RPC is a way for programs on different computers to ask each other for help. RDMA is a fast way to move data without the CPU getting in the way. This RFC explains how to combine them.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "RDMA Concepts and Message Types",
+      "content": "<p>The protocol assumes abstract RDMA capabilities. Registered Memory is memory allocated and registered for RDMA operations, identified by a 32-bit steering tag and 64-bit memory address. RDMA Send moves data into a pre-posted receive buffer at the destination, with completion signaled at the receiver. RDMA Write places data directly into a remote buffer specified by a steering tag and address, signaling completion at the sender but not the receiver. RDMA Read lets the receiver pull data from a remote buffer into its local memory.</p><p>RDMA transports retain message delineations like UDP while providing ordered, reliable delivery like TCP. They also provide efficient bulk-transfer service. The RFC describes three methods of moving RPC data: inline (within an RDMA Send), RDMA Read (for large chunks the receiver pulls), and RDMA Write (for large chunks the server pushes back).</p>",
+      "eli5": "<p>RDMA has three main tricks: Send (putting data in a waiting bucket), Write (shoving data into someone else's memory), and Read (pulling data from someone else's memory). Each trick is best for different sizes of data.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "RPC-over-RDMA Header and Message Layout",
+      "content": "<p>All RPC call and reply transfers begin with an RDMA Send containing an RPC-over-RDMA header followed by the RPC message. The header begins with four 32-bit fields: Transaction ID (XID), Version (1 for this RFC), Flow Control Credit value, and Message Type.</p><p>Message Type can be RDMA_MSG (chunk lists and RPC message follow), RDMA_NOMSG (chunk lists only, RPC message transferred separately), RDMA_MSGP (chunk list with padding), RDMA_DONE (signals completion of RDMA Read), or RDMA_ERROR (signals detected errors). The header is followed by read chunk lists and write chunk lists, which contain memory addresses, steering tags, and lengths for large data transfers. Short RPC messages go inline in a single Send. Large data chunks are moved separately using RDMA Read or Write based on what the RFC application specifies.</p>",
+      "eli5": "<p>Every message starts with a label saying what kind of data is coming, then instructions for where big chunks of data should be put. Small messages fit right in the label. Big chunks get their own special delivery.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4",
+      "title": "Data Transfer Methods and Flow Control",
+      "content": "<p>The protocol supports multiple strategies for moving RPC data. For short messages (typically under a few kilobytes), the entire call or reply is sent inline using RDMA Send. For large chunks, read chunk lists and write chunk lists allow efficient transfer. A read chunk list contains data the sender wants to transfer; the receiver uses RDMA Read to pull this data. A write chunk list contains buffers at the client where the server should place result data using RDMA Write.</p><p>Flow control is critical because RDMA Sends fail if no pre-posted receive buffer is available. The RPC-over-RDMA header includes a credit mechanism. RPC calls contain a requested credit value; replies grant a value. The client MUST NOT send unacknowledged requests exceeding the granted credit limit. The server MUST always provide at least one credit to avoid deadlock.</p>",
+      "eli5": "<p>The sender asks 'please save me five mailboxes' and the receiver replies 'okay, I saved you five mailboxes.' The sender never fills more mailboxes than promised, or messages get lost.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Protocol Interactions and Chunk Handling",
+      "content": "<p>RPC calls and replies can use combinations of inline data and chunks. A call with write chunks works like this: the client sends the call header and inline arguments, and the server receives it, then the server RDMA Writes result data to the buffers specified in the write chunk list, then sends the reply message with updated chunk lengths. The ordering guarantees from RDMA (Writes are ordered relative to subsequent Sends) ensure the client knows the data is there before processing the reply.</p><p>Calls with read chunks work differently: the server reads the large chunks from the client's registered memory, then sends the reply. Replies with read chunks require a Done message from the client after reading, so the server knows it is safe to free the buffers.</p><p>XDR encoding determines which data items are eligible for chunking; this is specified by upper-layer protocols like NFS. Chunk lists include a handle (steering tag), length, and offset. For write chunks only, they also include the bytes actually transferred, which may be less than the buffer size if the result is smaller.</p>",
+      "eli5": "<p>Three dances are possible: client sends a request and waits while server writes answers directly into the client's memory, or server reads big data from the client's memory and then sends replies, or server receives results inside the reply message itself.</p>"
+    },
+    {
+      "id": "connection-management",
+      "number": "6",
+      "title": "Connection Configuration and Padding",
+      "content": "<p>The RFC describes a connection configuration protocol that allows RPC client and server to negotiate parameters. Peers exchange padding and alignment parameters: rdma_align (the alignment value) and rdma_thresh (the data size above which padding is applied). These parameters help servers align large data into properly sized buffers during RDMA Send reception.</p><p>The RFC also covers memory registration overhead. Because registered memory incurs overhead, implementations must balance the efficiency of chunking against the cost of registration. The protocol is designed to be carried over RDMA transports like Internet Wide Area RDMA Protocol (iWARP) and InfiniBand. Error handling, node addressing, and RPC binding details are discussed in the later sections.</p>",
+      "eli5": "<p>Before the big data dances start, the two sides talk about how much space they have and what kind of alignment they need, so nothing gets dropped or misaligned.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "before",
+      "caption": "RPC call with write chunks: client provides buffers for results",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "RPC Client"
+          },
+          {
+            "key": "server",
+            "label": "RPC Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "RPC Call + Write Chunk List",
+            "color": "blue",
+            "note": "Header and arguments inline, buffers specified for results"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "RDMA Write",
+            "color": "neutral",
+            "note": "Server places result data directly into client's buffers"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "RPC Reply",
+            "color": "green",
+            "note": "Reply with actual lengths transferred"
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "RPC call with read chunks: server reads data from client",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "RPC Client"
+          },
+          {
+            "key": "server",
+            "label": "RPC Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "RPC Call + Read Chunk List",
+            "color": "blue",
+            "note": "Header inline, large data left in client's memory"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "RDMA Read",
+            "color": "neutral",
+            "note": "Server pulls chunk data from client's registered memory"
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "RPC Reply",
+            "color": "green"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4506]",
+      "text": "Eisler, M., Chandra, R., and D. Ottis, \"XDR: External Data Representation Standard\", RFC 4506, May 2006.",
+      "rfc": 4506
+    },
+    {
+      "number": "[RFC5040]",
+      "text": "Recio, R., Metzler, B., Culley, P., Hilland, J., and D. Garcia, \"A Remote Direct Memory Access Protocol Specification\", RFC 5040, October 2007.",
+      "rfc": 5040
+    },
+    {
+      "number": "[RFC5041]",
+      "text": "Recio, R., Metzler, B., Culley, P., Hilland, J., and D. Garcia, \"A Remote Direct Memory Access Protocol Specification (for an RDMA over SCTP Reliable Connection)\", RFC 5041, October 2007.",
+      "rfc": 5041
+    },
+    {
+      "number": "[RFC5531]",
+      "text": "Thurlow, R., \"RPC: Remote Procedure Call Protocol Specification Version 2\", RFC 5531, May 2009.",
+      "rfc": 5531
+    },
+    {
+      "number": "[RFC5661]",
+      "text": "Shepler, S., Eisler, M., and D. Noveck, \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

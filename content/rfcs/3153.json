@@ -9,13 +9,175 @@
   },
   "questions": [
     "ppp multiplexing",
-    "reduce ppp overhead small packets"
+    "reduce ppp overhead small packets",
+    "what is ppp multiplexing",
+    "how does pppmux reduce overhead",
+    "what is pppmuxcp",
+    "what is the ppp multiplexed frame protocol number"
+  ],
+  "tags": [
+    "PPP",
+    "Framing",
+    "Overhead"
+  ],
+  "subtitle": "Pack several small PPP packets into one frame so slow links spend less of their bandwidth on framing.",
+  "tldr": {
+    "problem": "Each PPP frame carries several bytes of framing overhead, which is costly when many small packets cross a slow link or are tunneled, for example in L2TP.",
+    "mechanism": "PPP Multiplexing concatenates several PPP frames, called subframes, into one PPP frame. Each subframe gets a short length field, and its protocol ID can be left out when it repeats the previous one.",
+    "outcome": "Overhead per packet drops, at the cost of some extra delay while frames are gathered. RFC 3153 is a Proposed Standard and the unit metadata lists no replacement.",
+    "outcomeLabel": "The trade-off"
+  },
+  "facts": [
+    {
+      "label": "Multiplexed frame protocol",
+      "value": "0x0059"
+    },
+    {
+      "label": "PPPMuxCP protocol",
+      "value": "0x8059"
+    },
+    {
+      "label": "Max subframe length",
+      "value": "16,383 bytes"
+    },
+    {
+      "label": "One byte length field",
+      "value": "6 bits, up to 63 bytes"
+    },
+    {
+      "label": "Two byte length field",
+      "value": "14 bits, over 63 bytes"
+    },
+    {
+      "label": "Default PID option",
+      "value": "Type 1, Length 4"
+    }
+  ],
+  "today": "<p>RFC 3153 is a Proposed Standard, published in August 2001, and the unit metadata lists no RFC that obsoletes or updates it. The text states no deployment figures.</p>",
+  "glossary": [
+    "ppp",
+    "multiplexing",
+    "hdlc",
+    "lcp",
+    "ncp",
+    "frame"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Overhead Problem",
+      "content": "<p>PPP encapsulation adds overhead to every packet. With HDLC framing that means a flag (at least one to separate adjacent packets), the Address (<code>0xFF</code>) and Control (<code>0x03</code>) bytes, a two byte PPP Protocol ID and a two byte CRC. Even with the Address and Control fields negotiated off and the Protocol ID compressed, each frame still carries four bytes of overhead.</p><p>On slow links that carry small packets, this is a large share of what is sent. When PPP frames are tunneled, as in L2TP (<a href='/2661/'>RFC 2661</a>), the L2TP overhead per PPP frame is also significant.</p>",
+      "eli5": "<p>Sending a tiny note in its own big envelope wastes paper. If you have many tiny notes, it is cheaper to share one envelope.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "The Key Idea: Subframes",
+      "content": "<p><strong>PPP Multiplexing</strong> sends multiple PPP encapsulated packets in a single PPP frame. A delimiter is inserted before the beginning of each packet, and the receiver's demultiplexor uses the delimiters to separate them. Each PPP encapsulated frame inside the multiplexed frame is called a <strong>PPP subframe</strong>.</p><p>A receiver offers to receive multiplexed frames during NCP negotiation. After that the transmitter may choose which frames to multiplex. Frames should not be re-ordered, whether they travel inside a multiplexed frame or by themselves.</p><p>The RFC compares this to the concatenated framing option of <a href='/1570/'>RFC 1570</a>. PPP multiplexing is more efficient and allows variable sized frames, where concatenated framing restricts all frames to a fixed length. As with any concatenation scheme, longer multiplexed frames save overhead but add delay.</p>",
+      "eli5": "<p>The sender stacks several notes in one envelope, with a little tag on each saying how long it is. The receiver splits the stack back into separate notes in the same order.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The Subframe Format",
+      "content": "<p>The multiplexed frame starts with a normal PPP header whose Protocol Field is <code>0x0059</code>. Each subframe then begins with a length field made of three parts.</p><ul><li><strong>PFF</strong> (Protocol Field Flag), the most significant bit of the first byte. <code>1</code> means the subframe's PPP Protocol ID follows the length field. <code>0</code> means it is absent and equals that of the preceding subframe with PFF = 1, or the default PID for the first subframe.</li><li><strong>LXT</strong> (Length Extension). If set, the length field is two bytes (14 bits of length). If clear, it is one byte (6 bits of length).</li><li><strong>LEN</strong>, the subframe length in bytes, not including the length field but including the Protocol ID if present.</li></ul><p>A subframe of 63 bytes or less uses the one byte form. The maximum subframe length is 16,383 bytes, and larger packets must be sent in their own PPP frame. The transmitter need not multiplex every small frame and may multiplex only those below a configurable size.</p><p>The receiver MUST support Protocol-Field-Compression of one or two bytes in the subframe, and the transmitter SHOULD compress Protocol IDs with an upper byte of zero (<code>0x21</code> through <code>0xFD</code>). This is separate from the PFC negotiated in LCP, which only affects the header of the multiplexed frame itself.</p><p>The Information field may hold any frame except LCP Configure Request, ACK, NAK and Reject frames and PPP Multiplexed frames. If LCP is renegotiated, multiplexing MUST be disabled until PPPMuxCP is negotiated again.</p>",
+      "eli5": "<p>Each note in the envelope has a tag saying how long it is. Short notes get a small tag and long notes get a bigger one. If a note is the same kind as the one before, the tag can skip saying what kind it is.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Transmitter and Receiver Procedures",
+      "content": "<p>The transmitter keeps a state variable, <code>Last_PID</code>, set at the start of each multiplexed frame to the default PID negotiated in PPPMuxCP. A configurable <code>MAX_SF_LEN</code> sets the largest frame that may be multiplexed; it should be less than or equal to the smaller of MRU-2 and 16,383.</p><p>For each subframe, the transmitter compares its protocol value with <code>Last_PID</code>. If they are equal, PFF is set to 0 and the protocol field is deleted. Otherwise PFF is set to 1, the (compressed) protocol field is included and <code>Last_PID</code> is updated. Gathering stops when the next subframe is longer than <code>MAX_SF_LEN</code>, when adding it would exceed the MRU negotiated in LCP, or when there are no more subframes. Implementations may add a timer as a further stopping rule, and may keep multiplexed frames well below the MRU to limit latency and error impact.</p><p>The receiver keeps <code>Last_rcvd_PID</code>, initialized to the default PID. If PFF = 0 it prepends that value to the subframe before passing it to PPP. If PFF = 1 it records the new value. Processing ends when the frame is empty, or when a length field exceeds the data remaining; in that case the last subframe must be dropped. A multiplexed frame inside a multiplexed frame is illegal.</p>",
+      "eli5": "<p>The sender remembers what kind the last note was and only writes the kind on the tag when it changes. The receiver remembers the same thing and fills it back in.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "5",
+      "title": "Negotiating With PPPMuxCP",
+      "content": "<p>A receiver offers to accept multiplexed frames using the <strong>PPP Mux Control Protocol</strong> (PPPMuxCP), a network control protocol similar to IPCP (<a href='/1332/'>RFC 1332</a>). Its protocol field value is <code>0x8059</code>. A transmitter may not send a multiplexed frame unless the peer has offered to receive them. Each direction is negotiated independently, and agreeing does not oblige a peer to send multiplexed frames.</p><p>The only option is <strong>Default PID</strong> (Type 1, Length 4, followed by a two byte Default PID). It is always negotiated, and lets the first subframe go without a protocol ID, saving one or two bytes. The receiver chooses it and interprets incoming multiplexed frames with the default it offered. LCP frames MUST NOT be sent inside multiplexed frames.</p>",
+      "eli5": "<p>Before using the shared envelope, the receiver says 'yes, I can open those' and names the kind of note it expects most often. Nobody is forced to use it.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "6",
+      "title": "Interaction With Multilink, CCP and ECP",
+      "content": "<p>Because LCP is negotiated over each member link of a Multilink PPP bundle (<a href='/1990/'>RFC 1990</a>), multiplexing can be negotiated only for the bundle, not for individual links. On the transmit side, multiplexing always happens before multilink encapsulation, so an MP header MUST be outside any PPPmux header, and multilink frames must not be sent in multiplexed frames.</p><p>Multiplexing must happen after any bundle-level CCP or ECP and before MP and any per-link CCP or ECP. An implementation that cannot perform PPPMux above CCP or ECP MUST issue Protocol-Reject for the per-link forms of CCP and ECP if PPPMux has been negotiated.</p><p>On security, the RFC adds no considerations beyond those that apply to PPP and header-compression schemes over PPP.</p>",
+      "eli5": "<p>The shared envelope has a fixed place in the packing line: it is made after the secret-code step and before the step that splits things across several roads.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "SUBFRAME LENGTH FIELD (RFC 3153)",
+      "data": {
+        "title": "One byte length field",
+        "bytes": 1,
+        "width": 8,
+        "fields": [
+          {
+            "key": "pff",
+            "name": "PFF",
+            "bits": 1,
+            "desc": "1 if the PPP Protocol ID follows the length field, 0 if it is omitted."
+          },
+          {
+            "key": "lxt",
+            "name": "LXT",
+            "bits": 1,
+            "desc": "If set, the length field is two bytes long."
+          },
+          {
+            "key": "len",
+            "name": "LEN",
+            "bits": 6,
+            "desc": "Subframe length in bytes, for subframes of 63 bytes or less."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Townsley, W., et al., \"Layer Two Tunneling Protocol 'L2TP'\", RFC 2661, August 1999.",
+      "rfc": 2661
+    },
+    {
+      "number": "[2]",
+      "text": "Simpson, W., Ed., \"PPP LCP extensions\", RFC 1570, January 1994.",
+      "rfc": 1570
+    },
+    {
+      "number": "[3]",
+      "text": "Simpson, W., Ed., \"PPP in HDLC-like Framing\", STD 51, RFC 1662, July 1994.",
+      "rfc": 1662
+    },
+    {
+      "number": "[4]",
+      "text": "Simpson, W., Ed., \"The Point-To-Point Protocol (PPP)\", STD 51, RFC 1661, July 1994.",
+      "rfc": 1661
+    },
+    {
+      "number": "[5]",
+      "text": "Sklower, K., et al., \"The PPP Multilink Protocol (MP)\", RFC 1990, August 1996.",
+      "rfc": 1990
+    },
+    {
+      "number": "[6]",
+      "text": "McGregor, G., \"The PPP Internet Protocol Control Protocol (IPCP)\", RFC 1332, May 1992.",
+      "rfc": 1332
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

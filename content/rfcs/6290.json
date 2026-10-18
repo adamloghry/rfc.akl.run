@@ -10,13 +10,231 @@
   "questions": [
     "ikev2 quick crash detection",
     "how to detect ipsec peer reboot",
-    "ike sa desynchronization"
+    "ike sa desynchronization",
+    "what is ikev2 quick crash detection",
+    "what is a qcd token",
+    "how does ipsec detect a peer reboot"
+  ],
+  "tags": [
+    "IKEv2",
+    "IPsec",
+    "Recovery"
+  ],
+  "subtitle": "A saved secret token lets a rebooted IKEv2 peer tell its partner to drop the dead tunnel and start over right away.",
+  "tldr": {
+    "problem": "When one IKEv2 peer reboots, the other gets no notice and can take as much as several minutes to find out, so the IPsec tunnel stays broken. This is worst when the rebooted peer only receives traffic or the other peer has a dynamic IP address.",
+    "mechanism": "During IKE_AUTH each side may send a QCD token that the other stores with the IKE SA. After a reboot, the peer regenerates the token and sends it in an unprotected message, and the partner deletes the old IKE SA and its child SAs.",
+    "outcome": "Recovery can start right after the restart instead of waiting for liveness checks to time out. Tokens must be hard to guess, because anyone with a valid token can tear the SA down.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Notify message type",
+      "value": "16419 (QUICK_CRASH_DETECTION)"
+    },
+    {
+      "label": "Token length",
+      "value": "16 to 128 octets"
+    },
+    {
+      "label": "Example QCD_SECRET",
+      "value": "32 random octets"
+    },
+    {
+      "label": "Tokens per packet",
+      "value": "At least 4 supported"
+    },
+    {
+      "label": "Protocol ID",
+      "value": "1"
+    },
+    {
+      "label": "SPI Size",
+      "value": "0"
+    }
+  ],
+  "today": "<p>RFC 6290 is a Proposed Standard from June 2011. The unit metadata shows no obsoleting or updating RFC.</p>",
+  "glossary": [
+    "ike",
+    "ipsec",
+    "security-association",
+    "spi",
+    "replay-attack"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Crash Recovery Is Slow",
+      "content": "<p>IKEv2 (<a href='/5996/'>RFC 5996</a>) can recover from a reboot as long as traffic flows in both directions, because the rebooted peer re-establishes the tunnels. That fails in two cases the RFC names: the rebooted peer is a VPN gateway protecting only servers, so all traffic is inbound; or the other peer has a dynamic IP address, so the rebooted peer does not know where to initiate.</p><p>When a peer loses state, the other peer gets no notification, and one-way IPsec traffic keeps flowing. The rebooted peer can only answer with an unprotected INVALID_SPI notification, which the recipient treats as a hint, since it could easily be forged. The recipient must then run a <strong>liveness check</strong> (a protected empty INFORMATIONAL message, also called Dead Peer Detection), and RFC 5996 suggests retransmitting at least a dozen times over at least several minutes before giving up on an SA.</p><p>That period can overlap with the reboot itself, so by the time a slow-booting gateway can send INVALID_SPI, its peers may have finished their liveness checks. Some implementations already shorten timeouts based on these hints, but Appendix A.4 explains why that may not be enough.</p>",
+      "eli5": "<p>When your friend falls asleep, you keep calling their name for many minutes before you decide they are really gone. That wastes time, and this RFC gives a faster way.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "2",
+      "title": "How QCD Works",
+      "content": "<p>A <strong>QCD token</strong> is an octet string sent in a notification during the first IKE_AUTH exchange messages, the first request and final response that contain the AUTH payloads. An implementation that sends one is a <strong>token maker</strong>. One that receives a token MUST store it, or a digest of it, with the IKE SA, and is a <strong>token taker</strong>. Implementations that are not token takers silently ignore QCD tokens.</p><p>After a reboot, when a token maker receives a protected IKE request with unknown IKE SPIs, it SHOULD generate a token identical to the previous one and send it in an unprotected message. When a token taker gets that token, it MUST check that it matches the stored token for the IKE SA. On success it MUST silently delete the IKE SA and all its child SAs. On failure, or if no IKE SA matches, it SHOULD log the event. The token taker MUST accept tokens from any IP address and port, to allow high-availability setups. It may then create new SAs immediately or wait for traffic to trigger them.</p><p>A token must be reproducible after a reboot from properties of the protected IKE message, such as the IKE SPIs. A small amount of non-volatile storage is required for a token maker.</p>",
+      "eli5": "<p>Each side hands the other a secret word when they first meet. If one side forgets everything, saying the secret word proves who they are, so the other side can say, let us start fresh.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "The QCD_TOKEN Notification and Exchanges",
+      "content": "<p>The QCD token notification has Protocol ID 1 (it relates to an IKE SA), SPI Size zero, Notify Message Type 16419, and a variable-length <code>TOKEN_SECRET_DATA</code> field holding the token. In IKE_AUTH it follows the AUTH payload and precedes the Configuration payload and the child SA payloads. A peer MUST NOT treat a missing token as proof the other side lacks support, and a peer that does not understand the notification ignores it, so it can be sent freely.</p><p>After an IKE SA is rekeyed the SPIs change, so a new token is needed. If only the responder is a token maker, it sends the token in the CREATE_CHILD_SA response. If the initiator is also a token maker, it SHOULD start an INFORMATIONAL exchange right after. Session resumption works similarly (<a href='/5723/'>RFC 5723</a>).</p><p>If a token stops being valid while its IKE SA is still fine, which can happen with the IP-address method, the token maker MUST send the new token in a protected message, for example a MOBIKE INFORMATIONAL exchange (<a href='/4555/'>RFC 4555</a>). A token taker MUST accept such protected updates, and a maker SHOULD NOT send them unless it can no longer generate the old token.</p><p>The unprotected token is sent as a response to a protected IKE request that uses an unknown IKE SA, together with INVALID_IKE_SPI so that peers that do not implement QCD still behave properly. The taker MUST support at least four QCD_TOKEN notifications in one packet and treats the token as verified if any one matches. If the token fails to validate, a response MUST NOT be sent.</p>",
+      "eli5": "<p>The secret word travels inside a sealed envelope when the friends first agree on it, and inside a plain postcard only when one of them needs to prove who they are.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4",
+      "title": "Generating and Checking Tokens",
+      "content": "<p>No generation method is mandated. Tokens MUST be at least 16 octets and no more than 128 octets long, SHOULD look random, MUST be re-creatable from the IKE SPIs after a reboot, and must make collisions between different SPI pairs highly unlikely. An external attacker must not be able to guess them, so a PRNG and hash functions are RECOMMENDED.</p><p>Two examples are given. In the stateless method, 32 random octets called <code>QCD_SECRET</code> are generated at installation or first boot and kept in non-volatile storage. The token is <code>HASH(QCD_SECRET | SPI-I | SPI-R)</code>. A key rollover policy may keep up to 3 previous secrets, so up to 4 notifications may be sent. The second method also hashes the token taker's IP address, which makes the token useless to an attacker at another address but means it must be replaced when the taker's address changes. If the taker changes address and the maker loses state before replacing the token, QCD fails and the peers fall back to RFC 5996 recovery.</p><p>The taker verifies by bitwise comparison with the stored token, and MAY keep several earlier tokens for multihomed cases. The token is tied to the (SPI-I, SPI-R) pair and SHOULD be deleted when the SA is deleted or expires.</p>",
+      "eli5": "<p>The secret word is made by mixing a private secret with the two names of the friends. Anyone who does not know the private secret cannot guess the word.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "5",
+      "title": "Deployment and Operations",
+      "content": "<p>Rebooting a gateway still takes anywhere from a few seconds to several minutes, which reduces the benefit, so critical systems should use backup gateways. It is RECOMMENDED that a standby gateway can generate the same token as the active one, for example by sharing the <code>QCD_SECRET</code>. This applies to high-availability setups, not load sharing where several gateways are active together.</p><p>Which role to implement: remote-access clients should be token takers, remote-access gateways token makers, and inter-domain VPN gateways both. Implementing both roles is always valid.</p><p>Rate limiting matters. A taker SHOULD limit the rate of QCD tokens it verifies from one source. A maker getting excessive requests with unknown IKE SPIs SHOULD fall back to the RFC 5996 behavior. Implementations that might sit in unsafe configurations SHOULD detect that and disable the extension, and MUST let the user turn it on or off.</p><p>After a reboot, IPsec packets are more likely than IKE packets. The rebooted peer would answer with INVALID_SPI and the token would arrive only after a liveness check, costing a round trip. A maker with enough non-volatile storage MAY store a mapping of child SPIs to IKE SPIs or tokens and send INVALID_SPI together with QCD_TOKEN. A taker MUST NOT treat an invalid token with INVALID_SPI as evidence of an attack, but SHOULD limit the rate at which these are processed.</p>",
+      "eli5": "<p>A spare helper who knows the same secret word can take over right away if the first helper falls asleep.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "6",
+      "title": "Working with Session Resumption",
+      "content": "<p>Session resumption (<a href='/5723/'>RFC 5723</a>) lets clients store an encrypted derivative of the IKE SA to rebuild a tunnel cheaply after a gateway failure. It does not help detect that the gateway failed. A failure can go undetected for a long time because IPsec has no packet acknowledgement, and some mobile devices wait a long time before a liveness check to save battery.</p><p>QCD fills that gap. A client supporting both stores the QCD token and the resumption ticket. When the gateway reboots, either the client's own liveness check or other IKE exchange times out after several minutes, where QCD does not help, or the primary or a backup gateway sends a token and the client quickly re-establishes the tunnel.</p>",
+      "eli5": "<p>One feature helps you rebuild quickly. This one helps you notice that you need to rebuild.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The extension must not reduce the security of IKEv2 or IPsec, and a passive eavesdropper must not be able to reset a session or add significant delay. Because it adds a new way to reset an IKE SA, tokens MUST be hard to guess: an attacker who guesses one can tear down the SA. The token is encrypted in IKE_AUTH and appears in the clear only in the unprotected message, which is the last time it is used. The taker MUST store tokens securely, and the <code>QCD_SECRET</code> MUST be protected, since anyone with it can delete all IKE SAs for that maker.</p><p>Modification, deletion or replay of the unprotected message does not compromise either side. A modified token is invalid, deletion only causes a delay, and replay is meaningless because the SA is gone after the first use.</p><p>A token maker MUST NOT send a valid token in an unprotected message for an existing IKE SA. This is hard in load-balanced clusters. All members MUST be able to tell whether an IKE SA is active anywhere in the cluster, for example by synchronizing a list of active IKE SPIs.</p><p>For token enumeration, an attacker could collect tokens from fake requests. The space of IKE SPI pairs is 2^128, and at least 2^64 even if one implementation is predictable, so token makers MUST generate unpredictable SPIs. Throttling and periodic secret changes further limit this.</p>",
+      "eli5": "<p>The secret word only works if nobody can guess it, so each side keeps it hidden, and it is used up the moment it is spoken out loud.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "IANA and Alternatives Considered",
+      "content": "<p>IANA assigned notify message type 16419, named QUICK_CRASH_DETECTION, from the status types range (16406-40959) of the IKEv2 Notify Message Types registry.</p><p>Appendix A lists ideas not taken. Starting a new IKE SA with INITIAL_CONTACT fails because an IKEv2 authentication exchange must piggyback a Child SA and the rebooted side has no traffic to choose selectors, and because with asymmetric authentication such as EAP the rebooted side cannot initiate. The SIR proposal, an unprotected query asking whether the IKE SA exists, lost out to QCD in the working group. Birth Certificates, a signed reboot statement, would need more storage and costly public key checks. Shortening the liveness check risks false detection and still leaves a noticeable delay.</p>",
+      "eli5": "<p>The authors also tried other ideas, like restarting from scratch or asking questions first, and picked the secret word because it was simplest and safest.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "QCD TOKEN FLOW (SIMPLIFIED FROM SECTIONS 3 AND 4)",
+      "data": {
+        "lanes": [
+          {
+            "key": "taker",
+            "label": "Token taker"
+          },
+          {
+            "key": "maker",
+            "label": "Token maker"
+          }
+        ],
+        "messages": [
+          {
+            "from": "taker",
+            "to": "maker",
+            "label": "IKE_AUTH request with QCD_TOKEN",
+            "color": "blue",
+            "note": "Optional; stored with the IKE SA."
+          },
+          {
+            "from": "maker",
+            "to": "taker",
+            "label": "IKE_AUTH response with QCD_TOKEN",
+            "color": "blue",
+            "note": "Token is encrypted here."
+          },
+          {
+            "from": "taker",
+            "to": "maker",
+            "label": "Protected IKE request after reboot",
+            "color": "neutral",
+            "note": "Maker no longer knows the IKE SPIs."
+          },
+          {
+            "from": "maker",
+            "to": "taker",
+            "label": "INVALID_IKE_SPI + QCD_TOKEN (unprotected)",
+            "color": "green",
+            "note": "Taker verifies, then deletes the IKE SA."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "THE TWO EXAMPLE TOKEN FORMULAS (RFC 6290, SECTIONS 5.1 AND 5.2)",
+      "data": {
+        "title": "TOKEN_SECRET_DATA",
+        "lang": "text",
+        "code": "TOKEN_SECRET_DATA = HASH(QCD_SECRET | SPI-I | SPI-R)\nTOKEN_SECRET_DATA = HASH(QCD_SECRET | SPI-I | SPI-R | IPaddr-T)"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "deployment",
+      "position": "after",
+      "caption": "WHICH ROLE TO IMPLEMENT",
+      "data": {
+        "items": [
+          {
+            "title": "Remote-access client",
+            "text": "Token taker."
+          },
+          {
+            "title": "Remote-access gateway",
+            "text": "Token maker."
+          },
+          {
+            "title": "Inter-domain VPN gateway",
+            "text": "Both roles, since traffic direction is not known in advance."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5996]",
+      "text": "Kaufman, C., Hoffman, P., Nir, Y., and P. Eronen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", RFC 5996, September 2010.",
+      "rfc": 5996
+    },
+    {
+      "number": "[RFC4555]",
+      "text": "Eronen, P., \"IKEv2 Mobility and Multihoming Protocol (MOBIKE)\", RFC 4555, June 2006.",
+      "rfc": 4555
+    },
+    {
+      "number": "[RFC5723]",
+      "text": "Sheffer, Y. and H. Tschofenig, \"Internet Key Exchange Protocol Version 2 (IKEv2) Session Resumption\", RFC 5723, January 2010.",
+      "rfc": 5723
+    },
+    {
+      "number": "[RFC6027]",
+      "text": "Nir, Y., \"IPsec Cluster Problem Statement\", RFC 6027, October 2010.",
+      "rfc": 6027
+    },
+    {
+      "number": "[recovery]",
+      "text": "Detienne, F., Sethi, P., and Y. Nir, \"Safe IKE Recovery\", Work in Progress, July 2009."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

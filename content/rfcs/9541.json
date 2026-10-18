@@ -10,13 +10,170 @@
   "questions": [
     "pbb-evpn c-mac flush",
     "i-sid mac flush evpn",
-    "single-active multihoming convergence"
+    "single-active multihoming convergence",
+    "what is c-mac flush",
+    "what is a b-mac i-sid route",
+    "why does pbb-evpn need i-sid based flush"
+  ],
+  "tags": [
+    "EVPN",
+    "Ethernet",
+    "BGP"
+  ],
+  "subtitle": "Lets PBB-EVPN routers tell each other to forget learned customer MAC addresses for one service instance on one backbone MAC.",
+  "tldr": {
+    "problem": "When an access link fails on a PBB-EVPN router whose attachment circuits have no Ethernet Segment (a zero ESI), the existing flush procedure of RFC 7623 is not triggered, so remote routers keep sending traffic to the old B-MAC until entries age out.",
+    "mechanism": "The failing PE advertises a B-MAC/I-SID route, an EVPN MAC/IP Advertisement route with the I-SID in the Ethernet Tag field, and raises the MAC Mobility sequence number. Receivers flush only the customer MACs tied to that B-MAC and that I-SID.",
+    "outcome": "Convergence is faster and more precise than flushing everything behind a B-MAC, and the scheme coexists with PEs that do not support it.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Ethernet Tag field",
+      "value": "Carries the I-SID"
+    },
+    {
+      "label": "MAC Mobility type",
+      "value": "0x06, sub-type 0x03"
+    },
+    {
+      "label": "MAC address length",
+      "value": "48"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 9541 is a Proposed Standard from March 2024 and has not been obsoleted or updated. It extends the flush procedures of <a href='/7623/'>RFC 7623</a> rather than replacing them.</p>",
+  "glossary": [
+    "bgp",
+    "mpls",
+    "mac-address",
+    "sequence-number",
+    "ethernet",
+    "i-sid",
+    "route-reflector"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem with Non-ES Redundancy",
+      "content": "<p>RFC 7623 combines Provider Backbone Bridging (PBB) with EVPN to deliver E-LAN services over large MPLS networks. It also defines a <strong>C-MAC flush</strong> that speeds up recovery when a Single-Active multihomed Ethernet Segment (ES) fails.</p><p>Some access networks do not ask the provider for multihomed ESs. They just ask for several single-homed ones, which use a null ESI (zero). The CEs then manage redundancy themselves, for example with G.8032 ring protection or an active/standby pseudowire as in <a href='/4762/'>RFC 4762</a>. The PBB-EVPN network no longer sees the redundancy.</p><p>In that case, if an active attachment circuit fails but the PE stays up, neither PE sends a flush. Remote PEs keep pointing at the old PE's B-MAC until the C-MACs age out. Reusing the RFC 7623 flush would instead clear every I-SID on that PE, causing needless flooding of unknown unicast traffic.</p>",
+      "eli5": "<p>If a shop moves to a new street but the signposts still point to the old one, visitors get lost. This document is a quick way to fix just the one signpost that changed, not all of them.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "2",
+      "title": "Solution Requirements",
+      "content": "<p>The RFC lists what the solution has to do:</p><ul><li>It <strong>MUST</strong> prevent packet loss after failures on null-ES attachment circuits when the access side handles redundancy.</li><li>It <strong>MUST</strong> also work with Single-Active non-null ESs and virtual ESs, whatever the B-MAC allocation (dedicated per-ES or shared).</li><li>It <strong>MUST</strong> flush at B-MAC and I-SID granularity when the egress PE fails.</li><li>It <strong>MUST</strong> stay reliable with Route Reflectors, even though BGP flush messages may be aggregated there.</li><li>It <strong>MUST</strong> coexist with RFC 7623 PEs that do not support it.</li><li>It <strong>SHOULD</strong> be switchable per PE and per I-SID.</li></ul>",
+      "eli5": "<p>The fix has to be precise (only the affected service), safe with old equipment, and something an operator can turn on one service at a time.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "3",
+      "title": "The B-MAC/I-SID Route",
+      "content": "<p>No new BGP attributes are needed. The flush notification reuses the EVPN MAC/IP Advertisement route and the MAC Mobility extended community (Type <code>0x06</code>, Sub-Type <code>0x03</code>).</p><p>The route, called the <strong>B-MAC/I-SID route</strong>, carries the B-MAC in the MAC address field and the I-SID in the Ethernet Tag field. The ESI is 0, the MAC address length is 48 and the IP address length is 0. Its route distinguisher and route targets are those of the EVI, though the route MAY use a route target auto-derived from the I-SID instead. The ordinary RFC 7623 route with Ethernet Tag ID zero is called the <strong>B-MAC/0 route</strong>.</p><p>An increase in the sequence number between two updates for the same B-MAC and I-SID is read as a flush request. Because nothing new is used, any Route Reflector accepts and reflects the route as specified in <a href='/7432/'>RFC 7432</a>, and a PE that does not support the feature simply ignores it.</p>",
+      "eli5": "<p>It is a normal address announcement with the service number written on it. A bumped counter says: forget what you knew about this one.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Activation and Flush Generation",
+      "content": "<p>Enabling the feature SHOULD be an administrative choice, and it MAY be configured per I-SID. When enabled, a PE can both generate and process B-MAC/I-SID routes, and it still follows the RFC 7623 flush procedures.</p><p>Each PE keeps advertising its shared B-MAC in a B-MAC/0 route. With the feature active for I-SID1, it also advertises the same B-MAC with I-SID1 in the Ethernet Tag. Receivers MUST use these B-MAC/I-SID routes only for flushing and MUST NOT use them to add or withdraw B-MAC entries in the MAC-VRF. The scheme MAY also be used with dedicated B-MACs.</p><ul><li>An AC going operationally down MUST cause a B-MAC/I-SID update with a higher sequence number. If the whole local I-SID goes down, the PE withdraws the route.</li><li>An AC coming up SHOULD NOT cause an update, unless it activates its I-SID, in which case the PE advertises the route.</li><li>A flush message from the access network, such as G.8032, MAY be propagated by sending an update with a higher sequence number.</li></ul>",
+      "eli5": "<p>Each router announces its address together with the service number. When a link for that service breaks, it bumps the counter so everyone knows to forget old notes.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Receiving a Flush Notification",
+      "content": "<p>A PE that receives a B-MAC/I-SID route with a non-zero I-SID MUST NOT add or remove any B-MAC in the MAC-VRF. The two flush triggers are:</p><ul><li>An update of a previously received route with an incremented sequence number MUST flush all C-MACs associated with that I-SID and that B-MAC. C-MACs with the same I-SID but a different B-MAC MUST NOT be flushed.</li><li>A withdraw of a B-MAC/I-SID route MUST flush all C-MACs associated with that B-MAC and I-SID.</li></ul><p>The RFC 7623 flush for B-MAC/0 routes remains valid, and a PE receiving it MUST still behave as RFC 7623 says.</p><p>The RFC's conclusions say this covers null-ES failures, works with Route Reflectors whatever order notifications arrive in, flushes a minimum number of C-MACs and so reduces unknown unicast flooding.</p>",
+      "eli5": "<p>A router that hears the news erases only the notes for that one service and that one sender, and leaves everything else alone.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security and Resource Cost",
+      "content": "<p>The security considerations of <a href='/7623/'>RFC 7623</a> apply. The extra routes are backwards compatible and should not cause trouble for PEs that do not implement the feature. They may, however, use extra memory and processing on receiving PEs.</p><p>For that reason the RFC says it is RECOMMENDED to activate the feature only when necessary, when multihomed networks or devices are attached to the PBB-EVPN PEs, and not by default. There are no IANA actions.</p>",
+      "eli5": "<p>Extra announcements cost a little effort for every router, so turn the feature on only where you need it.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "MAC MOBILITY EXTENDED COMMUNITY (REUSED, FROM THE RFC)",
+      "data": {
+        "title": "MAC Mobility extended community",
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "Extended community type.",
+            "value": "0x06"
+          },
+          {
+            "key": "sub-type",
+            "name": "Sub-Type",
+            "bits": 8,
+            "desc": "MAC Mobility sub-type.",
+            "value": "0x03"
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 8,
+            "desc": "Flags octet."
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 8,
+            "desc": "Reserved.",
+            "value": "0"
+          },
+          {
+            "key": "seq",
+            "name": "Sequence Number",
+            "bits": 32,
+            "desc": "An increment between updates for the same B-MAC and I-SID signals a C-MAC flush."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7432]",
+      "text": "Sajassi, A., Ed., et al., \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
+      "rfc": 7432
+    },
+    {
+      "number": "[RFC7623]",
+      "text": "Sajassi, A., Ed., et al., \"Provider Backbone Bridging Combined with Ethernet VPN (PBB-EVPN)\", RFC 7623, September 2015.",
+      "rfc": 7623
+    },
+    {
+      "number": "[RFC4762]",
+      "text": "Lasserre, M., Ed. and V. Kompella, Ed., \"Virtual Private LAN Service (VPLS) Using Label Distribution Protocol (LDP) Signaling\", RFC 4762, January 2007.",
+      "rfc": 4762
+    },
+    {
+      "number": "[G.8032]",
+      "text": "ITU-T, \"Ethernet ring protection switching\", ITU-T Recommendation G.8032/Y.1344, March 2020."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

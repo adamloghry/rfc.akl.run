@@ -1,6 +1,6 @@
 {
   "number": 6311,
-  "shortTitle": null,
+  "shortTitle": "IKEv2/IPsec HA",
   "category": "security",
   "categoryReviewed": false,
   "summary": "<p>Defines protocol support so IPsec with IKEv2 can run in high-availability clusters, where several gateways share the work and one can take over if another fails. It builds on an earlier problem statement that listed the issues with IKEv2 and IPsec clustering.</p>",
@@ -10,13 +10,274 @@
   "questions": [
     "ikev2 ipsec high availability",
     "ipsec cluster failover",
-    "how to cluster ipsec gateways"
+    "how to cluster ipsec gateways",
+    "what is ikev2 message id synchronization",
+    "how does ipsec failover work",
+    "what is an ipsec hot standby cluster"
+  ],
+  "tags": [
+    "IPsec",
+    "IKEv2",
+    "High Availability"
+  ],
+  "subtitle": "How a standby VPN gateway takes over mid-session without its IKEv2 and IPsec counters falling out of step with the peer.",
+  "tldr": {
+    "problem": "When the active member of an IPsec hot standby cluster fails, the standby member has stale IKEv2 Message ID values and IPsec replay counters, so the peer drops its traffic and the security associations can get torn down.",
+    "mechanism": "The peer and the cluster announce support during IKE_AUTH. After a failover, the newly active member sends an Informational exchange that agrees new Message IDs and tells the peer to skip IPsec replay counters forward by a delta.",
+    "outcome": "Sessions can survive a failover without being renegotiated, and the peer normally does not notice it. The RFC is a Standards Track document and the extension is optional.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Notification types",
+      "value": "16420 to 16423"
+    },
+    {
+      "label": "Message ID sync exchange",
+      "value": "Sent with Message ID zero"
+    },
+    {
+      "label": "Example replay counter skip",
+      "value": "2**30"
+    },
+    {
+      "label": "Replay delta size",
+      "value": "4 octets, or 8 with ESN"
+    },
+    {
+      "label": "Nonce size",
+      "value": "4 octets"
+    }
+  ],
+  "today": "<p>RFC 6311 is a Proposed Standard, and the unit metadata lists nothing that obsoletes or updates it. It defines the IKEv2 extension for counter synchronization after a hot standby failover, as of its July 2011 publication.</p>",
+  "glossary": [
+    "ike",
+    "ipsec",
+    "security-association",
+    "child-sa",
+    "message-id",
+    "replay-protection",
+    "nonce",
+    "esp",
+    "spi"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why IPsec Clusters Need Help",
+      "content": "<p>Businesses run VPNs on <strong>IKEv2/IPsec HA clusters</strong> to make them highly available, more scalable and failure-resistant. In the common <strong>hot standby cluster</strong>, only one member is active at a time. The active member keeps copying the IKE and IPsec security association (SA) state to a standby member. The goal is to look like one virtual gateway to the peer.</p><p>Copying state after every message is too costly, so it is done periodically. When the active member fails, the standby takes over with slightly old state, while the peer keeps sending requests and packets, which IKEv2 windowing allows. RFC 6311 resolves the main issues listed in the earlier problem statement, <a href='/6027/'>RFC 6027</a>, with the least possible change to the protocol.</p><p>The document defines an IKEv2 extension that solves two main issues: IKEv2 Message ID synchronization and IPsec replay counter synchronization. It also gives implementation advice for other issues.</p>",
+      "eli5": "<p>Two guards share one post, and the second one only gets a note from the first now and then. If the first guard suddenly leaves, the second may be a little out of date and has to catch up fast.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Hot Standby Clusters and Their Terms",
+      "content": "<p>The <strong>active member</strong> forwards packets for the virtual gateway. The <strong>standby member</strong> is the primary backup and becomes active after failover. The <strong>peer</strong> is the IKEv2/IPsec endpoint that talks to the cluster using the cluster's single IP address. Members share state over a synch channel. The Virtual Router Redundancy Protocol (<a href='/5798/'>RFC 5798</a>) is one way to build such a cluster.</p><p>The RFC also names two harder cases. In <strong>multiple failover</strong>, in a cluster of three or more members, failovers happen in quick succession. In <strong>simultaneous failover</strong>, two clusters have an IPsec connection and both fail over at once. Implementations should handle both.</p><p>Two kinds of counter matter. The IKEv2 Message ID counter is mandatory and ensures reliable delivery and protection against replay in IKEv2. The IPsec replay counter is the ESP Sequence Number (or Extended Sequence Number) or the matching field in AH. It is optional and provides IPsec anti-replay.</p>",
+      "eli5": "<p>One guard is on duty and the other waits. Each guard keeps two tally sheets: one for the secret-handshake messages and one for the packages going through the door.</p>"
+    },
+    {
+      "id": "background",
+      "number": "3",
+      "title": "The Counter Synchronization Problem",
+      "content": "<p>IKEv2 messages follow a request-response pattern. A sender retransmits until it gets a response, and it must not exceed the peer's stated window size. Losing even one message leads to repeated retransmissions, and then to teardown of the IKEv2 SA if they stay unacknowledged.</p><p>After a failover, the standby member may not know the last message the old active member acknowledged, and it does not know about unacknowledged requests the old member had sent. If it uses stale Message IDs, it may reject the peer's requests, or reuse an ID so the peer drops its request. The result can be IKEv2 and IPsec SAs torn down just from a transitory mismatch.</p><p>Anti-replay counters have the same flaw. With anti-replay enabled, which is commonly the case, the peer drops packets that reuse a counter value. IPsec lets a sender skip counter values and continue with higher ones, and the solution relies on that.</p>",
+      "eli5": "<p>If the new guard repeats a message number that was already used, the person on the other side says 'I have seen that one' and ignores it. Everyone ends up locked out.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "4",
+      "title": "Negotiating Support",
+      "content": "<p>The two capabilities are negotiated separately, so an implementation may support either or both. The peer and the active member exchange the <code>IKEV2_MESSAGE_ID_SYNC_SUPPORTED</code> and <code>IPSEC_REPLAY_COUNTER_SYNC_SUPPORTED</code> notifications in the <code>IKE_AUTH</code> exchange.</p><p>The responder MUST NOT assert support for a capability unless the initiator did. Only a capability asserted by both parties can be used for the lifetime of the SA. The peer's capabilities are part of the IKEv2 SA state and MUST be shared between the cluster members, so any member that takes over knows what the peer supports.</p><p>If the peer does not support the extension, existing IKEv2 behavior applies, and the IKE and IPsec SAs may or may not survive the failover.</p>",
+      "eli5": "<p>Before the show starts, both sides say whether they know the catch-up trick. They only use it if both said yes.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Message ID and Replay Counter Synchronization",
+      "content": "<p>After failover, the newly active member MAY start a synchronization. It sends an <code>INFORMATIONAL</code> exchange. For Message IDs only, the exchange uses Message ID zero and the sole notification <code>IKEV2_MESSAGE_ID_SYNC</code>. For replay counters only, it is an ordinary Informational exchange with the current Message IDs carrying <code>IPSEC_REPLAY_COUNTER_SYNC</code>. To do both, it sends the zero-Message ID message with both notifications.</p><p><strong>Message IDs.</strong> The request carries a random nonce and two values: M1, the next Message ID the member will send, and P1, the next one it expects from the peer. M1 MUST be larger than any value known to have been used, and it is RECOMMENDED to add at least the IKE sender window size. P1 SHOULD be one more than the last Message ID received from the peer. The peer replies with M2 and P2, the higher of what it received and what it already expects, and returns the nonce unchanged. The peer MUST silently drop a request if M1 is lower than or equal to the highest value it has seen from the cluster. Both messages are sent with Message ID zero.</p><p><strong>Replay counters.</strong> The newly active member MUST increment its own outgoing replay counter. Where an estimate is hard, it can add a very large number, for example <code>2**30</code>, and a rekey SHOULD follow shortly afterwards so the counter never wraps. It then asks the peer to increment the counters for all Child SAs of that IKE SA by a delta. If both notifications are in one message, the peer MUST process the Message ID notification first.</p>",
+      "eli5": "<p>The new guard says 'my next message number is this, and I expect yours to be that.' The other side picks the bigger numbers, and both skip ahead so no number is ever reused.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "6",
+      "title": "The Four Notification Payloads",
+      "content": "<p>The extension adds four IKEv2 Notify Message types. Multi-octet integers are in big endian (network) order. In all four, the <code>Protocol ID</code> MUST be 0 and the <code>SPI Size</code> MUST be 0, because the notification is not tied to one SA.</p><ul><li><code>IKEV2_MESSAGE_ID_SYNC_SUPPORTED</code> (16420) and <code>IPSEC_REPLAY_COUNTER_SYNC_SUPPORTED</code> (16421) carry no data. They announce support in <code>IKE_AUTH</code>.</li><li><code>IKEV2_MESSAGE_ID_SYNC</code> (16422) carries a 4-octet nonce, <code>EXPECTED_SEND_REQ_MESSAGE_ID</code> (4 octets) and <code>EXPECTED_RECV_REQ_MESSAGE_ID</code> (4 octets).</li><li><code>IPSEC_REPLAY_COUNTER_SYNC</code> (16423) carries an incoming IPsec SA delta value. It is 8 octets if the ESN bit is 1 and 4 octets otherwise, so all Child SAs of one IKE SA must either all use ESNs or none. Only the cluster sends it.</li></ul><div class='callout callout-info'><p>Because one delta is applied to every Child SA of the IKE SA, the replay counters of each Child SA are not synchronized one by one.</p></div>",
+      "eli5": "<p>There are four tiny note cards. Two say 'I know this trick', and two say 'here are my numbers' or 'please skip ahead this many.'</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "7",
+      "title": "Triggers, Policy and Cluster Advice",
+      "content": "<p>The standby member can start Message ID synchronization when it receives a packet outside its expected receive window, when it must send its first packet after failover, or proactively once it takes control. Normal rejection of out-of-window messages is unchanged. To limit denial-of-service (DoS) from replayed messages, the peer MUST NOT start counter synchronization for any IKE SA more than once per failover event. With many sessions, a member can synchronize lazily, only when it has to send or expects to receive traffic.</p><p>After sending its receive counter, the member MUST silently drop IKE messages outside its declared window. For IPsec, local policy decides whether to accept traffic outside the replay window until counters are synchronized.</p><p>The RFC also gives advice on the other problem-statement issues. A very large amount of state may call for a dedicated synch interface, or for synchronizing only the existence of some SAs. Peers MUST accept long-term parallel SAs. Cluster members must not generate multiple inbound SAs with the same SPI, and implementations MUST ensure no initial vector is ever repeated with counter-mode ciphers. If inconsistencies leave Child SAs on only one side, tearing down the whole IKE SA is preferred.</p>",
+      "eli5": "<p>The new guard checks in only when someone actually shows up. If something goes wrong, the simplest fix is to start the whole handshake again.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Replay Attacks and Related Specs",
+      "content": "<p>Message ID synchronization messages use Message ID zero, so they could be replayed. The RFC says that, given the protocol's semantics, such replays can only be DoS attacks, and it names two variants. A replayed request is countered by the rule that the cluster's send counter always increases, which the peer enforces by silently dropping contradicting messages. A replayed response is countered by the nonce, which the response must return, and the member MUST NOT process the same response twice.</p><p>The RFC also relates the extension to other work. It is mutually exclusive with IKEv2 session resumption (<a href='/5723/'>RFC 5723</a>) and with the IKEv2 Redirect mechanism (<a href='/5685/'>RFC 5685</a>) after a real failover, and it is unrelated to failure detection (<a href='/6290/'>RFC 6290</a>), since in failover the peer should not notice a failure. IANA assigned the four values 16420 to 16423 as IKEv2 Notify Message types.</p>",
+      "eli5": "<p>Someone could copy an old note and try to confuse the guards. A secret number on each note card means an old copy gets ignored.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "MESSAGE ID AND REPLAY COUNTER SYNC AFTER FAILOVER (RFC 6311)",
+      "data": {
+        "lanes": [
+          {
+            "key": "member",
+            "label": "Newly active member"
+          },
+          {
+            "key": "peer",
+            "label": "Peer"
+          }
+        ],
+        "messages": [
+          {
+            "from": "member",
+            "to": "peer",
+            "label": "N(IKEV2_MESSAGE_ID_SYNC) [+ N(IPSEC_REPLAY_COUNTER_SYNC)]",
+            "color": "blue",
+            "note": "Informational exchange with Message ID zero."
+          },
+          {
+            "from": "peer",
+            "to": "member",
+            "label": "N(IKEV2_MESSAGE_ID_SYNC)",
+            "color": "green",
+            "note": "Higher counter values and the same nonce, also with Message ID zero."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "IKEV2_MESSAGE_ID_SYNC NOTIFICATION LAYOUT (RFC 6311)",
+      "data": {
+        "title": "IKEV2_MESSAGE_ID_SYNC notification",
+        "width": 32,
+        "fields": [
+          {
+            "key": "next-payload",
+            "name": "Next Payload",
+            "bits": 8,
+            "desc": "Generic payload header field."
+          },
+          {
+            "key": "critical",
+            "name": "C and RESERVED",
+            "bits": 8,
+            "desc": "Critical bit and reserved bits."
+          },
+          {
+            "key": "payload-length",
+            "name": "Payload Length",
+            "bits": 16,
+            "desc": "Length of the whole payload including the generic header."
+          },
+          {
+            "key": "protocol-id",
+            "name": "Protocol ID",
+            "bits": 8,
+            "desc": "Set to 0.",
+            "value": "0"
+          },
+          {
+            "key": "spi-size",
+            "name": "SPI Size",
+            "bits": 8,
+            "desc": "Set to 0; no SPI is present.",
+            "value": "0"
+          },
+          {
+            "key": "notify-type",
+            "name": "Notify Message Type",
+            "bits": 16,
+            "desc": "IKEV2_MESSAGE_ID_SYNC.",
+            "value": "16422"
+          },
+          {
+            "key": "nonce",
+            "name": "Nonce Data",
+            "bits": 32,
+            "desc": "Random nonce, identical in request and response."
+          },
+          {
+            "key": "send-id",
+            "name": "EXPECTED_SEND_REQ_MESSAGE_ID",
+            "bits": 32,
+            "desc": "Message ID the sender will use in its next request."
+          },
+          {
+            "key": "recv-id",
+            "name": "EXPECTED_RECV_REQ_MESSAGE_ID",
+            "bits": 32,
+            "desc": "Message ID the sender expects in the next request it receives."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[4]",
+      "text": "Kaufman, C., Hoffman, P., Nir, Y., and P. Eronen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", RFC 5996, September 2010.",
+      "rfc": 5996
+    },
+    {
+      "number": "[6]",
+      "text": "Nir, Y., \"IPsec Cluster Problem Statement\", RFC 6027, October 2010.",
+      "rfc": 6027
+    },
+    {
+      "number": "[5]",
+      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
+      "rfc": 4301
+    },
+    {
+      "number": "[2]",
+      "text": "Kent, S., \"IP Encapsulating Security Payload (ESP)\", RFC 4303, December 2005.",
+      "rfc": 4303
+    },
+    {
+      "number": "[3]",
+      "text": "Kent, S., \"IP Authentication Header\", RFC 4302, December 2005.",
+      "rfc": 4302
+    },
+    {
+      "number": "[7]",
+      "text": "Nadas, S., Ed., \"Virtual Router Redundancy Protocol (VRRP) Version 3 for IPv4 and IPv6\", RFC 5798, March 2010.",
+      "rfc": 5798
+    },
+    {
+      "number": "[8]",
+      "text": "Nir, Y., Ed., Wierbowski, D., Detienne, F., and P. Sethi, \"A Quick Crash Detection Method for the Internet Key Exchange Protocol (IKE)\", RFC 6290, June 2011.",
+      "rfc": 6290
+    },
+    {
+      "number": "[12]",
+      "text": "Sheffer, Y. and H. Tschofenig, \"Internet Key Exchange Protocol Version 2 (IKEv2) Session Resumption\", RFC 5723, January 2010.",
+      "rfc": 5723
+    },
+    {
+      "number": "[13]",
+      "text": "Devarapalli, V. and K. Weniger, \"Redirect Mechanism for the Internet Key Exchange Protocol Version 2 (IKEv2)\", RFC 5685, November 2009.",
+      "rfc": 5685
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

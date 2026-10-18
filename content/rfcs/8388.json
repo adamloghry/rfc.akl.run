@@ -9,13 +9,220 @@
   },
   "questions": [
     "how is evpn used in practice",
-    "evpn deployment example"
+    "evpn deployment example",
+    "what is evpn",
+    "how is evpn deployed",
+    "mac-based vs mpls-based evpn forwarding",
+    "what is proxy arp in evpn"
+  ],
+  "tags": [
+    "VPN",
+    "Ethernet",
+    "Deployment"
+  ],
+  "subtitle": "A worked example of Ethernet VPN across three provider routers, showing what to configure and what each choice costs.",
+  "tldr": {
+    "problem": "RFC 7432 defines BGP MPLS-based Ethernet VPN (EVPN), but operators need a concrete picture of how its options play out in a common deployment.",
+    "mechanism": "The RFC walks one scenario of three provider edge routers and three customer devices through provisioning, route exchange and packet forwarding for three service interface types and two egress forwarding models.",
+    "outcome": "It gives deployers a trade-off guide: what is auto-derived, how many routes and labels each choice needs, and how ARP and unknown unicast flooding can be cut back.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Example topology",
+      "value": "3 PEs and 3 CEs"
+    },
+    {
+      "label": "Multihomed device",
+      "value": "CE2, to PE1 and PE2"
+    },
+    {
+      "label": "Service interface types",
+      "value": "VLAN-based, VLAN bundle, VLAN-aware bundling"
+    },
+    {
+      "label": "Egress models",
+      "value": "MAC-based and MPLS-based"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 8388 is an Informational document published in May 2018. It has not been obsoleted or updated, and it works as a companion guide to <a href='/7432/'>RFC 7432</a>, the EVPN specification.</p>",
+  "glossary": [
+    "evpn",
+    "mac-vrf",
+    "bgp",
+    "mpls",
+    "multihoming",
+    "mac-address",
+    "arp",
+    "gratuitous-arp",
+    "label-stack",
+    "split-horizon",
+    "ethernet"
+  ],
+  "sections": [
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "The Example Scenario and Why EVPN",
+      "content": "<p>RFC 8388 complements <a href='/7432/'>RFC 7432</a> by discussing how <strong>EVPN</strong> is applied in a simple and fairly common deployment. The scenario has three provider edge routers (PE1, PE2, PE3) and three customer edge devices (CE1, CE2, CE3) across an IP/MPLS network. Broadcast domains must be extended among the three CEs.</p><p>The service requirements are these. CE2 must be multihomed to PE1 and PE2, for redundancy and for extra bandwidth. Fast convergence is needed: if the CE2 to PE1 link fails, PE3 must be able to send traffic to PE2 immediately, however many services and MAC addresses are affected. The service definition must also be flexible about how customer VLAN IDs (CE-VIDs) map to broadcast domains. Finally, broadcast, unknown unicast and multicast (BUM) traffic must use ingress replication or P2MP MPLS LSPs on a per-service basis.</p><p>Three services illustrate the interface types: <code>EVI100</code> is VLAN-based (1:1 VLAN to EVI), <code>EVI200</code> is a VLAN bundle (N:1, no translation) and <code>EVI300</code> is VLAN-aware bundling (N:1, one broadcast domain per CE-VID, translation allowed).</p><p>The RFC argues that VPLS solutions based on <a href='/4761/'>RFC 4761</a>, <a href='/4762/'>RFC 4762</a> and <a href='/6074/'>RFC 6074</a> cannot meet these requirements. Its reasons: VPLS multihoming does not give flow-based load balancing, it cannot converge independently of the CE-VIDs, and it does not support the VLAN-aware bundling that EVI300 needs.</p>",
+      "eli5": "<p>Three offices want to share one big virtual room, and one office wants two doors for safety and speed. The older way of building this could not do everything asked, so the new way is picked.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4",
+      "title": "Provisioning the Network",
+      "content": "<p>Some parameters are not tied to any one service and are needed only on PE1 and PE2, the routers serving the multihomed CE2. The <strong>Ethernet Segment Identifier</strong> (ESI) names the link group to CE2. Single-homed CEs such as CE1 and CE3 need no ESI, and it is coded as zero in the BGP NLRI. Because CE2 uses a LAG, the ESI can be auto-derived from LACP information, but since it must be unique across all PEs this is recommended only when the operator manages the CEs. Otherwise the ESI should be manually provisioned (Type 0). The ES-Import route target is always auto-derived from the 6-byte MAC address portion of the ESI, and the multihoming type is set to all-active.</p><p>Per-service parameters, set on all three PEs, are the EVI identifier, a route distinguisher (RD), one or more route targets (RT) and the binding of CE-VIDs and ports to the EVI.</p><p>What can be auto-derived depends on the service interface. For a VLAN-based EVI where every CE uses the same VID (the 'Unique VLAN' case), the RD can be built as <code>[PE-IP]:[zero-padded-VID]</code> and the RT as <code>[AS]:[zero-padded-VID]</code>. If the VIDs differ, or for VLAN bundle and VLAN-aware bundling services, RDs and RTs must be provisioned by hand. A VLAN bundle (example VIDs 200-250) cannot translate CE-VIDs. With VLAN-aware bundling, bindings need not match across PEs, for example 300-310 on PE1 and PE2 and 321-330 on PE3, but each CE-VID to Ethernet Tag association must be provisioned.</p>",
+      "eli5": "<p>Setting up is like labelling lockers. Some labels can be made up automatically from simple rules, but when the offices use different numbers, a person has to write the labels by hand.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "Routes and Packet Walk-Through",
+      "content": "<p>Of the route types in <a href='/7432/'>RFC 7432</a>, PE1 and PE2 export and import all five kinds used here: Ethernet Segment, Ethernet A-D per ESI, Ethernet A-D per EVI, MAC and Inclusive Multicast. PE3 exports only MAC and Inclusive Multicast routes, but must be able to import A-D routes too. Without that, fast convergence and aliasing would not work.</p><p>At start-up, PE1 and PE2 advertise an Ethernet Segment route for the CE2 segment and run Designated Forwarder (DF) election. PE3 discards the route. When services come up, each PE sends Inclusive Multicast routes to build flooding trees, and PE1 and PE2 send A-D routes per ESI (used for fast convergence and split-horizon) and per EVI (carrying the label PE3 uses for aliasing).</p><p>The number of routes depends on the service type. With 4k VLAN-based EVIs, each PE sends up to 4k Inclusive Multicast routes. A VLAN bundle needs just one route of each kind. VLAN-aware bundling needs 4k Inclusive Multicast routes per PE, and 4k A-D per EVI routes if CE-VID translation is needed.</p><p>In a packet walk-through, a PE learns a source MAC and IP from an ARP request, then triggers a BGP MAC Advertisement route. BUM frames follow the Inclusive Multicast tree, and a non-DF PE adds an ESI label so the frame is not sent back to the segment it came from. Unicast frames use the label stack learned from MAC or A-D routes, and PE3 may hash traffic toward either PE1 or PE2.</p><p>Two egress models are covered. In the <strong>MAC-based</strong> model, the egress PE looks up the destination MAC after popping the label. In the <strong>MPLS-based</strong> model, a different label is advertised per CE next hop (or per MAC), so no MAC lookup is needed at egress. The two models interoperate, and each PE chooses its own.</p>",
+      "eli5": "<p>When a new device says hello, its local router writes it into a shared address book and tells the other routers. Messages to everyone get copied along a route, and a tag makes sure they do not loop back to where they started.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "8",
+      "title": "MAC-Based Versus MPLS-Based Egress",
+      "content": "<p>The RFC compares the two egress models by resource cost. The MAC-based model saves a significant amount of MPLS labels, because all MACs and A-D routes for the same EVI can signal the same label. The price is a MAC lookup at the egress PE.</p><p>The MPLS-based model avoids that MAC lookup and can save forwarding states at the egress PE if labels are allocated per next-hop CE rather than per MAC. The price is a different label per next-hop CE per MAC-VRF.</p><p>The egress model is a local implementation matter. In the example, PE1, PE2 and PE3 could each use either one with no dependencies between them.</p>",
+      "eli5": "<p>One way keeps a single big sign and checks a list when mail arrives. The other uses many small signs so no list check is needed, but you need more signs.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "9",
+      "title": "Reducing Flooding and Optimizing Routing",
+      "content": "<p>Because remote MAC addresses are learned through BGP, EVPN can trim unnecessary traffic. Local learning from the CE side can use the data plane, while remote learning uses BGP only.</p><p>When a MAC/IP Advertisement route carries an IP address, it correlates with that MAC, so a PE can build a <strong>proxy ARP/ND</strong> table and answer requests on behalf of remote hosts instead of flooding them. <strong>Unknown unicast flooding suppression</strong> is possible too, but the RFC says it must not be used unless MACs are learned through the control or management plane across the whole EVI, or all devices announce themselves when they come up (for example with gratuitous ARP). If a destination is not in the table, the frame is dropped at the ingress PE.</p><p>For inter-subnet traffic, an Integrated Routing and Bridging (IRB) interface lets the ingress PE route between EVIs locally. The PE rewrites the source MAC to the IRB MAC and the destination MAC to the remote host's MAC learned over EVPN. That avoids hairpinning and removes the need for IP-VPN processing at the egress PE.</p>",
+      "eli5": "<p>Instead of shouting a question to the whole town, a router keeps a phone book and answers for others. It can also skip yelling to find someone who is not in the book at all.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>The RFC adds no security mechanism of its own and points to the Security Considerations section of <a href='/7432/'>RFC 7432</a>. It also notes that the SIDR protections for route origin and route advertisement security cover IP address advertisements and ASN to prefix bindings. This document and RFC 7432 use BGP to carry other information, such as MAC addresses, so those protections do not apply here.</p><p>There are no IANA actions.</p>",
+      "eli5": "<p>This guide does not add new locks. It says to use the locks already described in the main rulebook, and the lock that protects normal addresses does not cover these new kinds of addresses.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "requirements",
+      "position": "after",
+      "caption": "THE THREE EXAMPLE SERVICES",
+      "data": {
+        "columns": [
+          "Service",
+          "Interface type",
+          "VLAN mapping",
+          "CE-VID translation"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "EVI100",
+              "VLAN-based",
+              "1:1 VLAN to EVI",
+              "Yes, at egress PEs if VIDs differ"
+            ]
+          },
+          {
+            "cells": [
+              "EVI200",
+              "VLAN bundle",
+              "N:1, single broadcast domain",
+              "Not supported"
+            ]
+          },
+          {
+            "cells": [
+              "EVI300",
+              "VLAN-aware bundling",
+              "N:1, one broadcast domain per CE-VID",
+              "Supported"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "discussion",
+      "position": "after",
+      "caption": "RESOURCE COMPARISON (TABLE 2 OF THE RFC)",
+      "data": {
+        "columns": [
+          "Resource",
+          "MAC-based model",
+          "MPLS-based model"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "MPLS labels consumed",
+              "1 per MAC-VRF",
+              "1 per CE/EVI"
+            ]
+          },
+          {
+            "cells": [
+              "Egress PE forwarding states",
+              "1 per MAC",
+              "1 per next hop"
+            ]
+          },
+          {
+            "cells": [
+              "Egress PE lookups",
+              "2 (MPLS + MAC)",
+              "1 (MPLS)"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7209]",
+      "text": "Sajassi, A., et al., \"Requirements for Ethernet VPN (EVPN)\", RFC 7209, May 2014.",
+      "rfc": 7209
+    },
+    {
+      "number": "[RFC7432]",
+      "text": "Sajassi, A., Ed., et al., \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
+      "rfc": 7432
+    },
+    {
+      "number": "[RFC4761]",
+      "text": "Kompella, K., Ed. and Y. Rekhter, Ed., \"Virtual Private LAN Service (VPLS) Using BGP for Auto-Discovery and Signaling\", RFC 4761, January 2007.",
+      "rfc": 4761
+    },
+    {
+      "number": "[RFC4762]",
+      "text": "Lasserre, M., Ed. and V. Kompella, Ed., \"Virtual Private LAN Service (VPLS) Using Label Distribution Protocol (LDP) Signaling\", RFC 4762, January 2007.",
+      "rfc": 4762
+    },
+    {
+      "number": "[RFC6074]",
+      "text": "Rosen, E., et al., \"Provisioning, Auto-Discovery, and Signaling in Layer 2 Virtual Private Networks (L2VPNs)\", RFC 6074, January 2011.",
+      "rfc": 6074
+    },
+    {
+      "number": "[EVPN-INTERSUBNET]",
+      "text": "Sajassi, A., et al., \"Integrated Routing and Bridging in EVPN\", Work in Progress, draft-ietf-bess-evpn-inter-subnet-forwarding-03, February 2017."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

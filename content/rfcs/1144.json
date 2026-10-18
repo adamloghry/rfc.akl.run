@@ -9,13 +9,223 @@
   },
   "questions": [
     "tcp ip header compression",
-    "van jacobson header compression"
+    "van jacobson header compression",
+    "what is van jacobson header compression",
+    "how does tcp ip header compression work",
+    "how small is a compressed tcp header",
+    "how does header compression recover from errors"
+  ],
+  "tags": [
+    "Compression",
+    "Serial Links",
+    "TCP"
+  ],
+  "subtitle": "How a 40-byte TCP/IP header shrinks to about 3 bytes on a slow dial-up serial line, by sending only what changed.",
+  "tldr": {
+    "problem": "On a 300 to 19,200 bps serial line, the 40 bytes of TCP/IP header on every packet make typing feel sluggish and waste most of the line's capacity.",
+    "mechanism": "Both ends of each link remember the last header seen on every active TCP connection. The sender transmits only a change mask, a connection number, the TCP checksum and the small differences in the fields that changed.",
+    "outcome": "The average compressed header is 3 bytes. Errors are caught by link-level framing plus the untouched TCP checksum, and TCP's own retransmissions trigger the resynchronisation.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Uncompressed header",
+      "value": "40 bytes (20 IP + 20 TCP)"
+    },
+    {
+      "label": "Average compressed header",
+      "value": "3 bytes"
+    },
+    {
+      "label": "Line speeds targeted",
+      "value": "300 to 19,200 bps"
+    },
+    {
+      "label": "Default state slots",
+      "value": "16 (2KB of memory)"
+    },
+    {
+      "label": "Maximum connections",
+      "value": "256"
+    },
+    {
+      "label": "Design goal",
+      "value": "5-byte header"
+    }
+  ],
+  "today": "<p>RFC 1144 is a Proposed Standard, and the metadata for this RFC lists no RFC that obsoletes or updates it. The memo itself says security considerations are not addressed.</p>",
+  "glossary": [
+    "tcp",
+    "ip",
+    "mtu",
+    "internet-checksum",
+    "fate-sharing",
+    "ppp",
+    "sequence-number",
+    "lossless-compression",
+    "header-compression",
+    "delta-encoding"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction",
+      "content": "<p>RFC 1144 describes a method, already in use when it was written, for improving <strong>TCP/IP</strong> performance over low-speed serial links running at 300 to 19,200 bps. It is a proposed elective protocol: the memo asks for discussion and suggestions for improvement. It covers the motivation, the implementation and the performance, and includes C code for a sample implementation.</p><p>The compression is specific to TCP/IP datagrams. The author looked at UDP/IP and found those datagrams too infrequent to be worth the bother. He also tried compressing the IP and TCP parts separately and rejected it, because it raised the average compressed header size by 50% and doubled the code size.</p><p>The scheme is similar in spirit to Thinwire-II, but the average compressed header is 3 bytes instead of 13. The Unix implementation is 250 lines of C.</p>",
+      "eli5": "<p>Slow phone lines get clogged by the labels that go on every packet. This memo shows a way to write the label much shorter, and only for TCP traffic.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "2",
+      "title": "The Problem with Slow Links",
+      "content": "<p>The goal is good interactive response. People perceive echo of a typed character as bad when it takes longer than 100 to 200 ms. One typed character produces a 41 byte TCP/IP packet and a 41 byte echo, and 82 bytes in 200 ms needs a line of at least 4000 bps.</p><p>Large packets would improve efficiency, but a bulk-data packet of 500 to 1000 bytes makes a telnet packet wait behind it. At 9600 bps, a 1024 byte MTU means an average wait of 500 ms. Modems that shift bandwidth to the busy direction also get confused when headers inflate keystroke traffic by a factor of forty.</p><p>The design goal that follows is a header of about five bytes, so that typing and ack traffic stays under 300 bps and packets of 100 to 200 bytes can give the user 95 to 98% of the line for data.</p><p>A second goal is that compression may rely only on state both ends of a single link are guaranteed to share. Routing may send packets of one conversation over different paths, so the scheme treats each physical link as two independent simplex links. This follows Dave Clark's principle of <strong>fate sharing</strong>: the two ends can disagree only if the link is broken.</p>",
+      "eli5": "<p>If every tiny letter you send needs a huge envelope, a slow mail truck spends all its time carrying envelopes. The goal is a tiny envelope so typing feels instant.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "3",
+      "title": "The Basic Idea",
+      "content": "<p>A minimum TCP/IP header is 40 bytes: 20 of IP and 20 of TCP. About half of those fields stay constant for the life of a connection. If both ends remember the last header of each active connection, the sender can send a connection identifier of 8 bits or fewer plus only the 20 bytes that change.</p><p>More can be saved. The total length is redundant because link framing already tells the receiver the length, and the IP header checksum can be regenerated locally. That leaves 16 bytes of changing fields, and a bitmask can say which of them actually changed. Finally, the fields change in predictable ways: the packet ID usually grows by one, and the sequence number grows by the amount of data sent. Sending the <strong>differences</strong> rather than the values brings headers down to the five-byte target, and two special cases bring the two most common kinds of traffic (typing and bulk transfer) to three bytes.</p><p>The TCP checksum is passed through unmodified, so the end-to-end integrity check stays valid.</p>",
+      "eli5": "<p>If you mail a friend the same form every day, you do not rewrite the whole form. You send a note that says only which boxes changed.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "4",
+      "title": "The Compressed Packet",
+      "content": "<p>A compressed packet starts with a <strong>change mask</strong> saying which fields are present. Next come an optional connection number, the unmodified TCP checksum, and then, for each bit set in the mask, the amount that field changed. The mask bits are <code>C</code> (connection number present), <code>I</code> (packet ID change), <code>P</code> (a copy of the TCP PUSH bit), and <code>S</code>, <code>A</code>, <code>W</code>, <code>U</code> for sequence number, ack, window and urgent pointer.</p><p>Numbers use a variable-length encoding. A change of 1 through 255 takes one byte. A zero byte signals an extension: the next two bytes hold a 16-bit value. For example, 15 is <code>0f</code>, 255 is <code>ff</code>, and 65534 is <code>00 ff fe</code>. A change over 16 bits forces an uncompressed packet. The packet ID is special: when the <code>I</code> bit is clear, the assumed change is one, not zero.</p><p>Certain unlikely combinations of the S, A, W and U bits signal two special cases. <code>S W U</code> means sequence number and ack both advanced by the amount of data in the last packet (echoed terminal traffic). <code>S A W U</code> means only the sequence number advanced by that amount (one-way data transfer). The connection number is elided when it is the same as the previous packet, so a compressed echo of typing looks like <code>0B c c d</code>: the mask, the two checksum bytes and the typed character.</p>",
+      "eli5": "<p>The packet starts with a row of on/off switches. Each switch says whether a certain piece of the label changed. Small changes are written in one byte, like a tiny sticky note.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "5",
+      "title": "Compressor and Decompressor",
+      "content": "<p>The compressor turns every outgoing IP packet into one of three types. <code>TYPE_IP</code> is sent unchanged. <code>UNCOMPRESSED_TCP</code> is the original packet with the IP protocol field replaced by a connection number; it also loads the saved-header slot, so it \"seeds\" the receiver. <code>COMPRESSED_TCP</code> replaces the IP and TCP headers with the compressed header.</p><p>A packet is sent as plain <code>TYPE_IP</code> if it is not TCP, is an IP fragment, has SYN, FIN or RST set, or has ACK clear. If no saved header matches the addresses and ports, the least recently used slot is reclaimed and an <code>UNCOMPRESSED_TCP</code> packet is sent. An uncompressed packet is also sent if an unchanging field (such as time-to-live or TCP options) differs, if the ack or sequence number goes backward or jumps more than 2^16 - 1, or if a packet looks like a retransmission or duplicate ack.</p><p>The decompressor is simpler because the compressor has already made every decision. For each compressed packet it finds the saved header, applies the changes, recomputes the IP total length and header checksum, and emits the rebuilt datagram. Communication is simplex: nothing flows back from decompressor to compressor.</p>",
+      "eli5": "<p>The sender has three kinds of envelope: a normal one, a full one that also teaches the receiver the label, and a tiny one that says only what changed. The receiver keeps a notebook of the last label from each friend.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "Detecting and Recovering from Errors",
+      "content": "<p>Compression removes almost all header redundancy, so a decompressor would happily turn line noise into a valid-looking packet. The RFC therefore requires error detection at the framing level, and recommends the CCITT CRC used in the PPP proposal, <a href='/1134/'>RFC 1134</a>. The framer must tell the decompressor when a packet had errors, and the decompressor always discards such packets.</p><p>Discarding creates a second problem: after a lost packet, later sequence numbers are rebuilt too low. The TCP checksum catches that, because it is a sum that includes the sequence numbers. To stop a compressed packet from being applied to the wrong conversation, after an error the receiver discards packets until one arrives with an explicit connection number (<code>C</code> bit set) or an uncompressed packet.</p><p>Recovery uses TCP itself instead of a request channel. A confused decompressor makes the receiving TCP drop packets, the sending TCP retransmits, and the compressor notices the retransmission (a negative or zero sequence number change, or a dataless duplicate ack) and sends an <code>UNCOMPRESSED_TCP</code> packet. That resynchronises the saved state.</p>",
+      "eli5": "<p>If a note gets smudged, the reader might fill in the wrong blanks. So the sender keeps a safe check number, and when anything looks wrong it re-sends the whole label once to get back on the same page.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "7",
+      "title": "Configuration and Tuning",
+      "content": "<p>Two settings matter: whether compression is on for a line, and how many state slots to reserve. Each slot must hold a header up to 128 bytes, so 16 slots take 2KB. The author saw eight slots thrash when many windows or three or more machines shared a link, and never saw sixteen thrash. The rules are: provide sixteen slots (zero through fifteen) when the framing cannot negotiate, allow any agreed number from 1 to 256 when it can, and assume sixteen until negotiated. A compressor must never use a connection number the decompressor will drop.</p><p>Compression should be switchable off, so it can interoperate with existing SLIP links that cannot negotiate. With PPP, compression defaults to off until negotiated on.</p><p>A small MTU does not hurt throughput much. For a 9600 bps line with header compression, raising the MTU to 576 increases average delay by 188% while throughput only rises from 96 to 99%. The RFC suggests a packet time of about 200 ms, which for a typical async line is 0.02 times the line speed in bits per second.</p>",
+      "eli5": "<p>The notebook has a fixed number of pages, one per friend. Too few pages and you keep erasing and rewriting; sixteen was enough in the author's tests.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "8",
+      "title": "Measurements and Compatibility",
+      "content": "<p>The author tested whether ordinary data compression makes header compression unnecessary. Lempel-Ziv on a 446-packet telnet trace cut the average header from 40 to 16 bytes (ratio 2.6), while header compression gave 3 bytes (ratio 13.3). For file transfers, compressing the data before TCP encapsulation was slightly better than compressing in the modem, and the footnote answers say header compression does not interact with data compression.</p><p>The code aimed to run at ISDN speed (64Kbps), so the target was 120 microseconds per packet. Most machines in Table 3 met it; the Vax machines, at 430 and 800 microseconds to compress, did not. The author blames byte order and the compiler.</p><p>Appendix B explains how to run the scheme over old SLIP, which has no type byte or option exchange. A server can start with compression allowed but off, and turn it on when an <code>UNCOMPRESSED_TCP</code> packet arrives from the client. The security section says only that security considerations are not addressed in the memo.</p>",
+      "eli5": "<p>The author raced the trick on lots of old computers and found it fast enough on most. He also showed a neat way to let old and new phone-line software talk without arguing.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "THE THREE PACKET TYPES (RFC 1144)",
+      "data": {
+        "items": [
+          {
+            "code": "TYPE_IP",
+            "label": "Plain IP",
+            "desc": "Unmodified copy of the input packet; does not change compressor state."
+          },
+          {
+            "code": "UNCOMPRESSED_TCP",
+            "label": "Seed or resync",
+            "desc": "Original packet with the IP protocol field replaced by a connection number; loads the saved-header slot.",
+            "highlight": true
+          },
+          {
+            "code": "COMPRESSED_TCP",
+            "label": "Compressed",
+            "desc": "IP and TCP headers replaced by a change mask, optional connection number, TCP checksum and field differences."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "TABLE 1, ASCII TEXT FILE COMPRESSION RATIOS (RFC 1144)",
+      "data": {
+        "columns": [
+          "Case",
+          "No data compress.",
+          "L-Z on data",
+          "L-Z on wire",
+          "L-Z on both"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Raw data",
+              "1.00",
+              "2.44",
+              "-",
+              "-"
+            ]
+          },
+          {
+            "cells": [
+              "+ TCP encapsulation",
+              "0.83",
+              "2.03",
+              "1.97",
+              "1.58"
+            ]
+          },
+          {
+            "cells": [
+              "With header compression",
+              "0.98",
+              "2.39",
+              "2.26",
+              "1.66"
+            ],
+            "self": true
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[5]",
+      "text": "Farber, D. J., Delp, G. S., and Conte, T. M., A Thinwire Protocol for connecting personal computers to the Internet, RFC 914, September 1984.",
+      "rfc": 914
+    },
+    {
+      "number": "[8]",
+      "text": "Nagle, J., Congestion Control in IP/TCP Internetworks, RFC 896, January 1984.",
+      "rfc": 896
+    },
+    {
+      "number": "[9]",
+      "text": "Perkins, D., Point-to-Point Protocol: A proposal for multi-protocol transmission of datagrams over point-to-point links, RFC 1134, November 1989.",
+      "rfc": 1134
+    },
+    {
+      "number": "[10]",
+      "text": "Postel, J., Ed., Internet Protocol Specification, RFC 791, September 1981.",
+      "rfc": 791
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

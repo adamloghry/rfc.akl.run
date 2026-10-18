@@ -9,13 +9,231 @@
   },
   "questions": [
     "acme onion certificate",
-    "how to get a tls certificate for a tor hidden service"
+    "how to get a tls certificate for a tor hidden service",
+    "what is acme onion-csr-01",
+    "how to get a certificate for a .onion address",
+    "can acme dns-01 validate onion domains",
+    "what is caa for tor hidden services"
+  ],
+  "tags": [
+    "ACME",
+    "Certificates",
+    "Tor"
+  ],
+  "subtitle": "How ACME can issue TLS certificates to Tor .onion services, which are not in the DNS.",
+  "tldr": {
+    "problem": "ACME proves control of a DNS name, but .onion names are not part of the DNS, so the usual proofs do not work for them.",
+    "mechanism": "RFC 9799 keeps the dns identifier type, allows http-01 and tls-alpn-01 over Tor, adds a new onion-csr-01 challenge using a CSR signed by the onion key, and adds a CAA-style mechanism inside Tor service descriptors.",
+    "outcome": "Operators of onion services can get certificates automatically, including wildcard certificates, with defined privacy and security rules for the CA and client.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New challenge",
+      "value": "onion-csr-01"
+    },
+    {
+      "label": "Nonce entropy",
+      "value": "At least 64 bits"
+    },
+    {
+      "label": "Nonce lifetime",
+      "value": "Not accepted if generated more than 30 days earlier"
+    },
+    {
+      "label": "Challenge expiry",
+      "value": "At least 30 minutes RECOMMENDED"
+    },
+    {
+      "label": "In-band CAA expiry",
+      "value": "SHOULD NOT be more than 8 hours ahead"
+    },
+    {
+      "label": "Onion v2 addresses",
+      "value": "MUST NOT be used"
+    }
+  ],
+  "today": "<p>RFC 9799 is a Proposed Standard published in June 2025, and the metadata lists no RFC that obsoletes or updates it. It builds on ACME as defined in <a href='/8555/'>RFC 8555</a>.</p>",
+  "glossary": [
+    "acme-challenge",
+    "certificate-authority",
+    "csr",
+    "caa-record",
+    "wildcard-certificate",
+    "nonce",
+    "base64url",
+    "subject-alternative-name",
+    "domain-name-space",
+    "certificate",
+    "man-in-the-middle"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Certificates for Onion Services",
+      "content": "<p>The Tor network can host onion services that are reachable only through Tor. They are identified by the <code>.onion</code> Special-Use Domain Name (<a href='/7686/'>RFC 7686</a>) and do not form part of the DNS. ACME (<a href='/8555/'>RFC 8555</a>) defines challenges for proving control of DNS identifiers, and a <code>.onion</code> name needs special treatment.</p><p>RFC 9799 therefore specifies challenges suited to <code>.onion</code> names, drawn from the methods the CA/Browser Forum Baseline Requirements accept, and an alternative to the DNS CAA record (<a href='/8659/'>RFC 8659</a>) for these names.</p>",
+      "eli5": "<p>Tor sites have names that are not in the internet's phone book. This document teaches the certificate robot how to check them anyway.</p>"
+    },
+    {
+      "id": "naming",
+      "number": "2",
+      "title": "Identifiers",
+      "content": "<p>The existing <code>dns</code> identifier type <strong>MUST</strong> be used when requesting a certificate for a <code>.onion</code> name. The value is the textual form defined in the Tor specifications, and it MAY include subdomain labels. Version 2 onion addresses MUST NOT be used because they are now considered insecure.</p><p>Appendix A explains why no new identifier type was defined. A web server behind a Tor-terminating proxy simply receives a TCP connection, so existing ACME tools such as Certbot working with NGINX can be unaware that a <code>.onion</code> name is involved. Section 8.2 argues there is little mis-issuance risk, because a CA unaware of this document could not resolve the name in the DNS, so its http-01, tls-alpn-01 and dns-01 attempts would fail.</p>",
+      "eli5": "<p>The new kind of name is still written in the usual slot on the form, so tools that do not know about Tor will simply fail instead of doing something wrong.</p>"
+    },
+    {
+      "id": "authentication",
+      "number": "3",
+      "title": "Validation Challenges",
+      "content": "<p>The <code>dns-01</code> challenge <strong>MUST NOT</strong> be used, since these names are not in the DNS. The <code>http-01</code> and <code>tls-alpn-01</code> challenges MAY be used with the modifications in this document. For http-01 the ACME server SHOULD follow redirects, including to services that are not <code>.onion</code>.</p><p>Those two methods cannot issue wildcard certificates, so the RFC defines <strong><code>onion-csr-01</code></strong>. Its challenge object has a <code>type</code>, a Base64 <code>nonce</code> with at least 64 bits of entropy, and an optional <code>authKey</code>. The client builds a PKCS#10 CSR (<a href='/2986/'>RFC 2986</a>) signed with the private key of the onion name. It must carry two attributes: <code>caSigningNonce</code>, the server's nonce as raw bytes, and <code>applicantSigningNonce</code>, a client nonce with at least 64 bits of entropy. The CSR's public key must be the onion name's key and must not be the key in the order's finalizing CSR. The client sends it in a <code>csr</code> field, base64url-encoded DER.</p><p>The server checks that the CSR is well formed, that its key matches the onion name, that the signature verifies, that the CA nonce matches, and that the applicant nonce is present with enough entropy. A response using a nonce generated more than 30 days earlier MUST NOT be accepted. The challenge MUST NOT be used for special-use names other than <code>.onion</code>.</p>",
+      "eli5": "<p>To prove a Tor name is yours, you sign a note with the secret key that the name is made from, and include a random number the certificate office gave you.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Client Authentication and ACME over Tor",
+      "content": "<p>Some hidden services encrypt their descriptor to the keys of authorized clients, so a CA cannot reach them. To fix this, the ACME server advertises an Ed25519 public key in the challenge's <code>authKey</code> field (encoded per <a href='/8037/'>RFC 8037</a>). The server MUST NOT use the same key for multiple hidden services, though it MAY reuse a key to re-validate the same service.</p><p>There is no way to tell the CA that authentication is needed. The server MUST try to compute its CLIENT-ID, and if no matching <code>auth-client</code> line exists in the descriptor, it assumes none is required. If the key is new, the service must republish its descriptor and wait for it to propagate, which should take no more than a few minutes. Servers MUST NOT expire challenges before a reasonable time and it is RECOMMENDED they allow at least 30 minutes.</p><p>A CA offering certificates for onion names SHOULD make its ACME server available as a hidden service, and ACME clients SHOULD support connecting to ACME servers over Tor.</p>",
+      "eli5": "<p>Some Tor sites only open the door for guests on a list. The certificate office hands over its own guest key so it can be put on that list before it visits.</p>"
+    },
+    {
+      "id": "extensibility",
+      "number": "5",
+      "title": "CAA for Onion Services",
+      "content": "<p>Because <code>.onion</code> names are not in the DNS, the RFC adds a <code>caa</code> line to the Second Layer Hidden Service Descriptor, written as <code>caa flags tag value</code>, with the same contents as in <a href='/8659/'>RFC 8659</a>. CAs treat it as if it were in the DNS for that name. There is no tree to search upward: all subdomains under a <code>.onion</code> name share its record set, and implementors MUST NOT look at the <code>onion</code> TLD.</p><p>If client authentication is on, the server cannot read the second layer until its key is added, so it MUST wait until the client responds to an authorization before checking CAA. A new <code>caa-critical</code> line (at most once) in the First Layer Descriptor signals that CAA records exist; a server that sees it MUST NOT issue until it can decrypt and parse them.</p><p>A server may also be unwilling to fetch descriptors over Tor, so an in-band option exists. The client can include an <code>onionCAA</code> object in the finalize request with a <code>caa</code> string (or null), an <code>expiry</code> Unix timestamp (SHOULD NOT be more than 8 hours ahead) and an Ed25519 <code>signature</code> over <code>\"onion-caa|\" || expiry || \"|\" || caa</code>. If the server needs this and the client omits it, the server responds with an <code>onionCAARequired</code> error, and the directory <code>meta</code> object can advertise <code>inBandOnionCAARequired</code>.</p>",
+      "eli5": "<p>A site can leave a note saying which certificate offices it trusts. Since there is no internet phone book for Tor names, the note goes inside the site's own listing, or can be handed over signed.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "6",
+      "title": "IANA Registrations",
+      "content": "<p>The document adds <code>onion-csr-01</code> (identifier type <code>dns</code>) to the \"ACME Validation Methods\" registry, the <code>onionCAARequired</code> error type to the \"ACME Error Types\" registry, and a boolean directory metadata field to the \"ACME Directory Metadata Fields\" registry. All reference RFC 9799.</p>",
+      "eli5": "<p>The new names were added to the official lists so every ACME program can recognise them.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security and Privacy",
+      "content": "<p>The Baseline Requirements' security considerations apply to onion-csr-01. The challenge skips the key authorization string, which does not weaken it, because the validation channel is ACME itself and requests are already signed by the account.</p><ul><li>An ACME server MUST NOT use Tor to validate domains that are not <code>.onion</code>, because of the risk of exit hijacking. That includes redirects to public DNS names.</li><li>The server MUST make its own Tor connection and MUST NOT outsource it to a service such as Tor2Web.</li><li>Redirecting to a non-onion site can reveal information such as an IP address to the ACME server operator.</li><li>Clients not using Tor to reach the CA can expose that a hidden service exists, even with Encrypted ClientHello. Clients SHOULD connect over Tor, preferring a hidden service endpoint.</li><li>Publicly trusted certificates appear in Certificate Transparency logs (<a href='/9162/'>RFC 9162</a>), publicly revealing the service. Operators MUST consider this, and client developers SHOULD warn users.</li><li>Operators SHOULD consider self-signed or private certificates when public ones are unnecessary, SHOULD give minimal subscriber details, and MUST use separate ACME account keys if they do not want services correlated.</li></ul>",
+      "eli5": "<p>Visiting the certificate office the wrong way can reveal your secret clubhouse exists, so use the Tor route, tell the office as little as possible, and remember public certificates go on a public list.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "ACME CHALLENGES FOR .ONION NAMES",
+      "data": {
+        "columns": [
+          "Challenge",
+          "For .onion",
+          "Wildcards"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "dns-01",
+              "MUST NOT be used",
+              "Not applicable"
+            ]
+          },
+          {
+            "cells": [
+              "http-01",
+              "MAY be used with modifications",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "tls-alpn-01",
+              "MAY be used with modifications",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "onion-csr-01",
+              "New in RFC 9799",
+              "Yes"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "extensibility",
+      "position": "after",
+      "caption": "WHERE ONION CAA POLICY LIVES",
+      "data": {
+        "items": [
+          {
+            "title": "caa line",
+            "text": "In the Second Layer Descriptor, with the same contents as a DNS CAA record."
+          },
+          {
+            "title": "caa-critical",
+            "text": "In the First Layer Descriptor; the server must not issue until it can read the CAA records."
+          },
+          {
+            "title": "onionCAA",
+            "text": "Signed CAA set sent in the ACME finalize request instead of fetching it over Tor."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8555]",
+      "text": "Barnes, R., et al., \"Automatic Certificate Management Environment (ACME)\", RFC 8555, March 2019.",
+      "rfc": 8555
+    },
+    {
+      "number": "[RFC7686]",
+      "text": "Appelbaum, J. and A. Muffett, \"The \\\".onion\\\" Special-Use Domain Name\", RFC 7686, October 2015.",
+      "rfc": 7686
+    },
+    {
+      "number": "[RFC8659]",
+      "text": "Hallam-Baker, P., et al., \"DNS Certification Authority Authorization (CAA) Resource Record\", RFC 8659, November 2019.",
+      "rfc": 8659
+    },
+    {
+      "number": "[RFC8737]",
+      "text": "Shoemaker, R.B., \"Automated Certificate Management Environment (ACME) TLS Application-Layer Protocol Negotiation (ALPN) Challenge Extension\", RFC 8737, February 2020.",
+      "rfc": 8737
+    },
+    {
+      "number": "[RFC2986]",
+      "text": "Nystrom, M. and B. Kaliski, \"PKCS #10: Certification Request Syntax Specification Version 1.7\", RFC 2986, November 2000.",
+      "rfc": 2986
+    },
+    {
+      "number": "[RFC8037]",
+      "text": "Liusvaara, I., \"CFRG Elliptic Curve Diffie-Hellman (ECDH) and Signatures in JSON Object Signing and Encryption (JOSE)\", RFC 8037, January 2017.",
+      "rfc": 8037
+    },
+    {
+      "number": "[RFC9162]",
+      "text": "Laurie, B., et al., \"Certificate Transparency Version 2.0\", RFC 9162, December 2021.",
+      "rfc": 9162
+    },
+    {
+      "number": "[tor-spec]",
+      "text": "The Tor Project, \"Tor Specifications\"."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

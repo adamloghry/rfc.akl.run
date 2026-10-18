@@ -9,13 +9,165 @@
   },
   "questions": [
     "bfd over vxlan",
-    "how to detect vxlan tunnel failure"
+    "how to detect vxlan tunnel failure",
+    "how does bfd monitor vxlan tunnels",
+    "what is the management vni",
+    "how quickly does bfd detect tunnel failures",
+    "what mac address is used for bfd on vxlan"
+  ],
+  "tags": [
+    "Overlay Networks",
+    "Monitoring",
+    "VXLAN"
+  ],
+  "subtitle": "Using fast liveness detection to quickly discover broken tunnel paths in VXLAN overlay networks.",
+  "tldr": {
+    "problem": "VXLAN tunnels connect virtual network endpoints across a shared Layer 3 network, but if a tunnel path breaks, it may take minutes for higher-layer protocols to notice. Applications experience a delay before network failures are detected.",
+    "mechanism": "Bidirectional Forwarding Detection (BFD) is a simple, fast protocol where two endpoints periodically send hello messages to each other. BFD operates at the tunnel endpoint level and detects failures in seconds. BFD packets are encapsulated in VXLAN headers and sent through a management VNI (virtual network identifier) so they are processed locally at the tunnel endpoint rather than forwarded to tenants.",
+    "outcome": "VXLAN tunnel failures are detected within seconds using BFD, enabling applications to fail over quickly. The RFC standardizes how to encapsulate and process BFD packets in VXLAN tunnels.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Tunnel monitoring",
+      "value": "BFD detects tunnel failures in seconds"
+    },
+    {
+      "label": "Management MAC",
+      "value": "00-52-02 (IANA assigned)"
+    },
+    {
+      "label": "Standard BFD port",
+      "value": "UDP 3784"
+    },
+    {
+      "label": "Default Management VNI",
+      "value": "VNI 1 (operator-configurable)"
+    },
+    {
+      "label": "Loopback range (IPv4)",
+      "value": "127/8"
+    },
+    {
+      "label": "Loopback range (IPv6)",
+      "value": "::ffff:127.0.0.0/104"
+    }
+  ],
+  "today": "<p>RFC 8971 is an Informational document that standardizes BFD use over VXLAN tunnels. It is used in data center networks and overlay deployments to provide fast failure detection for virtual network tunnels. The RFC builds on BFD (RFC 5880, RFC 5881) and VXLAN (RFC 7348).</p>",
+  "glossary": [
+    "bfd",
+    "vtep"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "VXLAN Tunnels and Failure Detection",
+      "content": "<p><strong>VXLAN</strong> is a tunneling protocol that encapsulates Ethernet frames inside UDP packets so that virtual networks can overlay a Layer 3 network. A <strong>VXLAN Tunnel End Point</strong> (VTEP) is a device (usually a hypervisor) that encapsulates traffic from virtual machines and sends it as a VXLAN tunnel to another VTEP. A <strong>VNI</strong> (VXLAN Network Identifier or segment ID) identifies which virtual network the traffic belongs to.</p><p>The challenge is detecting when a tunnel path fails. If the underlay network loses connectivity between two VTEPs, higher-layer protocols may not notice for minutes. Applications relying on the tunnel suffer a long outage. <strong>Bidirectional Forwarding Detection</strong> (BFD) is a lightweight protocol where two endpoints exchange hello messages (called Control packets) at regular intervals. If one endpoint stops receiving hellos from the other within a few hundred milliseconds, BFD declares the session down, signaling a failure. BFD is designed to be fast and stateless on the endpoint, making it ideal for monitoring tunnel health.</p>",
+      "eli5": "<p>A virtual machine sends data through a tunnel. If the tunnel breaks, nobody upstream notices for a while. BFD is like two people on opposite ends of the tunnel sending quick hand signals. If one stops signaling, the other knows something is wrong within a second.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "Encapsulation and the Management VNI",
+      "content": "<p>BFD packets are encapsulated in VXLAN exactly like any other traffic, but with a specific encapsulation:</p><p>The outermost headers are Ethernet, IP, and UDP (the VXLAN underlay). Next is the VXLAN header with the <strong>Management VNI</strong> field set to a designated management segment ID (typically VNI 1, but operator-configured). Inside the VXLAN envelope are inner Ethernet, IP, and UDP headers, followed by the BFD Control packet.</p><p>The inner Ethernet destination MAC SHOULD be set to 00-52-02, a dedicated MAC address for BFD on VXLAN (assigned by IANA). The inner IP destination address SHOULD be from the loopback address range 127/8 for IPv4 or ::ffff:127.0.0.0/104 for IPv6. This ensures that if the VXLAN tunnel is broken and the packet is accidentally forwarded by a router, it will be discarded instead of creating a loop.</p><p>The inner source IP is the VTEP's own IP address. The destination UDP port is 3784, the standard BFD port. All packets on the Management VNI are processed locally at the receiving VTEP and MUST NOT be forwarded to tenants.</p>",
+      "eli5": "<p>The BFD hello packet is wrapped in layers: VXLAN layer outside, then loopback IP address inside so it gets processed right away and not forwarded anywhere if something goes wrong.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "BFD Sessions and Multiple Tunnels",
+      "content": "<p>A separate BFD session can be established for each tunnel between a pair of VTEPs, or a single BFD session can monitor all tunnels between them. When a BFD session goes down, all tunnels it monitors are presumed to have failed. Implementations MUST be able to limit the number of BFD sessions between the same pair of VTEPs to prevent resource exhaustion.</p><p>On transmission, a VTEP encapsulates a BFD Control packet as described above, ensuring that BFD packets follow the same forwarding path as VXLAN data packets through the sender system. On reception, the receiving VTEP validates the packet: it must have arrived on the Management VNI and be identified as a BFD Control packet addressed to the VTEP itself. The inner IP payload is then validated according to the single-hop BFD specification (RFC 5881). Echo mode BFD (where a VTEP echoes packets back to the sender) is outside the scope of this document.</p>",
+      "eli5": "<p>Both ends of the tunnel send hello packets on a special management channel. If both sides receive hellos at regular intervals, the tunnel is okay. If one side stops receiving hellos, it knows the tunnel is broken.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "4",
+      "title": "Deployment in Virtual and Physical Networks",
+      "content": "<p>The RFC applies to both virtualized hosts in hypervisors (the primary use case) and non-virtualized hosts connected to physical VTEPs in switches. In a data center, a hypervisor hosts virtual machines across multiple VNI segments and terminates multiple VXLAN tunnels. BFD sessions monitor the health of the tunnels themselves, independent of tenant traffic.</p><p>When a BFD session detects a tunnel failure, the VTEP can trigger failover: if multiple paths exist to a remote VXLAN segment, traffic is rerouted. If a Multicast Service Node (MSN) participates in VXLAN to replicate multicast traffic, BFD can monitor the path from the source Network Virtualization Endpoint (NVE) to the MSN. The RFC does not address service-layer BFD between tenants, which would be indistinguishable from normal data packets and is outside the scope.</p>",
+      "eli5": "<p>In a data center with many virtual machines, the hypervisor monitors multiple tunnel connections. When it detects a broken tunnel with BFD, it can reroute traffic to another path.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "layers",
+      "anchor": "message-format",
+      "caption": "BFD encapsulation inside VXLAN",
+      "data": {
+        "layers": [
+          {
+            "label": "Outer Ethernet",
+            "detail": "Carries the underlay network packets"
+          },
+          {
+            "label": "Outer IP/UDP",
+            "detail": "Routes packets through the underlay network"
+          },
+          {
+            "label": "VXLAN header",
+            "detail": "Identifies the Management VNI",
+            "highlight": true
+          },
+          {
+            "label": "Inner Ethernet",
+            "detail": "Destination MAC 00-52-02 for BFD"
+          },
+          {
+            "label": "Inner IP/UDP",
+            "detail": "Loopback address, port 3784"
+          },
+          {
+            "label": "BFD Control packet",
+            "detail": "The hello message"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1812]",
+      "text": "Baker, F., Ed., \"Requirements for IP Version 4 Routers\", RFC 1812, June 1995.",
+      "rfc": 1812
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC5880]",
+      "text": "Katz, D. and D. Ward, \"Bidirectional Forwarding Detection (BFD)\", RFC 5880, June 2010.",
+      "rfc": 5880
+    },
+    {
+      "number": "[RFC5881]",
+      "text": "Katz, D. and D. Ward, \"Bidirectional Forwarding Detection (BFD) for IPv4 and IPv6 (Single Hop)\", RFC 5881, June 2010.",
+      "rfc": 5881
+    },
+    {
+      "number": "[RFC7348]",
+      "text": "Mahalingam, M. et al., \"Virtual eXtensible Local Area Network (VXLAN): A Framework for Overlaying Virtualized Layer 2 Networks over Layer 3 Networks\", RFC 7348, August 2014.",
+      "rfc": 7348
+    },
+    {
+      "number": "[RFC8293]",
+      "text": "Ghanwani, A., Dunbar, L., McBride, M., Bannai, V., and R. Krishnan, \"A Framework for Multicast in Network Virtualization over Layer 3\", RFC 8293, January 2018.",
+      "rfc": 8293
+    },
+    {
+      "number": "[RFC8365]",
+      "text": "Sajassi, A., Ed., Drake, J., Ed., Bitar, N., Shekhar, R., Uttaro, J., and W. Henderickx, \"A Network Virtualization Overlay Solution Using Ethernet VPN (EVPN)\", RFC 8365, March 2018.",
+      "rfc": 8365
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

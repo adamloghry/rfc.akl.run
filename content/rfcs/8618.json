@@ -10,13 +10,303 @@
   "questions": [
     "c-dns format",
     "dns packet capture format",
-    "compact dns capture"
+    "compact dns capture",
+    "what is c-dns",
+    "what is cbor used for in dns",
+    "how to store dns query logs compactly"
+  ],
+  "tags": [
+    "DNS",
+    "Packet Capture",
+    "Data Formats"
+  ],
+  "subtitle": "A compact binary file format for storing huge captures of DNS queries and responses without keeping every raw packet.",
+  "tldr": {
+    "problem": "DNS operators collect queries and responses for monitoring and analysis, but PCAP files carry a lot of data that DNS analysis does not need, and there is no standard exchange format for large DNS captures.",
+    "mechanism": "C-DNS stores each query and its matching response as one item, groups items into blocks, and moves repeated values into per-block tables that items refer to by index. The file is encoded in CBOR.",
+    "outcome": "Capture files get smaller and cheaper to produce, while still keeping the full DNS message content and the most useful transport details. It is a Proposed Standard.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "File type identifier",
+      "value": "String \"C-DNS\""
+    },
+    {
+      "label": "Format version defined",
+      "value": "1.0"
+    },
+    {
+      "label": "Encoding",
+      "value": "CBOR, with integer map keys"
+    },
+    {
+      "label": "Sample block size that worked well",
+      "value": "Up to 10,000 Q/R items"
+    },
+    {
+      "label": "Typical query timeout",
+      "value": "On the order of 5 seconds"
+    },
+    {
+      "label": "Minimum DNS header",
+      "value": "12 bytes"
+    }
+  ],
+  "today": "<p>RFC 8618 is a Proposed Standard, published in September 2019. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "dns",
+    "dns-message",
+    "resource-record",
+    "name-compression",
+    "opcode",
+    "authoritative-server",
+    "recursive-resolver",
+    "cbor",
+    "cddl",
+    "packet-capture"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why a New Capture Format",
+      "content": "<p>Server operators have long needed to collect DNS queries and responses on authoritative and recursive name servers. The data is used for traffic monitoring, analyzing network attacks, and \"day in the life\" (DITL) analysis. Tools such as DSC, packetq, dnscap and dnstap already collect it, but there is no standard exchange format for large DNS packet captures.</p><p>PCAP and PCAP-NG are what people use in practice. They can hold a great deal of information that has nothing to do with DNS analysis, which makes the files bigger. They also have no filter to record only certain fields at capture time, so anonymization has to be done afterwards. Text formats for DNS messages exist, but they target single messages.</p><p><strong>C-DNS</strong> (Compacted-DNS) has two stated goals: minimize file size for storage and transmission, and minimize the cost of producing the file and of any later general-purpose compression. Some DNS operators see hundreds of thousands of queries per second on one name server instance, which is why size matters.</p>",
+      "eli5": "<p>Recording every DNS conversation in the usual way makes giant files full of stuff nobody needs. C-DNS is a tidier way to write the same conversations down.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "Design Choices",
+      "content": "<p>The format is designed for the hardest case: collection and storage on the same machine as the name server, with uploads over the same network interface that carries DNS traffic. The RFC notes that serving DNS is the server's most important job, not capturing data, so the format must be cheap to produce.</p><p>The basic unit is a <strong>Query/Response (Q/R) data item</strong>, which combines a query and its matching response. Unmatched queries and unmatched responses use the same structure, with the missing half left out. Combining the two often saves space because the two messages share much of their data.</p><ul><li>All top-level fields in a Q/R item are optional, so operators only pay for the data they need and can leave out or anonymize fields such as the client address at capture time.</li><li>Items are collected into <strong>blocks</strong>. Common data in a block is stored once and referenced by index. The maximum number of items per block is configurable.</li><li>Traffic metadata, such as counts of ICMP messages and TCP resets, can optionally be included per block.</li><li>The raw wire format of malformed DNS messages can optionally be recorded.</li></ul><p>Only DNS payloads that parse as well-formed messages go into the structured items. That means a 12-byte header with a recognized OPCODE, section counts that match the contents, and fully parsable resource records. Everything else is optionally stored as a malformed message.</p>",
+      "eli5": "<p>Each page of the notebook records a question and its answer together. Pages are bundled into chapters so that repeated words are written once per chapter, and you can skip any detail you do not care about.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "5",
+      "title": "Why CBOR",
+      "content": "<p>C-DNS is encoded in <strong>CBOR</strong> (Concise Binary Object Representation, RFC 7049). The RFC gives these reasons: CBOR is binary and so economical in space; other binary formats were investigated and none had a significant advantage; it is an IETF specification built on familiar ideas of lists and objects; it is simple enough to implement from scratch; it converts easily to text formats such as JSON for debugging; and its schemas can be written in CDDL (RFC 8610). The format itself is defined in CDDL in Appendix A.</p><p>All map keys are integers, because string keys would bloat the file. Keys in current use are positive integers under 24, which take a single CBOR byte. Other positive integers are reserved for future standard extensions. Negative keys from -1 to -24 are for implementation-specific extras, and are just as compact.</p><p>Appendix C compares binary formats and concludes that blocking matters more than which serialization is used: there was no compelling case for one binary format in final size or resources, so CBOR was chosen for the reasons above.</p>",
+      "eli5": "<p>The notebook is written in a compact shorthand that many people already know, and its labels are tiny numbers instead of long words.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "6",
+      "title": "File, Blocks and Tables",
+      "content": "<p>A C-DNS file is an array with three parts: a file type identifier (the string <code>C-DNS</code>), a <strong>File Preamble</strong>, and an array of <strong>Blocks</strong>. The preamble holds the format version and an array of Block Parameters items. Each Block Parameters item holds the Storage and Collection Parameters for one or more Blocks, and a Block Preamble can pick which one applies, defaulting to index 0. An array is used so that files from different sources can be merged.</p><p>Each Block contains a Block Preamble (including the earliest timestamp), optional Block Statistics, the <strong>Block Tables</strong>, and then arrays of Query/Response items, Address/Event Count items and Malformed Message items.</p><p>The Block Tables hold the shared data. They include arrays of IP addresses, class and type pairs, names and RDATA, query signatures, question lists and resource record lists. A Q/R item points into these tables by 0-based index. A query signature groups the attributes that repeat often, such as server address and port, transport, DNS flags, OPCODE, RCODE and EDNS details.</p><p>Names and RDATA are stored as full wire-format names with no name compression. The RFC also warns that this design cannot be streamed below the level of a block. In sample data from a root server, block sizes up to 10,000 Q/R items gave good results.</p>",
+      "eli5": "<p>The file is a binder of chapters. Each chapter has a cheat sheet of names and addresses at the front, and the pages in it just say \"see entry number 3\" instead of repeating everything.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "6.2",
+      "title": "Storage Parameters and Hints",
+      "content": "<p>Because almost every field is optional, a reader needs to know whether a missing value was never recorded or just was not present. For example, no Query OPT RDATA could mean the query had no OPT record, or that the data was not stored. The <strong>Storage Hints</strong> solve this. They are bit fields that say which fields the encoder omits. A bit that is unset means the field is omitted and will never appear, and a set bit only means the field might be present. Hints have top-down precedence, so a hint on a containing map overrides hints on the map inside it.</p><p>Other Storage Parameters include the number of ticks per second for sub-second timing, the maximum items per block, the OPCODEs and RR types the collector records, and flags saying whether the data is anonymized, sampled, or has normalized (uniform-case) names. Optional text fields describe the sampling and anonymization methods, and the RFC recommends URIs pointing to descriptions of them.</p><p>Addresses can be stored in full or as prefixes only. For example, with a client IPv6 prefix of 48, the address 2001:db8:85a3::8a2e:370:7334 is stored as <code>0x20010db885a3</code>. If prefixes are used, the transport flags field must be present so the IP version can be determined.</p><p>An OPCODE or RR type the collector does not know cannot be validated, so such messages are treated as malformed. Collection Parameters, such as the query timeout, snaplen, interfaces and filter, are informational metadata only.</p>",
+      "eli5": "<p>A label on the front of the binder says which details were left out on purpose, so a reader will not wonder whether a page is missing or the detail was never written.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "10",
+      "title": "Matching Queries to Responses",
+      "content": "<p>Section 10 describes a non-normative algorithm for turning a stream of DNS messages into Q/R items. Each message gets a <strong>Primary ID</strong> made of source and destination IP address, source and destination port, transport, and the DNS message ID. If the message has a first question, that question is used as an optional <strong>Secondary ID</strong>.</p><p>Queries go into an output FIFO (OFIFO). A response is matched against the earliest unfinished item with the same IDs. Responses with no match yet wait in a second FIFO (RFIFO). The algorithm has two timeouts. The Query Timeout (typically on the order of 5 seconds) decides when a query is recorded with no response. The Skew Timeout (typically a few microseconds) allows for packet capture libraries that deliver a response before its query, which can happen on multi-core systems.</p><p>The output is a list of items that are a matched pair, a query alone, or a response alone. The algorithm cannot unambiguously match several queries with the same IDs, so it matches the earliest one. At the end of a capture, everything left is timed out.</p>",
+      "eli5": "<p>It is like pairing up questions and answers that arrive jumbled. You wait a short while for each answer to show up, and if one never does, you write the question down alone.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "9",
+      "title": "Converting Back to PCAP",
+      "content": "<p>PCAP files can usually be rebuilt from C-DNS, but only in a lossy way. How well that works depends on which optional fields were captured, and on whether a field such as <code>qr-sig-flags</code> says if an item has a query, a response, or both.</p><p>Some things cannot be rebuilt: IP fragmentation, TCP stream details such as how messages were split across segments, TLS session details, DNS-over-HTTPS details such as POST versus GET, and malformed or non-DNS packets unless they were recorded separately.</p><p>Exact bytes of a response are also out of reach. C-DNS stores full names, and different name server software compresses names with different algorithms, so a rebuilt response can have the right length but different bytes on the wire. Appendix D lists the fields recommended for traffic regeneration.</p>",
+      "eli5": "<p>You can turn the short notes back into a full recording, but a few small details, like exactly how words were squashed together, are gone for good.</p>"
+    },
+    {
+      "id": "privacy-considerations",
+      "number": "14",
+      "title": "Privacy and Security",
+      "content": "<p>The RFC's security section is brief: any control interface MUST perform authentication and encryption, and any data upload MUST be authenticated and encrypted.</p><p>On privacy, storing DNS traffic in PCAP and other formats is a long-standing practice. The RFC says C-DNS introduces no new user privacy issues beyond those of full data capture, which it describes as quite severe. It adds ways to improve privacy: recording only certain fields at capture time, and flags that mark data as sampled, anonymized, or normalized. Normalization reduces the chance of fingerprinting individuals, at the cost of a reduced ability to spot attack traffic by query name signatures.</p><p>Operators SHOULD capture at the source the minimum user data they need.</p>",
+      "eli5": "<p>Recording who asked for what can reveal private things. C-DNS lets you skip or blur details when you record, and it tells you which ones you blurred.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "tree",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "C-DNS FILE STRUCTURE (SCHEMATIC, AFTER RFC 8618 FIGURE 1)",
+      "data": {
+        "root": {
+          "label": "C-DNS file",
+          "children": [
+            {
+              "label": "File Type Identifier",
+              "note": "the string C-DNS"
+            },
+            {
+              "label": "File Preamble",
+              "children": [
+                {
+                  "label": "Format Version"
+                },
+                {
+                  "label": "Block Parameters"
+                }
+              ]
+            },
+            {
+              "label": "Block (repeated)",
+              "children": [
+                {
+                  "label": "Block Preamble"
+                },
+                {
+                  "label": "Block Statistics"
+                },
+                {
+                  "label": "Block Tables"
+                },
+                {
+                  "label": "Query/Response data items"
+                },
+                {
+                  "label": "Address/Event Count data items"
+                },
+                {
+                  "label": "Malformed Message data items"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "TRANSPORT VALUES IN THE TRANSPORT FLAGS (BITS 1-4)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "UDP",
+            "desc": "Plain DNS over UDP."
+          },
+          {
+            "code": "1",
+            "label": "TCP",
+            "desc": "Plain DNS over TCP."
+          },
+          {
+            "code": "2",
+            "label": "TLS",
+            "desc": "DNS over TLS."
+          },
+          {
+            "code": "3",
+            "label": "DTLS",
+            "desc": "DNS over DTLS."
+          },
+          {
+            "code": "4",
+            "label": "HTTPS",
+            "desc": "DNS queries over HTTPS."
+          },
+          {
+            "code": "15",
+            "label": "Non-standard",
+            "desc": "Generic value for non-standard transports. Values 5-14 are reserved."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "BLOCK SIZE VS FILE SIZE IN MB FOR ONE TEST CAPTURE (RFC 8618 APPENDIX C.6)",
+      "data": {
+        "columns": [
+          "Items per block",
+          "Uncompressed",
+          "gzip",
+          "xz"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "1,000",
+              "133.46",
+              "74.65",
+              "25.63"
+            ]
+          },
+          {
+            "cells": [
+              "10,000",
+              "76.87",
+              "38.94",
+              "21.09"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "320,000",
+              "54.41",
+              "24.36",
+              "18.66"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC6891]",
+      "text": "Damas, J., Graff, M., and P. Vixie, \"Extension Mechanisms for DNS (EDNS(0))\", STD 75, RFC 6891, April 2013.",
+      "rfc": 6891
+    },
+    {
+      "number": "[RFC7049]",
+      "text": "Bormann, C. and P. Hoffman, \"Concise Binary Object Representation (CBOR)\", RFC 7049, October 2013.",
+      "rfc": 7049
+    },
+    {
+      "number": "[RFC7858]",
+      "text": "Hu, Z., et al., \"Specification for DNS over Transport Layer Security (TLS)\", RFC 7858, May 2016.",
+      "rfc": 7858
+    },
+    {
+      "number": "[RFC8094]",
+      "text": "Reddy, T., Wing, D., and P. Patil, \"DNS over Datagram Transport Layer Security (DTLS)\", RFC 8094, February 2017.",
+      "rfc": 8094
+    },
+    {
+      "number": "[RFC8427]",
+      "text": "Hoffman, P., \"Representing DNS Messages in JSON\", RFC 8427, July 2018.",
+      "rfc": 8427
+    },
+    {
+      "number": "[RFC8484]",
+      "text": "Hoffman, P. and P. McManus, \"DNS Queries over HTTPS (DoH)\", RFC 8484, October 2018.",
+      "rfc": 8484
+    },
+    {
+      "number": "[RFC8610]",
+      "text": "Birkholz, H., Vigano, C., and C. Bormann, \"Concise Data Definition Language (CDDL)\", RFC 8610, June 2019.",
+      "rfc": 8610
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

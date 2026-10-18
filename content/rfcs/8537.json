@@ -10,13 +10,189 @@
   "questions": [
     "fast reroute for bidirectional lsp",
     "co-routed associated bidirectional lsp",
-    "rfc 4090 update for bidirectional paths"
+    "rfc 4090 update for bidirectional paths",
+    "what is a co-routed bidirectional lsp",
+    "how does fast reroute work for bidirectional lsps",
+    "what is restoring co-routing"
+  ],
+  "tags": [
+    "MPLS",
+    "RSVP-TE",
+    "Fast Reroute"
+  ],
+  "subtitle": "Keeps both directions of a paired MPLS path on the same route after a fast reroute, and keeps the pairs from being mixed up.",
+  "tldr": {
+    "problem": "When an associated bidirectional LSP is rerouted around a failure, the forward and reverse halves can pick different bypass tunnels, and midpoint nodes can pair the wrong LSPs, so a co-routed path stops being co-routed.",
+    "mechanism": "The downstream repair node records its bypass tunnel choice in the RSVP Path message, the upstream node mirrors it for the reverse LSP, the downstream merge point can restore co-routing, and each LSP pair gets a unique Extended Association ID.",
+    "outcome": "For co-routed LSPs, traffic flows on co-routed paths in both directions after a failure event. Nodes that do not support the procedures can still leave the paths asymmetric.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "BYPASS_ASSIGNMENT IPv4 subobject",
+      "value": "38"
+    },
+    {
+      "label": "BYPASS_ASSIGNMENT IPv6 subobject",
+      "value": "39"
+    },
+    {
+      "label": "FRR Bypass Assignment Error code",
+      "value": "44"
+    },
+    {
+      "label": "Bypass Tunnel Not Found sub-code",
+      "value": "1"
+    },
+    {
+      "label": "LSP ID size",
+      "value": "16 bits"
+    },
+    {
+      "label": "IANA actions",
+      "value": "None"
+    }
+  ],
+  "today": "<p>RFC 8537 is a Proposed Standard that updates <a href='/4090/'>RFC 4090</a> and <a href='/7551/'>RFC 7551</a>. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "mpls",
+    "association",
+    "label-switched-path",
+    "fast-reroute",
+    "point-of-local-repair",
+    "bypass-tunnel"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Introduction and Scope",
+      "content": "<p>The RSVP (Extended) ASSOCIATION Object (<a href='/6780/'>RFC 6780</a>) can associate MPLS and GMPLS Traffic Engineering Label Switched Paths (LSPs). <a href='/7551/'>RFC 7551</a> uses it to bind two point-to-point unidirectional LSPs into an <strong>associated bidirectional LSP</strong>, provisioned either <strong>single-sided</strong> (configured at one endpoint) or <strong>double-sided</strong> (configured at both). The reverse LSP may or may not follow the same path as the forward LSP.</p><p>Some packet transport networks need the reverse LSP to follow the forward path. Association signaling can deliver this without deploying GMPLS extensions, and it can reuse existing fast reroute mechanisms from <a href='/4090/'>RFC 4090</a>.</p><p>This document updates RFC 4090 for both single-sided and double-sided associated bidirectional LSPs, and updates the procedure in RFC 7551 for associating two reverse LSPs, so that co-routed LSPs stay co-routed after fast reroute. It relies on the mechanisms of <a href='/8271/'>RFC 8271</a>.</p>",
+      "eli5": "<p>Two one-way roads are tied together into a pair. This document makes sure the pair stays together when one road has a problem.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Assumptions and Terminology",
+      "content": "<p>Fast reroute for plain unidirectional LSPs, and fast reroute with unidirectional bypass tunnels, are left as defined in RFC 4090. The document assumes that bypass tunnels protecting associated bidirectional LSPs are also associated bidirectional, and co-routed when the protected LSPs are co-routed. Where the protected LSPs are not co-routed, coordination can still be used if the downstream <strong>Point of Local Repair</strong> (PLR) and <strong>Merge Point</strong> (MP) pair of the forward LSP matches the upstream MP and PLR pair of the reverse LSP.</p><p>For a single-sided LSP, the forward LSP is the one originating with a REVERSE_LSP Object. For a double-sided LSP, it is the LSP that originates from the higher node address and ends at the lower one. A reverse co-routed LSP starts where the forward LSP ends and runs along the same path in the opposite direction.</p>",
+      "eli5": "<p>The detour starts at one spot on the road and rejoins at another. This document just names those spots and says which road is the forward one.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "3",
+      "title": "The Three Problems",
+      "content": "<p><strong>Bypass assignment.</strong> If a PLR node has more than one bypass tunnel, the PLR nodes in the two directions must coordinate so traffic both ways uses the same one. In the RFC's Figure 1, bypass tunnel N and bypass tunnel S both protect the link B-C, and nodes B and C must pick the same tunnel.</p><p><strong>Node protection.</strong> With node protection bypass tunnels, after a link failure the forward and reverse traffic can end up on different bypass tunnels in the upstream and downstream directions, so the LSP is no longer co-routed. Unlike GMPLS LSPs, this asymmetry does not cause an RSVP soft-state timeout with associated bidirectional LSPs.</p><p><strong>Ambiguity at midpoints.</strong> After a link failure, a restoration LSP pair may be signaled while the protected pair remains. Both pairs carry identical (Extended) ASSOCIATION Objects, so a midpoint node may pair a forward LSP with the wrong reverse LSP and make poor bypass assignments, for example during RSVP graceful restart recovery.</p>",
+      "eli5": "<p>Three things can go wrong. The two lanes might pick different detours, they might end up apart after a switch, or a middle stop might mix up which lanes belong together.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "4",
+      "title": "Bypass Assignment Signaling",
+      "content": "<p>The fast reroute procedure of RFC 4090 is used, together with RFC 8271 mechanisms. The BYPASS_ASSIGNMENT IPv4 subobject (value 38) and IPv6 subobject (value 39), plus the Node-ID address subobject, MUST be added by the downstream PLR node to the RECORD_ROUTE Object of the forward LSP's RSVP Path message. They tell the upstream node the bypass tunnel source address, destination address and Tunnel ID, which it uses to find the associated bypass tunnel in the reverse direction.</p><p>The downstream PLR initiates the assignment. The upstream PLR MUST NOT add the BYPASS_ASSIGNMENT subobject to the reverse LSP's Path message and MUST NOT initiate the assignment; it only reflects it.</p><ul><li>If the bypass tunnel is not found, the upstream PLR SHOULD send a Notify message with Error Code \"FRR Bypass Assignment Error\" (value 44) and Sub-code \"Bypass Tunnel Not Found\" (value 1).</li><li>If the bypass tunnel cannot be used, the Sub-code is \"Bypass Assignment Cannot Be Used\" (value 0).</li><li>After a failure, PLRs in both directions trigger fast reroute independently as in RFC 4090. RSVP Resv signaling is unchanged.</li></ul><p>The procedure works for facility backup and one-to-one backup. For one-to-one backup, if the bidirectional bypass is already in use at the upstream PLR, it SHOULD send Sub-code \"One-to-One Bypass Already in Use\" (value 2). Assignment policies are configured on the downstream PLR nodes, which for single-sided bypass tunnels are the originating endpoints.</p>",
+      "eli5": "<p>The first stop tells the stop on the other side which detour it chose, and the other side copies that choice. If the detour cannot be found, it sends a warning note back.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "5",
+      "title": "Restoring Co-routing and Reverting",
+      "content": "<p>With node protection, the two directions can end up on different bypass tunnels. To fix this, the downstream MP node (acting as an upstream PLR) MUST reroute the protected reverse LSP's Path messages and traffic over the bypass tunnel on which it received the modified forward LSP messages. This is called <strong>restoring co-routing</strong>, defined in RFC 8271. In the RFC's Figure 2, node D does this over bypass tunnel S. The original upstream PLR, node C, stops receiving reverse LSP messages, which causes an RSVP soft-state timeout, and stops sending them over the other bypass tunnel.</p><p>Unidirectional link failures can also leave the LSP non-co-routed, but they do not cause RSVP soft-state timeout since the PLRs act independently. A failure in the downstream direction can be corrected with the same restoring co-routing procedure.</p><p>For revertive behavior, the procedure in Section 6.5.2 of RFC 4090 applies. Both PLRs move their Path messages and traffic back to the restored link. With node protection, after restoring co-routing, the upstream PLR SHOULD revert the reverse LSP to the original link when it receives the unmodified forward LSP messages over it.</p>",
+      "eli5": "<p>If the two lanes ended up on different detours, the lane that arrives at the far end first pulls the other lane onto its detour. When the original road is fixed, both move back.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "6",
+      "title": "Unique Association at Midpoints",
+      "content": "<p>To let midpoint nodes tell LSP pairs apart, the endpoint node MUST signal the Extended ASSOCIATION Object with a unique Extended Association ID for each associated forward and reverse LSP pair. For single-sided LSPs, the originating endpoint chooses the ID and the remote endpoint copies the object, ID included, into the reverse LSP's Path message. For double-sided LSPs, both endpoints must select unique IDs, and a controller can be used to provision them. How to select them is out of scope.</p><p>An endpoint MAY use the example format in Appendix A. For IPv4 it is the 32-bit LSP source address of the forward LSP, a 16-bit Reserved field set to 0 on transmission, a 16-bit LSP ID, and a variable length ID inserted by the endpoint. The IPv6 form is the same with a 16-byte source address.</p>",
+      "eli5": "<p>Each pair of lanes gets its own name tag, so the middle stops never confuse one pair with another.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "7",
+      "title": "Compatibility and Security",
+      "content": "<p>No new signaling messages are defined; the procedures use the messages of RFC 8271 and update RFC 4090 and RFC 7551. Operators wishing to use this function SHOULD ensure it is supported on all nodes on the LSP path. Nodes that do not support it can cause traffic to flow on asymmetric paths after fast reroute.</p><p>The document introduces no security considerations beyond those of RFC 4090, RFC 7551, RFC 8271 and the MPLS/GMPLS security framework (<a href='/5920/'>RFC 5920</a>). It has no IANA actions.</p>",
+      "eli5": "<p>It works only if every stop on the road knows the new rules. A stop that does not may still send the lanes different ways.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "BYPASS ASSIGNMENT COORDINATION (SIMPLIFIED FROM RFC 8537)",
+      "data": {
+        "lanes": [
+          {
+            "key": "downstream-plr",
+            "label": "Downstream PLR"
+          },
+          {
+            "key": "upstream-plr",
+            "label": "Upstream PLR"
+          }
+        ],
+        "messages": [
+          {
+            "from": "downstream-plr",
+            "to": "upstream-plr",
+            "label": "Path (RRO with BYPASS_ASSIGNMENT)",
+            "color": "blue",
+            "note": "Forward LSP carries the bypass tunnel source, destination and Tunnel ID."
+          },
+          {
+            "from": "upstream-plr",
+            "to": "downstream-plr",
+            "label": "Notify (FRR Bypass Assignment Error)",
+            "color": "neutral",
+            "note": "SHOULD be sent if the bypass tunnel is not found or cannot be used."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC4090]",
+      "text": "Pan, P., Ed., Swallow, G., Ed., and A. Atlas, Ed., \"Fast Reroute Extensions to RSVP-TE for LSP Tunnels\", RFC 4090, May 2005.",
+      "rfc": 4090
+    },
+    {
+      "number": "[RFC7551]",
+      "text": "Zhang, F., Ed., Jing, R., and R. Gandhi, Ed., \"RSVP-TE Extensions for Associated Bidirectional Label Switched Paths (LSPs)\", RFC 7551, May 2015.",
+      "rfc": 7551
+    },
+    {
+      "number": "[RFC8271]",
+      "text": "Taillon, M., Saad, T., Ed., Gandhi, R., Ed., Ali, Z., and M. Bhatia, \"Updates to the Resource Reservation Protocol for Fast Reroute of Traffic Engineering GMPLS Label Switched Paths (LSPs)\", RFC 8271, October 2017.",
+      "rfc": 8271
+    },
+    {
+      "number": "[RFC6780]",
+      "text": "Berger, L., Le Faucheur, F., and A. Narayanan, \"RSVP ASSOCIATION Object Extensions\", RFC 6780, October 2012.",
+      "rfc": 6780
+    },
+    {
+      "number": "[RFC2205]",
+      "text": "Braden, R., Ed., Zhang, L., Berson, S., Herzog, S., and S. Jamin, \"Resource ReSerVation Protocol (RSVP) -- Version 1 Functional Specification\", RFC 2205, September 1997.",
+      "rfc": 2205
+    },
+    {
+      "number": "[RFC3209]",
+      "text": "Awduche, D., Berger, L., Gan, D., Li, T., Srinivasan, V., and G. Swallow, \"RSVP-TE: Extensions to RSVP for LSP Tunnels\", RFC 3209, December 2001.",
+      "rfc": 3209
+    },
+    {
+      "number": "[RFC5920]",
+      "text": "Fang, L., Ed., \"Security Framework for MPLS and GMPLS Networks\", RFC 5920, July 2010.",
+      "rfc": 5920
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

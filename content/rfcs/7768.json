@@ -9,13 +9,127 @@
   },
   "questions": [
     "reduce logging in cgn",
-    "large scale nat port allocation"
+    "large scale nat port allocation",
+    "reduce nat logging volume",
+    "port block allocation",
+    "ipv6 transition large scale nat",
+    "how to log nat with less data"
+  ],
+  "tags": [
+    "Network Management",
+    "IPv6 Transition",
+    "NAT",
+    "Logging"
+  ],
+  "subtitle": "Allocate ports in blocks to cut logging volume while sharing IPv4 addresses fairly.",
+  "tldr": {
+    "problem": "Large-scale NATs (Carrier-Grade NATs) must log which subscriber used which address and port to track connections for law enforcement. Logging every port assignment generates terabytes of data per day, making storage expensive and privacy risky.",
+    "mechanism": "Instead of assigning ports individually, give each subscriber a block of ports all at once. Log only when the block is assigned or freed. Reuse ports within the block dynamically. A single log entry covers hundreds of connections.",
+    "outcome": "Logging volume drops by a factor equal to the block size—from 42 TB to 40 GB in a real test. Subscribers still get fair, dynamic port sharing, just with much less data to store.",
+    "outcomeLabel": "Scale logging without scale"
+  },
+  "facts": [
+    {
+      "label": "Log reduction factor",
+      "value": "Block size (e.g., 300 ports)"
+    },
+    {
+      "label": "Test case: 20,000 subscribers, 60 days",
+      "value": "42.5 TB per-session vs. 40.6 GB per-block"
+    },
+    {
+      "label": "Typical TCP idle timeout",
+      "value": "2 hours 4 minutes"
+    },
+    {
+      "label": "Block deallocation logging",
+      "value": "Optional"
+    }
+  ],
+  "today": "<p>RFC 7768 is an Informational RFC and has not been obsoleted. It proposes a practical approach to NAT logging that is implemented in some Carrier-Grade NAT deployments.</p>",
+  "glossary": [
+    "nat",
+    "port-number",
+    "datagram",
+    "tcp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Logging Problem",
+      "content": "<p>Large-scale NATs (Dual-Stack Lite, NAT64, AFTR) let thousands of homes share a small pool of IPv4 addresses. When one home's device sends a packet, the NAT translates its private address and port into a public address and port, and logs the mapping. This is required by law in many countries for up to 6 months.</p><p>The scale is huge: a NAT handling 20,000 subscribers can create tens of millions of new mappings per second on peak days. If each mapping is logged, the result is gigabytes of logs per second—enough to fill a large datacenter just with storage and transmission.</p><p>Worse, these logs are sensitive: they reveal which subscriber was using the internet at which time. Shorter logs mean less privacy risk.</p>",
+      "eli5": "<p>Imagine a phone company that logs every single call made by every person on a shared line. After one month, the logbook is the size of a library. If instead they just recorded 'this family got extensions 2000–2099,' the logbook fits in a notebook.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "Port Block Allocation",
+      "content": "<p>This RFC proposes a simple trade-off: allocate ports in blocks.</p><p>When a subscriber sends their first packet, the NAT assigns them a block of ports—say, 2001–2300—and logs it once. The subscriber's device can use any port in that range for new connections. If the device needs more ports, the NAT assigns a second block (3501–3800) and logs that too. Each block assignment is one log entry.</p><p>Individual connections within a block are not logged. Only when a block is assigned or (optionally) when it is freed is an entry made.</p><p>In a real test of 20,000 subscribers: per-session logging generated 42.5 TB over 60 days. Port-block logging generated 40.6 GB—1000 times smaller.</p>",
+      "eli5": "<p>Give each family a bank of extensions. Log it once. They can call anyone using any extension in their bank without another log entry.</p>"
+    },
+    {
+      "id": "section-3",
+      "number": "3",
+      "title": "Reusing and Freeing Blocks",
+      "content": "<p>When no connections in a block are active for a while, the block can be freed and given to another subscriber. To decide when to free a block, the NAT can track idle time: if all connections in a block have been inactive for, say, 2 hours and 4 minutes (matching TCP standards), the block is idle.</p><p>Here is a trade-off: if the NAT randomizes port selection across all blocks to reduce guessing attacks, it will keep many blocks active simultaneously, making it hard to free any. A compromise is to avoid using the block that has been idle longest unless all other blocks are full. This gives the longest-idle block a chance to empty.</p><p>Optionally, block deallocation can be logged, providing an audit trail. This adds robustness for troubleshooting without much cost, since deallocations are rare.</p>",
+      "eli5": "<p>If no one from a family calls for hours, the phone company can give their extensions to another family. Keep the longest-idle block free when possible, so it eventually empties.</p>"
+    },
+    {
+      "id": "section-4",
+      "number": "4",
+      "title": "Keeping Traceability Working",
+      "content": "<p>With blocks, traceability is possible if the destination (the server the subscriber connected to) logs the source port along with the source address. Many web servers can be configured to do this: Apache (via LogFormat), Postfix, sendmail, and sshd all support source-port logging. Some do not: IIS and some IMAP servers currently lack this feature.</p><p>If the server logs source address and source port, and both the NAT and server are timestamped accurately, an investigator can match them: the NAT log says 'subscriber X got ports 2001–2300 at 10:00 AM,' and the server log says 'connection from 203.0.113.5:2050 at 10:05 AM' maps back to subscriber X.</p><p>If servers do not log ports, traceability becomes harder. The game is lost, in a sense: the NAT might as well log everything.</p>",
+      "eli5": "<p>To trace a call, you need the phone number AND the extension. If the phone company logs 'Family A has extensions 2001–2300' and the bank logs 'someone called from extension 2050,' you know it was Family A calling the bank.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security and Port Guessing",
+      "content": "<p>A known risk: a narrower port range makes it easier for attackers to guess which port a connection is using and hijack it (TCP port-guessing attacks). Port blocks make this worse: instead of choosing from 64,000 ports, an attacker now guesses from maybe 300 ports.</p><p>Several mitigations exist. One is to assign non-contiguous sets of ports (scattered across the range) using pseudorandom functions, as described in RFC 6431. This makes guessing harder, but adds operational complexity and creates uncertainty when accuracy matters (e.g., law enforcement).</p><p>Another is to randomize which idle block gets reused. Instead of always picking the longest-idle block, the NAT can pseudorandomly select from blocks idle longer than a threshold. This provides some port randomization while still freeing blocks.</p><p>Within each block, RFC 6056 recommends algorithms for selecting individual ports unpredictably. When the NAT chooses a port from a block, using these algorithms—adapted for the block's smaller range—reduces guessing risk.</p>",
+      "eli5": "<p>Smaller extension ranges are easier for a thief to guess. But if the phone company randomizes which extensions each family gets, and the extensions are scattered (not 2001, 2002, 2003 but 2003, 2050, 2099), guessing gets harder.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC6888]",
+      "text": "Perreault, S., Ed., et al., \"Common Requirements for Carrier-Grade NATs (CGNs)\", BCP 127, RFC 6888, April 2013.",
+      "rfc": 6888
+    },
+    {
+      "number": "[RFC6269]",
+      "text": "Ford, M., Ed., et al., \"Issues with IP Address Sharing\", RFC 6269, June 2011.",
+      "rfc": 6269
+    },
+    {
+      "number": "[RFC6431]",
+      "text": "Boucadair, M., et al., \"Huawei Port Range Configuration Options for PPP IPCP\", RFC 6431, November 2011.",
+      "rfc": 6431
+    },
+    {
+      "number": "[RFC6056]",
+      "text": "Larsen, M. and F. Gont, \"Recommendations for Transport-Protocol Port Randomization\", BCP 156, RFC 6056, January 2011.",
+      "rfc": 6056
+    },
+    {
+      "number": "[RFC4787]",
+      "text": "Audet, F., Ed. and C. Jennings, \"Network Address Translation (NAT) Behavioral Requirements for Unicast UDP\", BCP 127, RFC 4787, January 2007.",
+      "rfc": 4787
+    },
+    {
+      "number": "[RFC5382]",
+      "text": "Guha, S., Ed., et al., \"NAT Behavioral Requirements for TCP\", BCP 142, RFC 5382, October 2008.",
+      "rfc": 5382
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

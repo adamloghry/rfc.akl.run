@@ -9,13 +9,155 @@
   },
   "questions": [
     "what is the srtp roll-over counter",
-    "join an srtp session late"
+    "join an srtp session late",
+    "what is the rcc transform in srtp",
+    "how does an srtp receiver resynchronize the roc",
+    "what are rccm1 rccm2 and rccm3",
+    "why is srtp mode 3 risky"
+  ],
+  "tags": [
+    "Security",
+    "SRTP",
+    "Media"
+  ],
+  "subtitle": "A way to carry the SRTP roll-over counter inside packets so late joiners can get in sync.",
+  "tldr": {
+    "problem": "A receiver that joins an ongoing SRTP session, or loses track of it, can end up with a roll-over counter (ROC) that differs from the sender's, and then it cannot authenticate or decrypt packets.",
+    "mechanism": "A new integrity transform, the Roll-over Counter Carrying Transform (RCC), puts the 4-byte ROC at the front of the authentication tag on every R-th packet, protected by a truncated HMAC-SHA1.",
+    "outcome": "Receivers can resynchronize quickly from the packet stream itself. The catch is that with R above 1 only some packets are integrity protected, so it is a synchronization aid, not a replacement for integrity protection.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "ROC size",
+      "value": "4 octets"
+    },
+    {
+      "label": "Transform values",
+      "value": "RCCm1 = 2, RCCm2 = 3, RCCm3 = 4"
+    },
+    {
+      "label": "ROC rate parameter (R)",
+      "value": "Type 13, 16-bit, default 1"
+    },
+    {
+      "label": "Recommended tag length",
+      "value": "14 octets (RCCm1, RCCm2)"
+    },
+    {
+      "label": "MAC_tr at that length",
+      "value": "10 octets"
+    },
+    {
+      "label": "Minimum tag length",
+      "value": "32 bits"
+    }
+  ],
+  "today": "<p>RFC 4771 is a Proposed Standard and the unit metadata lists no RFC that obsoletes or updates it. It builds on <a href='/3711/'>RFC 3711</a> and uses the MIKEY registrations of <a href='/3830/'>RFC 3830</a>.</p>",
+  "glossary": [
+    "srtp",
+    "rollover-counter",
+    "rtp",
+    "sequence-number",
+    "hmac",
+    "mac-integrity",
+    "replay-protection"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why the Roll-Over Counter Gets Lost",
+      "content": "<p>In SRTP (<a href='/3711/'>RFC 3711</a>), each packet's index is the 16-bit sequence number (SEQ) combined with a <strong>roll-over counter</strong> (ROC) that counts how many times the sequence number has wrapped. The ROC is not sent in the packets. A receiver joining an ongoing session must be told the sender's current ROC out of band, for example in a MIKEY message (<a href='/3830/'>RFC 3830</a>).</p><p>The RFC lists cases where even that fails. A receiver may get the ROC with a key but join hours later, after SEQ has wrapped. It may leave and return after 2^15 packets have been sent. A delayed packet from before a wrap can be the first one it sees, or the sender's randomly chosen initial SEQ may sit very close to <code>0xffff</code> so that early packet loss misleads the receiver.</p><p>The consequence is that integrity-protected packets are discarded, and unprotected ones may be decrypted with the wrong session key, because the ROC is an input to key derivation. Recovery then needs out-of-band signaling again.</p>",
+      "eli5": "<p>Imagine a race where laps are counted but nobody tells you the lap number. If you arrive late, you cannot tell which lap everyone is on, so you cannot follow along.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "The Roll-Over Counter Carrying Transform",
+      "content": "<p>The RFC considered carrying the ROC in the MKI field, but the MKI has no such meaning in RFC 3711 and is not integrity protected. It chose instead to put the ROC in the authentication tag of a special integrity transform, the <strong>Roll-over Counter Carrying Transform</strong> (RCC). The ROC must be integrity protected, otherwise an attacker could modify it in one packet and leave the victim out of sync until the next ROC arrives.</p><p>The sender checks whether SEQ is 0 modulo a non-zero constant <code>R</code>. If so, it computes the usual HMAC-SHA1 over the authenticated portion and the ROC, truncates the MAC by 32 bits to get <code>MAC_tr</code>, and builds <code>TAG = ROC_sender || MAC_tr</code>. Other packets are processed exactly as in RFC 3711. Because the ROC takes four octets, <code>R</code> lets a deployment send it sparsely.</p><p>The receiver does the mirror image. On packets where SEQ is 0 mod <code>R</code>, it takes <code>ROC_sender</code> from the tag and uses it, instead of its local ROC, both in the MAC check and when deriving the session integrity key. If the MAC verifies, it sets its local ROC to the carried value. If not, the packet MUST be dropped, so a receiver with a wrong ROC is never fooled into changing its mind by a bad packet.</p><p>SRTCP already carries its whole index in-band, so RCC SHALL only be applied to SRTP and SHALL NOT be used with SRTCP.</p>",
+      "eli5": "<p>Every so often the sender writes the lap number on a sealed label that only people with the secret can check. A latecomer reads the label, checks the seal, and knows which lap it is.</p>"
+    },
+    {
+      "id": "options",
+      "number": "3",
+      "title": "The Three Modes",
+      "content": "<p>The transform comes in three modes, and all three are MANDATORY to implement. Local policy decides which ones may actually be used.</p><ul><li><strong>Mode 1</strong>: only the packets that carry the ROC are integrity protected.</li><li><strong>Mode 2</strong>: packets that carry the ROC use RCC, and all other packets MUST be protected with the default integrity transform. Every packet is protected, but only some carry the ROC.</li><li><strong>Mode 3</strong>: no integrity protection at all, a NULL-MAC. The ROC is still carried.</li></ul><p>In mode 3 the receiver's SRTP layer SHOULD ignore the ROC from the packet if the application layer can indicate that the local ROC is already synchronized, though the received ROC MUST still be removed from the packet. That feedback can be as simple as a boolean flag.</p><p>Setting <code>R</code> to one in mode 1 also protects every packet, and adds the ROC to every packet. Modes 1 and 2 compute the MAC the same way as the default SRTP transform, HMAC-SHA1.</p>",
+      "eli5": "<p>There are three ways to run it: stamp only the label packets, stamp every packet, or stamp nothing. The last one is risky, so you only use it when you trust the road.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "4",
+      "title": "Negotiating the Parameters",
+      "content": "<p>Sender and receiver must agree out of band on the mode and on the rate <code>R</code>, for example with MIKEY. Three integrity transforms are registered in Table 6.10.1.c of RFC 3830: <code>RCCm1</code> (value 2), <code>RCCm2</code> (3) and <code>RCCm3</code> (4). The rate <code>R</code> is a 16-bit integer in network byte order, registered as type 13, and MUST be non-zero. If it is not negotiated, the default of 1 SHALL be used.</p><p>To let SRTP and SRTCP use different integrity transforms, the RFC also registers parameter types 14 to 19: separate SRTP and SRTCP authentication algorithm, session authentication key length, and authentication tag length. When both a specific parameter (types 14 to 19) and its general counterpart (type 2, 3 or 11) are present, the more specific one takes precedence.</p><p>The authentication tag length parameter MUST include the length of the ROC, so the minimum tag length with RCC is 32 bits.</p>",
+      "eli5": "<p>Before the call starts, both sides agree how often the lap number is written down and which of the three modes to use.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Trade-offs",
+      "content": "<p>Carrying the ROC means the full SRTP index (ROC and SEQ) becomes public, since it is sent unencrypted. RFC 3711 does not identify a need to encrypt it. Also, unless <code>R</code> is 1, only every R-th packet is integrity protected in mode 1, so the mechanism should be seen as a way to improve synchronization and not as a replacement for integrity protection.</p><p>Mode 3 adds a vulnerability not present in RFC 3711: an attacker who modifies the ROC goes undetected and the receiver loses cryptographic synchronization until the next correct ROC, so modifying every R-th packet is a denial-of-service attack. Mode 3 MUST only be used after a proper risk assessment, and only on networks that are trusted, protected from packet injection, and integrity-protected if they leave a trusted domain.</p><p>The tag-length matters. The tag holds the MAC and, on some packets, the four-octet ROC, so the MAC is shorter than the tag on those packets. To match the forgery resistance of the default transform, the RFC says the tag length should be 14 octets, leaving a 10-octet <code>MAC_tr</code>. This is recommended for RCCm1 and RCCm2, while for RCCm3 the tag length MUST be four octets.</p>",
+      "eli5": "<p>Writing the lap number in the open tells everyone the lap, which is fine. But if nobody checks the seal, a trickster can write a wrong number and confuse you, so be careful.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "6",
+      "title": "IANA Registrations",
+      "content": "<p>The RFC records its registrations with respect to the rules of RFC 3830, under which IETF consensus is required for values in the range 0 to 240 of the SRTP auth alg and SRTP Type namespaces. Value 2 is registered for RCCm1, 3 for RCCm2 and 4 for RCCm3 in the SRTP auth alg namespace. Value 13 (ROC transmission rate) and values 14 to 19 are registered in the SRTP Type namespace.</p>",
+      "eli5": "<p>The new codes were written into the official list so that everyone uses the same numbers.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "RCC INTEGRITY TRANSFORMS (RFC 4771, TABLE 1)",
+      "data": {
+        "items": [
+          {
+            "code": "2",
+            "label": "RCCm1",
+            "desc": "Mode 1: only packets carrying the ROC are integrity protected."
+          },
+          {
+            "code": "3",
+            "label": "RCCm2",
+            "desc": "Mode 2: ROC packets use RCC, all other packets use the default transform."
+          },
+          {
+            "code": "4",
+            "label": "RCCm3",
+            "desc": "Mode 3: no integrity protection, the ROC is still carried."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC3711]",
+      "text": "Baugher, M., McGrew, D., Naslund, M., Carrara, E., and K. Norrman, \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
+      "rfc": 3711
+    },
+    {
+      "number": "[RFC3830]",
+      "text": "Arkko, J., Carrara, E., Lindholm, F., Naslund, M., and K. Norrman, \"MIKEY: Multimedia Internet KEYing\", RFC 3830, August 2004.",
+      "rfc": 3830
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

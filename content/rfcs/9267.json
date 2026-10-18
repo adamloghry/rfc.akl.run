@@ -9,13 +9,116 @@
   },
   "questions": [
     "what are common dns parsing vulnerabilities",
-    "how to safely process dns resource records"
+    "how to safely process dns resource records",
+    "what are dns compression pointer attacks",
+    "how to safely parse dns packets",
+    "what dns validation should i implement"
+  ],
+  "tags": [
+    "Security",
+    "DNS",
+    "Implementation"
+  ],
+  "subtitle": "Common mistakes in DNS implementations that lead to crashes or attacks.",
+  "tldr": {
+    "problem": "Developers writing DNS software often make the same parsing mistakes when handling domain names and resource records, leading to buffer overflows, infinite loops, and crashes that attackers can exploit.",
+    "mechanism": "This memo identifies five common implementation anti-patterns: unchecked compression pointers, unvalidated label lengths, misplaced null terminators, unchecked response data length, and incorrect record counts. Each can cause memory corruption or denial of service.",
+    "outcome": "By understanding these patterns and applying the recommended validation checks, developers can eliminate a broad class of vulnerabilities from DNS implementations.",
+    "outcomeLabel": "Prevention guidance"
+  },
+  "facts": [
+    {
+      "label": "Max label length",
+      "value": "63 octets"
+    },
+    {
+      "label": "Max domain name length",
+      "value": "255 octets"
+    },
+    {
+      "label": "Max UDP DNS packet size",
+      "value": "512 octets"
+    },
+    {
+      "label": "Compression pointer offset bits",
+      "value": "14"
+    }
+  ],
+  "today": "<p>RFC 9267 is informational. It distills years of security research into actionable anti-patterns. Major DNS implementations, DNS libraries, and protocol stacks have been updated to address these issues since the RFC publication, but embedded systems and legacy code may still contain these vulnerabilities.</p>",
+  "glossary": [
+    "dns",
+    "dnssec",
+    "dns-message",
+    "replay-attack",
+    "vulnerability-disclosure"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why DNS Parsing Is a Security Problem",
+      "content": "<p>The Domain Name System is a critical part of the Internet. Every time a web browser looks up a domain name, a DNS client reads the response. If the DNS client is careless in parsing the response, an attacker can craft a malicious DNS answer that crashes the program or executes arbitrary code.</p><p>This memo surveys common implementation flaws across DNS client implementations in major TCP/IP stacks and embedded systems. The flaws often violate RFC 1035, the original DNS specification. Importantly, these mistakes are not new; some date back to the year 2000. Despite this, they continue to appear in new code, suggesting they are widely misunderstood.</p><p>The affected software includes DNS clients, firewalls, intrusion detection systems, and packet analyzers (like Wireshark). Some issues also affect DNS over HTTPS and DNS over TLS. Any software that reads the DNS wire format is at risk.</p><p>The memo provides technical details so developers can eradicate these anti-patterns and apply robust validation to all DNS parsing code.</p>",
+      "eli5": "<p>DNS answers come from the Internet. A careless program trusts them blindly. Bad actors send tricky answers that break the program. The memo shows what tricks to watch for.</p>"
+    },
+    {
+      "id": "concepts",
+      "number": "2",
+      "title": "Compression Pointers: A Common Source of Exploits",
+      "content": "<p>RFC 1035 allows DNS messages to save space by using compression pointers. Instead of sending a full domain name twice, the sender replaces it with a two-octet pointer to where the name appeared before. The first two bits are set to 1, and the remaining 14 bits are the offset (the byte position from the start of the DNS header).</p><p>Many implementations fail to validate these pointers correctly. Common mistakes:</p><p><strong>Unchecked offsets:</strong> Some code does not check if the offset is within the DNS packet bounds. An offset of 0xffff points 16,383 bytes past the packet start, causing the parser to read outside allocated memory.</p><p><strong>Infinite loops:</strong> If a compression pointer points to itself or to another pointer that eventually loops back, the parser enters an infinite loop, hanging the program.</p><p><strong>Uncontrolled jumps:</strong> Some code allows unlimited jumps from pointer to pointer. An attacker can construct a chain that causes the parser to copy the same label repeatedly, overwriting buffer memory on the stack or heap.</p><p><strong>Incorrect pointer detection:</strong> Some code uses a broken check (like <code>if (*octet & 0xc0)</code> instead of <code>if ((*octet & 0xc0) == 0xc0)</code>) that misidentifies regular data as a pointer.</p><p>The fix: validate that the offset is within the packet, ensure a pointer target is before the pointer itself (preventing loops), and check that targets are valid domain name positions (not arbitrary offsets).</p>",
+      "eli5": "<p>Compression pointers are shortcuts. Bad ones can point nowhere, point to themselves in a loop, or jump too many times. Check that they always point forward to valid places.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "3",
+      "title": "Label and Domain Name Length Violations",
+      "content": "<p>RFC 1035 sets strict limits: each label is at most 63 octets, and a full domain name is at most 255 octets. These limits allow labels and names to be represented compactly.</p><p>Many implementations do not enforce these limits. They assume a name buffer of 255 octets (correct) but place no check on individual label length. A malformed packet with a label-length octet of 200 will copy 200 bytes into a 255-byte buffer, leaving only 55 bytes for the rest of the name. If the packet contains multiple oversized labels, the second one overflows the buffer.</p><p>The same issue affects copies of domain names: code counts octets copied but does not check that a label's reported length does not exceed 63 octets or that the total name length does not exceed 255 octets.</p><p><strong>Fix:</strong> explicitly check that each label length is between 1 and 63, and that the total name length (including all labels and the terminator) does not exceed 255 octets.</p>",
+      "eli5": "<p>Labels have size limits. Names have size limits. Code must check the packet actually respects these limits before copying.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4",
+      "title": "Null Terminator and Data Length Validation",
+      "content": "<p>Each domain name must end with a zero octet (the null terminator). Code that parses names typically loops until it finds this terminator. If the terminator is missing or at an invalid position, the loop continues past the end of the packet, reading garbage from memory.</p><p>A common anti-pattern is using standard C string functions like <code>strlen()</code> to find the name length. <code>strlen()</code> scans memory for a null terminator and returns the position. If the terminator is not where expected, <code>strlen()</code> can read far beyond the allocated buffer, causing crashes or leaking secret data.</p><p>Similarly, the RDLENGTH field in a DNS resource record specifies how many bytes of resource data follow. If code trusts this field without checking that the data actually exists in the packet, it will read out-of-bounds.</p><p><strong>Fix:</strong> never trust user-provided data to be null-terminated. Use bounded string functions like <code>strnlen()</code> that take a maximum length. Always check that RDLENGTH does not exceed the remaining packet data before reading.</p>",
+      "eli5": "<p>The packet says 'read 200 bytes of data here,' but only 50 bytes are left. Code must check bounds before reading.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "5",
+      "title": "Record Count Validation and Packet Parsing",
+      "content": "<p>The DNS header contains four 16-bit count fields: QDCOUNT (questions), ANCOUNT (answers), NSCOUNT (authority records), and ARCOUNT (additional records). These say how many records of each type appear in the message.</p><p>A common pattern is to loop, processing each record and decrementing the count until zero. If the count is larger than the number of records actually present, the loop will read past the end of the packet.</p><p>For example, a malicious packet might claim 1000 answer records but include only 2. The parser will attempt to read 998 non-existent records, overflowing the packet buffer.</p><p><strong>Fix:</strong> validate all record counts against the actual packet size. As RFC 5625 recommends, discard malformed packets and optionally log them. Never assume the packet structure is valid before full validation.</p>",
+      "eli5": "<p>The header says '10 answers follow,' but only 3 are in the packet. Code must count as it parses and stop when the packet ends.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC1035]",
+      "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
+      "rfc": 1035
+    },
+    {
+      "number": "[RFC5625]",
+      "text": "Bellis, R., \"DNS Proxy Implementation Guidelines\", BCP 152, RFC 5625, August 2009.",
+      "rfc": 5625
+    },
+    {
+      "number": "[RFC7858]",
+      "text": "Hu, Z., Zhu, L., Heidemann, J., Mankin, A., Wessels, D., and P. Hoffman, \"Specification for DNS over Transport Layer Security (TLS)\", RFC 7858, May 2016.",
+      "rfc": 7858
+    },
+    {
+      "number": "[RFC8484]",
+      "text": "Hoffman, P. and P. McManus, \"DNS Queries over HTTPS (DoH)\", RFC 8484, October 2018.",
+      "rfc": 8484
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

@@ -10,13 +10,184 @@
   "questions": [
     "ikev2 per-resource child sa",
     "ipsec multiple cpu child sa",
-    "sa_resource_info"
+    "sa_resource_info",
+    "what is sa_resource_info",
+    "what is ts_max_queue",
+    "how to use multiple cpus for ipsec"
+  ],
+  "tags": [
+    "IPsec",
+    "IKEv2",
+    "Performance"
+  ],
+  "subtitle": "How two IPsec peers can set up several identical tunnels, one per CPU or queue, to get past the single-core speed limit.",
+  "tldr": {
+    "problem": "Most IPsec implementations tie a Child SA to one CPU or hardware queue, because sharing the sequence number among CPUs is slow. A 10 Gbps or faster link is commonly reduced to 2-5 Gbps.",
+    "mechanism": "The peers negotiate several Child SAs with identical Traffic Selectors, each bound to its own resource, and flag them with a new SA_RESOURCE_INFO notification. A peer that has had enough replies with the TS_MAX_QUEUE error.",
+    "outcome": "Each CPU keeps its own sequence number counter, so no cross-CPU locking is needed. The RFC reports aggregate throughput rising from 5 Gbps on 1 CPU to 40-60 Gbps on 25-30 CPUs.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "SA_RESOURCE_INFO type value",
+      "value": "16444 (status)"
+    },
+    {
+      "label": "TS_MAX_QUEUE type value",
+      "value": "48 (error)"
+    },
+    {
+      "label": "Recommended Child SA limit",
+      "value": "At least double the number of CPUs"
+    },
+    {
+      "label": "Reported throughput",
+      "value": "5 Gbps on 1 CPU to 40-60 Gbps on 25-30 CPUs"
+    }
+  ],
+  "today": "<p>RFC 9611 is a Proposed Standard published in July 2024. It has not been obsoleted or updated, and it builds on IKEv2 as defined in <a href='/7296/'>RFC 7296</a>.</p>",
+  "glossary": [
+    "ike",
+    "child-sa",
+    "security-association",
+    "traffic-selector",
+    "ipsec",
+    "sequence-number",
+    "replay-protection",
+    "esp"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The One-CPU Bottleneck",
+      "content": "<p>Most IPsec implementations limit a <strong>Child SA</strong> to a single hardware queue or CPU. Encrypting packets in parallel is possible, but the parts of the hardware end up locking or waiting to get the sequence number for the packet being encrypted. A machine with many CPUs can therefore use only one of them per Child SA.</p><p>The RFC gives an example: an unencrypted link of 10 Gbps or more is commonly reduced to 2-5 Gbps when IPsec encrypts it with AES-GCM. Using the approach in this document, aggregate throughput rose from 5 Gbps using 1 CPU to 40-60 Gbps using 25-30 CPUs.</p><p>Section 2 explains why: sharing cryptographic state, counters and sequence numbers among CPUs that use them at the same moment costs a significant performance penalty. The fix is to negotiate several Child SAs with identical Traffic Selectors, one per resource.</p>",
+      "eli5": "<p>Imagine one checkout counter that hands out numbered tickets, and every cashier must wait for it. Giving each cashier their own ticket roll means nobody waits.</p>"
+    },
+    {
+      "id": "background",
+      "number": "2",
+      "title": "Why Existing Tools Fall Short",
+      "content": "<p>The RFC notes that one workaround exists: set up multiple narrowed Child SAs, for example with Populate From Packet (PFP) from the IPsec architecture in <a href='/4301/'>RFC 4301</a>. But that would give too many Child SAs (one per network flow) or too few (one flow used on multiple CPUs), and PFP is not widely implemented.</p><p>IKEv2 (<a href='/7296/'>RFC 7296</a>) already allows several Child SAs with identical Traffic Selectors. What it lacks is a way to say that the extra Child SA is requested for performance reasons and is restricted to one resource, such as a queue or CPU. This document adds that signal.</p>",
+      "eli5": "<p>The old tricks made either far too many tunnels or too few. What was missing was a way to say, this extra tunnel is just for one worker.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "3",
+      "title": "Negotiating Per-Resource Child SAs",
+      "content": "<p>The initiator adds the <code>SA_RESOURCE_INFO</code> notify payload to the exchange that negotiates the Child SA (for example <code>IKE_AUTH</code> or <code>CREATE_CHILD_SA</code>). It MAY put an identifier in the Notification Data to say which resource the Child SA is tied to. A responder willing to have multiple Child SAs for the same Traffic Selectors answers with the same notification, and MAY add non-zero Notification Data.</p><p>More per-resource Child SAs are then negotiated as ordinary Child SAs with <code>CREATE_CHILD_SA</code>, each accompanied by <code>SA_RESOURCE_INFO</code>. On installation, each one gets an extra local selector, such as the CPU. They MUST be negotiated with the same properties as the initial Child SA, including cryptographic algorithms, Traffic Selectors, mode and compression usage. Each still derives its own keying material by the regular IKEv2 process.</p><p>The identifying data SHOULD be unique among all Child SAs with the same TS payloads, and the peer MUST use it only for debugging. Additional Child SAs can be started on demand or all at once, and peers may delete a per-resource Child SA when its resource is idle. When a Child SA is rekeyed, the notification MAY be included, but the new Child SA should be bound to the same resource(s) either way.</p>",
+      "eli5": "<p>One side says, I would like a separate tunnel for this worker, and the other agrees. Every tunnel follows the same rules but gets its own secret keys.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "4",
+      "title": "Implementation Considerations",
+      "content": "<p>A simple plan is to install one additional Child SA on each CPU. An implementation can keep one Child SA usable by all CPUs, so a CPU still waiting for its own Child SA (typically 1 RTT) can encrypt with that shared one. Alternatively, a CPU without the resources to encrypt a packet can relay it to a CPU that has them, at a performance cost.</p><p>Both peers may start additional Child SAs at the same time, especially when per-CPU Child SAs are triggered by individual <code>SADB_ACQUIRE</code> messages (<a href='/2367/'>RFC 2367</a>). Responders should install the new Child SA on the CPU with the fewest additional Child SAs for that TSi/TSr pair. The trigger packet's Traffic Selector can also guide the choice: a packet for TCP port 25 (SMTP) could place the Child SA on the CPU running the mail server.</p><p>If the peers have different numbers of resources, the peer with fewer may skip installing a second outbound Child SA it would never use, but it must install all inbound Child SAs it has committed to receiving on. Rekeying SHOULD use the same or wider Traffic Selectors, as in IKEv2.</p>",
+      "eli5": "<p>A smart computer puts each new tunnel on the worker with the fewest, and shares one spare tunnel while a worker waits for its own.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "The Two Notify Payloads",
+      "content": "<p>Both payloads use the Notify payload layout from <a href='/7296/'>RFC 7296</a>, with integers in big endian order. In each, the Critical flag MUST be 0, and Protocol ID and SPI Size MUST be 0 (and MUST be ignored if not 0).</p><p><code>SA_RESOURCE_INFO</code> is a status type with value 16444. It can end with an optional opaque Resource Identifier that conveys the local identity of the resource.</p><p><code>TS_MAX_QUEUE</code> is an error type with value 48 and no associated data. A peer sends it when it is receiving more additional Child SAs for one set of Traffic Selectors than it is willing to create.</p>",
+      "eli5": "<p>There are two little notes. One says, this tunnel belongs to a particular worker. The other says, no more tunnels, please.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "6",
+      "title": "Operational Advice",
+      "content": "<p>Implementations SHOULD extend their local SPD selector and on-demand negotiation to carry a CPU or queue identifier in the packet trigger message to the IKE daemon, and the RFC RECOMMENDS implementing per-CPU triggers. Without them, an implementation may bring up all its Child SAs at once, which risks an infinite loop of delete and re-create between the peers, or both peers ending with only the first Child SA.</p><p>Peers SHOULD be flexible about how many Child SAs they allow per TSi/TSr combination, since rekeying and on-demand triggers can briefly create many. Allowing at least double the number of available CPUs is RECOMMENDED, though a very large number of SAs may slow per-packet SAD lookup.</p><p>A per-CPU Child SA can be moved to another CPU, but both inbound and outbound SAs must be moved. A host that no longer accepts resource-specific Child SAs MUST NOT return <code>NO_ADDITIONAL_SAS</code>, since the peer could read it as meaning no other Child SA with different selectors is allowed either. It MUST return <code>TS_MAX_QUEUE</code> instead.</p>",
+      "eli5": "<p>Allow a few spare tunnels, and say the right word when you are full, so the other side does not think all tunnels are forbidden.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Implementations SHOULD NOT use data that reveals hardware details as the notification identifier. Using the CPU number itself might tell an attacker which packets are handled by which CPU and could help optimize a brute-force attack.</p><p>It is RECOMMENDED to limit the number of additional Child SAs per unique TSi/TSr, as with half-open SAs, to limit denial-of-service impact. The RFC says per-resource Child SAs make sense for high-volume gateway connections where the administrators trust each other. That trust is usually absent for remote access VPNs, so allowing them there is NOT RECOMMENDED, and neither is allowing them by default.</p>",
+      "eli5": "<p>Do not give strangers an unlimited number of tunnels, and do not label tunnels in a way that reveals how your machine is built inside.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "Adding a resource-specific Child SA (illustrative, simplified)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator"
+          },
+          {
+            "key": "responder",
+            "label": "Responder"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "CREATE_CHILD_SA + SA_RESOURCE_INFO",
+            "color": "blue",
+            "note": "Asks for another Child SA with the same Traffic Selectors, tied to a resource."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "CREATE_CHILD_SA + SA_RESOURCE_INFO",
+            "color": "green",
+            "note": "Agrees; or replies with TS_MAX_QUEUE if it will create no more."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "Values registered by IANA",
+      "data": {
+        "items": [
+          {
+            "code": "16444",
+            "label": "SA_RESOURCE_INFO",
+            "desc": "Status type: this Child SA is one of a group bound to resources.",
+            "highlight": true
+          },
+          {
+            "code": "48",
+            "label": "TS_MAX_QUEUE",
+            "desc": "Error type: no more additional Child SAs for this Traffic Selector combination."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC7296]",
+      "text": "Kaufman, C., Hoffman, P., Nir, Y., Eronen, P., and T. Kivinen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", STD 79, RFC 7296, October 2014.",
+      "rfc": 7296
+    },
+    {
+      "number": "[RFC4301]",
+      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
+      "rfc": 4301
+    },
+    {
+      "number": "[RFC2367]",
+      "text": "McDonald, D., Metz, C., and B. Phan, \"PF_KEY Key Management API, Version 2\", RFC 2367, July 1998.",
+      "rfc": 2367
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

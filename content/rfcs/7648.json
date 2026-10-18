@@ -9,13 +9,220 @@
   },
   "questions": [
     "what is a pcp proxy",
-    "how can a pcp client reach a server several hops away"
+    "how can a pcp client reach a server several hops away",
+    "how does pcp work with cascaded nats",
+    "what is optimized hairpin routing"
+  ],
+  "tags": [
+    "PCP",
+    "NAT",
+    "Proxy"
+  ],
+  "subtitle": "A relay that lets PCP clients behind one or more NATs reach the PCP server upstream.",
+  "tldr": {
+    "problem": "Hosts often sit behind several NATs run by different parties, and a PCP client cannot realistically discover or talk to every one of them, or be configured with a server more than one hop away.",
+    "mechanism": "A PCP proxy acts as a PCP server toward clients and a PCP client toward the upstream server, allocating its own external port and relaying the request, so the outermost external address and port flow back down to the client.",
+    "outcome": "Clients keep talking to one nearby device while mappings are created through the whole chain, but the proxy needs care with unknown options, THIRD_PARTY mappings and state repair.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Reuse threshold",
+      "value": "Reply immediately if at least 3/4 of requested lifetime remains"
+    },
+    {
+      "label": "Deletion",
+      "value": "Lifetime 0, always sent upstream"
+    },
+    {
+      "label": "Unknown Opcode error",
+      "value": "UNSUPP_OPCODE"
+    },
+    {
+      "label": "Unknown option error",
+      "value": "UNSUPP_OPTION"
+    },
+    {
+      "label": "Firewall-style mappings",
+      "value": "THIRD_PARTY option required"
+    }
+  ],
+  "today": "<p>RFC 7648 is a Proposed Standard published in September 2015, and the metadata lists no RFC that obsoletes or updates it. It builds on <a href='/6887/'>RFC 6887</a>.</p>",
+  "glossary": [
+    "nat",
+    "nat-traversal",
+    "proxy",
+    "nonce",
+    "ipv4",
+    "multicast"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The PCP Proxy and Its Use Cases",
+      "content": "<p>This RFC defines a new functional element for the Port Control Protocol (<a href='/6887/'>RFC 6887</a>): the <strong>PCP proxy</strong>. Logically it is a PCP client back-to-back with a PCP server. Only the glue between the two is specified here, and each half otherwise behaves like a regular client or server. Whether the proxy sits in the same device as a flow-aware function such as a NAT or firewall is deployment specific.</p><p>The first use case is the <strong>NAT cascade</strong>. With public IPv4 addresses scarce, customers often get a private address from their ISP, and may add a home NAT, a phone hotspot or a hotel guest router on top. Then several NATs lie on the path. Since they are run by different people, no one entity knows them all, and making simple low-cost clients talk to each one is unreasonable.</p><p>The second is the <strong>PCP relay</strong>. A proxy embedded in customer premises equipment (CPE) can forward requests from LAN clients, which cannot be configured with the server address, to the ISP's PCP server, whose address the CPE has been provisioned with. A well-known anycast address is an alternative, but it can be problematic when several PCP servers must be contacted.</p>",
+      "eli5": "<p>Many routers can be stacked like boxes inside boxes, and nobody knows them all. The proxy is one helper who talks to the next box for you.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "Architecture and Authentication",
+      "content": "<p>The reference architecture is a client on the left, then the proxy (a server joined to a client), then an upstream server. The RFC assumes <strong>hop-by-hop</strong> PCP authentication: the downstream client authenticates with the proxy, and the proxy authenticates with the upstream server. In some deployments only the proxy-to-server hop is authenticated.</p><p>Hop-by-hop authentication suits deployments better and lets implementations easily support a proxy that alters messages, for example by stripping an option or changing a field.</p><p>The terms upstream and downstream follow the packet direction: upstream is outbound toward the public Internet, downstream is inbound from it.</p>",
+      "eli5": "<p>Each helper only has to trust the next one in the chain, not everybody at once.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3",
+      "title": "Relaying a Mapping Request",
+      "content": "<p>When the proxy receives a mapping-creation request, it first checks its mapping table for an active mapping with the same internal address and port (and the remote peer, for PEER requests). If none exists, it allocates a port on its external interface, assumes that interface's address may itself be translated by an upstream NAT, and sends its own request upstream. The new mapping is temporary until the upstream server confirms it.</p><p>If a mapping exists and at least 3/4 of the requested lifetime remains, the proxy SHOULD reply immediately with the outermost external address and port. If less remains, it MUST generate an upstream request. A deletion request (lifetime 0) removes any local mapping and is always passed upstream. The proxy MUST find its server with the procedure in Section 8.1 of <a href='/6887/'>RFC 6887</a>.</p><p>In the upstream request the client address and port are the proxy's own newly allocated external ones. The suggested external address and port, the mapping nonce and (for PEER) the remote peer are copied from the original request. The lifetime is passed on if acceptable, otherwise capped to the configured limits.</p><p>The downstream reply carries the lifetime granted upstream (or less), the nonce, and the assigned external address and port copied from the upstream reply. Applied recursively, the outermost external address and port travel back to the client. The reply uses the proxy's <strong>own Epoch Time</strong>. It MUST NOT copy the upstream server's, so the proxy can signal its own state loss. If the upstream server loses state, the proxy can recreate the mappings or reset its own Epoch Time.</p>",
+      "eli5": "<p>The helper writes down your request, makes a new one in its own name, and when the answer comes back it passes it to you. It keeps its own clock so you can tell if it forgot things.</p>"
+    },
+    {
+      "id": "routing",
+      "number": "4",
+      "title": "Hairpin Routing and Ending the Recursion",
+      "content": "<p>A proxy SHOULD implement <strong>optimized hairpin routing</strong>. If an outgoing packet from an internal client is addressed to an external, or outermost external, address and port found in the proxy's own mapping table, it should create an outbound mapping if needed, rewrite the packet and deliver it directly to the internal client that owns that address and port. This is not required for communication to work, but it avoids sending the packet to the outermost NAT and back, giving higher throughput and lower latency. Upstream traffic counters will then differ from the proxy's.</p><p>Recursion must stop somewhere. The RFC gives non-exhaustive examples: a gateway configured to know it is outermost; a gateway whose external address is not in the private ranges of <a href='/1918/'>RFC 1918</a> and <a href='/6598/'>RFC 6598</a>; no configured list of PCP servers or an unresponsive default router; or an upstream device that does not embed a proxy.</p>",
+      "eli5": "<p>If two friends behind the same helper want to talk, the helper hands the message across directly instead of sending it far away and back.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "5",
+      "title": "Source Address, Unknown Opcodes and Options",
+      "content": "<p>The controlled device may be a NAT, a firewall or a hybrid. When the mapping's external address belongs to the proxy node, as with a NAT, the upstream request uses it as the source. When it does not, as with a firewall, the proxy MUST insert a <code>THIRD_PARTY</code> option carrying the mapping's external address.</p><p>With no NAT co-located, ports are not altered, so the proxy relays unknown Opcodes and options. When co-located with a NAT, the proxy MUST by default relay unknown Opcodes and mandatory-to-process unknown options, so clients can use new server features. Such messages could hide an internal address or port that would not be translated, so the proxy MUST be configurable to disable relaying. In that mode a NAT-co-located proxy MUST reply <code>UNSUPP_OPCODE</code> to an unknown Opcode and <code>UNSUPP_OPTION</code> to a mandatory-to-process unknown option.</p>",
+      "eli5": "<p>If the helper does not recognize a request type, it normally forwards it. But it can be told to say no when forwarding might leak private details.</p>"
+    },
+    {
+      "id": "management",
+      "number": "6",
+      "title": "Mapping Repair and Multiple Servers",
+      "content": "<p>Client <code>ANNOUNCE</code> requests are handled locally and MUST NOT be relayed. On an unsolicited <code>ANNOUNCE</code> from the server, the proxy renews its mappings and compares them with its cache, if it keeps one. If something changed, it MUST send unsolicited <code>ANNOUNCE</code> messages to the affected clients. Without a cache, it sends unsolicited multicast ones. If its external address changes, it SHOULD renew its mappings, and if the server assigns a different port, it SHOULD follow the repair procedure of <a href='/6887/'>RFC 6887</a>, which needs a full state table.</p><p>A proxy MAY handle <strong>multiple PCP servers</strong>, each with its own epoch value, invisibly to clients. Following the server selection process of <a href='/7488/'>RFC 7488</a>, it contacts all configured servers in parallel. It MAY load-balance clients among servers (for example with carrier-grade NATs) but MUST send a given client's requests to the same server, and MAY use fields such as Zone-ID to choose.</p>",
+      "eli5": "<p>If the faraway office changes something, the helper tells you. If there are several faraway offices, the helper picks one for you and always sticks with it.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The proxy MUST follow the security considerations of <a href='/6887/'>RFC 6887</a> for both its client and server sides. Where it inserts <code>THIRD_PARTY</code>, it must prevent a malicious user from creating mappings for others, as discussed in Section 13.1 of that RFC. <code>THIRD_PARTY</code> MUST NOT be enabled unless the network carrying the PCP messages is fully trusted, by physical or cryptographic security or both, for example with ACLs allowing only a trusted proxy to reach the server.</p><p>A request with an unknown Opcode or option SHOULD be dropped (or the option removed, if it need not be processed) when it conflicts with the proxy's security controls. The device embedding the proxy MAY block PCP requests sent directly to upstream servers, using ACLs.</p>",
+      "eli5": "<p>The helper must be careful not to let strangers ask for favors in someone else's name, so it only does that on a network it fully trusts.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "PCP PROXY RELAYING A MAPPING REQUEST (simplified from RFC 7648)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "PCP client"
+          },
+          {
+            "key": "proxy",
+            "label": "PCP proxy"
+          },
+          {
+            "key": "server",
+            "label": "Upstream PCP server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "proxy",
+            "label": "Mapping request",
+            "color": "blue",
+            "note": "Proxy allocates its own external port; local mapping is temporary."
+          },
+          {
+            "from": "proxy",
+            "to": "server",
+            "label": "Upstream request",
+            "color": "blue",
+            "note": "Client address and port are the proxy's own; nonce is copied."
+          },
+          {
+            "from": "server",
+            "to": "proxy",
+            "label": "Reply",
+            "color": "green",
+            "note": "Outermost external address, port and lifetime."
+          },
+          {
+            "from": "proxy",
+            "to": "client",
+            "label": "Reply",
+            "color": "green",
+            "note": "Outermost address and port relayed, with the proxy's own Epoch Time."
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "REFERENCE ARCHITECTURE (RFC 7648, FIGURE 1)",
+      "data": {
+        "layers": [
+          {
+            "label": "PCP client",
+            "detail": "Sends requests to the nearest PCP server"
+          },
+          {
+            "label": "PCP proxy: server side",
+            "detail": "Behaves like a regular PCP server",
+            "highlight": true
+          },
+          {
+            "label": "PCP proxy: client side",
+            "detail": "Behaves like a regular PCP client",
+            "highlight": true
+          },
+          {
+            "label": "Upstream PCP server",
+            "detail": "Controls the next NAT or firewall"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6887]",
+      "text": "Wing, D., Ed., Cheshire, S., Boucadair, M., Penno, R., and P. Selkirk, \"Port Control Protocol (PCP)\", RFC 6887, April 2013.",
+      "rfc": 6887
+    },
+    {
+      "number": "[RFC7488]",
+      "text": "Port Control Protocol (PCP) Server Selection, RFC 7488.",
+      "rfc": 7488
+    },
+    {
+      "number": "[RFC1918]",
+      "text": "Rekhter, Y., Moskowitz, B., Karrenberg, D., de Groot, G., and E. Lear, \"Address Allocation for Private Internets\", BCP 5, RFC 1918, February 1996.",
+      "rfc": 1918
+    },
+    {
+      "number": "[RFC6598]",
+      "text": "IANA-Reserved IPv4 Prefix for Shared Address Space, RFC 6598.",
+      "rfc": 6598
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

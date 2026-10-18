@@ -9,13 +9,291 @@
   },
   "questions": [
     "what is the rpl dco message",
-    "how does rpl invalidate routes"
+    "how does rpl invalidate routes",
+    "what is the rpl destination cleanup object",
+    "what is a no-path dao",
+    "how does rpl invalidate stale routes",
+    "what is the dco i flag"
+  ],
+  "tags": [
+    "Routing",
+    "IoT",
+    "RPL"
+  ],
+  "subtitle": "A downstream cleanup message that lets a router, not the moving node, erase stale RPL routes.",
+  "tldr": {
+    "problem": "In RPL Storing mode, a node that switches parents sends a No-Path DAO up its old path. That message can be lost with the broken link, ignores the node's own descendants, and can race with the new route setup.",
+    "mechanism": "The node sets an 'I' flag in its regular DAO to the new parent. The common ancestor of the old and new paths then sends a Destination Cleanup Object (DCO) down the old path to erase the stale routes.",
+    "outcome": "Stale routes are removed without depending on the failed link, descendants can be covered, and removal is tied to the Path Sequence so it does not clobber a newer route. NPDAO and DCO can coexist.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "DCO control code",
+      "value": "0x07 (DCO-ACK is 0x08)"
+    },
+    {
+      "label": "Invalidation RPL Status",
+      "value": "195 (address moved)"
+    },
+    {
+      "label": "Path Sequence for unsolicited cleanup",
+      "value": "240"
+    },
+    {
+      "label": "Recommended DelayDCO",
+      "value": "1 second"
+    },
+    {
+      "label": "Retry limit if latency unknown",
+      "value": "Not more than once in 3 seconds, not more than three times"
+    },
+    {
+      "label": "Applies to",
+      "value": "RPL Storing mode only"
+    }
+  ],
+  "today": "<p>RFC 9009 is a Proposed Standard, and the unit metadata lists no RFC that obsoletes or updates it. It builds on <a href='/6550/'>RFC 6550</a>, and the NPDAO mechanism from that RFC remains usable alongside the DCO.</p>",
+  "glossary": [
+    "rpl",
+    "sequence-number",
+    "link-local-address"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Cleaning Up Routes in RPL",
+      "content": "<p>RPL, the Routing Protocol for Low-Power and Lossy Networks defined in <a href='/6550/'>RFC 6550</a>, builds a tree toward a root. In <strong>Storing mode</strong>, DAO (Destination Advertisement Object) messages make every router on a node's path to the 6LBR (the border router at the root) keep a routing entry for it.</p><p>When a node changes parent, RPL lets it send a <strong>No-Path DAO</strong> (NPDAO), a DAO with a route lifetime of zero, to release the old path. Routing entries are a major user of the little memory these devices have, so stale entries matter. RFC 9009 explains where NPDAO falls short and adds a new message, the <strong>Destination Cleanup Object</strong> (DCO). It covers only Storing mode, because Non-Storing mode keeps no routing entries on the intermediate routers.</p>",
+      "eli5": "<p>Small devices have tiny notebooks for remembering routes. If old routes are never erased, the notebooks fill up with directions that lead nowhere.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "2",
+      "title": "Problems with the No-Path DAO",
+      "content": "<p>The RFC names three weaknesses, all illustrated with a sample topology in which node D moves from parent B to parent C.</p><ul><li><strong>Lost message.</strong> The NPDAO goes to the old parent. If D switched because that link or node failed, the NPDAO may never arrive.</li><li><strong>Dependent nodes.</strong> RPL does not say how to invalidate routes for nodes below the switching node (E and F in the example). D sends an NPDAO only for itself, so B and G keep stale entries for E and F until the route lifetime expires, which can be very long in these networks.</li><li><strong>Asynchronous operation.</strong> The NPDAO and the new DAO travel on different paths at almost the same time. The old route can be removed while the new DAO is lost, leaving downward traffic to the node with no route.</li></ul>",
+      "eli5": "<p>Telling the old road to forget you only works if you can still reach the old road. And it does not help the friends who follow you, and you might erase the old directions before the new ones are ready.</p>"
+    },
+    {
+      "id": "requirements",
+      "number": "3",
+      "title": "Requirements for a Better Scheme",
+      "content": "<p>From those problems the RFC derives three requirements.</p><ol><li>Route invalidation must not depend on the link to the previous parent, which is prone to failure.</li><li>It should be possible to invalidate routes for dependent nodes rooted at the switching node.</li><li>Invalidation should not hurt data traffic, so it is desirable that it be synchronized with the DAO to avoid route downtime.</li></ol>",
+      "eli5": "<p>A good fix must not rely on the broken road, must also cover the friends who follow you, and must not erase the old directions before the new ones work.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "How the DCO Works",
+      "content": "<p>The key change is who starts the cleanup. An NPDAO starts at the moving node and flows upstream. A DCO starts at the <strong>common ancestor</strong>, the first router shared by the old and new paths, and flows downstream along the old path. Like a DAO in Storing mode it is sent with link-local unicast source and destination addresses.</p><p>The moving node sets a new <code>I</code> (Invalidate previous route) flag in the Transit Information option of its regular DAO to the new parent. When the DAO reaches the common ancestor and the next hop for the target has changed, the ancestor SHOULD generate a DCO toward the old next hop. Each router on the old path removes its entry for the target and forwards a DCO to its next hop. The flag is carried with a RPL Status of 195, meaning the address has moved.</p><p>The RFC recommends this over NPDAO. Because dependent nodes send their own DAOs, they can also set the <code>I</code> flag, and it is not counterproductive if there is no previous route to invalidate. A 6LR may also send an unsolicited DCO on its own, for example when a route expires or an entry is evicted from a full table.</p>",
+      "eli5": "<p>Instead of the traveller going back to erase the old signposts, the person standing at the crossroads walks down the old road and takes each one down.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5",
+      "title": "The DCO and DCO-ACK Messages",
+      "content": "<p>The DCO is a new RPL control message with an 8-bit RPLInstanceID, a <code>K</code> flag, a <code>D</code> flag, six reserved flag bits, an 8-bit RPL Status, an 8-bit DCOSequence and an optional 128-bit DODAGID. It MUST carry at least one RPL Target option and a Transit Information option with a lifetime of 0x00000000, which signals loss of reachability to that target. The Transit Information option's Parent Address MUST NOT be included.</p><p>The <code>K</code> flag asks the receiver for an acknowledgment, a <strong>DCO-ACK</strong>. The <code>D</code> flag says the DODAGID is present and MUST be set when a local RPLInstanceID is used. A DCO-ACK echoes the DCOSequence and carries a status; a StatusValue of 0 with the U bit clear means success, and a StatusValue of 1 with U set means 'No routing entry'. Secure variants of both messages exist for RPL's secured modes.</p>",
+      "eli5": "<p>The cleanup message is a short note saying which address to forget and a tag to match the reply. If the sender asks for a receipt, the receiver sends one back.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Path Sequence, Retries and Timers",
+      "content": "<p>The Path Sequence in a DCO decides who wins. A router that receives a DCO whose Path Sequence is not newer than the one it already knows MUST NOT remove its state, and MUST NOT forward the DCO down that path. A DAO that is as new as or newer than a DCO wins. A DCO sent on its own initiative to discard state regardless of Path Sequence MUST use the value 240, which beats any established path but loses to a path being installed.</p><p>A node that sets <code>K</code> and gets no DCO-ACK MAY retry. If latency limits are unknown, it MUST NOT retry more than once in 3 seconds and MUST NOT retry more than three times. With multiple preferred parents, a common ancestor should wait a <strong>DelayDCO</strong> period, recommended as 1 second, so that updated DAOs from all next hops can arrive first and the DCO overhead stays low.</p><p>A node receiving a DCO that names its own address MUST strip that target, and drops the DCO if it was the only one. Deployments can mix NPDAO and DCO nodes. If some 6LRs do not support DCO, invalidation may only partly work, and a node can fall back to sending an NPDAO if no DCO arrives in time.</p>",
+      "eli5": "<p>Each note has a version number. A router only erases a route if the cleanup note is newer than what it knows, so a fresh route is never wiped by an old note.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>A common ancestor could already drop a route on its own, so a rogue one could invalidate routes and hurt traffic to a target. The <code>I</code> flag could also be spoofed by a malicious 6LR on the path, but invalidation only works if the Path Sequence condition is met. The RFC argues that a malicious 6LR could already spoof a zero-lifetime DAO or drop traffic, so DCO does not add substantial risk.</p><p>The RPL Status in a DCO is informative and unknown values are ignored, which could make it a one-shot covert channel, since the message destroys the route it travels on. The RFC assumes RPL's normal security. Secure DCO and DCO-ACK messages MUST be used in the Preinstalled and Authenticated security modes.</p>",
+      "eli5": "<p>Someone sneaky in the middle could pretend to ask for a cleanup. But they could already have done other mischief, and the version number still has to match.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "DCO BASE OBJECT (RFC 9009, FIGURE 3)",
+      "data": {
+        "title": "Destination Cleanup Object",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "instance-id",
+            "name": "RPLInstanceID",
+            "bits": 8,
+            "desc": "Topology instance associated with the DODAG."
+          },
+          {
+            "key": "k",
+            "name": "K",
+            "bits": 1,
+            "desc": "Recipient is expected to send a DCO-ACK."
+          },
+          {
+            "key": "d",
+            "name": "D",
+            "bits": 1,
+            "desc": "DODAGID field is present."
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 6,
+            "desc": "Reserved; zero on send, ignored on receipt."
+          },
+          {
+            "key": "status",
+            "name": "RPL Status",
+            "bits": 8,
+            "desc": "Set by the node that generates the DCO."
+          },
+          {
+            "key": "dco-seq",
+            "name": "DCOSequence",
+            "bits": 8,
+            "desc": "Incremented for each unique DCO from a node."
+          },
+          {
+            "key": "dodagid",
+            "name": "DODAGID (optional)",
+            "bits": 128,
+            "desc": "Present only when the D flag is set."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "APPENDIX A.1 EXAMPLE, NODE H OMITTED",
+      "data": {
+        "lanes": [
+          {
+            "key": "d",
+            "label": "D"
+          },
+          {
+            "key": "c",
+            "label": "C"
+          },
+          {
+            "key": "a",
+            "label": "A"
+          },
+          {
+            "key": "g",
+            "label": "G"
+          },
+          {
+            "key": "b",
+            "label": "B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "d",
+            "to": "c",
+            "label": "DAO(tgt=D,pathseq=x+1,I_flag=1)",
+            "color": "blue",
+            "note": "D switches parent from B to C."
+          },
+          {
+            "from": "c",
+            "to": "a",
+            "label": "DAO(tgt=D,pathseq=x+1,I_flag=1)",
+            "color": "blue",
+            "note": "Forwarded via H; each hop creates a route entry for D."
+          },
+          {
+            "from": "a",
+            "to": "g",
+            "label": "DCO(tgt=D,pathseq=x+1)",
+            "color": "green",
+            "note": "A is the common ancestor and sees a different next hop."
+          },
+          {
+            "from": "g",
+            "to": "b",
+            "label": "DCO(tgt=D,pathseq=x+1)",
+            "color": "green",
+            "note": "G invalidates its entry for D, then forwards."
+          },
+          {
+            "from": "b",
+            "to": "d",
+            "label": "DCO(tgt=D,pathseq=x+1)",
+            "color": "green",
+            "note": "B invalidates its entry; D ignores a DCO naming itself."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "NEW RPL CONTROL CODES (RFC 9009, TABLE 1)",
+      "data": {
+        "items": [
+          {
+            "code": "0x07",
+            "label": "DCO",
+            "desc": "Destination Cleanup Object.",
+            "highlight": true
+          },
+          {
+            "code": "0x08",
+            "label": "DCO-ACK",
+            "desc": "Destination Cleanup Object Acknowledgment."
+          },
+          {
+            "code": "0x87",
+            "label": "Secure DCO",
+            "desc": "Secure Destination Cleanup Object."
+          },
+          {
+            "code": "0x88",
+            "label": "Secure DCO-ACK",
+            "desc": "Secure Destination Cleanup Object Acknowledgment."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6550]",
+      "text": "Winter, T., Ed., et al., \"RPL: IPv6 Routing Protocol for Low-Power and Lossy Networks\", RFC 6550, March 2012.",
+      "rfc": 6550
+    },
+    {
+      "number": "[RFC9010]",
+      "text": "Thubert, P., Ed. and M. Richardson, \"Routing for RPL (Routing Protocol for Low-Power and Lossy Networks) Leaves\", RFC 9010, April 2021.",
+      "rfc": 9010
+    },
+    {
+      "number": "[RFC8505]",
+      "text": "Thubert, P., Ed., et al., \"Registration Extensions for IPv6 over Low-Power Wireless Personal Area Network (6LoWPAN) Neighbor Discovery\", RFC 8505, November 2018.",
+      "rfc": 8505
+    },
+    {
+      "number": "[RFC8126]",
+      "text": "Cotton, M., Leiba, B., and T. Narten, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 8126, June 2017.",
+      "rfc": 8126
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

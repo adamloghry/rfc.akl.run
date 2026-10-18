@@ -10,13 +10,158 @@
   "questions": [
     "ospf database overflow",
     "ospf memory limit",
-    "handle ospf lsdb overflow"
+    "handle ospf lsdb overflow",
+    "what is ospf database overflow",
+    "what is ospfextlsdblimit",
+    "what is ospf overflowstate"
+  ],
+  "tags": [
+    "Routing",
+    "OSPF",
+    "Resilience"
+  ],
+  "subtitle": "How OSPF routers cap the number of external routes they store, so a bloated database cannot quietly break routing.",
+  "tldr": {
+    "problem": "All routers in an OSPF area must hold an identical copy of the link-state database, but a very large database can exceed what some routers can store. Routers that drop data on their own end up with inconsistent views of the network.",
+    "mechanism": "Every router is configured with the same limit, ospfExtLsdbLimit, on non-default AS-external-LSAs. A router that reaches the limit flushes the ones it originated, enters OverflowState, stops originating new ones and drops (without acknowledging) any that would exceed the limit.",
+    "outcome": "After a short convergence period all routers hold the same database, routing inside the OSPF system and default routing to external destinations stay intact, and an optional timer lets routers recover automatically. The memo is Experimental.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Default exit interval",
+      "value": "0 (stay until restart)"
+    },
+    {
+      "label": "Exit timer jitter",
+      "value": "plus or minus 10 percent"
+    },
+    {
+      "label": "Trap threshold",
+      "value": "ninety percent of the limit"
+    },
+    {
+      "label": "MaxAge",
+      "value": "1 hour"
+    },
+    {
+      "label": "Limit scope",
+      "value": "Non-default AS-external-LSAs only"
+    }
+  ],
+  "today": "<p>RFC 1765 is an Experimental memo, and the unit metadata lists no RFC that obsoletes or updates it. It is not an Internet standard of any kind.</p>",
+  "glossary": [
+    "link-state-advertisement",
+    "link-state-routing",
+    "ospf-area",
+    "autonomous-system",
+    "snmp",
+    "mib"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Database Overflow Problem",
+      "content": "<p>OSPF requires every router in an area to keep an identical copy of the <strong>link-state database</strong>. When the database gets very large, for example because a regional network imports many external routes into OSPF, some routers may not have the resources to hold all of it. The RFC calls this <strong>database overflow</strong>. If it is not handled correctly, routers end up with inconsistent views of the network, possibly leading to incorrect routing.</p><p>The known way to avoid this is to place limited routers in OSPF stub areas or NSSAs (see <a href='/1587/'>RFC 1587</a>), which leave AS-external-LSAs out of their databases. That cannot cope with an unexpected overflow, so this memo describes a way of dynamically limiting database size when overflow happens.</p><p>Only non-default AS-external-LSAs are limited. They are the most likely to dominate the database in networks with huge databases, and they can be seen as optional because a router can probably still be monitored and reconfigured without them. Other LSA types are not limited.</p>",
+      "eli5": "<p>If one kid's backpack is too small for everyone's stuff, the group agrees on a limit for the optional items so every backpack holds the same things.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "2.1",
+      "title": "The Two Configuration Parameters",
+      "content": "<p><code>ospfExtLsdbLimit</code> is the maximum number of non-default AS-external-LSAs a router may hold. It <strong>MUST</strong> be set identically in all routers attached to the OSPF backbone or any regular OSPF area. If it is not, the routers will not converge on a common database, incorrect routing (possibly including routing loops) will result, and AS-external-LSAs will be retransmitted constantly. A router must also have some way to guarantee it can hold that many LSAs, for example by preallocating memory.</p><p><code>ospfExitOverflowInterval</code> is the number of seconds after which a router tries to leave OverflowState. The default is 0, which means the router stays in OverflowState until it is restarted. This value does not need to match across routers, and setting it the same everywhere may cause trouble because many routers would try to leave at once. For that reason the value is jittered by randomly varying it plus or minus 10 percent before use.</p>",
+      "eli5": "<p>Everyone must agree on the same page limit, but each person can choose a slightly different time to try again, so they do not all try at the same moment.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2.2",
+      "title": "Entering, Living in and Leaving OverflowState",
+      "content": "<p>A router enters <strong>OverflowState</strong> when the number of non-default AS-external-LSAs in its database hits the limit, either when it receives one during flooding or when it originates one itself. On entering, it flushes every non-default AS-external-LSA that it originated, using premature aging. LSAs originated by other routers are kept.</p><p>While in OverflowState, a router discards a non-default AS-external-LSA that has no current database instance and would push the count over the limit. The LSA is not installed and is not acknowledged. Some LSAs are still accepted: updates to an LSA already in the database, LSAs with LS age of MaxAge, and any LSA that keeps the count at or below the limit.</p><p>The router also refuses to originate non-default AS-external-LSAs, so the only AS-external-LSAs it originates have Link State ID <code>0.0.0.0</code>. If it receives a self-originated non-default AS-external-LSA, it flushes it from the routing domain.</p><p>If <code>ospfExitOverflowInterval</code> is non-zero, a timer starts on entry. When it fires, the router leaves OverflowState and starts originating non-default AS-external-LSAs again, although it can re-enter OverflowState if the limit is hit again.</p>",
+      "eli5": "<p>When your shelf is full, you take down the things you put up yourself and stop adding new ones. After a wait you may try again.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "3",
+      "title": "A Worked Example",
+      "content": "<p>Suppose a router has <code>ospfExtLsdbLimit</code> of 10,000 and <code>ospfExitOverflowInterval</code> of 600 seconds. It originates 400 non-default AS-external-LSAs itself, and its database holds 9,997 of them. A Link State Update arrives with 6 new ones. The first two are installed. The third is also installed but pushes the router into OverflowState, which starts flushing its 400 self-originated LSAs.</p><p>Those 400 still count as part of the database until their MaxAge re-flooding is acknowledged, so the last three LSAs in the update are discarded without acknowledgment. The neighbour may retransmit them, and they are accepted if the flush has been acknowledged by then.</p><p>The router also sets a timer that fires between 540 and 660 seconds later. When it fires, the router leaves OverflowState and re-originates its 400 LSAs, provided the database holds fewer than 9600 non-default AS-external-LSAs. Otherwise the timer is simply restarted.</p>",
+      "eli5": "<p>The shelf has room for 3 more things, but 6 arrive. The first ones fit, the rest are turned away, and the owner takes down their own things to make room.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "4",
+      "title": "Handling Overflow in Practice",
+      "content": "<p>After an overflow it may take network management intervention before all routing is restored, unless the overflow is transient. SNMP traps signal the condition: <code>ospfLsdbOverflow</code> says a router is entering OverflowState, and <code>ospfLsdbApproachingOverflow</code> says the count has exceeded ninety percent of the limit.</p><p>The RFC lists possible responses: raise <code>ospfExtLsdbLimit</code> if it was set too conservatively, isolate resource-limited routers in stub areas or NSSAs so the limit can be raised elsewhere, or stop importing less important external routes.</p><p>The scheme had been implemented in the Proteon router for a number of years, with two differences: it never left OverflowState until restarted, and it did not separate default from non-default LSAs. It performed as expected, converging on a common database below the configured limit. Possible enhancements include limiting other LSA types (except router-LSAs and network-LSAs) and flushing only some LSAs instead of all. The memo says security issues are not discussed.</p>",
+      "eli5": "<p>When the shelf is full, the grown-ups get a warning and can buy a bigger shelf, move some items away or decide which things matter most.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "OVERFLOWSTATE TRANSITIONS (RFC 1765)",
+      "data": {
+        "states": [
+          {
+            "key": "normal",
+            "label": "Normal",
+            "initial": true
+          },
+          {
+            "key": "overflow",
+            "label": "OverflowState"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "normal",
+            "to": "overflow",
+            "label": "count of non-default AS-external-LSAs hits ospfExtLsdbLimit"
+          },
+          {
+            "from": "overflow",
+            "to": "normal",
+            "label": "ospfExitOverflowInterval timer fires"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Moy, J., \"OSPF Version 2\", RFC 1583, March 1994.",
+      "rfc": 1583
+    },
+    {
+      "number": "[2]",
+      "text": "Coltun, R., and V. Fuller, \"The OSPF NSSA Option\", RFC 1587, March 1994.",
+      "rfc": 1587
+    },
+    {
+      "number": "[3]",
+      "text": "Moy, J., Editor, \"OSPF Protocol Analysis\", RFC 1245, July 1991.",
+      "rfc": 1245
+    },
+    {
+      "number": "[5]",
+      "text": "Moy, J., Editor, \"Experience with the OSPF Protocol\", RFC 1246, July 1991.",
+      "rfc": 1246
+    },
+    {
+      "number": "[6]",
+      "text": "Moy, J., \"Multicast Extensions to OSPF\", RFC 1584, March 1994.",
+      "rfc": 1584
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

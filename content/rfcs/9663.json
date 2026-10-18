@@ -9,13 +9,184 @@
   },
   "questions": [
     "how to give each client its own ipv6 prefix",
-    "dhcpv6 prefix delegation on wi-fi"
+    "dhcpv6 prefix delegation on wi-fi",
+    "why delegate prefixes instead of addresses",
+    "how does dhcpv6-pd help network scalability"
+  ],
+  "tags": [
+    "IPv6",
+    "DHCPv6",
+    "Network Design"
+  ],
+  "subtitle": "Giving every device its own IPv6 prefix to solve network scalability.",
+  "tldr": {
+    "problem": "Networks with many devices hit scalability limits: routers must maintain separate routing table entries and neighbor cache entries for each IPv6 address, not just each device. This overwhelms network infrastructure.",
+    "mechanism": "Use DHCPv6 Prefix Delegation (DHCPv6-PD) to give each device its own unique IPv6 prefix instead of sharing one link prefix. The router maintains one route per device, not one per address.",
+    "outcome": "Network scales to the number of devices, not the number of addresses. Devices can use as many addresses as they need within their prefix, and can even extend the network to subtended devices via routing rather than NAT.",
+    "outcomeLabel": "Better scalability"
+  },
+  "facts": [
+    {
+      "label": "Typical delegated prefix length",
+      "value": "/64"
+    },
+    {
+      "label": "IPv4 /8 equivalent in IPv6",
+      "value": "IPv6 /40"
+    },
+    {
+      "label": "DHCPv6 protocol standard",
+      "value": "RFC 8415"
+    },
+    {
+      "label": "Documented status",
+      "value": "Informational"
+    }
+  ],
+  "today": "<p>RFC 9663 documents an emerging deployment model supported by vendors and deployed in enterprise networks. It is not yet universal; many networks still use shared on-link prefixes. The RFC is informational and describes operational best practices rather than defining new protocol requirements.</p>",
+  "glossary": [
+    "dhcp",
+    "ipv6",
+    "prefix",
+    "slaac",
+    "dhcpv6-prefix-delegation"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Scalability Problem",
+      "content": "<p><strong>DHCPv6 Prefix Delegation per client</strong> is a way to deploy IPv6 on large broadcast networks (enterprise networks, public Wi-Fi) where many devices connect to the same link. Instead of all devices forming addresses from a single shared prefix assigned to that link, the network gives each device its own unique prefix.</p><p>Networks face two main scalability problems. First, IPv6 devices routinely have multiple addresses per interface: a link-local address, one or more global addresses, temporary addresses for privacy, and potentially addresses for 464XLAT or other functions. On a network where every device has 10 addresses, the router must maintain 10 times as many neighbor cache entries, routes, and other tables. When infrastructure resources are exhausted, addresses are silently dropped and traffic fails. Second, this design allows a device to extend the network to its own subtended devices (like tethered phones or VMs) using routing instead of NAT, providing full end-to-end connectivity just as IPv4 NAT does, but without the translation overhead.</p>",
+      "eli5": "<p>Routers have limited memory for keeping track of all the computers and their addresses. If each computer had its own prefix instead of all sharing one, the routers only need to remember one route per computer, not one per address.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2",
+      "title": "How It Works",
+      "content": "<p>The deployment operates as follows: each device requests a prefix via DHCPv6-PD by sending an IA_PD (Identity Association for Prefix Delegation) request. The DHCPv6 server delegates a prefix to the device and installs it into the first-hop router's routing table as a route pointing to the device's link-local address. For the router and infrastructure, the delegated prefix is treated as off-link, so traffic to that prefix does not trigger Neighbor Discovery packets beyond the minimum needed to keep the device reachable.</p><p>The device can use the delegated prefix in various ways. It can form its own addresses using SLAAC (Stateless Address Autoconfiguration). It can also extend the network by acting as a router to subtended networks, advertising the delegated prefix and allowing connected nodes to form their own addresses via SLAAC. If the network has redundant first-hop routers, all must relay DHCPv6 traffic, maintain the routes locally, and advertise them to the network. To avoid split-brain routing when a router reboots, the DHCPv6 servers must support Bulk Leasequery or Active Leasequery so relays can recover their state.</p>",
+      "eli5": "<p>The device asks the DHCPv6 server: 'Can I have my own prefix?' The server says yes and tells the router to send packets for that prefix to the device's link-local address. The device can then carve up its prefix into even smaller pieces and hand them to computers connected to it.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "3",
+      "title": "Prefix Pool Allocation and Routing",
+      "content": "<p>One simple deployment model assigns a dedicated prefix pool to each link, with prefixes issued only to clients on that link. When clients move to another link, they obtain a new prefix from the pool for that link, just like with address allocation using DHCPv6 IA_NA. The network can route the entire pool to the link's first-hop routers, and the routers do not need to advertise individual delegated prefixes into the network's dynamic routing protocol.</p><p>Prefix length is critical. At the time of writing, only /64 prefixes allow devices to use SLAAC, so each delegated prefix should be /64 or shorter. A network using IPv4 /X prefix can allocate an IPv6 prefix of X+32 to support /64 prefixes to every device. For example, a very large network with an IPv4 /8 (16 million addresses) would only need an IPv6 /40. Even though the address space cost is higher, it is economically justified in large networks where scalability becomes the limiting factor.</p>",
+      "eli5": "<p>Each network link has a pool of prefixes to hand out, like a lifeguard with a stack of colored wristbands. When a device moves to a different link, it gets a wristband from that link's pool.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "4",
+      "title": "Security and Privacy",
+      "content": "<p>Malicious clients can attempt to exhaust the prefix pool by sending requests with different DHCPv6 Unique Identifiers (DUIDs). Networks must configure the DHCPv6 server or relay to limit the number of prefixes delegated to any single client. Administrators can also authenticate devices using tokens that cannot be spoofed (such as 802.1x authentication) and limit the number of link-local addresses or MAC addresses each client can use. Antispoofing is improved by enabling unicast Reverse Path Forwarding (uRPF) on first-hop router interfaces toward clients, which drops packets with spoofed source addresses unless the address is already delegated to another client on the same link. For additional protection, administrators should deploy Source Address Validation Improvement (SAVI) with DHCPv6-PD snooping to detect spoofing.</p><p>Privacy implications are equivalent to networks using stateful DHCPv6 address assignment: both allow the server to determine addresses, though one assigns full 128-bit addresses and the other determines the prefix. Networks should ensure assigned prefixes are randomized rather than deterministic, use short prefix lifetimes (hours rather than days) to ensure clients get different prefixes when reconnecting, and allow clients to hold multiple prefixes simultaneously to rotate prefixes like temporary addresses. A common approach: if clients request a new prefix every 24 hours and prefixes have a one-hour validity, they will consume just over 1 prefix on average.</p>",
+      "eli5": "<p>Bad actors might try to grab too many prefixes. Routers can stop this by limiting how many each device gets. Neighbors can spoof addresses if they know what prefixes are delegated, but routers can block obviously fake traffic using simple filters.</p>"
+    },
+    {
+      "id": "summary",
+      "number": "5",
+      "title": "Benefits and Applicability",
+      "content": "<p>This model provides multiple benefits. Network device resources scale to the number of devices, not addresses. First-hop routers maintain a single route per device pointing to the device's link-local address, reducing hardware cost for systems limited by routing table size or address counts. The cost of having multiple addresses is offloaded to clients, which are free to create as many addresses as needed without burdening the network. If all clients support this mode and generate addresses from delegated prefixes, the shared on-link prefix can be removed from the link entirely, reducing the attack surface for Neighbor Discovery attacks. DHCPv6-PD logs and routing tables provide complete IPv6-to-MAC mapping for forensics and troubleshooting, more stable than dynamic neighbor discovery caches. Network administrators can create per-device security policies (such as ACLs) even when clients use temporary addresses. All global addresses for a client are routed as a single prefix (fate sharing), making failures easier to diagnose. Multicast traffic is lower because routers only resolve clients' link-local addresses, and there is no Duplicate Address Detection traffic except for link-local addresses.</p><p>This deployment benefits large-scale networks where three to five addresses per client introduce scalability issues, networks with many virtual hosts requiring multiple addresses per device, and managed networks where troubleshooting and forensics are important. Smaller networks like home networks or small enterprises are better served by SLAAC due to lower address space and fewer clients.</p>",
+      "eli5": "<p>The router only tracks one route per computer instead of one per address. Computers can make as many addresses as they want without bothering the router. It is easier to see who is who, catch network problems, and block bad traffic.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "6",
+      "title": "Server Configuration and Client Mobility",
+      "content": "<p>The DHCPv6-PD server must follow key recommendations. It should implement RFC 8168 guidance on processing prefix-length hints and provide prefixes short enough for clients to extend the network to at least one interface and support SLAAC. When receiving the same Solicit message from the same client through multiple relays, it must reply to all with the same prefix(es) to ensure all relays configure correct routes. The server must not send the Server Unicast option unless the topology guarantees no client connects to a link with multiple relays. To preserve routes when a relay crashes or reboots, the server must support Bulk Leasequery or Active Leasequery. Operators familiar with IPv4 DHCP can apply similar pool sizing and timer strategies, considering the expected maximum number of clients, average connection duration, client mobility (wireless networks may need shorter timers than wired networks), and reconnection frequency (authenticated Wi-Fi may use longer timers than open Wi-Fi).</p><p>When a client moves between attachment points on the same link (such as roaming between access points on the same VLAN), the delegated prefix does not change because the first-hop routers retain the route based on the client's link-local address. When a client moves to a different link, the DHCPv6 server provides a new prefix from that link's pool, consistent with SLAAC or IA_NA behavior. While DHCPv6 servers could theoretically delegate the same prefix to a client across different links, it is not feasible without changing relay behavior: relays retain routes to delegated prefixes for the duration of DHCPv6 timers, so allowing the same prefix on different links would result in two routes for one prefix pointing to different links, breaking connectivity.</p>",
+      "eli5": "<p>When a computer moves to a new wireless network, it asks the server for a new prefix just like it asks for a new address. Different links need different prefixes for security anyway.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "Traditional vs DHCPv6-PD per Client",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Traditional Shared Prefix",
+          "DHCPv6-PD per Client"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Addresses per device",
+              "Multiple from one shared /64",
+              "Multiple from own /64"
+            ]
+          },
+          {
+            "cells": [
+              "Router routing table entries",
+              "One per address",
+              "One per device"
+            ]
+          },
+          {
+            "cells": [
+              "Neighbor cache pressure",
+              "High with many addresses",
+              "Low (only link-local)"
+            ]
+          },
+          {
+            "cells": [
+              "Network extension",
+              "Via NAT only",
+              "Via routing with full connectivity"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Scalability limit",
+              "Number of addresses",
+              "Number of devices"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8415]",
+      "text": "Mrugalski, T., et al., \"Dynamic Host Configuration Protocol for IPv6 (DHCPv6)\", RFC 8415, November 2018.",
+      "rfc": 8415
+    },
+    {
+      "number": "[RFC8987]",
+      "text": "Farrer, I., Kottapalli, N., Hunek, M., and R. Patterson, \"DHCPv6 Prefix Delegating Relay Requirements\", RFC 8987, February 2021.",
+      "rfc": 8987
+    },
+    {
+      "number": "[RFC8168]",
+      "text": "Li, T., Liu, C., and Y. Cui, \"DHCPv6 Prefix-Length Hint Issues\", RFC 8168, May 2017.",
+      "rfc": 8168
+    },
+    {
+      "number": "[RFC5460]",
+      "text": "Stapp, M., \"DHCPv6 Bulk Leasequery\", RFC 5460, February 2009.",
+      "rfc": 5460
+    },
+    {
+      "number": "[RFC7039]",
+      "text": "Wu, J., Bi, J., Bagnulo, M., Baker, F., and C. Vogt, \"Source Address Validation Improvement (SAVI) Framework\", RFC 7039, October 2013.",
+      "rfc": 7039
+    },
+    {
+      "number": "[RFC3704]",
+      "text": "Baker, F. and P. Savola, \"Ingress Filtering for Multihomed Networks\", BCP 84, RFC 3704, March 2004.",
+      "rfc": 3704
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

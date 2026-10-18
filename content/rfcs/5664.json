@@ -9,13 +9,221 @@
   },
   "questions": [
     "pnfs object layout",
-    "object-based parallel nfs"
+    "object-based parallel nfs",
+    "what is pnfs object layout",
+    "how does pnfs striping work",
+    "what are osd capabilities in pnfs",
+    "what raid levels does pnfs support"
+  ],
+  "tags": [
+    "Storage",
+    "NFS",
+    "Parallel I/O"
+  ],
+  "subtitle": "How parallel NFS clients read and write striped objects directly on object storage devices.",
+  "tldr": {
+    "problem": "Parallel NFS lets clients bypass the NFSv4 server for file data, but the client needs layout-type-specific rules for the kind of storage being used.",
+    "mechanism": "The RFC defines the object-based layout type: the server hands out layouts listing component objects, a striping and RAID map, and signed capabilities, and the client then reads and writes the object storage devices directly.",
+    "outcome": "Clients get parallel, direct data access while the metadata server keeps control through capabilities that it can revoke and layouts that it can recall.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Layout type",
+      "value": "LAYOUT4_OSD2_OBJECTS"
+    },
+    {
+      "label": "Object and partition ids",
+      "value": "64-bit numbers"
+    },
+    {
+      "label": "Logical unit number",
+      "value": "64-bit"
+    },
+    {
+      "label": "RAID algorithms",
+      "value": "RAID_0, RAID_4, RAID_5, RAID_PQ"
+    },
+    {
+      "label": "Client OSD commands",
+      "value": "READ, WRITE, GET ATTRIBUTES, FLUSH"
+    }
+  ],
+  "today": "<p>RFC 5664 is a Proposed Standard published in January 2010. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "pnfs",
+    "striping",
+    "ipsec"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Object-Based Layout Type",
+      "content": "<p>In <strong>pNFS</strong>, the file server returns typed layout structures that describe where file data lives. Different storage systems use different layouts. This RFC defines the layout for <strong>object-based storage devices</strong> (OSDs), which are accessed with the OSD storage protocol (ANSI INCITS 400-2004). It is a companion to the main NFSv4.1 specification (<a href='/5661/'>RFC 5661</a>).</p><p>An object is a container for data and attributes, and a file is stored in one or more objects. Of the OSD commands, a client using this layout only uses READ, WRITE, GET ATTRIBUTES and FLUSH. The others are used only by the pNFS server.</p><p>The layout type number is <code>LAYOUT4_OSD2_OBJECTS</code>. The layout body is opaque to the generic pNFS client and is interpreted by the object storage layout driver. The protocol is written in XDR (see <a href='/5662/'>RFC 5662</a> and <a href='/4506/'>RFC 4506</a>), and the XDR is embedded in the document so it can be extracted with a short script.</p>",
+      "eli5": "<p>Files are chopped into pieces stored in many boxes. The server tells you which boxes hold your file and gives you permission to open them.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Objects, Credentials and Devices",
+      "content": "<p>An object is named by <code>pnfs_osd_objid4</code>: a device id, a 64-bit partition id and a 64-bit object id. Objects inside a device are grouped into partitions.</p><p>Each component of a file is described by <code>pnfs_osd_object_cred4</code>, which holds the object id, the OSD version (or <code>PNFS_OSD_MISSING</code> if the component is unavailable), and the capability and capability key that act as security credentials.</p><p>Devices are described by <code>pnfs_osd_deviceaddr4</code>, returned by GETDEVICEINFO and GETDEVICELIST. The server MUST provide the OSD system id and SHOULD provide the OSD name. It may also give an iSCSI name or SCSI device identifier and a network address as a hint to speed up discovery, plus a 64-bit logical unit number. The client signs requests with a key derived from the system id, so a stale device mapping makes the integrity check fail. In that case the client should return the layout with LAYOUTRETURN, drop the address mappings and ask again.</p>",
+      "eli5": "<p>Every piece has an address made of a box number, a shelf number and an item number, plus a ticket that proves you may open it.</p>"
+    },
+    {
+      "id": "design",
+      "number": "5",
+      "title": "Layouts, Striping and RAID",
+      "content": "<p>The layout, <code>pnfs_osd_layout4</code>, has a data map plus the list of component objects. The data map <code>pnfs_osd_data_map4</code> has the number of components, the stripe unit (bytes placed on one component before moving to the next), a group width and depth for nested striping, a mirror count and a RAID algorithm. Each component MUST appear in the list only once. The layout is always <em>dense</em>: the second stripe unit starts at offset 0 of the second component.</p><p>For simple striping the RFC gives equations from the file offset to a component and an offset inside it. Its example uses four devices and a 4096-byte stripe unit, so a full stripe is 16384 bytes. Nested striping adds groups, and with mirroring the replicas sit next to each other in the component array. If mirroring is not used, <code>odm_mirror_cnt</code> MUST be 0.</p><p>The RAID algorithms are <code>PNFS_OSD_RAID_0</code> (no parity), <code>PNFS_OSD_RAID_4</code> (parity on the last component, computed by XOR), <code>PNFS_OSD_RAID_5</code> (parity rotated every stripe) and <code>PNFS_OSD_RAID_PQ</code> (two parity components, Reed-Solomon P+Q). The metadata server is responsible for serializing updates, for example by not granting overlapping write layouts on mirrored objects, so that two clients cannot corrupt parity or leave replicas different.</p><p>When creating a file, the client may send a layout hint for any of the map fields, but the server may ignore any hint without failing the CREATE.</p>",
+      "eli5": "<p>Imagine dealing a deck of cards to several players in turn. Each player holds some cards, and with the right extra card, a lost card can be rebuilt.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "10",
+      "title": "Layout Segments and Recalls",
+      "content": "<p>Layout operations work on byte ranges, but OSD byte-range capabilities cannot be merged or split. So when responding to CB_LAYOUTRECALL, the client MUST NOT return a sub-range of a layout segment. Each LAYOUTRETURN must completely cover at least one outstanding segment. If a client repeatedly returns a sub-range, the server SHOULD recall all its layouts and may deny its LAYOUTGETs.</p><p>LAYOUTCOMMIT is used only to carry attribute hints and I/O error flags, so its offset and length are reserved and set to 0. The client can report capacity consumed by its writes so the server can track quota.</p><p>The server should recall layouts when security policy changes (ACLs or mode bits), when the aggregation map changes, and on sharing conflicts, such as two clients wanting RW layouts on the same RAID-5 stripes. It can also use CB_RECALL_ANY to reclaim resources. If a client is unresponsive or lets a recalled layout go unreturned for a lease period, the server MAY revoke its layouts and MUST fence it off from the objects.</p>",
+      "eli5": "<p>If you borrow a whole page you must hand back the whole page, not a torn corner. The librarian can also ask for pages back when the rules change.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "7",
+      "title": "Recovering from I/O Errors",
+      "content": "<p>A client can hit errors while talking to storage devices directly, but the metadata server owns recovery. The client MUST report errors when it returns the layout, using <code>pnfs_osd_ioerr4</code> records. Each record names the component object, the failed byte range, whether it was a write, and an error code.</p><p>The codes are hints: <code>PNFS_OSD_ERR_EIO</code> (the default), <code>NOT_FOUND</code>, <code>NO_SPACE</code>, <code>BAD_CRED</code>, <code>NO_ACCESS</code>, <code>UNREACHABLE</code> and <code>RESOURCE</code>. The server may repair parity, recover media failures or rebuild missing objects. It SHOULD recall outstanding layouts and MUST finish recovery before handing out new layouts for the affected ranges.</p><p>The client SHOULD get a new layout and retry using OSD commands first, and only if the error persists retry through the metadata server with ordinary NFS READ or WRITE.</p>",
+      "eli5": "<p>If a shelf is broken, tell the librarian exactly which shelf. The librarian fixes it, and meanwhile you can ask the librarian to fetch the book for you.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "13",
+      "title": "Capabilities and Security",
+      "content": "<p>pNFS splits NFSv4 into a control path (all new operations, protected by the existing NFSv4 security) and a data path to the storage. The metadata server checks the file's access policy at LAYOUTGET time and returns capabilities for the requested READ or RW mode. The client MUST still authenticate its local users with OPEN and ACCESS calls to the metadata server.</p><p>A <strong>capability</strong> names an object and the permitted operations and expires at a set time. A credential is a signed capability, and only the security manager, which is the pNFS server here, knows the device keys needed to sign it. The client uses the capability key to sign each request, and the OSD recomputes the signature with its shared secret. The OSD security method NOSEC MUST NOT be used for any I/O operation.</p><p>Since a snooped capability key lets another client forge valid requests, the key must be kept private. This can be done with RPCSEC_GSS privacy, by encrypting it with the SSV key, or with a VLAN or <a href='/4301/'>IPsec</a>.</p><p>The server can revoke all capabilities on an object by changing its policy access tag. It MUST do so when permissions change, when a conflicting mandatory byte-range lock is granted or when a layout is revoked and reassigned.</p>",
+      "eli5": "<p>The key card has a tamper-proof stamp from the librarian. Shelves check the stamp, and the librarian can cancel all cards by changing the stamp.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "RAID ALGORITHMS IN THE OBJECT LAYOUT",
+      "data": {
+        "columns": [
+          "Algorithm",
+          "Redundancy"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "PNFS_OSD_RAID_0",
+              "No parity; all bytes are data"
+            ]
+          },
+          {
+            "cells": [
+              "PNFS_OSD_RAID_4",
+              "Parity on the last component, by XOR"
+            ]
+          },
+          {
+            "cells": [
+              "PNFS_OSD_RAID_5",
+              "Parity rotated on each stripe"
+            ]
+          },
+          {
+            "cells": [
+              "PNFS_OSD_RAID_PQ",
+              "Two parity components, P and Q"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "I/O ERROR CODES (pnfs_osd_errno4)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "PNFS_OSD_ERR_EIO",
+            "desc": "Device failed to access the object; the default code.",
+            "highlight": true
+          },
+          {
+            "code": "2",
+            "label": "PNFS_OSD_ERR_NOT_FOUND",
+            "desc": "The object does not exist on the device."
+          },
+          {
+            "code": "3",
+            "label": "PNFS_OSD_ERR_NO_SPACE",
+            "desc": "The device ran out of free capacity."
+          },
+          {
+            "code": "4",
+            "label": "PNFS_OSD_ERR_BAD_CRED",
+            "desc": "Capability expired or revoked."
+          },
+          {
+            "code": "5",
+            "label": "PNFS_OSD_ERR_NO_ACCESS",
+            "desc": "Capability does not allow the operation."
+          },
+          {
+            "code": "6",
+            "label": "PNFS_OSD_ERR_UNREACHABLE",
+            "desc": "Communication failure; outcome undetermined."
+          },
+          {
+            "code": "7",
+            "label": "PNFS_OSD_ERR_RESOURCE",
+            "desc": "Local problem on the client; command never sent."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[2]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[3]",
+      "text": "Eisler, M., \"XDR: External Data Representation Standard\", STD 67, RFC 4506, May 2006.",
+      "rfc": 4506
+    },
+    {
+      "number": "[4]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 External Data Representation Standard (XDR) Description\", RFC 5662, January 2010.",
+      "rfc": 5662
+    },
+    {
+      "number": "[6]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[8]",
+      "text": "Satran, J., et al., \"Internet Small Computer Systems Interface (iSCSI)\", RFC 3720, April 2004.",
+      "rfc": 3720
+    },
+    {
+      "number": "[15]",
+      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
+      "rfc": 4301
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

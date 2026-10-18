@@ -10,13 +10,245 @@
   "questions": [
     "what is certificate transparency",
     "how to detect misissued certificates",
-    "ct log version 2"
+    "ct log version 2",
+    "how do ct logs work",
+    "what is a signed certificate timestamp",
+    "what is a merkle tree inclusion proof"
+  ],
+  "tags": [
+    "Security",
+    "Certificates",
+    "TLS"
+  ],
+  "subtitle": "Public, append-only logs of TLS certificates, so misissued certificates can be spotted by anyone who looks.",
+  "tldr": {
+    "problem": "A certification authority can issue a certificate it should not have, and nobody notices. The name owner has no easy way to see every certificate issued for their domain.",
+    "mechanism": "Logs hold certificates in an append-only Merkle Tree. Each accepted submission gets a signed promise (an SCT), servers present SCTs to TLS clients, and monitors and auditors check that logs keep their promises using inclusion and consistency proofs.",
+    "outcome": "The logs do not prevent misissuance, but they let interested parties detect it. The intent is that clients eventually refuse certificates that are not logged. This version is Experimental and obsoletes RFC 6962.",
+    "outcomeLabel": "Status today"
+  },
+  "facts": [
+    {
+      "label": "Leaf hash prefix",
+      "value": "0x00"
+    },
+    {
+      "label": "Interior node prefix",
+      "value": "0x01"
+    },
+    {
+      "label": "TLS extension",
+      "value": "transparency_info (value 52)"
+    },
+    {
+      "label": "Transparency Information X.509v3 OID",
+      "value": "1.3.101.75"
+    },
+    {
+      "label": "Initial hash algorithm",
+      "value": "SHA-256 (0x00)"
+    },
+    {
+      "label": "Maximum log OID encoding",
+      "value": "127 octets"
+    }
+  ],
+  "today": "<p>RFC 9162 is an Experimental RFC published in December 2021, and it obsoletes <a href='/6962/'>RFC 6962</a>. It has not been obsoleted or updated according to the unit metadata.</p>",
+  "glossary": [
+    "certificate-authority",
+    "certificate",
+    "trust-anchor",
+    "tls",
+    "tls-extension",
+    "ocsp",
+    "digital-signature",
+    "merkle-tree",
+    "signed-certificate-timestamp",
+    "precertificate"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Idea Behind Certificate Transparency",
+      "content": "<p><strong>Certificate Transparency</strong> (CT) aims to mitigate misissued certificates by providing append-only logs of issued certificates. The logs do not themselves prevent misissuance, but they ensure that interested parties, particularly those named in certificates, can detect it. This RFC describes its use for public TLS server certificates.</p><p>Anyone can submit certificate chains to a log. Public CAs are expected to submit all newly issued certificates, but certificate holders and third parties can too. To keep spurious submissions out, each chain must end with a trust anchor that the log accepts. When a log accepts a chain, it returns a signed timestamp that later serves as evidence to TLS clients that the chain was submitted.</p><p>People concerned about misissuance <strong>monitor</strong> the logs and check whether certificates were issued for domains they are responsible for. What they do about a misissue, such as asking the CA to revoke it, is outside the scope of the document. Checking inclusion is asynchronous so clients can proceed without delay.</p><p>This document revises and obsoletes CT 1.0 (<a href='/6962/'>RFC 6962</a>). Major changes include algorithm agility through IANA registries, precertificates as CMS objects instead of X.509 certificates, logs identified by an OID, a new <code>TransItem</code> structure, a <code>submit-entry</code> API, a <code>get-all-by-hash</code> API and a <code>transparency_info</code> TLS extension.</p>",
+      "eli5": "<p>Anyone can read the public book of ID cards. If a card shows up with your name that you never asked for, you can raise the alarm.</p>"
+    },
+    {
+      "id": "cryptography",
+      "number": "2",
+      "title": "Merkle Trees and Proofs",
+      "content": "<p>Each log is a binary <strong>Merkle Tree</strong>, where each non-leaf node is a hash of its children. A leaf hash is <code>HASH(0x00 || d[0])</code> and an interior node is <code>HASH(0x01 || left || right)</code>. The different prefixes are domain separation, required for second preimage resistance. The tree need not be balanced, but its shape is determined entirely by the number of leaves.</p><p>Two kinds of proof make auditing efficient:</p><ul><li>An <strong>inclusion proof</strong> is the shortest list of extra nodes needed to compute the root from one leaf. If the computed root matches the real one, the leaf is in the tree.</li><li>A <strong>consistency proof</strong> shows that an older tree is a prefix of a newer one, which proves the append-only property. Its size is bounded above by <code>ceil(log2(n)) + 1</code> nodes.</li></ul><p>The RFC gives algorithms for generating and verifying both, for verifying a root hash from a complete list of entries, and a worked example with a tree of 7 leaves. Logs must sign with an algorithm from the IANA Signature Algorithms registry.</p>",
+      "eli5": "<p>Imagine fingerprinting every page of the book, then fingerprinting pairs of fingerprints, up to one final fingerprint. If anyone changes an old page, the final fingerprint changes too.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Submissions, Entries and Signed Structures",
+      "content": "<p>A submission is a certificate or a <strong>precertificate</strong>, a preannouncement by the CA before issuance. A precertificate is a CMS signed-data object holding a TBSCertificate identical to the one in the issued certificate, except that the Transparency Information extension is omitted. Its signature indicates the CA's binding intent to issue, so misissuing a precertificate counts as misissuing the certificate.</p><p>When a log accepts a submission it returns a <strong>Signed Certificate Timestamp</strong> (SCT), its promise to add the entry to its tree. The log must fulfil the promise within the <strong>Maximum Merge Delay</strong> (MMD), one of the log's immutable parameters. Periodically the log signs its current tree head as a <strong>Signed Tree Head</strong> (STH), which holds a timestamp, <code>tree_size</code> and <code>root_hash</code>.</p><p>All of these are wrapped in a <code>TransItem</code>, which carries a type and version. Logs must store the whole chain used for verification so that a CA cannot avoid blame by logging a partial chain. Each log is identified by an OID, and the DER encoding of that OID is limited to 127 octets. A log that must be shut down stops accepting submissions, issues a final STH and keeps running until certificates in its entries have expired or exist in other logs.</p>",
+      "eli5": "<p>When the librarian accepts a new card, they hand you a signed receipt saying it will be in the book soon. Each day they also sign a note saying how many pages the book has.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Log Client Messages",
+      "content": "<p>Clients talk to a log over HTTPS using GET and POST, with JSON bodies and base64 for binary data, building URLs by adding suffixes to the log's base URL. The messages are:</p><ul><li><code>submit-entry</code> (POST): submit a certificate or precertificate with its chain and get back an SCT, plus an STH and inclusion proof if the entry is already in the tree.</li><li><code>get-sth</code>: the latest STH, no older than the MMD.</li><li><code>get-sth-consistency</code>: a consistency proof between two tree sizes.</li><li><code>get-proof-by-hash</code> and <code>get-all-by-hash</code>: an inclusion proof for a leaf hash, with the second also returning the STH and a consistency proof.</li><li><code>get-entries</code>: a range of log entries.</li><li><code>get-anchors</code>: the trust anchors the log accepts.</li></ul><p>Because a log may run several front-end machines that are not perfectly in sync, responses are designed so a client can make progress despite skew, and front ends must only serve data free of gaps. Errors use an HTTP 4xx or 5xx code with a JSON problem details body whose <code>type</code> is a URN such as <code>urn:ietf:params:trans:error:malformed</code>. Clients should treat 500 and 503 as transient and 4xx as a problem with the request.</p>",
+      "eli5": "<p>The library has a front desk with a few simple questions you can ask: add this card, how big is the book, and show me proof this card is in it.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "5",
+      "title": "TLS Servers, CAs, Clients and Monitors",
+      "content": "<p>CT-using TLS servers must present SCTs from one or more logs during full handshakes, by one of three mechanisms: the new <code>transparency_info</code> TLS extension, an extension in a stapled OCSP response, or an X.509v3 extension embedded in the certificate by the CA. The first two allow SCTs and inclusion proofs to be updated on the fly. Embedding is the only one that works with unmodified servers, but it cannot be updated, so the certificate may later become noncompliant if its logs stop being accepted. Servers should send SCTs from multiple logs.</p><p>CT-using TLS clients must implement all three mechanisms. A client validates an SCT by reconstructing the TBSCertificate and checking the log's signature. This does not replace normal certificate validation. A client may fetch inclusion proofs from a log, but doing so reveals which server it is talking to, so it is preferable for the server to send them. What counts as compliant is local policy.</p><p><strong>Monitors</strong> must inspect every new entry in every log they watch, checking the STH signature and tree consistency. <strong>Auditing</strong> checks four properties: the MMD, the STH Frequency Count, the append-only property, and a consistent view for all query sources.</p>",
+      "eli5": "<p>A website shows its receipts when you visit. Checkers watch the book all day, and your browser can ask the librarian for proof if it wants to be sure.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>A valid SCT tells a client that a log has committed to publishing the certificate, so monitors have had some time to notice a misissue. It does not guarantee this, because monitors might not have checked or a CA might refuse to revoke. Because a log may serve an STH of any age up to the MMD, a misissued certificate can be used for at most twice the MMD before it is available for audit.</p><p>Logs do not detect misissuance themselves, and they rely on parties like domain owners to monitor them. A log can misbehave by missing the MMD, showing conflicting views of the tree, issuing STHs too often, or mutating a logged signature. Detecting conflicting views needs clients to compare STHs, a technique called gossip that the RFC describes as an active area of research and does not define. Each log must still be treated as a trusted third party. Requiring SCTs from multiple logs makes it harder for a colluding CA and log to hide a misissue.</p><p>Logs can also leak DNS information: malicious monitors can learn of domain names that are otherwise hard to discover, and subdomain labels may reveal what a service runs. Logs should avoid producing several differently-signed SCTs or STHs for the same data, since that could be used to track clients.</p>",
+      "eli5": "<p>The book only helps if people actually read it, and you still have to trust the librarian not to show different books to different people.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "deployment",
+      "position": "after",
+      "caption": "SCT DELIVERY AND OPTIONAL PROOF FETCH (SUMMARIZED FROM RFC 9162)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "TLS client"
+          },
+          {
+            "key": "server",
+            "label": "TLS server"
+          },
+          {
+            "key": "log",
+            "label": "CT log"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "ClientHello with transparency_info",
+            "color": "blue",
+            "note": "The client should send the extension with empty extension_data."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "TransItemList with SCTs",
+            "color": "green",
+            "note": "Inclusion proofs and STHs are added when the server can obtain them."
+          },
+          {
+            "from": "client",
+            "to": "log",
+            "label": "get-proof-by-hash",
+            "color": "blue",
+            "note": "Optional, and it reveals which server the client talks to."
+          },
+          {
+            "from": "log",
+            "to": "client",
+            "label": "inclusion proof and STH",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "TRANSITEM TYPES (VersionedTransType VALUES IN RFC 9162)",
+      "data": {
+        "items": [
+          {
+            "code": "0x0100",
+            "label": "x509_entry_v2",
+            "desc": "Log entry for a certificate."
+          },
+          {
+            "code": "0x0101",
+            "label": "precert_entry_v2",
+            "desc": "Log entry for a precertificate."
+          },
+          {
+            "code": "0x0102",
+            "label": "x509_sct_v2",
+            "desc": "SCT for a certificate.",
+            "highlight": true
+          },
+          {
+            "code": "0x0103",
+            "label": "precert_sct_v2",
+            "desc": "SCT for a precertificate.",
+            "highlight": true
+          },
+          {
+            "code": "0x0104",
+            "label": "signed_tree_head_v2",
+            "desc": "A signed tree head (STH)."
+          },
+          {
+            "code": "0x0105",
+            "label": "consistency_proof_v2",
+            "desc": "Consistency proof between two tree sizes."
+          },
+          {
+            "code": "0x0106",
+            "label": "inclusion_proof_v2",
+            "desc": "Inclusion proof for one entry."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6962]",
+      "text": "Certificate Transparency (CT 1.0), RFC 6962, obsoleted by RFC 9162.",
+      "rfc": 6962
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., Santesson, S., Farrell, S., Boeyen, S., Housley, R., and W. Polk, \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC5652]",
+      "text": "Housley, R., \"Cryptographic Message Syntax (CMS)\", STD 70, RFC 5652, September 2009.",
+      "rfc": 5652
+    },
+    {
+      "number": "[RFC6960]",
+      "text": "Santesson, S., Myers, M., Ankney, R., Malpani, A., Galperin, S., and C. Adams, \"X.509 Internet Public Key Infrastructure Online Certificate Status Protocol - OCSP\", RFC 6960, June 2013.",
+      "rfc": 6960
+    },
+    {
+      "number": "[RFC8446]",
+      "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
+      "rfc": 8446
+    },
+    {
+      "number": "[RFC8174]",
+      "text": "Leiba, B., \"Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words\", BCP 14, RFC 8174, May 2017.",
+      "rfc": 8174
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

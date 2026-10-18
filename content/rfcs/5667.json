@@ -9,13 +9,141 @@
   },
   "questions": [
     "nfs direct data placement",
-    "nfs over rdma"
+    "nfs over rdma",
+    "rdma write list",
+    "rdma read list",
+    "nfs v4 compound operations"
+  ],
+  "tags": [
+    "Transport",
+    "NFS",
+    "Performance"
+  ],
+  "subtitle": "Moving file data directly to client memory with remote direct memory access.",
+  "tldr": {
+    "problem": "Copying file data through RPC message buffers adds latency and CPU overhead. NFS clients and servers have to serialize, send, deserialize, and copy data multiple times.",
+    "mechanism": "NFS over RPC/RDMA allows the server to write file data directly into client memory buffers (or read from them) using Remote Direct Memory Access operations, bypassing the normal RPC serialization.",
+    "outcome": "File transfer performance improves significantly with less CPU overhead. The RFC specifies exactly which NFS operations in each version can use direct placement and how clients post buffers. It was superseded by RFC 8267.",
+    "outcomeLabel": "Why it mattered"
+  },
+  "facts": [
+    {
+      "label": "Maximum segment description",
+      "value": "handle, length, address offset (3 fields per segment)"
+    },
+    {
+      "label": "NFS v2 typical message size",
+      "value": "up to 8 KB"
+    },
+    {
+      "label": "NFS v3 typical message size",
+      "value": "up to 32 KB"
+    }
+  ],
+  "today": "<p>RFC 5667 was superseded by <a href='/8267/'>RFC 8267</a>, which provides updated NFS direct data placement specifications.</p>",
+  "glossary": [
+    "port-number",
+    "datagram",
+    "traffic-class"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Direct Data Placement Over RDMA",
+      "content": "<p>NFS traditionally sends all data through RPC messages, which means data is serialized into XDR format, sent in a message, received, deserialized, and copied into application buffers. For large files, this is expensive.</p><p>The RPC/RDMA transport protocol adds a capability: clients can post memory buffers to the server, and the server can use <strong>Remote Direct Memory Access (RDMA)</strong> to transfer data directly into or out of those buffers without going through the RPC message stream. This is called <strong>direct data placement</strong>.</p><p>This RFC specifies the binding: for each NFS version (2, 3, 4, and 4.1), which operations can use direct placement, how clients describe buffers to the server, and how the server uses them.</p>",
+      "eli5": "<p>You tell the server where to put data before you ask for it. The server sends the data straight there instead of putting it in an envelope.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "Read and Write Lists",
+      "content": "<p>The RPC/RDMA header carries two lists:</p><p><strong>Write list:</strong> A set of client-posted buffers where the server can write results. Each buffer is described as an array of memory segments, specified by a handle (steering tag), length, and virtual address or offset.</p><p><strong>Read list:</strong> A set of client buffers from which the server can read request data (e.g., the file data for an NFS WRITE operation).</p><p>Each segment triplet lets the client specify discontiguous memory regions that the server will fill or read sequentially. The server returns the Write list with segment lengths updated to show how much data was actually written.</p>",
+      "eli5": "<p>You give the server two lists: 'here are buckets to fill' and 'here is data to read'. The server uses RDMA instead of copying through messages.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "3",
+      "title": "NFS Versions 2 and 3 Mapping",
+      "content": "<p>For NFS v2 and v3, only a single buffer is used at a time:</p><ul><li><strong>READ and READLINK:</strong> The client posts a single Write list entry, and the server RDMA-writes the result there.</li><li><strong>WRITE and SYMLINK:</strong> The client posts a single Read list entry, and the server RDMA-reads the data from there.</li></ul><p>The server ignores additional list entries and ignores Write lists for any procedure that doesn't need them.</p><p>For versions 2 and 3, typical message sizes (up to 8 KB for v2, 32 KB for v3) mean configuration is often optional: servers can be sized to handle the maximum in posted buffers, and clients can size their receive buffers based on their mount parameters.</p>",
+      "eli5": "<p>For file operations, the client says 'I'm reading, here's my bucket' or 'I'm writing, here's my data'. One bucket per operation.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "4",
+      "title": "NFS Version 4 Mapping",
+      "content": "<p>NFS v4 is more complex because a COMPOUND operation can include multiple READ and READLINK operations in sequence. Write list entries are consumed in order: the first Write list buffer is used by the first READ or READLINK, the second entry by the next READ or READLINK, and so on.</p><p>If there are more READ/READLINK operations than Write list entries, the remaining ones return their results inline in the RPC reply.</p><p>For example, a COMPOUND with three READs would consume three Write list entries if the client posted them. The client can also post a zero-length buffer to force a particular operation to return inline.</p><p>NFS v4 adds server-initiated callbacks to notify clients of events like delegation recalls. These callbacks carry no bulk data and can be sent inline or via RDMA_NOMSG if they exceed negotiated buffer sizes.</p>",
+      "eli5": "<p>A batch of operations can request several reads. Each read uses the next bucket from your list, or returns the data in the message if you run out of buckets.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "5",
+      "title": "Port Usage and Security",
+      "content": "<p>NFS traditionally uses port 2049 for both UDP and TCP. When RPC/RDMA is used on networks like iWARP (which share the UDP/TCP port space), an alternative well-known port must be used to distinguish RPC/RDMA traffic from TCP/UDP NFS.</p><p>Security is handled entirely by the RPC/RDMA transport: it supports all RPC security models, including RPCSEC_GSS, and link-level security. The choice to use RDMA Read or RDMA Write for data transfer does not introduce new vulnerabilities; the transport layer ensures that security requirements are met.</p>",
+      "eli5": "<p>RDMA NFS may use a different port number to avoid confusion. Security is handled the same way as normal RPC.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "contrast",
+      "anchor": "introduction",
+      "caption": "Traditional RPC vs. RPC/RDMA for file transfer",
+      "data": {
+        "left": {
+          "title": "Traditional RPC",
+          "from": "client",
+          "to": "server",
+          "desc": "File data is serialized into a message and sent through the RPC stream."
+        },
+        "right": {
+          "title": "RPC/RDMA",
+          "from": "server",
+          "to": "client",
+          "desc": "Server uses RDMA to place file data directly in client buffers."
+        },
+        "joiner": "improved by"
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5666]",
+      "text": "Talpey, T. and B. Callaghan, \"Remote Direct Memory Access Transport for Remote Procedure Call\", RFC 5666, January 2010.",
+      "rfc": 5666
+    },
+    {
+      "number": "[RFC1094]",
+      "text": "Sun Microsystems, \"NFS: Network File System Protocol specification\", RFC 1094, March 1989.",
+      "rfc": 1094
+    },
+    {
+      "number": "[RFC1813]",
+      "text": "Callaghan, B., Pawlowski, B., and P. Staubach, \"NFS Version 3 Protocol Specification\", RFC 1813, June 1995.",
+      "rfc": 1813
+    },
+    {
+      "number": "[RFC3530]",
+      "text": "Shepler, S., et al., \"Network File System (NFS) version 4 Protocol\", RFC 3530, April 2003.",
+      "rfc": 3530
+    },
+    {
+      "number": "[RFC5661]",
+      "text": "Shepler, S., Ed., Eisler, M., Ed., and D. Noveck, Ed., \"Network File System (NFS) Version 4 Minor Version 1 Protocol\", RFC 5661, January 2010.",
+      "rfc": 5661
+    },
+    {
+      "number": "[RFC2203]",
+      "text": "Eisler, M., Chiu, A., and L. Ling, \"RPCSEC_GSS Protocol Specification\", RFC 2203, September 1997.",
+      "rfc": 2203
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

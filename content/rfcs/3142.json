@@ -9,13 +9,128 @@
   },
   "questions": [
     "ipv6 to ipv4 transport relay",
-    "trt translator"
+    "trt translator",
+    "ipv6 to ipv4 translation",
+    "transport relay translator",
+    "ipv6 ipv4 interoperability"
+  ],
+  "tags": [
+    "IPv6",
+    "IPv4",
+    "Translation"
+  ],
+  "subtitle": "A transport relay translator for IPv6-to-IPv4 connectivity without modifying existing hosts",
+  "tldr": {
+    "problem": "IPv6-only networks need to communicate with IPv4-only hosts and services, but direct protocol translation is complex. Early IPv6 transition mechanisms required modifications to either IPv6 initiating hosts or IPv4 destination hosts, limiting deployment.",
+    "mechanism": "A transport relay translator (TRT) positioned between IPv6 and IPv4 networks relays TCP and UDP connections at the transport layer. IPv6 hosts connect to a special IPv6 address derived from the IPv4 destination's address, the TRT intercepts that connection, establishes a parallel IPv4 connection to the real destination, and relays traffic bidirectionally between them.",
+    "outcome": "IPv6-only hosts can communicate with IPv4 services without any modifications to either the IPv6 clients or IPv4 servers, making deployment simpler than protocol-translation approaches, though at the cost of maintaining state in the relay system.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Reserved IPv6 prefix",
+      "value": "C6::/64"
+    },
+    {
+      "label": "IPv6 minimum MTU",
+      "value": "1280 octets"
+    },
+    {
+      "label": "Protocols supported",
+      "value": "TCP and UDP"
+    },
+    {
+      "label": "Connection direction",
+      "value": "Bidirectional"
+    }
+  ],
+  "today": "<p>RFC 3142 describes an early IPv6-to-IPv4 transition technique that was deployed and tested in real environments, notably at IETF meetings. While later mechanisms like NAT64 and DNS64 have become more standardized and widely adopted, TRT remains a documented approach. The RFC notes that the WIDE KAME IPv6 stack implementation called FAITH was operational for over five years, supporting interactive protocols like SSH, FTP, HTTP, and POP3 at scale.</p>",
+  "glossary": [
+    "ipv6",
+    "ipv4",
+    "nat",
+    "tcp",
+    "udp",
+    "dns",
+    "ipv6-transition"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "The IPv6-to-IPv4 Transition Problem",
+      "content": "<p>During IPv6 deployment, networks often consist of IPv6-only hosts that need to communicate with IPv4-only services on the wider Internet. Simple solutions like direct IPv6-to-IPv4 header translation require either header rewriting at the network layer (with associated complexity in handling fragmentation and path MTU discovery) or modifications to either the IPv6 clients or IPv4 servers to be aware of the translation.</p><p>The RFC proposes an alternative: a <strong>Transport Relay Translator (TRT)</strong> that operates at the transport layer, relaying TCP and UDP connections without modifying network headers at the IP layer. This approach has key advantages: no modifications needed to IPv6 hosts or IPv4 servers, simpler handling of MTU and fragmentation issues (because paths are independent), and implementation using existing technology. The trade-off is that the TRT becomes a stateful middlebox (like a NAT) and cannot relay protocols that are sensitive to source address (like some BSD-style authentication) or protocols it does not understand.</p>",
+      "eli5": "<p>IPv6-only networks want to reach IPv4 services. A relay translator sits between them, accepting IPv6 connections pretending to be the IPv4 destination, then making its own IPv4 connection to the real destination and relaying the traffic both ways.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "How Transport Relay Works",
+      "content": "<p>The TRT operates by establishing two transport-layer connections in parallel. Consider an IPv6 host at address A6 wanting to reach IPv4 host X4: the IPv6 host does not connect directly to X4 but instead connects to a specially-formed IPv6 address that encodes X4 in its lower 32 bits (using a reserved prefix C6::/64 assigned to the TRT system). For example, if the TRT reserves fec0:0:0:1::/64 and the IPv4 target is 10.1.1.1, the IPv6 host connects to fec0:0:0:1::10.1.1.1.</p><p>The TRT intercepts this IPv6 connection by announcing C6::/64 in routing, accepts it as if it owned the destination address, then extracts the IPv4 address from the lower 32 bits of the IPv6 destination, and establishes a separate IPv4 connection from the TRT's IPv4 address (Y4) to the real destination (X4). Traffic flows bidirectionally: IPv6 packets from A6 go to the TRT (as C6::X4), and the TRT forwards their payload over the IPv4 connection from Y4 to X4, and vice versa. The TRT relies on underlying transport (TCP or UDP) to handle connection state, sequence numbers, and reliability.</p>",
+      "eli5": "<p>The TRT pretends to be the IPv4 destination but with an IPv6 address that has the IPv4 address hidden inside it. When an IPv6 host connects, the TRT reads the hidden IPv4 address, connects there itself, and relays data both ways.</p>"
+    },
+    {
+      "id": "addressing",
+      "number": "3",
+      "title": "Address Mapping and DNS",
+      "content": "<p>The critical challenge for TRT deployment is address mapping: IPv6 initiating hosts need to know to use the special IPv6-encoded form of the IPv4 destination address. The RFC identifies three approaches: static address mapping tables on each host (like /etc/hosts in UNIX), a special DNS server implementation that translates IPv4 addresses into the encoded IPv6 form when queried, or a modified DNS resolver on the initiating host.</p><p>Each approach has trade-offs. Static mapping requires manual configuration on every host, limiting scalability. A special DNS server is easier to manage operationally but requires users to know about and configure different DNS servers. A modified resolver on each host requires host changes, contradicting the TRT's advantage of requiring no host modifications. The RFC recommends static mapping for small deployments and a special DNS server for larger sites. Notably, TRT systems need not translate DNS query traffic themselves; a recursive DNS resolver accessible via IPv6 elsewhere in the site is preferable, avoiding the complexity of trying to translate DNS over the TRT.</p>",
+      "eli5": "<p>IPv6 hosts need to know to use the special address instead of the real IPv4 address. This can be done by hand (like an address book), a special DNS server that answers IPv4-to-IPv6 lookups, or modifying how DNS works on each host.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "4",
+      "title": "Implementation Challenges and Optimization",
+      "content": "<p>Implementers must handle several technical challenges. For UDP relay, path MTU discovery on the IPv6 side becomes the TRT's responsibility: the RFC recommends fragmenting packets from the TRT to IPv6 hosts to the IPv6 minimum MTU (1280 octets) to avoid MTU discovery complexity. The TRT must also monitor ICMPv6 messages to C6::/64 to recognize path MTU discovery messages and error notifications.</p><p>For TCP, special care is needed when handling urgent data (the URGENT flag). NAT-unfriendly protocols (like some authentication schemes or embedded IP addresses in payloads) may require the TRT to inspect and modify TCP or UDP payload data, similar to how NAT systems handle such protocols. Scalability requires careful planning: the TRT's bottleneck is often the number of concurrent connections the operating system and userland processes can handle. To scale beyond a single TRT system, operators can deploy multiple TRT systems with different reserved prefixes, let initiating hosts pick prefixes randomly or via special DNS responses for load balancing, and use multiple userland relay processes within the TRT.</p>",
+      "eli5": "<p>The TRT needs to handle message size limitations (IPv6 wants minimum 1280-byte packets), be careful with TCP flags, and prepare for the fact that some protocols hide IP addresses in their payload data. For big networks, you can run multiple TRTs with different address prefixes.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Implications and Limitations",
+      "content": "<p>TRT systems introduce security considerations similar to NAT devices. A TRT can be exploited as a relay for unwanted traffic to IPv4 destinations, similar to an SMTP open relay or circumvention of ingress filtering attacks. Operators must implement access control to prevent such abuse. The RFC notes that TRT implementations may be vulnerable to buffer overflow attacks, though this is implementation-dependent.</p><p>Some authentication schemes rely on source address validation (like BSD rsh/rlogin), which do not work across a relay because the TRT presents a different source address to the IPv4 destination than what the IPv6 host sees. IPsec connections cannot traverse a relay because IPsec provides end-to-end encryption. DNS proxies that modify DNS responses (like those changing AAAA record lookups to A records) can break DNSSEC signature verification. These limitations mean TRT is best suited for interactive protocols (HTTP, SSH, FTP, POP3) that do not rely on address-based authentication or embedded IP addresses in payloads.</p>",
+      "eli5": "<p>Someone could use the TRT to hide where traffic really comes from, so administrators need to restrict what it relays. Some security protocols like IPsec and address-based login do not work through the relay. DNS tricks can break signature verification.</p>"
+    }
+  ],
+  "viz": [],
+  "references": [
+    {
+      "number": "[RFC2765]",
+      "text": "Nordmark, E., \"Stateless IP/ICMP Translator (SIIT)\", RFC 2765, February 2000.",
+      "rfc": 2765
+    },
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2993]",
+      "text": "Hain, T., \"Architectural Implications of NAT\", RFC 2993, November 2000.",
+      "rfc": 2993
+    },
+    {
+      "number": "[RFC2766]",
+      "text": "Tsirtsis, G. and P. Srisuresh, \"Network Address Translation - Protocol Translation (NAT-PT)\", RFC 2766, February 2000.",
+      "rfc": 2766
+    },
+    {
+      "number": "[RFC2505]",
+      "text": "Lindberg, G., \"Anti-Spam Recommendations for SMTP MTAs\", RFC 2505, February 1999.",
+      "rfc": 2505
+    },
+    {
+      "number": "[RFC2267]",
+      "text": "Ferguson, P. and D. Senie, \"Network Ingress Filtering: Defeating Denial of Service Attacks which employ IP Source Address Spoofing\", RFC 2267, January 1998.",
+      "rfc": 2267
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

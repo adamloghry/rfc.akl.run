@@ -10,13 +10,299 @@
   "questions": [
     "how to sign syslog messages",
     "signed syslog",
-    "syslog message integrity"
+    "syslog message integrity",
+    "what is syslog-sign",
+    "what is a signature block in syslog",
+    "how does signed syslog detect missing messages"
+  ],
+  "tags": [
+    "Syslog",
+    "Security",
+    "Logging"
+  ],
+  "subtitle": "Syslog messages get detached signatures, so a log reader can check who wrote them, whether they were changed and whether any are missing.",
+  "tldr": {
+    "problem": "Ordinary syslog messages are unsigned, so a reader cannot tell whether a log line really came from its claimed source, was altered, was replayed or went missing.",
+    "mechanism": "A signer periodically sends special syslog messages called Signature Blocks that carry hashes of recently sent messages plus a digital signature, and Certificate Blocks that carry the key material needed to check them.",
+    "outcome": "A collector can build an authenticated, numbered log and spot gaps, duplicates and reordering. It is a Proposed Standard and has not been obsoleted.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Maximum message size to support",
+      "value": "2048 octets"
+    },
+    {
+      "label": "Signature Block SD-ID",
+      "value": "ssign"
+    },
+    {
+      "label": "Certificate Block SD-ID",
+      "value": "ssign-cert"
+    },
+    {
+      "label": "Hashes per Signature Block",
+      "value": "1 to 99"
+    },
+    {
+      "label": "Defined VER values",
+      "value": "0111 (SHA1), 0121 (SHA256)"
+    },
+    {
+      "label": "Recommended PRI",
+      "value": "110 (facility 13, severity 6)"
+    }
+  ],
+  "today": "<p>RFC 5848 is a Proposed Standard from May 2010. The metadata lists no RFC that obsoletes or updates it. It works together with <a href='/5424/'>RFC 5424</a>.</p>",
+  "glossary": [
+    "syslog",
+    "structured-data",
+    "digital-signature",
+    "replay-attack",
+    "base64",
+    "tls",
+    "udp",
+    "x509-certificate",
+    "man-in-the-middle",
+    "iana"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Signing a Stream of Log Messages",
+      "content": "<p>RFC 5848 describes a mechanism called <strong>syslog-sign</strong>. It adds origin authentication, message integrity, replay resistance, message sequencing and detection of missing messages to syslog. It is meant to be used with the syslog protocol of <a href='/5424/'>RFC 5424</a>, and compliant implementations MUST also implement RFC 5424.</p><p>Instead of changing the messages themselves, a <strong>signer</strong> sends a special syslog message whose content is a <strong>Signature Block</strong>. The block is, in effect, a detached signature on some number of previously sent messages: it holds the hashes of those messages and is cryptographically signed. The signer can be the same originator whose messages it signs, or a separate one.</p><p>A <strong>collector</strong> can check each received message against the signed hashes. It can do this as messages arrive and build an authenticated log file, or it can store everything and authenticate the log when someone reviews it.</p>",
+      "eli5": "<p>Instead of stamping each log note, the computer now and then sends one extra signed note that lists a fingerprint of the recent notes. Whoever reads the log can check the fingerprints.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "How Signed Messages Travel",
+      "content": "<p>Signatures cover each message in its entirety, so messages MUST NOT be changed in transit, and neither may the syslog-sign messages. Relays that alter messages, or any truncation, make the mechanism useless. For that reason signer and collector implementations MUST support messages of up to and including 2048 octets.</p><p>The special messages carry their data as <strong>Structured Data</strong> elements from RFC 5424, identified by an SD-ID. The MSG part SHOULD be empty, because the content is for applications, not humans. A signer MUST use consistent HOSTNAME, APP-NAME and MSGID values, and the combination of APP-NAME and PROCID MUST be unique for each signer on a host. Signature Block and Certificate Block messages are never themselves signed.</p><p>The RFC does not recommend UDP transport (<a href='/5426/'>RFC 5426</a>). Its recommended payload size of 480 octets is too small: a 480-octet Signature Block could sign only 9 normal messages. Where UDP is used, operators must make sure messages up to 2048 octets get through. The TLS transport of <a href='/5425/'>RFC 5425</a> is the better fit.</p>",
+      "eli5": "<p>The signed notes must arrive exactly as written, like a sealed letter. If a post office changes or cuts off a note, the check fails, so the notes need enough room to travel whole.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "4",
+      "title": "The Signature Block",
+      "content": "<p>A Signature Block is a Structured Data element with SD-ID <code>ssign</code>. It has nine parameters that MUST appear in a fixed order, each exactly once, as printable ASCII with binary values in base64. The shape is <code>[ssign VER RSID SG SPRI GBC FMN CNT HB SIGN]</code>. No new parameters may be added unless a new Version is defined.</p><p><strong>VER</strong> is 4 octets: two for the protocol version (<code>01</code>), one for the hash algorithm (<code>1</code> is SHA1, <code>2</code> is SHA256) and one for the signature scheme (<code>1</code> is OpenPGP DSA). So <code>0111</code> and <code>0121</code> are the defined values. All implementations MUST support SHA1; SHA256 SHOULD be supported.</p><p><strong>RSID</strong>, the Reboot Session ID, should strictly increase on each signer reboot, so collectors can tell sessions apart. A signer that cannot guarantee that MUST set it to 0. <strong>GBC</strong>, the Global Block Counter, counts Signature Blocks sent before this one in the reboot session, starting at 0. <strong>FMN</strong> is the number, within the Signature Group, of the first message whose hash is in this block; the first message of a reboot session is 1. <strong>CNT</strong> is the number of hashes, from 1 to 99.</p><p><strong>HB</strong> is the hash block: base64 hashes of the entire syslog messages, space separated, in the order the messages occurred, starting from the <code>&lt;</code> of the PRI. A hash MUST NOT be shorter than 160 bits. <strong>SIGN</strong> is a base64 signature over the whole Signature Block message with the SIGN parameter removed.</p><p>The SG and SPRI fields tie messages to Signature Groups, so that signatures can follow their messages to different collectors. SG takes a value from 0 to 3 and says how to read SPRI: <code>0</code> is one group for everything, <code>1</code> is one group per PRI value, <code>2</code> is a group per range of PRI values, and <code>3</code> is a scheme agreed outside the specification. At most 192 groups are permitted.</p>",
+      "eli5": "<p>Each signed note says which batch of log lines it covers, how many lines, and carries a fingerprint for each one. At the bottom the sender signs the whole note with a secret pen.</p>"
+    },
+    {
+      "id": "key-management",
+      "number": "5",
+      "title": "Payload and Certificate Blocks",
+      "content": "<p>To check signatures, a collector needs the signer's key. A <strong>Payload Block</strong> holds that public-key information. It is sent at the start of each new reboot session, and there is exactly one per reboot session. Because certificates can be much longer than 2048 octets, the Payload Block is split into fragments, and each fragment travels in a <strong>Certificate Block</strong> message with SD-ID <code>ssign-cert</code>.</p><p>A Payload Block holds a timestamp for when the reboot session started, a one-octet <strong>Key Blob Type</strong> and the key blob. Certificate Blocks carry VER, RSID, SG, SPRI, TPBL (total payload length), INDEX (where the fragment starts, counting from 1), FLEN (fragment length), FRAG and SIGN. The Certificate Blocks are signed, not the Payload Block itself.</p><p>All implementations MUST support Key Blob Type <code>C</code>, a PKIX certificate. To decide whether to trust a signer, the RFC describes X.509 certification path validation (collectors SHOULD support it), X.509 end-entity certificate matching by fingerprint (collectors MUST support it) and OpenPGP V4 fingerprints (signers and collectors MAY support it). Only the end-entity certificate is sent, because of message size limits.</p>",
+      "eli5": "<p>The reader needs the sender's public key to check the signature, like a sample of a signature to compare with. It is sent first, in small pieces, because it may be too big for one note.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "6",
+      "title": "Redundancy and Configuration",
+      "content": "<p>Messages can be lost, and without the blocks many messages cannot be verified. The signer may therefore send Signature and Certificate Blocks multiple times, and the collector MUST ignore duplicates it has already authenticated. The RFC defines optional configuration parameters: <code>certInitialRepeat</code>, <code>certResendDelay</code> and <code>certResendCount</code> for Certificate Blocks, and <code>sigMaxDelay</code>, <code>sigNumberResends</code>, <code>sigResendDelay</code> and <code>sigResendCount</code> for Signature Blocks.</p><p>Signature Blocks SHOULD NOT overlap, but collectors MUST cope if they do, and MUST ignore hashes of messages they already validated. With TLS transport the sender MUST send a fresh Certificate Block when a session is established. Sending redundant Certificate Blocks even after the first message is RECOMMENDED, in particular over UDP.</p>",
+      "eli5": "<p>Because mail can get lost, the sender is allowed to send the same signed note more than once. The reader just ignores copies it already has.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "7",
+      "title": "Verifying Logs Offline and Online",
+      "content": "<p>The RFC outlines two optional methods for checking logs; implementations MAY use others. In <strong>offline review</strong>, the stored log is sorted into normal, Signature Block and Certificate Block messages. For each signer, reboot session and group, the Payload Block is rebuilt from the Certificate Blocks sorted by INDEX and used to verify their signatures. Then Signature Blocks are processed in order of First Message Number. Each hash is looked up among the stored messages, and found messages go into an authenticated log with their message numbers. Missing numbers show the gaps.</p><p>In <strong>online review</strong> the collector keeps a \"Waiting for Signature\" queue for messages that arrived before their signature, and a \"Waiting for Message\" queue for signatures that arrived before their message. Both queues must be sized large enough, or an attacker flooding the collector with unsigned messages can push entries off a queue before their signatures arrive.</p>",
+      "eli5": "<p>To check a log, you match each line to its fingerprint in the signed notes. Lines with no match are not trusted, and missing numbers show which lines are gone.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The model is direct trust: the certificate that is transferred is its own trust anchor, with no chain needed. An attacker can forge messages only by compromising the originator's private key, and anyone who controls a private key can sign anything.</p><p>The RFC walks through threats. Replays can be found by checking whether a message is already in the authenticated log. Loss, reordering and damage can be spotted from the Signature Blocks. Blocks and messages are sent in plaintext unless TLS is used. A man in the middle could substitute its own certificate information, so administrators need to verify that the key in the Payload Block is the one the signer really uses. Attackers can send invalid Signature Blocks or flood a collector to cause denial of service. The RFC also states that nothing in the protocol tries to eliminate covert channels.</p>",
+      "eli5": "<p>The signature is only as safe as the secret pen. If a thief steals the pen, they can sign fake notes, so the pen must be guarded.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "9",
+      "title": "IANA Registries",
+      "content": "<p>IANA registered the Structured Data IDs <code>ssign</code> and <code>ssign-cert</code> with their parameters. It also created registries for the Protocol Version, Hash Algorithm, Signature Scheme, SG field and Key Blob Type values, with new values assigned by the \"IETF Review\" policy. Protocol Versions 51 through 99 are vendor specific, and so are lowercase Key Blob Type letters.</p>",
+      "eli5": "<p>A keeper of lists writes down which codes mean which choice, so everyone uses the same codes.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "SIGNATURE BLOCK PARAMETERS (RFC 5848, SECTION 4.2)",
+      "data": {
+        "items": [
+          {
+            "code": "VER",
+            "label": "Version",
+            "desc": "4 octets: protocol version, hash algorithm, signature scheme."
+          },
+          {
+            "code": "RSID",
+            "label": "Reboot Session ID",
+            "desc": "1 to 10 octets; increases on each signer reboot."
+          },
+          {
+            "code": "SG",
+            "label": "Signature Group",
+            "desc": "1 octet; says how to interpret SPRI."
+          },
+          {
+            "code": "SPRI",
+            "label": "Signature Priority",
+            "desc": "1 to 3 octets; 0 to 191."
+          },
+          {
+            "code": "GBC",
+            "label": "Global Block Counter",
+            "desc": "1 to 10 octets; Signature Blocks sent before this one."
+          },
+          {
+            "code": "FMN",
+            "label": "First Message Number",
+            "desc": "1 to 10 octets; number of the first hashed message."
+          },
+          {
+            "code": "CNT",
+            "label": "Count",
+            "desc": "1 to 2 octets; number of hashes, 1 to 99."
+          },
+          {
+            "code": "HB",
+            "label": "Hash Block",
+            "desc": "Base64 hashes, space separated.",
+            "highlight": true
+          },
+          {
+            "code": "SIGN",
+            "label": "Signature",
+            "desc": "Base64 signature over the message without SIGN.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "KEY BLOB TYPES (RFC 5848, SECTION 5.2.1)",
+      "data": {
+        "items": [
+          {
+            "code": "C",
+            "label": "PKIX certificate",
+            "desc": "Per RFC 5280. All implementations MUST support it.",
+            "highlight": true
+          },
+          {
+            "code": "P",
+            "label": "OpenPGP certificate",
+            "desc": "OpenPGP KeyID followed by the certificate."
+          },
+          {
+            "code": "K",
+            "label": "Public key",
+            "desc": "The key matching the private key that signs the messages."
+          },
+          {
+            "code": "N",
+            "label": "No key sent",
+            "desc": "The key is pre-distributed."
+          },
+          {
+            "code": "U",
+            "label": "Installation-specific",
+            "desc": "Installation-specific key exchange information."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "ORDER OF MESSAGES IN A REBOOT SESSION (SIMPLIFIED, ILLUSTRATIVE)",
+      "data": {
+        "lanes": [
+          {
+            "key": "signer",
+            "label": "Signer"
+          },
+          {
+            "key": "collector",
+            "label": "Collector"
+          }
+        ],
+        "messages": [
+          {
+            "from": "signer",
+            "to": "collector",
+            "label": "Certificate Blocks",
+            "color": "blue",
+            "note": "Sent first, carrying the Payload Block in fragments."
+          },
+          {
+            "from": "signer",
+            "to": "collector",
+            "label": "Normal syslog messages",
+            "color": "neutral"
+          },
+          {
+            "from": "signer",
+            "to": "collector",
+            "label": "Signature Block",
+            "color": "green",
+            "note": "Signed hashes of earlier messages."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC5424]",
+      "text": "Gerhards, R., \"The syslog Protocol\", RFC 5424, March 2009.",
+      "rfc": 5424
+    },
+    {
+      "number": "[RFC5425]",
+      "text": "Miao, F., Yuzhi, M., and J. Salowey, \"TLS Transport Mapping for syslog\", RFC 5425, March 2009.",
+      "rfc": 5425
+    },
+    {
+      "number": "[RFC5426]",
+      "text": "Okmianski, A., \"Transmission of syslog Messages over UDP\", RFC 5426, March 2009.",
+      "rfc": 5426
+    },
+    {
+      "number": "[RFC4648]",
+      "text": "Josefsson, S., \"The Base16, Base32, and Base64 Data Encodings\", RFC 4648, October 2006.",
+      "rfc": 4648
+    },
+    {
+      "number": "[RFC4880]",
+      "text": "Callas, J., Donnerhacke, L., Finney, H., Shaw, D., and R. Thayer, \"OpenPGP Message Format\", RFC 4880, November 2007.",
+      "rfc": 4880
+    },
+    {
+      "number": "[RFC5280]",
+      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "rfc": 5280
+    },
+    {
+      "number": "[RFC5226]",
+      "text": "Narten, T. and H. Alvestrand, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 5226, May 2008.",
+      "rfc": 5226
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

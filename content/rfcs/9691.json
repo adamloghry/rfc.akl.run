@@ -9,13 +9,254 @@
   },
   "questions": [
     "what is an rpki trust anchor key object",
-    "how to change rpki trust anchor keys"
+    "how to change rpki trust anchor keys",
+    "what is a tak object",
+    "how long is the rpki acceptance timer"
+  ],
+  "tags": [
+    "RPKI",
+    "Routing Security",
+    "Key Rollover"
+  ],
+  "subtitle": "A signed object that lets an RPKI trust anchor announce where its keys live and stage a successor key for a safe rollover.",
+  "tldr": {
+    "problem": "Relying parties learn about an RPKI trust anchor from a Trust Anchor Locator, but until now there was no in-band way to tell them that the locator had changed, which made key rollovers risky.",
+    "mechanism": "A Trust Anchor Key (TAK) object, signed under the trust anchor, lists the current public key and certificate locations and can name a predecessor and a successor key. A relying party that sees a verified successor starts a 30-day acceptance timer and then switches over.",
+    "outcome": "Trust anchors can plan key rollovers, such as moving between hardware security module vendors, without invalidating the RPKI tree. Relying parties that ignore TAK objects keep using their old key, so the trust anchor may have to run both key pairs for a while.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Acceptance timer",
+      "value": "30 days"
+    },
+    {
+      "label": "TAK version",
+      "value": "0"
+    },
+    {
+      "label": "File extension",
+      "value": ".tak"
+    },
+    {
+      "label": "Content type OID",
+      "value": "1.2.840.113549.1.9.16.1.50"
+    },
+    {
+      "label": "Media type",
+      "value": "application/rpki-signed-tal"
+    },
+    {
+      "label": "ASN.1 module number",
+      "value": "74"
+    }
+  ],
+  "today": "<p>RFC 9691 is a Proposed Standard published in December 2024. It has not been obsoleted or updated.</p>",
+  "glossary": [
+    "rpki",
+    "trust-anchor-locator",
+    "relying-party",
+    "key-rollover",
+    "trust-anchor",
+    "certificate-authority",
+    "x509-certificate",
+    "digital-signature"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Why TAK Objects Exist",
+      "content": "<p>In the Resource Public Key Infrastructure (RPKI), a <strong>Trust Anchor Locator</strong> (TAL, <a href='/8630/'>RFC 8630</a>) tells a <strong>relying party</strong> (RP) where to find and how to validate a trust anchor's CA certificate. The problem this RFC solves is that there has been no in-band way to tell RPs about updates to a TAL. In-band notification lets trust anchor operators be more confident that RPs know about a key rollover.</p><p>The RFC defines a new signed object, the <strong>Trust Anchor Key</strong> (TAK) object. It records the certificate locations for the current public key, plus the successor public key and its locations, so a planned rollover does not risk invalidating the RPKI tree under the trust anchor.</p><p>The stated main motivation is migrating from a Hardware Security Module (HSM) from one vendor to another when the first vendor does not support exporting private keys. Other rollover scenarios may also benefit.</p>",
+      "eli5": "<p>When the trust anchor changes its master key, it needs a safe way to tell everyone. The TAK object is a signed message that says where the keys are and which one is next.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "2",
+      "title": "The TAK Object Format",
+      "content": "<p>A TAK object is built from the template for RPKI signed objects (<a href='/6488/'>RFC 6488</a>), which wraps content in a Cryptographic Message Syntax (<a href='/5652/'>RFC 5652</a>) envelope. The RFC defines the object identifier <code>id-ct-signedTAL</code>, the ASN.1 syntax of the content, and extra validation steps. The content is DER encoded.</p><p>A <code>TAKey</code> holds zero or more <code>comments</code> (UTF-8 text, like the comment lines in a TAL, with the leading hash sign dropped), at least one <code>certificateURIs</code> entry (an rsync or HTTPS URI) and a <code>subjectPublicKeyInfo</code>. The <code>TAK</code> itself has a <code>version</code> that MUST be 0, a <code>current</code> key, and optional <code>predecessor</code> and <code>successor</code> keys.</p><p>The <code>current</code> key is that of the repository where the TAK object is published. The <code>successor</code> is the key to use in its place after the relevant acceptance timer expires. The file name extension <code>.tak</code> MUST be used.</p>",
+      "eli5": "<p>The note has a few lines: this is our key now, this was our key before, and this will be our key next. Each key comes with the addresses where its certificate can be fetched.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "3",
+      "title": "Generating and Validating a TAK",
+      "content": "<p>To publish a TAK, the trust anchor MUST create a one-time-use end-entity (EE) certificate with its own unique key pair. That certificate MUST describe its Internet Number Resources with the <code>inherit</code> attribute, since the resource set is irrelevant to this object. Its <code>notBefore</code> time MUST match or predate publication, and its <code>notAfter</code> time reflects how long the TAK will be published. The current key in the TAK MUST match the trust anchor CA certificate it was issued under.</p><p>An RP validates a TAK on top of the checks in RFC 6488. The TAK must be issued by the trust anchor CA certificate itself, be the only entry on the manifest with the <code>.tak</code> extension, use <code>inherit</code>, decode correctly, and carry a current key matching that CA certificate. If any check fails, the RP MUST ignore the TAK and carry on as if it were not on the manifest.</p><div class='callout callout-note'><p>If the certificate URIs in a TAK differ from the RP's own for the current key, the RP MAY alert the user but MUST NOT update its configuration automatically. Moving to new URIs is meant to happen through the successor key process.</p></div>",
+      "eli5": "<p>The trust anchor signs the note with a pen it uses only once. The reader checks that the signature really comes from the trust anchor, and ignores the note if anything looks wrong.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "How Relying Parties Follow a Successor Key",
+      "content": "<p>When doing top-down validation, an RP MUST first validate the TAK object for its current known public key. If the TAK names a successor, the RP verifies it by validating from the successor key, confirming a valid TAK exists there, and checking that the successor's TAK names the original current key as its predecessor and the original successor as its current key.</p><p>If the successor passes and the RP did not see it in the previous successful run, the RP sets an <strong>acceptance timer</strong> of 30 days for it, cancels any existing timer, and keeps validating with the current key. On later runs, while the timer has not expired, the RP keeps using the current key. Once the timer expires, the RP updates its stored key details to the successor and starts validation again from it. If verification fails or no successor is listed, the RP cancels the timer.</p><p>An RP MUST NOT use a successor key for production validation outside this process, though it may test it. An RP may instead alert the user and let them switch manually.</p>",
+      "eli5": "<p>When the reader sees a note about a new key, it waits 30 days and keeps checking that the note never changes. Only then does it start trusting the new key.</p>"
+    },
+    {
+      "id": "migration",
+      "number": "5",
+      "title": "Running Multiple Keys and Rolling a Key",
+      "content": "<p>An RP that understands TAK objects uses only one key at a time, but an RP that does not will keep using the key from its TAL indefinitely. So during a rollover the trust anchor may have to keep the old key pair running. Each key pair's material MUST be published in different directories, and the CA certificates and published content for each key pair MUST be equivalent, apart from the TAK object, so that it makes no difference which key an RP starts from. A trust anchor SHOULD NOT publish anything beyond a CRL, a manifest, a single TAK and CA certificates for child CAs.</p><p>The rollover from key pair 'A' to key pair 'B' has four phases:</p><ol><li>Add a TAK for key pair A alone, to confirm the trust anchor can maintain one.</li><li>Generate key pair B and publish equivalent content under it. Then issue a TAK under A listing B as successor, and a TAK under B listing A as predecessor.</li><li>Release a new TAL for B. It SHOULD use different URIs from the TAK file, so the trust anchor can learn how many RPs follow the TAK. Keep A running for a period set by local policy.</li><li>Remove all content for A and destroy its private key. RPs still relying on A's TAL can no longer validate and need a new TAL by hand.</li></ol>",
+      "eli5": "<p>A rollover is like moving house in four steps: keep living at the old place, set up the new one, tell friends the new address, then finally give back the old keys.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "6",
+      "title": "Deployment and Operations",
+      "content": "<p>Publishing TAK objects while RPs do not support them makes those RPs reject the objects. It is not expected to invalidate any other object under the trust anchor. A TAK can also be used to distribute TAL data: RPs may convert a TAK into a TAL file, defaulting to the <code>current</code> key and including any comments. The RP MUST validate the TAK first and MUST NOT produce a TAL if validation fails. A TAK distributed out of band has the same weak security as a TAL, because there is no authentication.</p><p>The acceptance timer exists so RPs can test the new key before relying on it, and so the trust anchor can gain confidence. If a successor key is withdrawn from a TAK, the trust anchor SHOULD NOT add the same key back, because an RP that already started a timer would switch sooner than others. Changing the URL set for the successor avoids this, since an RP that sees the URL set change cancels its timer and starts a new one.</p>",
+      "eli5": "<p>Some readers will not understand the new notes and will ignore them. That is fine, but the trust anchor must keep the old key working for them a while.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>A trust anchor has to decide how long to keep old key pairs and their repositories. An RP seeded with old TAL data runs 30 days on the old key before each migration step. It may therefore be better for the trust anchor to return errors for the old publication URLs so that the operator reseeds the RP right away. Once an old key pair is no longer maintained, the trust anchor SHOULD destroy its private key, and SHOULD reuse the old CA certificate URLs in the next TAL.</p><p>TAK objects give no protection against compromise of the current or successor private key. A malicious actor could use a TAK to move RPs to a successor key, but only after having compromised the current private key, which already gives complete control of the trust anchor. The RFC also notes that the in-band process is optional, but TAK objects are at least verifiable with the currently trusted key, unlike out-of-band distribution.</p>",
+      "eli5": "<p>A forged note can only fool people if the thief already has the master key. So the note does not add a new danger, but it also cannot save you from a stolen key.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "IANA Registrations",
+      "content": "<p>IANA registered the content type <code>id-ct-signedTAL</code> as number 50 (OID 1.2.840.113549.1.9.16.1.50) and added Trust Anchor Key to the RPKI Signed Objects registry. It added the <code>.tak</code> file extension to the RPKI Repository Name Schemes registry and registered ASN.1 module identifier 74, <code>RPKISignedTrustAnchorList-2021</code>. It also registered the media type <code>application/rpki-signed-tal</code>, which is binary.</p>",
+      "eli5": "<p>IANA wrote the new file type, its name tag and its extension into the official list.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "migration",
+      "position": "after",
+      "caption": "KEY ROLLOVER FROM KEY PAIR A TO B (SIMPLIFIED FROM SECTION 6)",
+      "data": {
+        "lanes": [
+          {
+            "key": "ta",
+            "label": "Trust Anchor"
+          },
+          {
+            "key": "rp",
+            "label": "Relying Party"
+          }
+        ],
+        "messages": [
+          {
+            "from": "ta",
+            "to": "rp",
+            "label": "TAK under A: current A, successor B",
+            "color": "blue",
+            "note": "A matching TAK under B names A as predecessor."
+          },
+          {
+            "from": "rp",
+            "to": "rp",
+            "label": "Verify B, start 30-day timer",
+            "color": "neutral",
+            "note": "Keeps validating with A meanwhile."
+          },
+          {
+            "from": "ta",
+            "to": "rp",
+            "label": "New TAL for B released",
+            "color": "green",
+            "note": "Key pair A keeps running for a period."
+          },
+          {
+            "from": "rp",
+            "to": "rp",
+            "label": "Timer expires, switch to B",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "STRUCTURE OF THE TAK CONTENT (ASN.1 IN APPENDIX A)",
+      "data": {
+        "root": {
+          "label": "TAK",
+          "children": [
+            {
+              "label": "version",
+              "note": "MUST be 0"
+            },
+            {
+              "label": "current (TAKey)",
+              "children": [
+                {
+                  "label": "comments",
+                  "note": "zero or more"
+                },
+                {
+                  "label": "certificateURIs",
+                  "note": "at least one"
+                },
+                {
+                  "label": "subjectPublicKeyInfo"
+                }
+              ]
+            },
+            {
+              "label": "predecessor (optional TAKey)"
+            },
+            {
+              "label": "successor (optional TAKey)"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC8630]",
+      "text": "Huston, G., Weiler, S., Michaelson, G., Kent, S., and T. Bruijnzeels, \"Resource Public Key Infrastructure (RPKI) Trust Anchor Locator\", RFC 8630, August 2019.",
+      "rfc": 8630
+    },
+    {
+      "number": "[RFC6488]",
+      "text": "Lepinski, M., Chi, A., and S. Kent, \"Signed Object Template for the Resource Public Key Infrastructure (RPKI)\", RFC 6488, February 2012.",
+      "rfc": 6488
+    },
+    {
+      "number": "[RFC6487]",
+      "text": "Huston, G., Michaelson, G., and R. Loomans, \"A Profile for X.509 PKIX Resource Certificates\", RFC 6487, February 2012.",
+      "rfc": 6487
+    },
+    {
+      "number": "[RFC6481]",
+      "text": "Huston, G., Loomans, R., and G. Michaelson, \"A Profile for Resource Certificate Repository Structure\", RFC 6481, February 2012.",
+      "rfc": 6481
+    },
+    {
+      "number": "[RFC9286]",
+      "text": "Austein, R., Huston, G., Kent, S., and M. Lepinski, \"Manifests for the Resource Public Key Infrastructure (RPKI)\", RFC 9286, June 2022.",
+      "rfc": 9286
+    },
+    {
+      "number": "[RFC8181]",
+      "text": "Weiler, S., Sonalker, A., and R. Austein, \"A Publication Protocol for the Resource Public Key Infrastructure (RPKI)\", RFC 8181, July 2017.",
+      "rfc": 8181
+    },
+    {
+      "number": "[RFC5652]",
+      "text": "Housley, R., \"Cryptographic Message Syntax (CMS)\", STD 70, RFC 5652, September 2009.",
+      "rfc": 5652
+    },
+    {
+      "number": "[RFC3779]",
+      "text": "Lynn, C., Kent, S., and K. Seo, \"X.509 Extensions for IP Addresses and AS Identifiers\", RFC 3779, June 2004.",
+      "rfc": 3779
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

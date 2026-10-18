@@ -9,13 +9,296 @@
   },
   "questions": [
     "what is dncp",
-    "distributed node consensus protocol"
+    "distributed node consensus protocol",
+    "how does dncp synchronize state",
+    "what is a dncp profile",
+    "how does the trickle algorithm work in dncp"
+  ],
+  "tags": [
+    "Synchronization",
+    "Trickle",
+    "Home Networking"
+  ],
+  "subtitle": "A generic way for a group of nodes to keep a shared set of published data in sync using hash trees and Trickle.",
+  "tldr": {
+    "problem": "Devices such as embedded routers need to discover each other and share a small amount of data, and every one of them needs the same view of what everyone has published.",
+    "mechanism": "Each node publishes a set of TLVs (at most 64 KB). A hash over every reachable node's data, the network state hash, is announced with the Trickle algorithm, and nodes fetch the details only when hashes differ.",
+    "outcome": "DNCP is abstract: it is only usable once a DNCP profile fills in transport, security, hash function and timer choices. It works best for data that changes rarely.",
+    "outcomeLabel": "The catch"
+  },
+  "facts": [
+    {
+      "label": "Max node data",
+      "value": "64 KB per node"
+    },
+    {
+      "label": "TLV header",
+      "value": "2-byte Type, 2-byte Length"
+    },
+    {
+      "label": "TLV padding",
+      "value": "To a 4-byte boundary"
+    },
+    {
+      "label": "Mandatory republish",
+      "value": "Roughly every 48 days"
+    },
+    {
+      "label": "Trust verdicts",
+      "value": "5 (0 to 4)"
+    },
+    {
+      "label": "Recommended hash",
+      "value": "SHA-256 (default choice)"
+    }
+  ],
+  "today": "<p>RFC 7787 is a Proposed Standard published in April 2016, and the metadata lists no obsoleting or updating RFC. It remains an abstract framework that needs a DNCP profile to be implemented.</p>",
+  "glossary": [
+    "tag-length-value",
+    "trickle-algorithm",
+    "hash-tree",
+    "multicast",
+    "unicast",
+    "sequence-number",
+    "opportunistic-privacy",
+    "pre-shared-key",
+    "pki",
+    "certificate",
+    "tls"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "What DNCP Is For",
+      "content": "<p>The <strong>Distributed Node Consensus Protocol</strong> (DNCP) lets each participating node publish a small set of TLV (Type-Length-Value) tuples, at most 64 KB, and gives every node a shared and common view of the data published by every currently bidirectionally reachable node in the network.</p><p>The RFC names autonomous bootstrapping, discovery and negotiation of embedded network devices such as routers as typical uses. It can also serve as a basis for distributed algorithms such as the one in <a href='/7596/'>RFC 7596</a>.</p><p>DNCP is <strong>abstract</strong>. A <em>DNCP profile</em> sets the concrete choices: the unicast transport (for example TCP, UDP or SCTP), optional TLS or DTLS security, optional multicast transport, communication scopes, extra payloads and optional extensions.</p><div class='callout callout-warning'><p>The RFC lists poor fits: large amounts of data, very dense unicast-only networks, mostly tiny changes to large node data, frequently changing data, and many very constrained nodes, since every node stores everything published by all nodes.</p></div>",
+      "eli5": "<p>Everyone in the group gets a small page to write on, and everyone can see everyone else's page. It works best when the pages do not change every minute.</p>"
+    },
+    {
+      "id": "overview",
+      "number": "3",
+      "title": "How the Hash Tree Keeps Everyone in Sync",
+      "content": "<p>Each node keeps a hash tree of height 1. Every leaf stands for one bidirectionally reachable node, ordered by ascending node identifier. A node's <strong>node data hash</strong> is computed over the TLVs it published. The <strong>network state hash</strong> at the root is computed by concatenating, in node identifier order, each node's sequence number (in network byte order) with its node data hash, then hashing the result. The hash function and its truncation come from the profile.</p><p>Nodes announce the network state hash with the <strong>Trickle algorithm</strong> (<a href='/6206/'>RFC 6206</a>). When a node sees a different hash from a peer, it asks that peer for the list of node states (sequence number, node data hash, time since publication). It compares them with its own, and requests the full node data only where its copy is outdated or missing.</p><p>Whenever a node's local copy of any node data or its hash tree changes, its Trickle instances are reset so the change spreads to its peers. Importantly, a node MUST NOT reset Trickle merely because it received a different network state hash.</p>",
+      "eli5": "<p>Everyone computes one fingerprint for the whole notebook. If a friend's fingerprint is different, you ask which pages changed and copy only those.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "Transport, Trickle and Handling Received TLVs",
+      "content": "<p>DNCP needs only a way to send unicast datagrams or stream data to a peer and, optionally, multicast datagrams. DNCP does not fragment or reassemble TLVs, so the transport must. A node MUST send a <strong>Node Endpoint TLV</strong> so peers can form bidirectional relationships: once per connection on a stream transport, and in every datagram carrying a Network State TLV (before it) on a datagram transport.</p><p>An endpoint runs in one of several modes. With only reliable unicast, Trickle is not used and a Network State TLV goes to each peer when the hash changes. With only unreliable unicast, Trickle state is kept per peer. With multicast plus unicast, Trickle state is kept per endpoint and updates go over multicast.</p><p>Received TLVs are handled as follows:</p><ul><li>A Request Network State TLV is answered with a Network State TLV and a Node State TLV for each node, normally without node data.</li><li>A Request Node State TLV is answered with that node's Node State TLV, including node data.</li><li>A Network State TLV with a differing hash leads to a Request Network State TLV, rate limited to one per link per unique hash within Imin.</li><li>A Node State TLV that is newer or different leads to a request for the node data, or an update of the stored state.</li><li>Unknown TLVs are silently ignored, except inside node data, where they are kept and passed on.</li></ul><p>If another node claims the local node's identifier with a higher sequence number, the node SHOULD republish with a sequence number significantly greater than the received one (for example 1000). Sequence numbers are compared with a looping function so overflow is safe.</p>",
+      "eli5": "<p>Friends send short notes by whatever method they agreed on. A quiet friend says nothing until something changes, and a friend who sees a mismatch asks for just the part that differs.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4.5",
+      "title": "Peers, Reachability and Keep-Alives",
+      "content": "<p>There are no dedicated discovery messages. A peer is discovered simply by receiving its regular TLVs, over multicast or over preconfigured unicast addresses. A node received over unicast is added as a peer and gets a Peer TLV.</p><p>Data is only valid if its publisher is <strong>bidirectionally reachable</strong>. Each node walks a topology graph starting from itself. Node N counts as reachable if a reachable node R publishes a Peer TLV naming N and N publishes a matching Peer TLV naming R, and R's node data is not too old. Nodes not reached MUST NOT be used for the network state hash or handed to applications.</p><p>An optional <strong>keep-alive</strong> extension sends Network State TLVs periodically, per endpoint over multicast or per peer over unicast. A peer is removed when its last contact timestamp is older than the keep-alive multiplier times the keep-alive interval. Without keep-alives, other means such as Ethernet carrier detection or TCP keep-alive MUST be used.</p><p>A second extension handles dense multicast links, where Peer TLVs would grow as O(N^2). Above a profile-defined peer limit, nodes without the highest node identifier treat the link as unicast to the node with the highest identifier.</p>",
+      "eli5": "<p>Two friends only count as being in touch if each says they can hear the other. If someone stays silent too long, the others forget them.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "7",
+      "title": "TLV Encoding and the Defined TLVs",
+      "content": "<p>Every TLV has a 2-byte Type, a 2-byte Length (of the value only; 0 means no value), the value, and zero padding up to the next 4-byte boundary. Padding is not counted in the Length of the TLV itself, but is counted when the TLV is nested inside another. For example, type 123 with value <code>x</code> is encoded as <code>007B 0001 7800 0000</code>.</p><p>The RFC defines these TLVs:</p><ul><li><strong>Request Network State</strong> (1) and <strong>Request Node State</strong> (2) ask for information.</li><li><strong>Node Endpoint</strong> (3) carries the sender's node identifier and endpoint identifier.</li><li><strong>Network State</strong> (4) carries the network state hash.</li><li><strong>Node State</strong> (5) carries node identifier, sequence number, Milliseconds Since Origination, the node data hash and optionally the node data itself.</li><li><strong>Peer</strong> (8) vouches that a peer is reachable on a local endpoint.</li><li><strong>Keep-Alive Interval</strong> (9) announces a non-default interval in milliseconds; zero means no keep-alives.</li><li><strong>Trust-Verdict</strong> (10) is used by the certificate-based trust method.</li></ul><p>Node data inside a Node State TLV MUST be strictly ordered by ascending binary content and passed along exactly as received. If the 32-bit Milliseconds Since Origination value nears overflow (greater than 2^32 - 2^16), the node MUST republish, which means roughly every 48 days.</p>",
+      "eli5": "<p>Every note has a label, a length, and the message. Notes are padded so they line up neatly, like boxes that must all fit into the same size slots.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and Trust",
+      "content": "<p>A profile may use TLS or DTLS to authenticate and encrypt some or all unicast traffic. Multicast is not secured, because it carries only hashes and triggers. If secure unicast is configured, Node State TLVs received over insecure multicast MUST be silently ignored.</p><p>The RFC defines three trust methods. A <strong>pre-shared key</strong> is simple and suits small networks. A <strong>PKI-based</strong> method allows centralized management at the cost of more complexity. A <strong>certificate-based trust consensus</strong> method, based on opportunistic security (<a href='/7435/'>RFC 7435</a>) and X.509 certificates, lets every node announce a verdict on any certificate.</p><p>There are five verdicts in ascending priority: Neutral (0), Cached Trust (1), Cached Distrust (2), Configured Trust (3) and Configured Distrust (4). The effective verdict is the highest-priority one announced. Nodes keep a trust cache so verdicts survive when no node holds a configured one. Bootstrap ceremonies include trust by identification, preconfigured trust, trust on button press and trust on first use.</p><p>The Security Considerations section notes that an attacker on the link can learn only hash values from multicast and trigger unicast synchronization, so nodes MUST rate limit reactions to multicast. It also warns that a trust cache may be poisoned before a revocation takes effect, which might need physical intervention.</p>",
+      "eli5": "<p>The group can use a shared password, a trusted ID office, or vote on whether to let a newcomer in. Quick checks help, but a sneaky cheat can still need someone to step in by hand.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "9",
+      "title": "What a DNCP Profile Must Define",
+      "content": "<p>Each DNCP profile MUST specify the values for a set of parameters, prefixed with <code>DNCP_</code>:</p><ul><li>Unicast and optional multicast transport, how they are secured, and parameters such as port numbers and multicast addresses.</li><li>Which additional TLVs may safely be ignored, and how node identifier collisions are handled.</li><li>Trickle Imin, Imax and k ranges.</li><li>The hash function H(x) and how many bits are used. <a href='/6234/'>RFC 6234</a> SHA-256 is the recommended default.</li><li><code>DNCP_NODE_IDENTIFIER_LENGTH</code>, and whether keep-alives are used, with <code>DNCP_KEEPALIVE_INTERVAL</code> and <code>DNCP_KEEPALIVE_MULTIPLIER</code>.</li><li>Whether to support the dense multicast link optimization.</li></ul><p>Appendix C gives a fictional example profile for SHSP, a home automation protocol: TCP unicast, UDP multicast on a link-local address, no security, a random 32-bit node identifier, Imin of 200 ms, Imax of 7, k of 1, and SHA-256 with 128 bits used.</p>",
+      "eli5": "<p>DNCP is a game's rulebook with blanks. Each group fills in the blanks, such as how to send notes and how secret they are, before they can play.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "DNCP TLV TYPES (RFC 7787 IANA REGISTRY)",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "Request network state",
+            "desc": "Asks for a Network State TLV and all Node State TLVs without node data."
+          },
+          {
+            "code": "2",
+            "label": "Request node state",
+            "desc": "Asks for one node's Node State TLV including node data."
+          },
+          {
+            "code": "3",
+            "label": "Node endpoint",
+            "desc": "Identifies the sender's node and endpoint."
+          },
+          {
+            "code": "4",
+            "label": "Network state",
+            "desc": "Carries the network state hash.",
+            "highlight": true
+          },
+          {
+            "code": "5",
+            "label": "Node state",
+            "desc": "Carries one node's sequence number, hash and optional data.",
+            "highlight": true
+          },
+          {
+            "code": "8",
+            "label": "Peer",
+            "desc": "Vouches that a peer is reachable on a local endpoint."
+          },
+          {
+            "code": "9",
+            "label": "Keep-alive interval",
+            "desc": "Announces a non-default keep-alive interval."
+          },
+          {
+            "code": "10",
+            "label": "Trust-Verdict",
+            "desc": "Announces a verdict on a certificate."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "HOW A HASH MISMATCH IS RESOLVED (SIMPLIFIED FROM RFC 7787 SECTION 4.4)",
+      "data": {
+        "lanes": [
+          {
+            "key": "a",
+            "label": "Node A"
+          },
+          {
+            "key": "b",
+            "label": "Node B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Network State TLV",
+            "color": "blue",
+            "note": "A announces its network state hash."
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "label": "Request Network State TLV",
+            "color": "neutral",
+            "note": "B's hash differs, so it asks for details."
+          },
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Network State + Node State TLVs",
+            "color": "green",
+            "note": "Normally without node data."
+          },
+          {
+            "from": "b",
+            "to": "a",
+            "label": "Request Node State TLV",
+            "color": "neutral",
+            "note": "For a node whose data B lacks or has outdated."
+          },
+          {
+            "from": "a",
+            "to": "b",
+            "label": "Node State TLV with node data",
+            "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "CERTIFICATE TRUST VERDICTS, LOWEST TO HIGHEST PRIORITY",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Neutral",
+            "desc": "No verdict exists; the network should determine one."
+          },
+          {
+            "code": "1",
+            "label": "Cached Trust",
+            "desc": "Last known effective verdict was Configured or Cached Trust."
+          },
+          {
+            "code": "2",
+            "label": "Cached Distrust",
+            "desc": "Last known effective verdict was Configured or Cached Distrust."
+          },
+          {
+            "code": "3",
+            "label": "Configured Trust",
+            "desc": "Trustworthy based on an external ceremony or configuration."
+          },
+          {
+            "code": "4",
+            "label": "Configured Distrust",
+            "desc": "Not trustworthy based on an external ceremony or configuration."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC6206]",
+      "text": "Levis, P., Clausen, T., Hui, J., Gnawali, O., and J. Ko, \"The Trickle Algorithm\", RFC 6206, March 2011.",
+      "rfc": 6206
+    },
+    {
+      "number": "[RFC6234]",
+      "text": "Eastlake 3rd, D. and T. Hansen, \"US Secure Hash Algorithms (SHA and SHA-based HMAC and HKDF)\", RFC 6234, May 2011.",
+      "rfc": 6234
+    },
+    {
+      "number": "[RFC5246]",
+      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.2\", RFC 5246, August 2008.",
+      "rfc": 5246
+    },
+    {
+      "number": "[RFC6347]",
+      "text": "Rescorla, E. and N. Modadugu, \"Datagram Transport Layer Security Version 1.2\", RFC 6347, January 2012.",
+      "rfc": 6347
+    },
+    {
+      "number": "[RFC7435]",
+      "text": "Dukhovni, V., \"Opportunistic Security: Some Protection Most of the Time\", RFC 7435, December 2014.",
+      "rfc": 7435
+    },
+    {
+      "number": "[RFC7596]",
+      "text": "Cui, Y., et al., \"Lightweight 4over6: An Extension to the Dual-Stack Lite Architecture\", RFC 7596, July 2015.",
+      "rfc": 7596
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

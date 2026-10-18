@@ -9,13 +9,196 @@
   },
   "questions": [
     "dynamically switched link control protocol",
-    "control circuit switched t3 links"
+    "control circuit switched t3 links",
+    "how does dslcp control circuit-switched links",
+    "dslcp state machine and transitions",
+    "managing t3 network connections with dslcp"
+  ],
+  "tags": [
+    "Networks",
+    "Control",
+    "Circuits"
+  ],
+  "subtitle": "Protocol for a host to control circuit-switched network links.",
+  "tldr": {
+    "problem": "Circuit-switched networks (like T3 networks) require dynamic connection setup and teardown, but hosts need a simple way to request link control without dealing with the complex details of different switch hardware and configurations.",
+    "mechanism": "DSLCP defines a request/response protocol where transport providers send setup and teardown requests to a link controller. A state machine hides the details and status of link control from the transport provider, allowing the transport provider to focus on data transfer.",
+    "outcome": "Hosts can transparently request that downstream circuit-switched links be prepared for data transfer, with the protocol hiding the complexity of individual switch control implementations.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Transport protocol",
+      "value": "UDP or IP"
+    },
+    {
+      "label": "Number of states",
+      "value": "6 (Down, Coming Up, Up, Going Down, Bring Down, Bring Up)"
+    },
+    {
+      "label": "Recommended timeout",
+      "value": "5 seconds (with 3 retransmits)"
+    },
+    {
+      "label": "Maximum message body size",
+      "value": "65,499 octets"
+    }
+  ],
+  "today": "<p>RFC 1307 is an Experimental protocol for controlling circuit-switched network links. It remains relevant for managing on-demand high-speed connections in environments where circuit-switched networks (such as T3 or modern optical circuits) must be dynamically provisioned.</p>",
+  "glossary": [
+    "finite-state-machine",
+    "link-layer",
+    "connectionless"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "Connecting Temporary High-Speed Links",
+      "content": "<p>DSLCP addresses the challenge of efficiently using expensive circuit-switched networks. Unlike always-on packet-switched networks, circuit-switched networks (such as T3 services) require explicit connection setup, have significant per-use costs, and are disconnected when not in use.</p><p>The protocol was developed at Cray Research, Inc., as part of a project team's work with circuit-switched T3 networks. Rather than have each application or transport provider implement switch control, DSLCP provides a standardized interface between the transport provider (the part of the system that handles data transfer) and the link controller (the system entity managing the physical switch).</p><p>The key insight is that the transport provider knows when a data connection needs to start (when a transport user requests service) and when it needs to end (when the user is finished), but should not need to understand the details of how to prepare different types of network links. DSLCP hides those details in the link controller.</p>",
+      "eli5": "<p>When a program needs a fast connection for important data, it asks DSLCP to turn on the circuit-switched link. When done, it asks DSLCP to turn it off. DSLCP handles the actual switch control, so the program does not have to.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "2",
+      "title": "The Architecture: Transport, DSLCP, and Switch",
+      "content": "<p>DSLCP sits between two layers. Above it, the transport provider (TCP, UDP, or similar) communicates with DSLCP when it needs to prepare a link. Below it, the link controller is the entity responsible for actually controlling the physical switch and understanding its specific command set and behavior.</p><p>The transport provider does not track the link status itself; instead, it requests setup or release and waits for DSLCP to report success or failure. DSLCP maintains a state machine that represents the link's state (down, coming up, up, going down, bring up, or bring down), hiding the complexity of multiple requests arriving while a previous request is still being processed.</p><p>For example, if the transport provider requests link setup while another setup is already in progress, DSLCP does not pass this request directly to the switch. Instead, it tracks that multiple entities need the link and responds to the second request once the first setup completes, potentially without sending a second message to the switch. This way, the transport provider does not need to understand reference counting or multi-user link sharing.</p>",
+      "eli5": "<p>The transport provider asks DSLCP to turn on the link. DSLCP tells the actual switch to do it. The switch does it (or fails). DSLCP tells the transport provider the result. If multiple programs ask at the same time, DSLCP handles the complexity.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "3",
+      "title": "Control Messages and Link Status",
+      "content": "<p>DSLCP messages are carried as UDP or IP datagrams. Each control message is 8 bytes of header plus a variable-length message body. The header contains a 16-bit identifier (assigned by DSLCP to uniquely identify the transaction), a 16-bit total length, a 16-bit function code (0 for bring up, 1 for bring down), and a 16-bit event status code.</p><p>The function field indicates the operation being requested or the response being sent. The event status field carries the outcome: setup succeeded (value 2), setup failed (value 3), teardown succeeded (value 4), teardown failed (value 5), or asynchronous network down (value 7).</p><p>The message includes two 32-bit endpoint addresses (the source and destination IP addresses of the communicating parties) and a variable-length message body (up to 65,499 octets) containing site-specific control strings. These strings are configured by the site administrator and are meaningful to the particular link controller being used. The message body allows protocol-neutral communication of link-specific parameters without the DSLCP protocol itself needing to define them.</p>",
+      "eli5": "<p>A DSLCP message says: with ID 123, turn on the link between these two addresses using this magic command string that the switch understands.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "4",
+      "title": "The Six-State Machine",
+      "content": "<p>DSLCP uses a six-state state machine to manage the lifecycle of a controlled link. The states are:</p><p><strong>Down:</strong> No active connection and the link is not prepared. <strong>Coming Up:</strong> The transport provider requested setup, DSLCP has sent a setup message to the link controller, and it is waiting for a response. <strong>Up:</strong> At least one transport connection is active and the link is ready. <strong>Going Down:</strong> All transport connections have been released, DSLCP has sent a teardown request to the link controller, and it is waiting for a response. <strong>Bring Down:</strong> A teardown was requested while Coming Up; DSLCP waits for the setup response before sending teardown. <strong>Bring Up:</strong> A setup was requested while Going Down; DSLCP waits for the teardown response before sending setup.</p><p>This design allows the protocol to handle overlapping requests from the transport provider without losing any. For example, if a setup request arrives while a teardown is in progress, DSLCP enters the Bring Up state and will send a new setup request as soon as the teardown completes. The transport provider making each request receives only success or failure; DSLCP manages the sequencing.</p>",
+      "eli5": "<p>The link can be down, coming up, up, going down, waiting to come up, or waiting to go down. As requests arrive, DSLCP moves between these states and tells the switch what to do.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Message Handling and Timeouts",
+      "content": "<p>DSLCP processes three types of events: setup requests from the transport provider, teardown requests from the transport provider, and messages from the link controller (setup/teardown success or failure, asynchronous network down, or timeout).</p><p>When the transport provider requests link setup from the Down state, DSLCP sends a setup message to the link controller and moves to Coming Up, telling the transport provider to wait. If a setup succeeds while in Coming Up, DSLCP moves to Up and notifies waiting transport providers. If setup fails, DSLCP returns to Down.</p><p>Teardown requests from the Up state trigger a teardown message to the switch and a transition to Going Down. From Going Down, a successful teardown response returns to Down. Various states handle unexpected or redundant messages gracefully, typically by ignoring them (since network reordering or retransmission of earlier requests may cause them).</p><p>Because DSLCP does not require a reliable transport (messages travel over UDP or IP), it must implement timeouts and retransmission. The RFC recommends a 5-second timeout with a 3-retransmit limit for local network contexts, with the caveat that different networks and switch controllers may require different values. A self-adapting algorithm would be suitable for general deployment.</p>",
+      "eli5": "<p>When the transport provider asks to set up the link, DSLCP sends the request to the switch and waits. If the switch does not answer within 5 seconds, DSLCP asks again, up to 3 times. Depending on what the switch says, DSLCP tells the transport provider success or failure.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "DSLCP Link State Machine",
+      "data": {
+        "states": [
+          {
+            "key": "down",
+            "label": "Down",
+            "initial": true
+          },
+          {
+            "key": "coming-up",
+            "label": "Coming Up"
+          },
+          {
+            "key": "up",
+            "label": "Up"
+          },
+          {
+            "key": "going-down",
+            "label": "Going Down"
+          },
+          {
+            "key": "bring-down",
+            "label": "Bring Down"
+          },
+          {
+            "key": "bring-up",
+            "label": "Bring Up"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "down",
+            "to": "coming-up",
+            "label": "Setup request"
+          },
+          {
+            "from": "coming-up",
+            "to": "up",
+            "label": "Setup succeeded"
+          },
+          {
+            "from": "coming-up",
+            "to": "bring-down",
+            "label": "Teardown request"
+          },
+          {
+            "from": "coming-up",
+            "to": "down",
+            "label": "Setup failed"
+          },
+          {
+            "from": "up",
+            "to": "going-down",
+            "label": "Teardown request"
+          },
+          {
+            "from": "going-down",
+            "to": "down",
+            "label": "Teardown succeeded"
+          },
+          {
+            "from": "going-down",
+            "to": "bring-up",
+            "label": "Setup request"
+          },
+          {
+            "from": "bring-down",
+            "to": "down",
+            "label": "Setup failed"
+          },
+          {
+            "from": "bring-down",
+            "to": "going-down",
+            "label": "Teardown succeeded"
+          },
+          {
+            "from": "bring-up",
+            "to": "coming-up",
+            "label": "Teardown succeeded"
+          },
+          {
+            "from": "bring-up",
+            "to": "up",
+            "label": "Setup succeeded"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[1]",
+      "text": "Nicholson, A. and J. Young, \"Experiences Supporting By-Request Circuit-Switched T3 Networks\", RFC 1306, March 1992.",
+      "rfc": 1306
+    },
+    {
+      "number": "[2]",
+      "text": "Nicholson, A., et al., \"High Speed Networking at Cray Research\", Computer Communications Review, January 1991."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-18",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-18"
 }

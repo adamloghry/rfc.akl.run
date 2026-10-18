@@ -9,13 +9,277 @@
   },
   "questions": [
     "what is the congestion manager",
-    "share congestion control between connections"
+    "share congestion control between connections",
+    "what is a macroflow",
+    "how does cm_request work"
+  ],
+  "tags": [
+    "Congestion",
+    "Transport",
+    "API"
+  ],
+  "subtitle": "An end-host module that lets all streams to the same receiver share one view of network congestion.",
+  "tldr": {
+    "problem": "Concurrent streams to the same receiver compete instead of sharing, and together they tend to be more aggressive in congestion than one TCP connection. Many real-time UDP applications do not react to congestion at all.",
+    "mechanism": "The Congestion Manager keeps congestion state per macroflow, and applications use an API to ask permission to send, report what happened, and learn the current rate and round-trip time. A congestion controller decides when data may go and a scheduler decides which stream goes.",
+    "outcome": "Streams share congestion information and applications can adapt what they send. It is a Proposed Standard whose use is optional, and the document leaves feedback for applications without their own feedback, and differentiated-service networks, to later documents.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "Sharing unit",
+      "value": "Macroflow"
+    },
+    {
+      "label": "Default aggregation",
+      "value": "By destination IP address"
+    },
+    {
+      "label": "Failed cm_open() returns",
+      "value": "-1"
+    },
+    {
+      "label": "Grant size",
+      "value": "Up to one PMTU of bytes per cm_request()"
+    },
+    {
+      "label": "Rate unit",
+      "value": "Bits per second"
+    },
+    {
+      "label": "Round-trip time unit",
+      "value": "Microseconds"
+    }
+  ],
+  "today": "<p>RFC 3124 is a Proposed Standard published in June 2001, and the unit metadata lists no RFC that obsoletes or updates it. The RFC says systems MAY choose to use the CM, and that extensions for applications without their own feedback and for differentiated-service networks would come in later documents.</p>",
+  "glossary": [
+    "congestion-control",
+    "tcp",
+    "udp",
+    "mtu",
+    "path-mtu",
+    "path-mtu-discovery",
+    "nat",
+    "sliding-window"
+  ],
+  "sections": [
+    {
+      "id": "motivation",
+      "number": "1",
+      "title": "Why a Congestion Manager",
+      "content": "<p>The <strong>Congestion Manager</strong> (CM) is an end-system module with two goals. The first is <strong>efficient multiplexing</strong>. Servers send many kinds of data to a receiver, and the streams share a path but usually compete for it and do not learn from each other. Even if each stream does its own congestion control, the group tends to be more aggressive in congestion than a single TCP connection.</p><p>The second goal is <strong>application adaptation</strong>. Popular real-time streaming applications run over UDP with their own user-level transports and in most cases do not react properly to congestion. By implementing a stable control algorithm and exposing an adaptation API, the CM lets applications adapt what they transmit to current conditions.</p><p>The design builds on TCP control block sharing and integrated TCP congestion control, and extends them to non-TCP streams and to an API for adaptation. Systems MAY choose to use the CM, and if so they MUST follow this specification.</p>",
+      "eli5": "<p>Several kids all running down the same hallway shove each other. If they share information about how crowded it is, everybody gets through more smoothly.</p>"
+    },
+    {
+      "id": "scope",
+      "number": "2",
+      "title": "Scope and Key Terms",
+      "content": "<p>The document focuses on <em>well-behaved</em> applications that have their own per-byte or per-packet sequence numbers and use the CM API to update CM state, on best-effort networks without reservations. The receiving application must give feedback to the sender about received packets and losses, and no changes to the receiver protocol stack are required. It does not address networks with reservations or service differentiation, nor streams to the same host that cross paths with differing characteristics.</p><p>Key terms:</p><ul><li><strong>Stream</strong>: packets sharing source and destination IP address, type-of-service, transport protocol and ports.</li><li><strong>Macroflow</strong>: a group of CM-enabled streams that use the same congestion management and scheduling algorithms and share congestion state. Streams to different receivers belong to different macroflows. Streams with identical congestion behavior and algorithm SHOULD share a macroflow.</li><li><strong>Well-behaved application</strong>: one that only transmits when the CM allows and accurately reports what it sent.</li><li><code>cwnd</code> and <code>ownd</code>: the congestion window, and the bytes sent but not known to be received or lost.</li></ul>",
+      "eli5": "<p>A stream is one conversation. A macroflow is all the conversations going to the same place, which share a single traffic report.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "3",
+      "title": "Components of the Framework",
+      "content": "<p>The framework has three key components: the <strong>API</strong>, the <strong>congestion controller</strong> and the <strong>scheduler</strong>. The congestion controller adjusts the aggregate transmission rate between sender and receiver from its estimate of congestion, using feedback that applications give through the API. The scheduler divides available bandwidth among the streams of a macroflow and tells applications when they may send.</p><p>The CM does not enforce proper behavior for all applications, though it does not preclude a policer on the host. The network itself must still be protected against compromised end hosts, which needs router machinery and is not addressed.</p><p>Each macroflow has its own congestion control algorithm, which MUST be \"TCP-friendly\". The controller MUST implement abstract <code>query</code>, <code>notify</code> and <code>update</code> interfaces so that separately developed schedulers can interoperate, and MUST call the scheduler's <code>schedule</code> function when the congestion state allows an MTU-sized packet to be sent. The scheduler MUST implement <code>schedule</code>, <code>query_share</code> and <code>notify</code>.</p>",
+      "eli5": "<p>One helper decides how much traffic the road can take. Another decides whose turn it is to drive. Together they keep the road moving.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4",
+      "title": "The CM API",
+      "content": "<p>The RFC notes that the IETF does not by convention treat APIs as standards track, but wants API and algorithm requirements in one document. The functions are abstract and implementations may differ in detail.</p><p><strong>State</strong>: applications MUST call <code>cm_open(stream_info)</code> first, which returns a <code>cm_streamid</code> (or -1 on failure), and SHOULD call <code>cm_close</code> at the end. <code>cm_mtu</code> returns the estimated path MTU.</p><p><strong>Sending</strong> comes in two styles. In the callback style the application calls <code>cm_request</code> and the CM later calls <code>cmapp_send()</code>, a grant to send up to one PMTU of bytes. The CM buffers no data, so the stream can adapt at the last instant. In the synchronous style, used by timer-driven senders, the CM calls <code>cmapp_update(newrate, srtt, rttdev)</code> when the rate changes and the stream MUST keep within it. <code>cm_thresh</code> sets how large a change must be before callbacks, and <code>cm_query</code> reads the current rate and round-trip estimates, returning negative values when no valid estimate exists.</p><p><strong>Feedback</strong>: when a stream hears from the receiver it MUST call <code>cm_update</code> with bytes received, bytes lost, a loss mode and an RTT sample. <code>cm_notify</code> MUST be called when data is actually sent. A <code>cmapp_send</code> grant expires after the larger of the round-trip time and an implementation-dependent threshold, and an application that declines to send SHOULD call <code>cm_notify</code> with 0 so other streams can use the grant. The CM MUST be robust to applications that forget or crash.</p><p><strong>Grouping</strong>: <code>cm_getmacroflow</code> and <code>cm_setmacroflow</code> let applications choose which streams share a macroflow. The suggested default is to aggregate by destination IP address. The RFC warns that hosts behind a NAT look like one address, so those on different bottleneck links may see worse performance.</p>",
+      "eli5": "<p>Before sending, a program asks the CM, 'may I?'. After sending, it tells the CM what happened. The CM can also say, 'the road got slower, please send less.'</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "5",
+      "title": "Loss Reporting and Feedback",
+      "content": "<p>The <code>lossmode</code> argument of <code>cm_update</code> tells the CM how a loss was found, and is reported as a bit-vector:</p><ul><li><code>CM_NO_FEEDBACK</code>: no feedback for all outstanding data, such as a TCP timeout.</li><li><code>CM_LOSS_FEEDBACK</code>: some loss believed due to congestion, but not all outstanding data lost, such as loss found through duplicate acknowledgments.</li><li><code>CM_EXPLICIT_CONGESTION</code>: the receiver echoed an explicit congestion notification.</li><li><code>CM_NO_CONGESTION</code>: no congestion-related loss. On links with non-congestion losses an application SHOULD still report them with this flag set.</li></ul><p>All applications that use the CM MUST incorporate receiver feedback, typically once or twice per round-trip time, and MUST call <code>cm_update</code> with the result. This updates <code>ownd</code> and may change estimates and trigger <code>cmapp_update</code> callbacks.</p>",
+      "eli5": "<p>After each delivery the program tells the CM whether the packages arrived, were lost, or the road signs said 'slow down'. The CM uses these reports to judge traffic.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "6",
+      "title": "Examples: TCP, UDP and Audio",
+      "content": "<p>The RFC gives three example uses and says they are suggestions, not requirements.</p><p><strong>TCP over the CM</strong> uses the <code>cmapp_send</code> callback. TCP removes its own congestion window checks and slow-start threshold updates, still does loss recovery, queues data and calls <code>cm_request</code>, and sends at most one segment per callback. On three duplicate acknowledgments it reports a loss with <code>CM_LOSS_FEEDBACK</code>, and on a retransmission timeout it reports <code>CM_NO_FEEDBACK</code>.</p><p><strong>Congestion-controlled UDP</strong> buffers data in a socket queue, calls <code>cm_request</code>, and sends one MTU per callback. It needs feedback either from the receiving application or from the receiving UDP implementation, and the latter needs changes to the receiver's stack and explicit negotiation.</p><p><strong>An audio server</strong> uses the synchronous API: it queries the CM at start, picks an encoding that fits the estimate (or its own initial values if the estimate is negative) and changes encoding when <code>cmapp_update</code> reports a new rate.</p><p>The RFC also sketches an additive-increase, multiplicative-decrease controller (<code>AIMD_CC</code>) and a round robin scheduler (<code>RR_sched</code>), whose <code>query_share</code> returns 1/(number of streams in macroflow).</p>",
+      "eli5": "<p>The same traffic helper works for different kinds of travelers: a file download, a live call, a music stream. Each learns how much road is free and fits itself in.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>Because the CM offers much of what TCP congestion control offers, it shares many of the same weaknesses. Wrong reports of losses and transmissions give it an inaccurate picture of congestion. A high estimate of congestion degrades performance, and a stream on a host can arbitrarily slow down any other stream on the same macroflow, a form of denial of service.</p><p>The more dangerous case is a low estimate of congestion, which makes the CM overly aggressive and lets data go out much faster than sound congestion control would allow.</p><p>Applications can also control shared state through the API that affects other applications on the same computer. For example, a poorly designed, compromised or malicious UDP application could misuse <code>cm_update</code> to starve others in the macroflow or make them too aggressive.</p>",
+      "eli5": "<p>If one kid tells the hall monitor false things, the whole hallway suffers: everyone slows down, or everyone runs too fast and crashes.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "THE THREE KEY COMPONENTS OF THE CM FRAMEWORK",
+      "data": {
+        "items": [
+          {
+            "title": "API",
+            "text": "Lets applications open streams, request transmissions, report feedback and query rate and round-trip time."
+          },
+          {
+            "title": "Congestion controller",
+            "text": "Decides when and how much a macroflow may send, from feedback reported by applications."
+          },
+          {
+            "title": "Scheduler",
+            "text": "Decides which stream of the macroflow gets to transmit and notifies applications when they may send."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "CALLBACK-STYLE SENDING (RFC 3124, SECTIONS 3.2 AND 3.3)",
+      "data": {
+        "lanes": [
+          {
+            "key": "app",
+            "label": "Application"
+          },
+          {
+            "key": "cm",
+            "label": "Congestion Manager"
+          },
+          {
+            "key": "receiver",
+            "label": "Receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "app",
+            "to": "cm",
+            "label": "cm_request()",
+            "color": "blue",
+            "note": "Asks for a chance to send up to one PMTU of bytes."
+          },
+          {
+            "from": "cm",
+            "to": "app",
+            "label": "cmapp_send()",
+            "color": "green",
+            "note": "Grant to send, valid until it expires."
+          },
+          {
+            "from": "app",
+            "to": "cm",
+            "label": "cm_notify(nsent)",
+            "color": "blue",
+            "note": "Reports that data was actually sent."
+          },
+          {
+            "from": "app",
+            "to": "receiver",
+            "label": "data",
+            "color": "neutral"
+          },
+          {
+            "from": "receiver",
+            "to": "app",
+            "label": "feedback",
+            "color": "neutral",
+            "note": "The receiving application reports received packets and losses."
+          },
+          {
+            "from": "app",
+            "to": "cm",
+            "label": "cm_update(nrecd, nlost, lossmode, rtt)",
+            "color": "blue",
+            "note": "Passes the feedback on to the CM."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "LOSS MODES FOR cm_update (RFC 3124, SECTION 3.3)",
+      "data": {
+        "items": [
+          {
+            "code": "CM_NO_FEEDBACK",
+            "label": "No feedback",
+            "desc": "No feedback for any outstanding data, such as a TCP timeout."
+          },
+          {
+            "code": "CM_LOSS_FEEDBACK",
+            "label": "Loss",
+            "desc": "Some loss thought to be congestion, but not all outstanding data lost."
+          },
+          {
+            "code": "CM_EXPLICIT_CONGESTION",
+            "label": "Explicit congestion",
+            "desc": "The receiver echoed an explicit congestion notification."
+          },
+          {
+            "code": "CM_NO_CONGESTION",
+            "label": "No congestion",
+            "desc": "No congestion-related loss occurred."
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[Allman99]",
+      "text": "Allman, M. and Paxson, V., \"TCP Congestion Control\", RFC 2581, April 1999.",
+      "rfc": 2581
+    },
+    {
+      "number": "[Bradner97]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[Floyd99b]",
+      "text": "Floyd, S. and T. Henderson, \"The New Reno Modification to TCP's Fast Recovery Algorithm\", RFC 2582, April 1999.",
+      "rfc": 2582
+    },
+    {
+      "number": "[Mogul90]",
+      "text": "Mogul, J. and S. Deering, \"Path MTU Discovery\", RFC 1191, November 1990.",
+      "rfc": 1191
+    },
+    {
+      "number": "[Paxson00]",
+      "text": "Paxson, V. and M. Allman, \"Computing TCP's Retransmission Timer\", RFC 2988, November 2000.",
+      "rfc": 2988
+    },
+    {
+      "number": "[Postel81]",
+      "text": "Postel, J., Editor, \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[Touch97]",
+      "text": "Touch, J., \"TCP Control Block Interdependence\", RFC 2140, April 1997.",
+      "rfc": 2140
+    },
+    {
+      "number": "[Balakrishnan99]",
+      "text": "Balakrishnan, H., Rahul, H., and Seshan, S., \"An Integrated Congestion Management Architecture for Internet Hosts\", Proc. ACM SIGCOMM, September 1999."
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }

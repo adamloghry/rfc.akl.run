@@ -9,13 +9,220 @@
   },
   "questions": [
     "how does evpn handle igmp and mld",
-    "what is an igmp proxy in evpn"
+    "what is an igmp proxy in evpn",
+    "what is an smet route in evpn",
+    "what are evpn route types 6 7 and 8"
+  ],
+  "tags": [
+    "Multicast",
+    "EVPN",
+    "BGP"
+  ],
+  "subtitle": "How EVPN edge routers act as IGMP/MLD proxies so multicast joins are shared over BGP instead of flooded.",
+  "tldr": {
+    "problem": "In a stretched EVPN subnet with hundreds of hosts, IGMP and MLD queries and membership reports get flooded everywhere, and multicast traffic is sent to PEs that do not want it.",
+    "mechanism": "Each EVPN provider edge (PE) terminates IGMP/MLD locally, advertises memberships to other PEs in new BGP EVPN routes (types 6, 7 and 8), and rebuilds IGMP/MLD messages only where a multicast router needs them.",
+    "outcome": "Multicast state is shared consistently across PEs, including multihomed segments, and ingress replication can send traffic only to PEs that asked for it. It is a Proposed Standard and is not obsoleted.",
+    "outcomeLabel": "Why it matters"
+  },
+  "facts": [
+    {
+      "label": "New EVPN route types",
+      "value": "6, 7 and 8"
+    },
+    {
+      "label": "Multicast Flags EC",
+      "value": "Type 0x06, sub-type 0x09"
+    },
+    {
+      "label": "EVI-RT EC sub-types",
+      "value": "0x0A to 0x0D"
+    },
+    {
+      "label": "ESI length",
+      "value": "10 octets"
+    },
+    {
+      "label": "Group length field",
+      "value": "32 for IGMP, 128 for MLD"
+    }
+  ],
+  "today": "<p>RFC 9251 is a Proposed Standard published in June 2022, and the unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "glossary": [
+    "igmp",
+    "multicast",
+    "multicast-router",
+    "bgp",
+    "proxy",
+    "evpn",
+    "ethernet-segment",
+    "ipv6"
+  ],
+  "sections": [
+    {
+      "id": "introduction",
+      "number": "1",
+      "title": "The Problem in Data Center Subnets",
+      "content": "<p>In data center networks, a subnet (VLAN) can be stretched across several points of delivery (PODs) and several data centers by <strong>EVPN</strong>. Several hundred hosts can sit on that one subnet. Hosts tell the network which multicast groups they want by sending IGMP or MLD Membership Reports, and a router periodically sends Membership Queries to check who is still interested.</p><p>RFC 9251 sets three objectives. First, reduce flooding of IGMP/MLD queries and reports, much as ARP/Neighbor Discovery suppression reduces ARP flooding in EVPN. Second, let the EVPN network behave as a distributed anycast multicast router for the hosts on the subnet. Third, forward multicast traffic only to the PEs that have interest in a group. The first two come from running an IGMP/MLD proxy on each PE. The third comes from using the proxy's state to decide where to send traffic; this document covers the ingress replication case, and P2MP tunnels are left to another document.</p>",
+      "eli5": "<p>Imagine a huge school where every student shouts which show they want. The principal wants the teachers to collect the answers quietly instead, and only send each show to the classrooms that asked.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
+      "title": "The IGMP/MLD Proxy Design",
+      "content": "<p>The proxy has two parts: a proxy for Membership Reports and a proxy for Membership Queries. Each PE acts as an IGMP router for its locally attached domain, keeps state on local nodes and sends periodic queries. A new EVPN route, the <strong>Selective Multicast Ethernet Tag (SMET)</strong> route, carries each PE's local state over BGP so all PEs share a consistent view of joins and leaves.</p><p>Reporting works like this. The first-hop PE terminates the host's report, sends one BGP message for the first report for a given (*,G) or (S,G) (BGP is stateful, so repeats are not needed), and the remote PE turns the route back into an IGMP/MLD message. If a host later reports a different IGMP version for the same (*,G), the PE re-advertises the same route with the extra version flag set instead of withdrawing it. An IGMPv3 report for (S,G) MUST always be advertised, even when the source is attached to the same PE, so a source can move later.</p><p>On leaves, the PE queries to see whether the leaving host was the last one. If so it clears the version flag, and withdraws the route when the last flag goes. A receiving PE that sees a route with all version flags cleared treats it as an error and applies the treat-as-withdraw procedure from <a href='/7606/'>RFC 7606</a>.</p><div class='callout callout-info'><p>Each PE MUST act as a proxy querier. This lets the PEs together act as a distributed multicast router with an anycast IP address, and suppresses queries and reports over the MPLS/IP core.</p></div>",
+      "eli5": "<p>Each classroom helper writes down who wants which show and tells the other helpers once. If somebody changes their mind, the helper just updates the note.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "5",
+      "title": "Reconstructing Messages at the Edge",
+      "content": "<p>The RFC walks through an example with three PEs sharing one bridge domain. PE1 has only hosts, PE2 has hosts and a multicast source, and PE3 has hosts, a source and a multicast router (R1).</p><p>When PE1 gets an IGMPv2 report for (*,G1), it does not forward it to its other host ports. It sends an SMET route with the v2 flag set. PE3 rebuilds the IGMPv2 report and sends it only to the port with the router. PE2 receives the route but does not send anything to its host ports. A second IGMPv2 report for the same group only adds a port to the outgoing interface (OIF) list, with no new BGP route. An IGMPv3 report for the same group causes the route to be re-advertised with the v3 and exclude flags set.</p><p>The reason for sending reconstructed reports only toward routers is IGMPv2 report suppression: if a host saw a report for a group it wants, it would stay silent, and the PE would then never learn about that host. An IGMPv2 report MUST NOT be sent on an attachment circuit that does not lead to a multicast router. IGMPv3 has no such suppression.</p>",
+      "eli5": "<p>The helper only passes the note to the grown-up in charge of shows. Telling the other kids would make them think someone already asked, and they would stop asking.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "6",
+      "title": "Multihoming and State Synchronization",
+      "content": "<p>A customer device connected to several PEs through a link aggregation group may send any one IGMP message to any of those PEs, and the matching leave to a different one. So in <strong>All-Active</strong> mode, all PEs on an Ethernet segment must coordinate (x,G) state per broadcast domain, where x is either * or a source. PEs that do IGMP proxy for such hosts MUST support these procedures.</p><p>For joins, a PE that creates local state advertises a <strong>Multicast Membership Report Synch</strong> route carrying the ES-Import route target, so only PEs on that segment import it. The membership state is the union of local state and installed synch routes. Only the designated forwarder (DF) advertises the SMET route toward the rest of the network.</p><p>For leaves, a PE computes a Maximum Response Time (Last Member Query Count times Last Member Query Interval from <a href='/2236/'>RFC 2236</a>, plus a configured delta for BGP propagation), starts a timer, sends group-specific queries and advertises a <strong>Multicast Leave Synch</strong> route. Other PEs start the same timer. If a report arrives before it expires, state is kept; otherwise it is removed.</p><p>If a PE or its link fails, remote PEs SHOULD NOT remove the state at once; a General Query SHOULD be generated to refresh it. In Single-Active mode, PEs SHOULD also coordinate state so that it survives a failover.</p>",
+      "eli5": "<p>If two helpers share one family, either might hear a request or a cancellation. So they pass notes to each other and wait a short while before crossing anything off, in case someone still wants it.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "8",
+      "title": "Selective Forwarding with Ingress Replication",
+      "content": "<p>When an ingress PE uses ingress replication, it decides per (x,G) and broadcast domain which PEs get a copy. PEs that do not support IGMP/MLD proxies are those whose Inclusive Multicast Ethernet Tag (IMET) route has no Multicast Flags Extended Community, or one with neither proxy flag set. The ingress PE sends traffic to all of these.</p><p>PEs that do support the proxies get the traffic only if they have advertised an SMET route for that (x,G) in that domain. A PE that supports the proxy but has no interest in a group simply advertises no SMET route, and is skipped. A router sitting behind the EVPN domain can originate a default (*,*) SMET route, using the procedure from <a href='/6625/'>RFC 6625</a>, to receive all multicast traffic in the domain.</p>",
+      "eli5": "<p>The sender checks the list. Helpers who said they wanted the show get a copy, helpers who said nothing are skipped, and helpers who cannot keep a list get it just in case.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "9",
+      "title": "BGP Routes and Extended Communities",
+      "content": "<p>Three new EVPN route types carry the state. Route type 6 is the SMET route, 7 is the Multicast Membership Report Synch route and 8 is the Multicast Leave Synch route. All three carry a route distinguisher, an Ethernet Tag ID, source and group lengths and addresses, an originator router address and a 1-octet Flags field. The synch routes also carry a 10-octet Ethernet Segment Identifier, and the leave route adds a Maximum Response Time.</p><p>The Flags field holds version bits (v1, v2, v3) and an <code>IE</code> include/exclude bit. Group length 32 means IGMP and 128 means MLD, and a source length of 0 means any source. For IPv6 the v3 bit MUST be 0, because there is no MLD version 3. IGMPv1 is treated as invalid: senders set the bit to 0 and receivers apply treat-as-withdraw.</p><p>The <strong>Multicast Flags Extended Community</strong> (type 0x06, sub-type 0x09) is attached to a PE's IMET route to signal support: bit 15 for IGMP proxy, bit 14 for MLD proxy. Its absence means no proxy support. The synch routes also carry exactly one <strong>EVI-RT</strong> extended community (sub-types 0x0A to 0x0D) that identifies the EVPN instance, since these routes use the ES-Import route target rather than the instance's own. If it is missing or duplicated, the PE applies treat-as-withdraw. Malformed updates whose keys cannot be extracted trigger session reset per <a href='/7606/'>RFC 7606</a>.</p>",
+      "eli5": "<p>The notes the helpers pass around follow a fixed form with boxes to fill in: which show, who asked, and which kind of request. A sticker on each helper says whether they can do this job.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "11",
+      "title": "Security Considerations",
+      "content": "<p>The RFC adds little of its own here. The security considerations of the underlying EVPN and BGP are in <a href='/7432/'>RFC 7432</a>, and multicast considerations are in RFC 6513 and RFC 6514. Because EVPN with the IGMP proxy provides a single broadcast domain, the security considerations of IGMPv2, IGMPv3, MLD and MLDv2 apply as they would on one ordinary subnet.</p>",
+      "eli5": "<p>The safety rules are the ones that already apply to the pieces underneath, since this just lets them work across a bigger area.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "12",
+      "title": "IANA Registrations",
+      "content": "<p>IANA allocated sub-types 0x09 (Multicast Flags Extended Community) and 0x0A to 0x0D (EVI-RT Types 0 to 3) in the EVPN Extended Community Sub-Types subregistry. It also allocated EVPN route types 6, 7 and 8. A new Multicast Flags Extended Community subregistry was created with First Come First Served registration; bit 14 is MLD Proxy Support, bit 15 is IGMP Proxy Support, and bits 0 to 13 are unassigned.</p>",
+      "eli5": "<p>The numbers used in the notes were officially written down in a public list so nobody picks the same number for something else.</p>"
+    }
+  ],
+  "viz": [
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "before",
+      "caption": "NEW EVPN ROUTE TYPES (RFC 9251)",
+      "data": {
+        "items": [
+          {
+            "code": "6",
+            "label": "Selective Multicast Ethernet Tag",
+            "desc": "Advertises a PE's interest in a multicast group (SMET).",
+            "highlight": true
+          },
+          {
+            "code": "7",
+            "label": "Multicast Membership Report Synch",
+            "desc": "Shares membership state among PEs on one Ethernet segment."
+          },
+          {
+            "code": "8",
+            "label": "Multicast Leave Synch",
+            "desc": "Shares leave state and the Maximum Response Time on one Ethernet segment."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "MULTICAST FLAGS EXTENDED COMMUNITY",
+      "data": {
+        "title": "Multicast Flags Extended Community",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 8,
+            "desc": "EVPN extended community type.",
+            "value": "0x06"
+          },
+          {
+            "key": "sub-type",
+            "name": "Sub-Type",
+            "bits": 8,
+            "desc": "Multicast Flags.",
+            "value": "0x09"
+          },
+          {
+            "key": "flags",
+            "name": "Flags",
+            "bits": 16,
+            "desc": "Bit 15 is IGMP Proxy Support, bit 14 is MLD Proxy Support, bits 0 to 13 reserved."
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 32,
+            "desc": "Set to 0.",
+            "value": "0"
+          }
+        ]
+      }
+    }
+  ],
+  "references": [
+    {
+      "number": "[RFC2236]",
+      "text": "Fenner, W., \"Internet Group Management Protocol, Version 2\", RFC 2236, November 1997.",
+      "rfc": 2236
+    },
+    {
+      "number": "[RFC3376]",
+      "text": "Cain, B., et al., \"Internet Group Management Protocol, Version 3\", RFC 3376, October 2002.",
+      "rfc": 3376
+    },
+    {
+      "number": "[RFC7432]",
+      "text": "Sajassi, A., Ed., et al., \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
+      "rfc": 7432
+    },
+    {
+      "number": "[RFC7606]",
+      "text": "Chen, E., Ed., et al., \"Revised Error Handling for BGP UPDATE Messages\", RFC 7606, August 2015.",
+      "rfc": 7606
+    },
+    {
+      "number": "[RFC6625]",
+      "text": "Rosen, E., Ed., et al., \"Wildcards in Multicast VPN Auto-Discovery Routes\", RFC 6625, May 2012.",
+      "rfc": 6625
+    },
+    {
+      "number": "[RFC4364]",
+      "text": "Rosen, E. and Y. Rekhter, \"BGP/MPLS IP Virtual Private Networks (VPNs)\", RFC 4364, February 2006.",
+      "rfc": 4364
+    }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-15",
-    "reviewedBy": null
+    "drafted": "2026-10-17",
+    "reviewedBy": null,
+    "promptVersion": "explain-v1",
+    "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-15"
+  "updated": "2026-10-17"
 }
