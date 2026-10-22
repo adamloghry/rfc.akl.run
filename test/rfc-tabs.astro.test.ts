@@ -117,16 +117,18 @@ describe('AI notice', () => {
     ['claude-sonnet-5-5', 'Claude Sonnet'],
     ['claude-haiku-4-5', 'Claude Haiku'],
     ['claude-opus-4-1-20250805', 'Claude Opus'],
-  ])('model %s', async (model, family) => {
+  ])('model %s', async (model) => {
     const h = await notice(withProv(r903, { source: 'llm-draft', model, reviewedBy: null }));
     expect(h).toContain('<strong>AI-generated explainer.</strong>');
     expect(h).toContain(
-      `Written by Claude (${family}) from the RFC text and not reviewed by a human. It may contain mistakes. The RFC text is the authoritative source.`,
+      'Written by AI from the RFC text following ISO Plain Language guidelines and not reviewed by a human. It may contain mistakes. The RFC text is the authoritative source.',
     );
     expect(h).toContain('role="note"');
   });
   test('unknown or missing model, and human-written content', async () => {
-    expect(await notice(withProv(r903, { source: 'llm-draft', model: 'mystery-1' }))).toContain('Written by Claude from the RFC text');
+    expect(await notice(withProv(r903, { source: 'llm-draft', model: 'mystery-1' }))).toContain(
+      'Written by AI from the RFC text following ISO Plain Language guidelines',
+    );
     expect(await notice(withProv(r903, undefined))).toContain('AI-generated explainer.');
     const human = await notice(withProv(r903, { source: 'human', reviewedBy: 'akl' }));
     expect(human).not.toContain('AI-generated');
