@@ -6,6 +6,7 @@
  * The default is always RFC text; nothing is persisted.
  */
 import { disposer, listen, ownerDoc, qs, qsa } from './dom';
+import { isPlainLanguageName } from './legacy';
 
 type Name = 'text' | 'plain-language';
 
@@ -18,6 +19,7 @@ export function tabForHash(doc: Document, hash: string): Name {
     /* keep the raw id */
   }
   if (!id) return 'text';
+  if (isPlainLanguageName(id)) return 'plain-language';
   const el = doc.getElementById(id);
   const panel = el?.closest('[data-tab-panel]');
   return panel?.getAttribute('data-tab-panel') === 'plain-language' ? 'plain-language' : 'text';
@@ -68,11 +70,15 @@ export function init(root: ParentNode = document): () => void {
   }
   /** Apply the URL hash: pick the tab and scroll to the anchor (which may have just become visible). */
   function fromHash(): void {
-    show(tabForHash(doc, location.hash));
+    const name = tabForHash(doc, location.hash);
+    show(name);
     const id = decodeURIComponent(location.hash.replace(/^#/, ''));
     if (!id) return;
-    if (id === 'plain-language') bringTabsIntoView();
-    else doc.getElementById(id)?.scrollIntoView();
+    if (isPlainLanguageName(id)) {
+      // A legacy alias (#eli5) names the same panel: open it and leave the canonical hash behind.
+      if (id !== 'plain-language') setHash('plain-language');
+      bringTabsIntoView();
+    } else doc.getElementById(id)?.scrollIntoView();
   }
 
   tabs.forEach((t, i) => {

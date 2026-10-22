@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>The BGP Monitoring Protocol (BMP) provides access to routing information bases. This document updates BMP (RFC 7854) by adding access to the Local RIB (Loc-RIB), the table of routes a BGP speaker has selected through its Decision Process, as defined in RFC 4271.</p>",
   "plainLanguage": {
-    "summary": "<p>A router keeps a list of its chosen best routes. This document lets monitoring tools peek at that list too, not just the routes the router heard from others.</p>"
+    "summary": "<p>A router hears many routes from its neighbours but keeps only the ones that win its best-path decision. Those winners sit in what BGP calls the Local RIB. This document lets a router send that table to a monitoring station, so the station sees what the router is actually using rather than everything the router was told.</p>"
   },
   "questions": [
     "bmp loc-rib",
@@ -21,26 +21,22 @@
   ],
   "subtitle": "How a router can show a BMP monitoring station the routes it actually selected, not just the routes it heard.",
   "tldr": {
-    "problem": "BMP could export what a router received from its peers, but not the router's own table of selected routes (the Loc-RIB). Monitoring tools had to rebuild that table from raw inputs, or from another router's view.",
-    "mechanism": "The RFC adds a Loc-RIB Instance Peer type (3) to BMP. The router acts as an emulated peer, sending Peer Up and Down messages plus Route Monitoring messages that carry its Loc-RIB.",
-    "outcome": "A monitoring system can read the selected routes directly, per VRF or table, without extra BGP peering. The RFC updates RFC 7854, and RFC 9736 later updates this one.",
-    "outcomeLabel": "Why it matters"
+    "problem": "BMP gives a monitoring station the routes a router received from its peers, but not the subset the router actually chose to use, so the station cannot see the router's routing decisions or the state that drives forwarding.",
+    "mechanism": "The document adds a Loc-RIB Instance Peer, peer type 3, to BMP. The router presents its Local RIB as if it were a locally emulated BGP peer, sending a Peer Up with a fabricated OPEN message, then Route Monitoring messages carrying the selected routes.",
+    "outcome": "The document updates RFC 7854, replacing its section on locally originated routes, and defines the peer type, the flag that marks a filtered view, the VRF or table name TLV and the statistics a collector can read.",
+    "outcomeLabel": "What it adds"
   },
   "facts": [
     {
-      "label": "New peer type",
-      "value": "3 (Loc-RIB Instance Peer)"
+      "label": "BMP peer type",
+      "value": "3, Loc-RIB Instance Peer"
     },
     {
-      "label": "Peer flag",
-      "value": "F (flag 0), Loc-RIB is filtered"
+      "label": "VRF/Table Name TLV type",
+      "value": "3"
     },
     {
-      "label": "Peer Up TLV",
-      "value": "Type 3, VRF/Table Name"
-    },
-    {
-      "label": "Table name length",
+      "label": "VRF/Table Name length",
       "value": "1 to 255 bytes"
     },
     {
@@ -48,159 +44,199 @@
       "value": "6"
     },
     {
-      "label": "Default instance name",
-      "value": "global"
+      "label": "Route Monitoring ASN encoding",
+      "value": "4-byte ASN"
+    },
+    {
+      "label": "Loc-RIB route count Stat Type",
+      "value": "8"
     }
   ],
-  "today": "<p>RFC 9069 is a Proposed Standard from February 2022 that updates <a href='/rfc7854'>RFC 7854</a>. It has not been obsoleted, but it is itself updated by <a href='/rfc9736'>RFC 9736</a>.</p>",
+  "today": "<p>RFC 9069 is a Proposed Standard that updates <a href='/rfc7854'>RFC 7854</a>, so the BGP Monitoring Protocol now covers the Local RIB as well as the Adj-RIBs-In. It was later updated by <a href='/rfc9736'>RFC 9736</a>, which adds a Peer Up message namespace to BMP.</p>",
   "glossary": [
     "bgp",
     "autonomous-system",
     "router-id",
     "iana",
     "routing-information-base",
-    "bgp-monitoring-protocol"
+    "bgp-monitoring-protocol",
+    "adj-rib-in",
+    "rib",
+    "vrf",
+    "route-distinguisher",
+    "next-hop",
+    "ibgp-and-ebgp"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why Monitor the Loc-RIB",
-      "content": "<p>The BGP Monitoring Protocol (BMP, <a href='/rfc7854'>RFC 7854</a>) exports BGP routing data to monitoring stations. It had no way to send a BGP instance's <strong>Loc-RIB</strong>: the routes the local speaker selected through its Decision Process, which include selected routes from peers and locally originated routes. This document adds that and replaces Section 8.2 of RFC 7854 ('Locally Originated Routes').</p><p>It gives three use cases. First, a tool that only needs the selected routes should not have to ingest every post-policy Adj-RIB-In, which may hold hundreds of thousands of routes, and redo the best-path selection. Second, a history of Loc-RIB changes helps troubleshooting, for example a problem that lasted only 5 minutes. Third, operators can compare Adj-RIB-In post-policy with the Loc-RIB to validate that policy and multipath installed what was expected.</p>",
-      "plainLanguage": "<p>Instead of making a detective read every letter the router received, you just show them the short list of roads the router actually decided to use.</p>"
+      "title": "Why the Loc-RIB Was Missing",
+      "content": "<p>This document defines a mechanism to monitor the BGP Loc-RIB state of remote BGP instances without establishing BGP peering sessions with them. BMP, defined in <a href='/rfc7854'>RFC 7854</a>, has no method to send the Loc-RIB of a BGP instance. It does define locally originated routes in Section 8.2 of that document, but those are the routes that originated into BGP, as in Section 9.4 of <a href='/rfc4271'>RFC 4271</a>. The Loc-RIB also holds the received routes that were selected from BGP peers.</p><p>The Loc-RIB is where the routes from each peer's Adj-RIB-In end up after filters and policies are applied and after the best path has been chosen. Figure 1 of the document shows that flow: each peer's pre-policy Adj-RIB-In passes through filters and policy into a post-policy Adj-RIB-In, and from there the selected routes go into the Loc-RIB of the router or BGP instance.</p><p>The document gives three use cases for Loc-RIB access. The first is scale. The post-policy Adj-RIB-In for one peer can hold hundreds of thousands of routes, while only a handful are selected and installed after best-path selection. A monitoring application that only wants to correlate flow records with Loc-RIB entries needs only the selected routes. Making it collect all the post-policy data forces it to receive a large unwanted data set and to run the BGP decision process itself, which means having access to the interior gateway protocol next-hop metrics. That is possible with BGP Link State, but it requires the application to implement Shortest Path First, and possibly Constrained Shortest Path First with additional policies. That is overly complex for an application that only needs the Loc-RIB.</p><p>The second use case is history. Changes over many BGP peers are common, and many of them do not change the router's Loc-RIB. A change in the Loc-RIB can have a direct impact on the forwarding state, and a history of Loc-RIB changes can greatly reduce the time needed to troubleshoot and resolve issues. A performance issue seen for only five minutes is a case in point: troubleshooting it afterwards without Loc-RIB history hides any decision-based routing changes that happened during those five minutes.</p><p>The third use case is validating policy. Operators often want to check the effect of the policies applied to the Adj-RIB-In by looking at the final decision the router made when installing into the Loc-RIB. For instance, to check that multipath prefixes are installed as expected for all advertising peers, the post-policy Adj-RIB-In and the Loc-RIB have to be compared, which is only possible if the Loc-RIB is available. Monitoring the Adj-RIB-In of that router from another router is likely to show different installed prefixes, because the received Adj-RIB-In differs when ADD-PATH is not enabled or when the maximum supported number of equal paths differs between the Loc-RIB and the advertised routes.</p><p>This document adds the Loc-RIB to BMP and replaces Section 8.2 of <a href='/rfc7854'>RFC 7854</a>, which covered locally originated routes.</p>",
+      "plainLanguage": "<p>A router is told about many more routes than it uses. This document lets it hand over the smaller list of routes it actually chose, so a monitoring station sees the routing decisions rather than the raw incoming feed.</p>"
     },
     {
-      "id": "background",
+      "id": "related-work",
       "number": "1.1",
-      "title": "The Indirect Alternative",
-      "content": "<p>Without this feature, you can infer a router's Loc-RIB by peering a second router with it and monitoring that second router's pre-policy Adj-RIB-In. The RFC calls this complex and error prone.</p><p>It needs at least two routers when only one was to be monitored, and extra BGP peering that may not otherwise exist (the RFC names VRF tables with no peers as an example). The outbound policy on the peering may also generate aggregates, suppress prefixes, change attributes or filter routes, so the view no longer matches the real Loc-RIB. Finally, BGP peering carries no internal system information such as the router name, so the monitoring side must correlate BGP identifiers and addresses using data it gets from outside BMP.</p>",
-      "plainLanguage": "<p>The old way is asking a neighbor what the router told them. The neighbor may have left things out, so the answer is only a guess.</p>"
+      "title": "The Alternative, and Why It Is Worse",
+      "content": "<p>Since the Loc-RIB is used to build the Adj-RIB-Out when advertising routes to a peer, it is possible to derive the Loc-RIB of a router by monitoring the pre-policy Adj-RIB-In from another router. The document calls this overly complex and error prone once the number of peers monitored per router is considered.</p><p>The setup this needs requires another router with a peering session to the target router, as Figure 2 shows. The target router's Loc-RIB is advertised through its Adj-RIB-Out to the monitoring router over a standard BGP peering session, and that router then forwards the pre-policy Adj-RIB-In to the BMP receiver. That introduces a need for extra resources: at least two routers when only one router was to be monitored, and additional BGP peering to collect the received updates when peering might not have been required in the first place. Virtual routing and forwarding tables with no peers, redistributed BGP Link State with no peers, and segment routing egress peer engineering where no peers have the link-state address family enabled are all situations with no preexisting BGP peers.</p><p>Several complexities come with inferring a Loc-RIB from a received Adj-RIB-In. The Adj-RIB-Out received as an Adj-RIB-In from another router may have had a policy applied that generates aggregates, suppresses more specific prefixes, manipulates attributes or filters routes. That does not just invalidate the Loc-RIB view, it adds complexity when several BMP routers may have peering sessions to the same router, leaving the receiver with the error-prone task of identifying which peering session is the best representative of the Loc-RIB.</p><p>BGP peering is designed to work between administrative domains, so it does not need to carry internal system-level information about each peering router, such as the system name or version information. Deriving the Loc-RIB needs the router name or other system information, so the receiver is forced into some kind of correlation using whatever the peering session carries, such as peering addresses, autonomous system numbers and BGP identifiers, which leads to error-prone correlations. Correlating BGP identifiers and session addresses to a router requires extra data such as a router inventory, which the BMP receiver has to obtain outside BMP, and the accuracy of that data directly affects the integrity of the correlation.</p>",
+      "plainLanguage": "<p>You could work out the answer by watching what the router tells a neighbour, but that needs a second router, an extra peering session and a lot of guesswork to undo the policies in between. The document explains why sending the table directly is better.</p>"
     },
     {
       "id": "message-format",
-      "number": "4",
-      "title": "Peer Type and Per-Peer Header",
-      "content": "<p>A new peer type, <code>3</code>, is the <strong>Loc-RIB Instance Peer</strong>. Locally sourced routes sent through BMP MUST use it. Its only defined peer flag is <code>F</code>, which MUST be set when a filter limits what Loc-RIB routes go to the BMP collector. Other bits are reserved: sent as 0 and ignored on receipt.</p><p>In the per-peer header of all messages for this peer type, the Peer Distinguisher is zero for the global instance (otherwise the route distinguisher or a unique local value), and the Peer Address is zero-filled. The Peer AS is the router's primary ASN, and the Peer BGP ID is the router-id of the VRF instance, or the global router-id. The Timestamp is when the routes were installed in the Loc-RIB.</p>",
-      "plainLanguage": "<p>The watcher needs a name tag for this special 'peer', so the router uses a new tag type and fills in the details that make sense, leaving the rest as zeros.</p>"
+      "number": "5.1",
+      "title": "The Per-Peer Header for a Loc-RIB",
+      "content": "<p>All peer messages that carry a per-peer header use a set of fixed values for the Loc-RIB Instance Peer.</p><ul><li>The <strong>Peer Type</strong> is set to 3, a new type defined by this document to indicate a Loc-RIB Instance Peer. Section 4.2 of <a href='/rfc7854'>RFC 7854</a> already defines a Local Instance Peer type for the case of non-RD peers that have an instance identifier; the new type covers a Loc-RIB that may have a route distinguisher.</li><li>The <strong>Peer Distinguisher</strong> is zero-filled if the Loc-RIB represents the global instance, and otherwise set to the route distinguisher or the unique locally defined value of the particular instance the Loc-RIB belongs to.</li><li>The <strong>Peer Address</strong> is zero-filled, because a remote peer address does not apply. The V flag is not applicable with this peer type, since the addresses are zero-filled.</li><li>The <strong>Peer Autonomous System</strong> is the primary router BGP autonomous system number.</li><li>The <strong>Peer BGP ID</strong> is the router-id of the VRF instance if VRF is used, and otherwise the global instance router-id.</li><li>The <strong>Timestamp</strong> is the time when the encapsulated routes were installed in the Loc-RIB, in seconds and microseconds since midnight on January 1, 1970 (UTC). A zero value means the time is unavailable, and the precision is implementation dependent.</li></ul><p>The per-peer header flags for this peer type define a single flag, the <strong>F flag</strong>, which indicates that the Loc-RIB is filtered. It MUST be set when a filter is applied to the Loc-RIB routes sent to the BMP collector. The remaining bits are reserved for future use, MUST be transmitted as 0 and their values MUST be ignored on receipt.</p><p>If locally sourced routes are communicated using BMP, they MUST be conveyed using the Loc-RIB Instance Peer Type.</p>",
+      "plainLanguage": "<p>The header of each Loc-RIB message says which routing table it is about. The address fields are left empty because there is no remote peer, the timestamp says when the routes were installed, and one flag warns the collector that the table has been filtered and is not the whole thing.</p>"
     },
     {
       "id": "operation",
-      "number": "5",
-      "title": "How Loc-RIB Monitoring Works",
-      "content": "<p>The router emulates a peer. A <strong>Peer Up</strong> notification follows <a href='/rfc7854'>RFC 7854</a> with these clarifications: local address, local port and remote port are zero, and the Sent OPEN message is fabricated. It MUST include the 4-octet ASN capability and the capabilities needed to represent Loc-RIB messages. The Received OPEN is a repeat of the sent one.</p><p>A new Peer Up information TLV, type <code>3</code>, is the <strong>VRF/Table Name</strong>, a UTF-8 string of 1 to 255 bytes. If a name is configured it MUST be included, and the default name <code>global</code> is used for the default Loc-RIB instance. The Peer Down notification uses reason code <code>6</code> and repeats the name TLV if it was in the Peer Up.</p><p><strong>Route Monitoring</strong> messages do the initial synchronization and then carry incremental changes, using 4-byte ASN encoding. Senders SHOULD use state compression and throttling, so that, for example, five changes to one prefix within a second may be sent as just the final one. <strong>Route Mirroring</strong> does not apply, and received mirroring messages SHOULD be ignored. For Statistics Reports, Stat Type 8 gives the number of routes in Loc-RIB and Stat Type 10 gives the number per AFI/SAFI.</p>",
-      "plainLanguage": "<p>The router pretends to be a little neighbor that hands the watcher its best-roads list, sends updates when the list changes, and can skip sending tiny changes that were quickly undone.</p>"
+      "number": "5.2",
+      "title": "Peer Up, Peer Down and Route Monitoring",
+      "content": "<p>The Loc-RIB holds all the routes selected by the BGP Decision Process, as described in Section 9.1 of <a href='/rfc4271'>RFC 4271</a>. These include the routes learned from BGP peers through the post-policy Adj-RIBs-In as well as routes learned by other means, such as redistribution of routes from other protocols into BGP or locally originated aggregate routes.</p><p>The <strong>Peer Up</strong> notification follows Section 4.10 of <a href='/rfc7854'>RFC 7854</a> with these clarifications. The local address is zero-filled, and the local and remote ports are set to 0, because neither applies. The sent OPEN message is a fabricated BGP OPEN message whose capabilities MUST include the 4-octet ASN and all the capabilities needed to represent the Loc-RIB Route Monitoring messages. Only capabilities that will actually be used are included: if ADD-PATH is enabled for IPv6 and the Loc-RIB holds additional paths, the ADD-PATH capability should be included for IPv6. For ADD-PATH the intent of advertise, receive or both can be ignored, because the presence of the capability already indicates that additional paths will be used. The received OPEN message is a repeat of the same sent OPEN message, so that the BMP receiver can parse the expected received OPEN message as Section 4.10 of RFC 7854 requires.</p><p>A new <strong>Peer Up Information</strong> TLV type is added, type 3, for the VRF or table name. The Information field holds a UTF-8 string whose value MUST equal the name of the VRF or table being conveyed, and the string size MUST be between 1 and 255 bytes. The TLV is optional, to support implementations that have no name defined, but if a name is configured it MUST be included. The default value <code>global</code> MUST be used for the default Loc-RIB instance with a zero-filled distinguisher. If the TLV is included it MUST also be included in the Peer Down notification. Multiple TLVs of the same type can be repeated in one message, for example to convey a filtered view of a VRF; a BMP receiver should append multiple TLVs of the same type to a set, to support alternate or additional names for the same peer, and if multiple strings are included their ordering MUST be preserved when they are reported.</p><p>The <strong>Peer Down</strong> notification MUST use reason code 6, followed by data in TLV format, with a Peer Down Information TLV of type 3 carrying the VRF or table name. That TLV MUST be included if it was in the Peer Up.</p><p><strong>Route Monitoring</strong> messages are used for the initial synchronization of the Loc-RIB and to convey incremental changes. Following the common BMP header and the per-peer header comes a BGP Update PDU, as in Section 4.6 of RFC 7854. The messages MUST use a 4-byte ASN encoding, as indicated by the capability in the Peer Up sent OPEN message.</p><p>State compression and throttling SHOULD be used by a BMP sender to reduce the number of Route Monitoring messages. With state compression only the final resultant updates are sent: if prefix 192.0.2.0/24 is updated in the Loc-RIB five times within one second, only the final change is transmitted and the other four are suppressed because they fall within the compression interval, where without compression all five updates would have been transmitted. A BMP receiver should expect the granularity to vary between implementations.</p><p><strong>Route Mirroring</strong> as defined in Section 4.7 of RFC 7854 is not applicable, because the PDUs are originated by the router rather than received, so any received Route Mirroring messages SHOULD be ignored. For the <strong>Statistics Report</strong>, only two Stat Types are relevant: Stat Type 8, a 64-bit gauge giving the number of routes in the Loc-RIB, and Stat Type 10, the number of routes in a per-AFI/SAFI Loc-RIB, whose value is structured as a 2-byte AFI, a 1-byte SAFI and a 64-bit gauge.</p>",
+      "plainLanguage": "<p>The router fakes a BGP session to the collector. It opens with a made-up BGP hello that says what address families are involved, announces the name of the table, and then sends the routes the same way a normal BGP update would. The collector gets the table as it stands and every later change to it.</p>"
     },
     {
       "id": "implementation-notes",
-      "number": "6",
-      "title": "Multiple Instances, Filtering and Changes",
-      "content": "<p>There MUST be at least one emulated peer for each Loc-RIB instance, such as each VRF. The receiver identifies a Loc-RIB by the peer distinguisher and BGP ID, and uses the VRF/Table Name for a label. If more than one emulated peer is needed to carry different address families for one Loc-RIB, they share the distinguisher and BGP ID, and each sends its own Peer Up with its address family capabilities.</p><p>The router may filter what it exports, for example sending only EBGP routes and not IBGP or IGP ones. When it does, the F flag is set to 1, and if several filters apply to the same Loc-RIB a table name MUST be used so the receiver can tell them apart. If filtering or table names change on an existing BMP session, the session MUST be bounced with a Peer Down and Peer Up sequence.</p>",
-      "plainLanguage": "<p>Each separate routing table gets its own stand-in neighbor. If the router hides some roads from the watcher, it raises a flag so the watcher knows the list is partial.</p>"
+      "number": "6.1",
+      "title": "Implementing and Filtering the Feed",
+      "content": "<p>There are several methods for a BGP speaker to implement Loc-RIB efficiently. In all of them the implementation emulates a peer, with Peer Up and Peer Down messages to convey capabilities and Route Monitoring messages to convey the Loc-RIB. The peer that conveys the Loc-RIB is a locally emulated peer.</p><p>There MUST be at least one emulated peer for each Loc-RIB instance, such as with VRFs. The BMP receiver identifies the Loc-RIB by the peer header distinguisher and BGP ID, and uses the VRF or table name from the Peer Up information to associate a name with the Loc-RIB. Some implementations may need more than one emulated peer for a Loc-RIB in order to convey different address families for the same Loc-RIB. In that case the peer distinguisher and BGP ID should be the same, because they represent the same Loc-RIB instance, and each emulated peer instance MUST send a Peer Up with an OPEN message indicating the address family capabilities. A BMP receiver MUST process these capabilities to know which peer belongs to which address family.</p><p>There may be cases where BMP receivers should receive only specific routes from the Loc-RIB. IPv4 unicast routes, for example, may include internal BGP, external BGP and IGP routes, but only the external BGP ones should reach the collector. Alternatively only internal and external BGP routes might be wanted, with redistributed IGP routes excluded. Where the Loc-RIB is filtered, the F flag is set to 1 to tell the receiver that the Loc-RIB is filtered, so that it does not represent the complete routing table. If multiple filters are associated with the same Loc-RIB, a table name MUST be used so that a BMP receiver can make the right associations.</p><p>Any change that alters the behaviour of an existing BMP session, such as a change to filtering or to table names, MUST be applied by bouncing the session with a Peer Down and Peer Up sequence.</p>",
+      "plainLanguage": "<p>The router presents each of its routing tables as its own fake peer, so a collector can tell them apart. An operator can also limit what the collector sees, and the header then carries a flag saying the view is partial.</p>"
     },
     {
       "id": "security-considerations",
       "number": "7",
-      "title": "Security and IANA",
-      "content": "<p>The security considerations in Section 11 of <a href='/rfc7854'>RFC 7854</a> apply. Implementations SHOULD only establish sessions with authorized and trusted monitoring devices, and the RFC believes it adds no further security considerations.</p><p>IANA registered peer type <code>3</code> (Loc-RIB Instance Peer), created a registry for Loc-RIB Instance Peer flags with flag 0 as F and flags 1 to 7 unassigned, registered Peer Up Information TLV type <code>3</code> (VRF/Table Name) and Peer Down reason code <code>6</code>. It also marked the old F flag in the registry for peer types 0 through 2 as deprecated.</p>",
-      "plainLanguage": "<p>Only let trusted watchers listen in, because the router's route list is private.</p>"
+      "title": "Security Considerations",
+      "content": "<p>The same considerations as in Section 11 of <a href='/rfc7854'>RFC 7854</a> apply. Implementations of this protocol SHOULD require that sessions are only established with authorized and trusted monitoring devices. The document states that it does not introduce any additional security considerations.</p>",
+      "plainLanguage": "<p>The rules are the ones that already apply to BMP: only connect to monitoring stations you trust. This document adds nothing new in that area.</p>"
+    },
+    {
+      "id": "iana-considerations",
+      "number": "8",
+      "title": "New Registry Entries",
+      "content": "<p>IANA has assigned new parameters in the BGP Monitoring Protocol parameters registry.</p><p>A new peer type is registered, peer type 3 for the Loc-RIB Instance Peer. The registry of BMP peer flags is renamed to cover peer types 0 through 2, and a new registry is created for peer type 3, holding the F flag at flag 0. Flags 1 through 7 are unassigned and the registration procedure is Standards Action. The F Flag entry in the older registry for peer types 0 through 2 is marked deprecated.</p><p>The registry of BMP Initiation Message TLVs is renamed to cover Initiation and Peer Up Information TLVs, since Section 4.4 of RFC 7854 has both share the same information TLVs. A new TLV type 3, VRF/Table Name, is added, carrying a UTF-8 string equal to the name of the VRF or table being conveyed, of 1 to 255 bytes.</p><p>A new Peer Down reason code 6 is registered, meaning the local system closed and TLV data follows.</p>",
+      "plainLanguage": "<p>The document asks the registry for a few new numbers: a peer type for the new kind of feed, one flag bit, one name TLV and one reason code for the session closing.</p>"
     }
   ],
   "viz": [
     {
       "type": "compare-table",
-      "anchor": "message-format",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "PER-PEER HEADER VALUES FOR THE LOC-RIB INSTANCE PEER",
+      "caption": "THE ROUTING TABLES A BGP SPEAKER KEEPS",
       "data": {
         "columns": [
-          "Field",
-          "Value for peer type 3"
+          "Table",
+          "What it holds"
         ],
         "rows": [
           {
             "cells": [
-              "Peer Type",
-              "3 (Loc-RIB Instance Peer)"
+              "Adj-RIB-In",
+              "Unprocessed routing information advertised to the local BGP speaker by its peers. Also called the pre-policy Adj-RIB-In."
+            ]
+          },
+          {
+            "cells": [
+              "Loc-RIB",
+              "The routes selected by the local BGP speaker's Decision Process, which also may include routes imported from other protocols such as an IGP or local static routes."
             ],
             "self": true
           },
           {
             "cells": [
-              "Peer Distinguisher",
-              "Zero for the global instance, else the route distinguisher or a unique local value"
-            ]
-          },
-          {
-            "cells": [
-              "Peer Address",
-              "Zero-filled"
-            ]
-          },
-          {
-            "cells": [
-              "Peer AS",
-              "The router's primary ASN"
-            ]
-          },
-          {
-            "cells": [
-              "Peer BGP ID",
-              "The VRF instance router-id, or the global router-id"
-            ]
-          },
-          {
-            "cells": [
-              "Timestamp",
-              "When the routes were installed in the Loc-RIB; zero if unavailable"
+              "Adj-RIB-Out",
+              "The routes for advertisement to specific peers by means of the local speaker's UPDATE messages."
             ]
           }
         ]
       }
     },
     {
-      "type": "sequence",
-      "anchor": "operation",
+      "type": "key-grid",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "ILLUSTRATIVE, NOT FROM THE RFC: ORDER OF MESSAGES FOR ONE LOC-RIB",
+      "caption": "WHAT OPERATORS USE THE LOC-RIB FOR",
       "data": {
-        "lanes": [
+        "items": [
           {
-            "key": "router",
-            "label": "BMP sender (router)"
+            "title": "Scale",
+            "text": "The post-policy Adj-RIB-In for one peer may hold hundreds of thousands of routes, while only a handful are selected and installed."
           },
           {
-            "key": "receiver",
-            "label": "BMP receiver"
+            "title": "History",
+            "text": "A change in the Loc-RIB can have a direct impact on the forwarding state, and a history of those changes shortens troubleshooting."
+          },
+          {
+            "title": "Validating policy",
+            "text": "Comparing the post-policy Adj-RIB-In with the Loc-RIB shows whether multipath prefixes were installed as expected for all advertising peers."
           }
-        ],
-        "messages": [
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "PER-PEER HEADER FLAGS FOR THE LOC-RIB INSTANCE PEER (SECTION 4.2)",
+      "data": {
+        "title": "Loc-RIB peer flags",
+        "bytes": 1,
+        "width": 8,
+        "fields": [
           {
-            "from": "router",
-            "to": "receiver",
-            "label": "Peer Up (fabricated OPEN)",
-            "color": "blue",
-            "note": "Carries the VRF/Table Name TLV, type 3."
+            "key": "f-flag",
+            "name": "F",
+            "bits": 1,
+            "desc": "Set when a filter is applied to the Loc-RIB routes sent to the BMP collector.",
+            "value": "0"
           },
           {
-            "from": "router",
-            "to": "receiver",
-            "label": "Route Monitoring (initial sync)",
-            "color": "green",
-            "note": "Loc-RIB routes in BGP Update PDUs."
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 7,
+            "desc": "Reserved for future use. Must be transmitted as 0 and ignored on receipt."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "iana-considerations",
+      "position": "after",
+      "caption": "THE REGISTRY ENTRIES THIS DOCUMENT ADDS",
+      "data": {
+        "items": [
+          {
+            "code": "3",
+            "label": "BMP peer type",
+            "desc": "Loc-RIB Instance Peer.",
+            "highlight": true
           },
           {
-            "from": "router",
-            "to": "receiver",
-            "label": "Route Monitoring (changes)",
-            "color": "green",
-            "note": "Incremental Loc-RIB changes."
+            "code": "0",
+            "label": "Loc-RIB peer flag",
+            "desc": "F flag: the Loc-RIB is filtered."
           },
           {
-            "from": "router",
-            "to": "receiver",
-            "label": "Peer Down (reason 6)",
-            "color": "neutral",
-            "note": "Repeats the name TLV if it was in the Peer Up."
+            "code": "3",
+            "label": "Peer Up Information TLV",
+            "desc": "VRF/Table Name, a UTF-8 string of 1 to 255 bytes."
+          },
+          {
+            "code": "6",
+            "label": "Peer Down reason code",
+            "desc": "Local system closed, TLV data follows."
+          },
+          {
+            "code": "8",
+            "label": "Statistics Stat Type",
+            "desc": "64-bit gauge: number of routes in Loc-RIB."
+          },
+          {
+            "code": "10",
+            "label": "Statistics Stat Type",
+            "desc": "Number of routes in a per-AFI/SAFI Loc-RIB: 2-byte AFI, 1-byte SAFI, 64-bit gauge."
           }
         ]
       }
@@ -208,28 +244,28 @@
   ],
   "references": [
     {
-      "number": "[RFC4271]",
-      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
-      "rfc": 4271
-    },
-    {
       "number": "[RFC7854]",
-      "text": "Scudder, J., Ed., Fernando, R., and S. Stuart, \"BGP Monitoring Protocol (BMP)\", RFC 7854, June 2016.",
+      "text": "Scudder, J., Ed., R. Fernando, and S. Stuart, \"BGP Monitoring Protocol (BMP)\", RFC 7854, June 2016.",
       "rfc": 7854
     },
     {
+      "number": "[RFC4271]",
+      "text": "Rekhter, Y., Ed., T. Li, Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "rfc": 4271
+    },
+    {
       "number": "[RFC7911]",
-      "text": "Walton, D., Retana, A., Chen, E., and J. Scudder, \"Advertisement of Multiple Paths in BGP\", RFC 7911, July 2016.",
+      "text": "Walton, D., A. Retana, E. Chen, and J. Scudder, \"Advertisement of Multiple Paths in BGP\", RFC 7911, July 2016.",
       "rfc": 7911
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

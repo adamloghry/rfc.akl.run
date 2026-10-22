@@ -5,29 +5,31 @@
   "categoryReviewed": false,
   "summary": "<p>FQ-CoDel combines flow queueing with CoDel to fight bufferbloat. It mixes packets from many flows, limits head-of-line blocking from bursty traffic, and keeps low-rate traffic such as DNS from being stuck behind big transfers. This memo is Experimental.</p>",
   "plainLanguage": {
-    "summary": "<p>Instead of one long line, each person gets their own mini-line and the cashier serves them in turn. A quick question is not stuck behind a huge order.</p>"
+    "summary": "<p>FQ-CoDel is a way for a router to share a link between many separate streams of traffic. It gives each stream its own queue, takes turns between the queues, and drops packets that have waited too long. That keeps the waiting time low and stops one large transfer from blocking everything behind it.</p>"
   },
   "questions": [
     "what is fq-codel",
     "how to reduce latency with fair queueing",
     "how does fq-codel reduce latency",
     "what is bufferbloat",
-    "how does flow queueing work"
+    "how does flow queueing work",
+    "what is the difference between codel and fq-codel"
   ],
   "tags": [
-    "Networking",
-    "Queue Management"
+    "Queue Management",
+    "Bufferbloat",
+    "Scheduling"
   ],
-  "subtitle": "Fair queueing with active queue management to reduce latency and bufferbloat.",
+  "subtitle": "Flow queueing combined with Controlled Delay to keep queues short and links fair.",
   "tldr": {
-    "problem": "Routers often buffer packets excessively, causing high latency and poor performance even when links have capacity. This 'bufferbloat' hurts interactive applications like video conferencing and web browsing.",
-    "mechanism": "FQ-CoDel combines two techniques: flow queueing, which gives each flow its own queue to prevent one large transfer from blocking others, and CoDel (Controlled Delay), which drops packets when queues get too long to signal congestion early.",
-    "outcome": "Connections experience lower latency and faster responsiveness without sacrificing link utilization, and the algorithm is lightweight enough for deployment in Linux kernel, home routers, and other hardware.",
+    "problem": "Routers that buffer too much make every packet wait, and a single large transfer can hold up the small traffic behind it. A queue management algorithm is needed that keeps the waiting time low without letting one flow take over the link.",
+    "mechanism": "FQ-CoDel hashes each flow into its own queue and shares the link between those queues with a Deficit Round Robin scheduler. Each queue is then run through the CoDel algorithm, which drops packets that have been waiting too long.",
+    "outcome": "The RFC reports that the algorithm has shipped in the Linux kernel since version 3.5, released on 21 July 2012, and is the default queueing discipline in a number of mainline Linux distributions. It also lists where flow queueing does not fit well, such as inside encrypted tunnels.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Default flow buckets",
+      "label": "Default number of queues",
       "value": "1024"
     },
     {
@@ -47,75 +49,170 @@
       "value": "10240 packets"
     },
     {
-      "label": "Linux kernel version",
-      "value": "3.5 (July 2012)"
+      "label": "Memory per queue",
+      "value": "Less than 64 bytes on 64-bit systems"
     }
   ],
-  "today": "<p>RFC 8290 is an Experimental specification that remains non-standard, but FQ-CoDel is widely deployed in Linux kernels and routers as the default queueing discipline, and has been extensively tested and proven effective at reducing bufferbloat.</p>",
+  "today": "<p>RFC 8290 is an Experimental document and has not been obsoleted. The RFC says FQ-CoDel has shipped as part of the Linux kernel since version 3.5, released on 21 July 2012, with the ce_threshold parameter added in version 4.2. It reports that the algorithm is configured as the default queueing discipline in a number of mainline Linux distributions, and that a BSD implementation is also available.</p>",
   "glossary": [
-    "bufferbloat"
+    "bufferbloat",
+    "active-queue-management",
+    "five-tuple",
+    "head-of-line-blocking",
+    "explicit-congestion-notification",
+    "hash-function",
+    "tcp",
+    "mtu",
+    "encapsulation"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Bufferbloat Problem",
-      "content": "<p>Routers and network devices buffer packets to smooth out traffic bursts, but excessive buffering creates high latency called <strong>bufferbloat</strong>. A single large file transfer can fill buffers and delay interactive traffic for seconds, hurting video calls, games, and web browsing. FQ-CoDel solves this by combining fair queueing with active queue management.</p><p>The algorithm is based on Deficit Round Robin (DRR) scheduling and the CoDel AQM algorithm. It is memory and CPU efficient, already shipping in the Linux kernel since version 3.5 and adopted as the default queueing discipline in distributions like OpenWrt, Arch Linux, and Fedora.</p>",
-      "plainLanguage": "<p>When networks get congested, buffers fill up and everything slows down. FQ-CoDel keeps buffers small and responsive by letting many flows share the queue fairly and dropping packets early when delays get too long.</p>"
+      "title": "Bufferbloat and the Two Ingredients",
+      "content": "<p>FQ-CoDel is a combined packet scheduler and active queue management algorithm, developed as part of the bufferbloat-fighting community effort. It is built from a modified Deficit Round Robin (DRR) scheduler with the CoDel active queue management algorithm running on each queue.</p><p>The RFC defines the terms it uses carefully. A <strong>flow</strong> is typically identified by a 5-tuple: source IP address, destination IP address, source port number, destination port number and protocol number. A <strong>queue</strong> is the internal data structure that holds packets, and in most cases each flow gets its own queue, although hash collisions can put two flows in the same one. A <strong>scheduler</strong> is the mechanism that chooses which queue the next packet is taken from.</p><p>CoDel, described separately in <a href='/rfc8289'>RFC 8289</a>, controls queue length by keeping enough queueing to hold the outgoing link busy but no more. It does this by preferentially dropping packets that remain in the queue for too long. The drops happen at the head of the queue, which shortens the time the drop signal takes to reach the sender and helps trigger a TCP fast retransmit sooner.</p><p>The result is that FQ-CoDel is a general, efficient and nearly parameterless approach. The RFC describes the algorithm in abstract terms in the first four sections and then gives the Linux implementation details separately, because that implementation is treated as canonical for default behaviour.</p>",
+      "plainLanguage": "<p>FQ-CoDel puts together two known techniques. CoDel drops packets that have waited too long, so a queue never grows large. Deficit Round Robin shares the link between queues by the number of bytes each one sends.</p>"
     },
     {
-      "id": "architecture",
-      "number": "2",
-      "title": "How FQ-CoDel Works",
-      "content": "<p>FQ-CoDel maintains multiple queues, by default 1024, each identified by a flow's 5-tuple: source and destination IP addresses, source and destination ports, and protocol number. Each flow is hashed into one of these buckets. Within each queue, CoDel controls delay: when packets have been sitting too long, CoDel drops them from the queue head, signaling congestion to the sender.</p><p>The scheduler uses a two-tier round-robin scheme with <strong>new</strong> and <strong>old</strong> queues. New queues (those that do not build up a standing queue) get priority, so short, bursty traffic like DNS queries and interactive traffic get through quickly. Once a queue empties, it drops back to new status for its next packet, providing implicit prioritization for low-volume flows.</p>",
-      "plainLanguage": "<p>FQ-CoDel sorts traffic by flow and manages how much each gets to send. It also drops packets when delays grow too long, telling senders to slow down before the buffer overflows.</p>"
-    },
-    {
-      "id": "parameters",
+      "id": "design",
       "number": "3",
-      "title": "Tunable Parameters",
-      "content": "<p>FQ-CoDel exposes several parameters for configuration. The <code>target</code> parameter (default 5 ms) sets the acceptable minimum queue delay; the <code>interval</code> parameter (default 100 ms) is the time window for CoDel to detect persistent queue buildup. The <code>quantum</code> parameter (default 1514 bytes) controls how many bytes each queue gets per scheduling round. The <code>limit</code> parameter sets the hard packet limit per qdisc (default 10240 packets).</p><p>The number of flow buckets is set via the <code>flows</code> parameter (default 1024), which balances memory usage against hash collision probability. The <code>noecn</code> option disables Explicit Congestion Notification, and <code>ce_threshold</code> enables DCTCP-like behavior for low-latency data centers.</p>",
-      "plainLanguage": "<p>These knobs let network operators tune FQ-CoDel for their specific links, devices, and traffic patterns: slower links may need smaller buffers, busier networks may need more queues.</p>"
+      "title": "Flow Queueing with Deficit Round Robin",
+      "content": "<p>The intention is to give each flow its own queue. In practice a hashing scheme is used, so flows are hashed into a number of buckets, each with its own queue. The number of buckets is configurable and defaults to 1024 in the Linux implementation, which the RFC says is enough to avoid collisions on the moderate number of flows seen in, for example, a home gateway. The number of buckets can be tuned to trade memory against a lower chance of collisions.</p><p>The scheduler works on bytes, not on packets. Each queue holds a count of byte credits, initialised to the configurable quantum. When a queue gets a turn it sends packets, and its credits go down by the size of each packet, until the counter reaches zero or less. At that point the counter is increased by one quantum and the turn ends. A queue holding packets of a third of the quantum size therefore sends three packets per turn, while a queue holding quantum-sized packets sends one, so flows that send small packets are not penalised for the size difference.</p><p>There are two sets of flows, which the RFC calls the new list and the old list. The new list holds flows that have not built a queue recently, and the old list holds queues that have built a backlog. This is the reason the algorithm is called flow queueing rather than fair queueing: flows that build a queue are treated differently from flows that do not. A queue that does not build up more than a quantum of bytes before the scheduler visits it is removed from the list once it empties and added back as a new queue when its next packet arrives, so it gets priority over queues that never empty. The RFC notes that many things worth prioritising tend to fall into this category, including acknowledgements, DNS lookups, interactive SSH, HTTP requests and voice over IP.</p>",
+      "plainLanguage": "<p>Each flow, meaning a stream of packets with the same addresses and ports, is given its own queue by a hashing scheme. The scheduler then takes turns between the queues, giving each one a set number of bytes per turn, so no single flow can take over the link.</p>"
     },
     {
-      "id": "section-1",
+      "id": "operation",
       "number": "4",
-      "title": "Flow Isolation and Fairness",
-      "content": "<p>By isolating flows into separate queues, FQ-CoDel prevents head-of-line blocking: a bulk transfer cannot starve interactive traffic. However, the hashing approach is probabilistic—with 1024 buckets, a small number of flows may collide into the same queue. For up to 100 flows with 1024 buckets, the probability of no collisions is about 91%, and the probability that no more than two flows collide is 99.6%.</p><p>FQ-CoDel applies fairness at the flow level, not at other granularities. In some scenarios (ISP fairness between customers, transit provider fairness between ASes, or high-flow-count links), flow-level fairness may not be desired. The Linux implementation allows reconfiguring the classification scheme via the <code>tc filter</code> command to match on MAC addresses, Diffserv markings, or other packet fields.</p>",
-      "plainLanguage": "<p>Each flow gets fair access to the network, so a video stream does not starve your web browsing. But the fairness is probabilistic: some unrelated flows might accidentally end up in the same queue.</p>"
+      "title": "The FQ-CoDel Scheduler",
+      "content": "<p>Enqueueing happens in three stages. The packet is first classified into a queue, by hashing the 5-tuple with a Jenkins hash function and taking the result modulo the number of queues. The hash is salted by adding a random value chosen at initialisation time, so that an attacker cannot predict which queue a targeted flow will land in. The packet is then handed to CoDel for timestamping, added to the tail of the queue, and the queue's byte count is updated. If the queue was not already active, it is added to the end of the list of new queues with its credits set to the quantum.</p><p>Finally, the total number of enqueued packets is compared with the configured limit. If the limit is exceeded, half the packets, up to a maximum of 64, are dropped from the head of the queue with the largest byte count. Dropping several at once lowers the cost of repeatedly finding the longest queue during an overload.</p><p>Dequeueing does most of the work. The scheduler looks at the head of the new list. If that queue has negative credits, meaning it has already sent at least a quantum of bytes, the queue is given another quantum, moved to the end of the old list, and the scheduler tries the next queue. Otherwise the queue is selected and the CoDel algorithm is applied to it, which may discard one or more packets from its head before returning a packet.</p><p>If CoDel returns nothing, the queue was empty. A queue that came from the new list is moved to the end of the old list, and a queue that came from the old list is removed from it, to be added back as a new queue the next time a packet hashes to it. Moving the empty queue to the end of the old list first is what prevents starvation, because the scheduler then has to service all the old queues before that queue can be removed.</p>",
+      "plainLanguage": "<p>When a packet arrives it is hashed into a queue and timestamped. When a packet leaves, the scheduler walks the list of queues and takes the next one that still has bytes left in its allowance. Queues that empty out are given priority, so a short message is not stuck behind a large transfer.</p>"
     },
     {
-      "id": "deployment",
+      "id": "implementation-notes",
       "number": "5",
-      "title": "Deployment and Results",
-      "content": "<p>FQ-CoDel has been included in the Linux kernel mainline since July 2012 (version 3.5), with Explicit Congestion Notification support added in version 4.2. Experimental data from Linux distributions, BSD implementations, and research show massive improvements in latency and fairness compared to the previous default FIFO queue. It is now the default queueing discipline in many Linux distributions.</p><p>Known limitations include difficulty with encrypted tunnels (opaque encapsulation bunches flows), challenges with low-priority delay-based congestion control algorithms (e.g., LEDBAT), and the need for tuning when fairness is desired at granularities other than flows. Future work includes the Cake algorithm, which extends FQ-CoDel principles with built-in rate limiting and improved hash collision handling.</p>",
-      "plainLanguage": "<p>FQ-CoDel is already built into many routers and Linux systems, and testing shows it massively improves responsiveness. The main challenge is tuning it for different networks and handling special cases.</p>"
+      "title": "Implementation Considerations",
+      "content": "<p>The Linux implementation exposes a small set of parameters. The <code>interval</code> parameter is the time window CoDel uses to detect a persistent queue; the default is 100 ms, and it should be on the order of the worst-case round trip time through the bottleneck. The <code>target</code> parameter is the acceptable minimum standing queue delay, with a default of 5 ms. It should be tuned to be at least the transmission time of one MTU-sized packet at the prevailing egress link speed, which the RFC gives as about 15 ms for 1 Mbps with an MTU of 1500, and otherwise set to 5 to 10 percent of the interval. The <code>limit</code> parameter is a global hard limit on the number of packets in all queues, defaulting to 10240 packets, which the RFC says suits up to 10-Gigabit Ethernet speeds. The <code>quantum</code> parameter is the number of bytes each queue may send per round, defaulting to 1514 bytes, which is the Ethernet MTU plus the 14-byte hardware header. The <code>flows</code> parameter is the number of queues, defaulting to 1024 and settable only at initialisation because memory for the hash table has to be allocated then.</p><p>Explicit Congestion Notification is enabled by default and can be turned off with the <code>noecn</code> parameter. The <code>ce_threshold</code> parameter is disabled by default and, when set to a number of microseconds, enables DCTCP-like marking of Congestion Encountered packets at a lower delay setpoint than the normal CoDel target.</p><p>Memory cost is low: less than 64 bytes per queue on 64-bit systems. The CoDel part of the algorithm requires a per-packet timestamp to be stored with the packet, which works well for software routers but may be impossible to retrofit onto devices that do their processing in silicon, and the timestamp resolution must be finer than the CoDel target setting.</p><p>Compared with CoDel on its own, the RFC notes that FQ-CoDel mixes the packets of competing flows, which paces bursty flows and fills the pipe better. A new flow gets substantial leeway until CoDel finds an ideal drop rate for it, so FQ-CoDel takes longer in time to converge on that rate but does so within fewer delivered packets. Because the CoDel drop mechanism then operates on the flows that are actually building queues, packets are dropped more accurately from the largest flows, and FQ-CoDel reacts almost immediately when traffic or link characteristics change.</p>",
+      "plainLanguage": "<p>Most settings have sensible defaults and rarely need changing. The main ones are how many queues exist, how long a packet may wait before CoDel reacts, and how many bytes each queue may send per turn. Each queue costs less than 64 bytes of memory.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "6",
+      "title": "Limitations of Flow Queueing",
+      "content": "<p>The RFC lists three cases where the scheduling side of FQ-CoDel is not a good fit.</p><p><strong>Fairness between things other than flows.</strong> An internet service provider may care more about fairness between customers than between flows, and a transit provider may want fairness between connecting networks. On a link with very many simultaneous flows, flow-level fairness may not work either. In the Linux implementation the packet matching of the <code>tc</code> subsystem can be used to partition packets into virtual queues on any available field, such as address or subnet pairs, and FQ-CoDel is commonly deployed alongside three tiers of service classification based on Diffserv markings: priority, best effort and background.</p><p><strong>Flow bunching by opaque encapsulation.</strong> FQ-CoDel tries to decapsulate packets before hashing them, and the Linux implementation does this for common encapsulations such as 6in4, IP-in-IP and GRE. It cannot do so for encrypted VPNs. Several flows inside such a tunnel are seen as one flow, so they share a queue and the drop behaviour, they lose the implicit prioritisation, and when the bunched flow competes with others it counts as one flow rather than as the number of flows inside it.</p><p><strong>Low-priority congestion control algorithms.</strong> Algorithms such as LEDBAT try to use less than their fair share of bandwidth. When an active queue management scheme already keeps latency low, they see little added delay and lose the signal that would tell them to back off, so they tend to revert to loss-based congestion control and take their full share. The RFC suggests such algorithms may need to take the reduced delay into account, or to use a coupled approach that watches several flows at once.</p>",
+      "plainLanguage": "<p>Flow queueing does not suit every network. It cannot tell apart flows hidden inside an encrypted tunnel, and it does not slow down algorithms that volunteer to use less than their share of the bandwidth.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The RFC finds no security exposures in FQ-CoDel that are not already present in current first-in first-out systems, and says that some weaknesses of those systems, such as simple-minded packet floods, are reduced by FQ-CoDel. It then asks for three things in the implementation.</p><p>First, to stop packets in the new queues from starving the old ones, an empty queue must be moved to the end of the old list before it is removed. Second, to stop an attacker aiming at one specific flow, the hash that maps packets to queues must not be predictable, which is why the hash is salted. The size of the salt and the strength of the hash function are a trade-off between performance and security; the Linux implementation uses a 32-bit random value and a Jenkins hash function, which the RFC considers sufficient to ward off the most obvious attacks. Third, packet fragments without a Layer 4 header can hash into a different bucket than the first fragment with the header intact, which can cause reordering. Keeping state to match fragments to the start of the packet, or putting all fragments of a packet into the same queue, are two ways to avoid it.</p>",
+      "plainLanguage": "<p>The RFC finds no security problems beyond those of a plain first-in first-out queue. It does ask for two things in the implementation: the hash that picks queues must be unpredictable, and an emptied queue must be moved to the end of the old list so it cannot be starved.</p>"
     }
   ],
   "viz": [
     {
-      "type": "layers",
-      "anchor": "architecture",
+      "type": "key-grid",
+      "anchor": "motivation",
       "position": "after",
-      "caption": "FQ-CoDel in the network stack",
+      "caption": "The parts that make up FQ-CoDel",
       "data": {
-        "layers": [
+        "items": [
           {
-            "label": "Application",
-            "detail": "User programs and network services"
+            "title": "CoDel",
+            "text": "The active queue management algorithm that decides when to drop packets that have waited too long."
           },
           {
-            "label": "TCP/UDP",
-            "detail": "Transport layer"
+            "title": "Deficit Round Robin",
+            "text": "The scheduler that decides which queue the next packet is taken from."
           },
           {
-            "label": "FQ-CoDel",
-            "detail": "Packet scheduling and queue management",
-            "highlight": true
+            "title": "Flow hashing",
+            "text": "Packets are hashed on their 5-tuple into a fixed number of buckets, each with its own queue."
           },
           {
-            "label": "Link layer",
-            "detail": "Ethernet, WiFi, or other media"
+            "title": "New and old lists",
+            "text": "Queues that never build a backlog get priority over queues that do."
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "How a queue moves between the empty, new and old states",
+      "data": {
+        "states": [
+          {
+            "key": "empty",
+            "label": "Empty",
+            "initial": true
+          },
+          {
+            "key": "new",
+            "label": "New"
+          },
+          {
+            "key": "old",
+            "label": "Old"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "empty",
+            "to": "new",
+            "label": "Arrival"
+          },
+          {
+            "from": "new",
+            "to": "old",
+            "label": "Empty or credits exhausted"
+          },
+          {
+            "from": "old",
+            "to": "old",
+            "label": "Credits exhausted"
+          },
+          {
+            "from": "old",
+            "to": "empty",
+            "label": "Empty"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "implementation-notes",
+      "position": "after",
+      "caption": "CoDel on its own compared with FQ-CoDel",
+      "data": {
+        "columns": [
+          "Aspect",
+          "CoDel alone",
+          "FQ-CoDel"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Where the drop decision is made",
+              "On the single queue",
+              "On the flows that are actually building queues"
+            ]
+          },
+          {
+            "cells": [
+              "Response to changed traffic or link speed",
+              "Can take a while to respond",
+              "Reacts almost immediately"
+            ]
+          },
+          {
+            "cells": [
+              "Convergence for a new flow",
+              "Converges toward an ideal drop rate",
+              "Takes longer in time, but within fewer delivered packets"
+            ]
           }
         ]
       }
@@ -128,28 +225,46 @@
       "rfc": 8289
     },
     {
-      "number": "[RFC3168]",
-      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
-      "rfc": 3168
-    },
-    {
       "number": "[RFC7806]",
       "text": "Baker, F. and R. Pan, \"On Queuing, Marking, and Dropping\", RFC 7806, April 2016.",
       "rfc": 7806
     },
     {
+      "number": "[RFC3168]",
+      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
+      "rfc": 3168
+    },
+    {
       "number": "[RFC6817]",
       "text": "Shalunov, S., Hazel, G., Iyengar, J., and M. Kuehlewind, \"Low Extra Delay Background Transport (LEDBAT)\", RFC 6817, December 2012.",
       "rfc": 6817
+    },
+    {
+      "number": "[RFC8257]",
+      "text": "Bensley, S., Thaler, D., Balasubramanian, P., Eggert, L., and G. Judd, \"Data Center TCP (DCTCP): TCP Congestion Control for Datacenters\", RFC 8257, October 2017.",
+      "rfc": 8257
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[CODEL]",
+      "text": "Nichols, K. and V. Jacobson, \"Controlling Queue Delay\", ACM Queue, Volume 10, Issue 5, May 2012."
+    },
+    {
+      "number": "[DRR]",
+      "text": "Shreedhar, M. and G. Varghese, \"Efficient Fair Queueing Using Deficit Round Robin\", IEEE/ACM Transactions on Networking, Volume 4, Issue 3, June 1996."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

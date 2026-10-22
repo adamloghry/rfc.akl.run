@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines circuit breakers for unicast RTP sessions, which stop media flows that suffer persistent heavy loss or congestion so they do not harm the network.</p>",
   "plainLanguage": {
-    "summary": "<p>A fuse that cuts off a call stream if it keeps causing trouble, like a house fuse.</p>"
+    "summary": "<p>This document does not tell a video sender how to slow down politely. Instead it defines four emergency stops: conditions that are so bad, and so clearly harmful to the network, that the sender should stop sending media altogether. The idea is that a proper congestion control algorithm stays well inside these limits and never trips them.</p>"
   },
   "questions": [
     "rtp circuit breaker",
@@ -24,7 +24,7 @@
   "tldr": {
     "problem": "Voice and video over RTP often run on best-effort UDP networks with no standard congestion control, so a sender that never slows down can cause persistent congestion.",
     "mechanism": "The RFC defines four RTP circuit breakers, driven by basic RTCP reports, that make a sender stop when feedback disappears, media stops arriving, loss is far worse than TCP would tolerate, or the media is unusable.",
-    "outcome": "It is a protection of last resort, not a congestion control algorithm. Any Standards Track RTP congestion control must operate within its envelope.",
+    "outcome": "It is a protection of last resort, not a congestion control algorithm. Any Standards Track RTP congestion control must operate within the envelope set by these breakers.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -53,7 +53,7 @@
       "value": "RFC 3550"
     }
   ],
-  "today": "<p>RFC 8083 is a Proposed Standard that updates <a href='/rfc3550'>RFC 3550</a>. It has not been obsoleted or updated by a later RFC. The text expects a future replacement to give guidance on how ECN feedback should affect the congestion breaker.</p>",
+  "today": "<p>RFC 8083 is a Proposed Standard that updates <a href='/rfc3550'>RFC 3550</a>, and the metadata records no document that obsoletes it. It remains the statement of the four RTP circuit breakers, sitting alongside the general framework for network transport circuit breakers in <a href='/rfc8084'>RFC 8084</a>.</p>",
   "glossary": [
     "rtp",
     "rtcp",
@@ -64,172 +64,233 @@
     "unicast",
     "tcp",
     "udp",
-    "circuit-breaker"
+    "circuit-breaker",
+    "rtp-circuit-breaker",
+    "packet-loss",
+    "round-trip-time",
+    "explicit-congestion-notification"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "Why RTP Needs Circuit Breakers",
-      "content": "<p>The Real-time Transport Protocol (RTP) is widely used for voice over IP, video conferencing and telepresence, often over best-effort UDP/IP networks. Without congestion control, network congestion leads to uncontrolled packet loss and a worse experience. There is no consensus on one standard congestion control algorithm for interactive RTP flows, and this memo does not propose one.</p><p>Instead it defines a minimal set of <strong>RTP circuit breakers</strong>: conditions under which there is general agreement that serious congestion is occurring and the sender needs to stop. They are a specific instance of the network transport circuit breakers of RFC 8084 and act as a protection of last resort against persistent excessive congestion. Applications on best-effort networks are expected to run without triggering them unless congestion is long-lived and excessive.</p>",
-      "plainLanguage": "<p>The rules do not teach a call how to share the road politely. They only say when the call must pull over because it is blocking everyone.</p>"
+      "title": "Introduction",
+      "content": "<p>The Real-time Transport Protocol is widely used in voice-over-IP, video teleconferencing and telepresence systems. Many of these systems run over best-effort UDP/IP networks and can suffer from packet loss and increased latency if network congestion occurs. Designing effective RTP congestion control algorithms to adapt the transmission of RTP-based media to match the available network capacity while also maintaining the user experience is a difficult but important problem. Many such congestion control and media adaptation algorithms have been proposed, but to date there is no consensus on the correct approach or even that a single standard algorithm is desirable.</p><p>This memo does not attempt to propose a new RTP congestion control algorithm. Instead, it proposes a small set of RTP circuit breakers: mechanisms that terminate RTP flows in conditions under which there is general agreement that serious network congestion is occurring. The RTP circuit breakers are a specific instance of the general class of network transport circuit breakers, designed to act as a protection mechanism of last resort to avoid persistent excessive congestion. To avoid triggering the RTP circuit breaker, any Standards Track congestion control algorithms defined for RTP will need to operate within the envelope set by these circuit breaker algorithms.</p><p>The background matters for understanding what the breakers can see. Congestion can be detected in three ways: a receiver can infer the onset of congestion by observing an increase in one-way delay caused by queue build-up; if Explicit Congestion Notification is supported, the network can signal congestion by marking packets; or, in the extreme case, congestion causes packet loss that can be detected by observing a gap in the received RTP sequence numbers. Once congestion is observed, the receiver has to send feedback to the sender, and the RTCP Receiver Report and Sender Report packets are the base mechanism. RTCP reports are sent periodically, on the order of a few seconds on average, and can be less than a second in a high-bandwidth session. If a receiver detects congestion part way through a reporting interval, the base RTP specification contains no provision for sending the RTCP RR packet early, and the receiver has to wait until the next scheduled reporting interval.</p>",
+      "plainLanguage": "<p>Real-time media usually travels on plain UDP with nobody minding the pipe. If the sender keeps going at full rate while the network is already full, everyone on the path suffers. There is no agreed congestion control algorithm for RTP, so this document takes a different tack: it names the conditions under which a sender must simply stop. The receiver's periodic reports are the only input, so the breakers work with the plainest possible RTCP.</p>"
     },
     {
-      "id": "background",
-      "number": "2",
-      "title": "Unicast Congestion Control Background",
-      "content": "<p>The scope is unicast RTP, one sender and one receiver. Multicast needs different solutions and is out of scope. Congestion control can live in a congestion-controlled transport such as TCP, which is safe for the network and not considered further, or in the application on top of UDP using RTCP feedback. This memo targets the second case.</p><p>Congestion can be detected through rising one-way delay, through ECN Congestion Experienced marks, or, in the extreme case, through packet loss seen as gaps in RTP sequence numbers. The receiver then reports back. Basic RTCP Receiver Reports carry the fraction of packets lost, the cumulative loss, the highest sequence number received and jitter, and let the sender estimate round-trip time, but a report cannot be sent early when congestion starts mid-interval. RTCP Extended Reports add richer metrics without changing timing. The RTP/AVPF profile allows early reports, and ECN feedback for RTP builds on it.</p>",
-      "plainLanguage": "<p>The receiver sends back little report cards saying how many packets arrived. The report cards come only every few seconds, so the sender has to be patient and careful.</p>"
-    },
-    {
-      "id": "parameters",
+      "id": "terminology",
       "number": "3",
-      "title": "The Variables Used",
-      "content": "<p>The circuit breakers are defined with a handful of variables. The main ones are:</p><ul><li><code>Td</code>: the deterministic RTCP reporting interval from RFC 3550. <code>Tdr</code> is the sender's estimate of that interval as calculated by the receiver of its media.</li><li><code>Tr</code>: the round-trip time, smoothed as <code>Tr = (0.8 * Tr) + (0.2 * Tr_new)</code>.</li><li><code>Tf</code>: the media framing interval, and <code>G</code>: the number of frames coded together at one sending rate setting.</li><li><code>k</code>: the non-reporting threshold.</li><li><code>X</code>: the throughput a TCP connection would achieve, with <code>s</code> the RTP packet size, <code>p</code> the loss event rate, <code>t_RTO</code> the TCP retransmission timeout (approximated as <code>4 * Tr</code>) and <code>b</code> the packets acknowledged per TCP acknowledgement (<code>b = 1</code> is RECOMMENDED).</li><li><code>T_rr_interval</code>: the minimal interval between RTCP reports under RTP/AVPF.</li></ul>",
-      "plainLanguage": "<p>These are the measuring sticks: how often the report cards arrive, how long a message takes to go there and back, and how fast a polite TCP download would go on the same road.</p>"
-    },
-    {
-      "id": "design",
-      "number": "4",
-      "title": "The Four Circuit Breakers",
-      "content": "<p>The design uses only basic RTCP features, so it works for every unicast RTP application without extended reports or rapid feedback. Implementations that sometimes talk to endpoints without RTCP need to disable the breakers unless signaling confirms the peer implements RTCP, but the RFC says they SHOULD NOT be disabled on networks that might be congested unless an equivalent mechanism exists. Round-trip time alone and jitter alone are judged too weak to serve as breakers, so the breakers rest on loss and connectivity signals.</p><p><strong>#1 RTCP timeout.</strong> If a sender has received no RTCP SR or RR for its SSRC for at least three times <code>Td</code> (computed without randomization and with the fixed minimum interval of Tmin=5 seconds), it SHOULD cease transmission, because it cannot know whether it is causing congestion. Implementations SHOULD NOT configure <code>Td</code> above 5 seconds or <code>T_rr_interval</code> above 4 seconds.</p><p><strong>#2 Media timeout.</strong> If reports show a non-increasing extended highest sequence number received, the media is not arriving. <code>MEDIA_TIMEOUT</code> consecutive such reports trigger the breaker, and the sender SHOULD then cease transmission. The RECOMMENDED value for <code>k</code> is 5 reports.</p><p><strong>#4 Media usability.</strong> If reported loss or latency leaves the media unusable for a significant time, the sender SHOULD stop, and receivers SHOULD terminate the session. The RFC deliberately sets no bound, since this depends on the application.</p>",
-      "plainLanguage": "<p>There are four trip wires. One trips when the report cards stop coming, one when the packets stop arriving, one when too many are being lost, and one when the call is too broken to be useful.</p>"
-    },
-    {
-      "id": "algorithms",
-      "number": "4.3",
-      "title": "The Congestion Breaker Algorithm",
-      "content": "<p>Breaker #3 compares the sender's rate with what TCP would get. The RTP/AVP profile already says RTP loss is acceptable if a TCP flow in the same conditions would get an average throughput not less than the RTP flow's, and the comparison is an order of magnitude (a factor of about ten). TCP throughput <code>X</code> is estimated from <code>s</code>, <code>Tr</code> and the loss rate. The RFC RECOMMENDS the simplified equation. Implementations that want more sensitivity MAY use the full equation, which tended to trigger earlier in the measurements it cites, including on LTE.</p><p>RTCP reports give the loss <em>fraction</em>, not the loss event rate, so the fraction is used in its place; the RFC argues this is acceptable for an order-of-magnitude test. A sender sending at least one packet every <code>max(Tdr, Tr)</code> seconds averages the fraction lost over the last <code>CB_INTERVAL</code> reporting intervals, weighted by interval duration. If its actual sending rate is more than <code>10 * X</code>, the breaker triggers.</p><p>On triggering, the sender SHOULD cease transmission. It MAY first cut its rate by about a factor of ten, such as a video system dropping to audio only. If the breaker triggers again after the next <code>CB_INTERVAL</code> intervals, it MUST stop. When reports are sent round-robin across many sources, priority SHOULD go to reports on sources with high loss, which is an update to RFC 3550.</p>",
-      "plainLanguage": "<p>The sender asks what speed a well-behaved TCP download would reach on the same road. If the call is going more than ten times faster than that and losing packets, the fuse trips.</p>"
+      "title": "The Variables the Breakers Use",
+      "content": "<p>The definition of the RTP circuit breaker is specified in terms of a set of variables. Td is the deterministic RTCP reporting interval. Tdr is the sender's estimate of that interval, calculated by a receiver of the data it is sending; it is not known at the sender but can be estimated from the average RTCP packet size seen at the sender, the number of members reported in the receiver's SR/RR report blocks, and whether the receiver is sending SR or RR packets.</p><p>Tr is the network round-trip time, calculated by the sender and smoothed using an exponentially weighted moving average as Tr = (0.8 * Tr) + (0.2 * Tr_new), where Tr_new is the latest RTT estimate obtained from an RTCP report. The weight is chosen so old estimates decay over k intervals. Tf is the media framing interval at the sender: for applications sending at a constant frame rate it is the inter-frame interval; for applications that switch between a small set of possible frame rates it is the longest of the inter-frame intervals; for applications that dynamically vary their frame rate it is the largest inter-frame interval used in the last 10 seconds; and for applications that send less than one frame every 10 seconds, or that have no concept of periodic frames, it is the time interval since the previous frame.</p><p>G is the frame group size, the number of frames that are coded together based on a particular sending rate setting. If the codec can change its rate on each frame, G is 1; otherwise it is the number of frames before the codec can adjust to the new rate, and for codecs with a Group of Pictures it is likely the GOP length. T_rr_interval is the minimal interval between RTCP reports, and is only meaningful for the RTP/AVPF or RTP/SAVPF profiles.</p><p>X is the estimated throughput a TCP connection would achieve over a path, in bytes per second. s is the size of RTP packets being sent, in bytes; if the packets vary in size, the average size over the packets comprising the last 4 * G frames must be used. p is the loss event rate, between 0.0 and 1.0, that would be seen by a TCP connection over a particular path. t_RTO is the retransmission timeout value that would be used by a TCP connection over a path, and must be approximated using t_RTO = 4 * Tr when used as part of the RTP congestion circuit breaker. b is the number of packets acknowledged by a single TCP acknowledgement, and it is recommended that the value b = 1 is used. k is the non-reporting threshold used by the media timeout circuit breaker.</p>",
+      "plainLanguage": "<p>The breakers are written as formulas over a handful of measured quantities: how often the receiver reports, how long a round trip takes, how often a frame is sent, how many frames the codec sends at one rate, the packet size, and the measured loss. All of these can be derived from ordinary RTCP reports, which is the point: the breakers must work without any extra signalling.</p>"
     },
     {
       "id": "operation",
-      "number": "4.5",
-      "title": "Ceasing and Restarting Transmission",
-      "content": "<p>What it means to cease transmission depends on the application. It can mean stopping one RTP flow or several bundled flows on a particular 5-tuple of transport protocol, ports and IP addresses, until the network problem has dissipated. Halted flows SHOULD NOT restart automatically unless the sender has information that the congestion has cleared. Examples are a competing flow finishing or a mobile device moving to a new location. Ideally a human user decides whether to try again, which avoids automatic redial systems congesting the network.</p><p>If an implementation cannot tell whether a restart was human or scripted, it MUST rate limit restarts on the same 5-tuple so that the reaction lasts at least the triggering interval. The RFC also suggests that applications may show a user interface cue that problems are occurring before the breaker triggers.</p>",
-      "plainLanguage": "<p>Once the fuse trips, you do not flip it back on again and again. You wait until the problem is likely gone, and it is best if a person decides.</p>"
+      "number": "4.1",
+      "title": "Circuit Breaker One: RTCP Timeout",
+      "content": "<p>An RTCP timeout can occur when RTP data packets are being sent but no RTCP reports are returned from the receiver. This is either a failure of the receiver to send RTCP reports or a failure of the return path preventing those reports from being delivered. In either case, it is not safe to continue transmission, since the sender has no way of knowing whether it is causing congestion.</p><p>An RTP sender that has not received any RTCP SR or RR packets reporting on the SSRC it is using, for a time period of at least three times its deterministic RTCP reporting interval Td, where Td is calculated without the randomization factor and using the fixed minimum interval of Tmin = 5 seconds, SHOULD cease transmission. To reduce the risk of premature timeout, implementations SHOULD NOT configure the RTCP bandwidth such that Td is larger than 5 seconds. Implementations using the RTP/AVPF or RTP/SAVPF profiles SHOULD NOT configure T_rr_interval to values larger than 4 seconds.</p><p>The choice of three reporting intervals as the timeout is large enough that the other participants will have timed out the sender if a network problem stops its data packets from reaching the receivers, even allowing for the loss of some RTCP packets. If a sender is transmitting a large number of RTP media streams, such that the corresponding RTCP SR or RR packets are too large to fit into the network MTU, the receiver will generate them in a round-robin manner; in that case the sender SHOULD treat receipt of an RTCP SR or RR packet corresponding to any SSRC it sent on the same 5-tuple of source and destination IP address, port and protocol as an indication that the receiver and return path are working, thus preventing the RTCP timeout circuit breaker from triggering.</p>",
+      "plainLanguage": "<p>First breaker: the sender hears nothing back. If no report about its media has arrived for three reporting intervals, it should stop. The reason to wait three rather than one is that the other participants in the session will have given up on the sender by then, so the sender is not being unfairly penalised for an ordinary hiccup. The exception is a sender running many streams at once, where the receiver takes turns reporting on each; any report on the same address and port counts as proof the path works.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4.2",
+      "title": "Circuit Breaker Two: Media Timeout",
+      "content": "<p>If RTP data packets are being sent but the RTCP SR or RR packets reporting on that SSRC indicate a non-increasing extended highest sequence number received, this is an indication that those RTP data packets are not reaching the receiver. This could be a short-term issue affecting only a few RTP packets, perhaps caused by a slow-to-open firewall or a transient connectivity problem, but if the issue persists, it is a sign of a more ongoing and significant problem, a media timeout.</p><p>The time needed to declare a media timeout depends on the parameters Tdr, Tr, Tf and on the non-reporting threshold k. The value of k is chosen so that when Tdr is large compared with Tr and Tf, receipt of at least k RTCP reports with a non-increasing extended highest sequence number received gives reasonable assurance that the forward path has failed and that the RTP data packets have not been lost by chance. The recommended value for k is 5 reports.</p><p>When Tdr is less than Tf, RTP data packets are being sent at a rate of less than one per RTCP reporting interval, so the extended highest sequence number received can be expected to be non-increasing for some reporting intervals. Similarly, when Tdr is less than Tr, some reporting intervals might pass before the RTP data packets arrive at the receiver. Both issues require the media timeout interval to be scaled relative to the threshold k. The circuit breaker is therefore computed as MEDIA_TIMEOUT = ceil(k * max(Tf, Tr, Tdr) / Tdr).</p><p>When a sender receives an RTCP packet that indicates reception of the media it has been sending, it cancels the media timeout circuit breaker; if it is still sending, it must calculate a new value for MEDIA_TIMEOUT and set a new media timeout circuit breaker. If it receives an RTCP packet indicating that its media was not received, it must calculate a new value for MEDIA_TIMEOUT, and if the new value is larger than the previous, it replaces MEDIA_TIMEOUT with the new value, extending the breaker. If MEDIA_TIMEOUT consecutive RTCP packets are received indicating that the media being sent was not received, and the breaker has not been cancelled, then it triggers and the sender SHOULD cease transmission. When stopping sending an RTP stream, a sender MUST cancel the corresponding media timeout circuit breaker.</p>",
+      "plainLanguage": "<p>Second breaker: the receiver is reporting, but the sequence number it has received has stopped going up, so the media is not arriving. The sender waits for a number of consecutive such reports before giving up. How many depends on how fast it is sending compared with the reporting interval, which is why the formula scales the threshold by the ratio of the frame and round-trip times to the reporting interval. Five reports is the recommended threshold.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4.3",
+      "title": "Circuit Breaker Three: Congestion",
+      "content": "<p>If RTP data packets are being sent and the corresponding RTCP SR or RR packets show a non-zero packet loss fraction and an increasing extended highest sequence number received, then those RTP data packets are arriving at the receiver, but some degree of congestion is occurring. The RTP/AVP profile states that packet loss is acceptable if a TCP flow across the same network path and experiencing the same network conditions would achieve an average throughput, measured on a reasonable timescale, that is not less than the throughput the RTP flow is achieving. The comparison to TCP cannot be specified exactly, but is intended as an order-of-magnitude comparison in timescale and throughput.</p><p>To implement this, it is necessary to estimate the throughput a bulk TCP connection would achieve over the path. For a long-lived TCP Reno connection, the throughput X in bytes per second can be estimated with a formula involving the packet size s, the round-trip time Tr, the number of packets acknowledged per acknowledgement b, the loss event rate p and the retransmission timeout t_RTO. Under conditions of low packet loss the second term in the denominator is small, so the formula can be approximated as X = s / (Tr * sqrt(2*b*p/3)). It is recommended that this simplified throughput equation be used, since the reduction in accuracy is small and it is much simpler to calculate. The data shows that the full equation tends to be more sensitive to packet loss and triggers the circuit breaker earlier. Initial measurements in LTE networks have shown that the extra sensitivity is helpful there.</p><p>Report blocks in RTCP SR or RR packets contain the packet loss fraction rather than the loss event rate, so p cannot be reported, since TCP typically treats the loss of multiple packets within a single RTT as one loss event, while RTCP RR packets report the overall fraction of packets lost and do not report when the losses occurred. Using the loss fraction in place of the loss event rate can overestimate the loss, which is the more conservative choice for bursty loss.</p><p>When a sender that is transmitting at least one RTP packet every max(Tdr, Tr) seconds receives an RTCP SR or RR packet containing a report block for an SSRC it is using, the sender MUST record the value of the fraction lost field and the time since the last report block was received for that SSRC. If more than CB_INTERVAL report blocks have been received, the sender must calculate the average fraction lost over the last CB_INTERVAL reporting intervals and estimate the TCP throughput over the path. The estimate is then compared with the actual sending rate of the RTP stream: if the actual sending rate is more than 10 * X, the congestion circuit breaker is triggered.</p><p>The CB_INTERVAL parameter is set to ceil(3*min(max(10*G*Tf, 10*Tr, 3*Tdr), max(15, 3*Td))/(3*Tdr)). The parameters that feed into it give the congestion control algorithm time to react: they give at least three RTCP reports, ten round trip times, and ten groups of frames to adjust the rate and reduce the congestion to a reasonable level.</p><p>When the congestion circuit breaker is triggered, the sender SHOULD cease transmission. However, if the sender is able to reduce its sending rate by a factor of approximately ten, it MAY first reduce it by that factor to see if that resolves the congestion. If the sending rate is reduced in this way and the breaker triggers again after the next CB_INTERVAL reporting intervals, the sender MUST then cease transmission. An example would be a video conferencing system that backs off to sending audio only before completely dropping the call. If such a reduction resolves the congestion, the sender MAY gradually increase the rate after a reasonable amount of time, taking care not to cause the problem to recur.</p>",
+      "plainLanguage": "<p>Third breaker: the media is arriving, but so much of it is being lost that the sender is taking much more of the link than a TCP connection could. The sender estimates what TCP would achieve on the same path from the measured loss and round-trip time, and compares that with its own sending rate. If it is sending more than ten times the TCP rate, the breaker trips. The sender is allowed one chance to back off by a factor of ten first, which in practice means dropping from video to audio before giving up.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "4.4",
+      "title": "Circuit Breaker Four: Media Usability",
+      "content": "<p>Applications that use RTP are generally tolerant to some amount of packet loss. How much can be tolerated depends on the application, the media codec and the amount of error correction and packet loss concealment that is applied. There is an upper bound on the loss that can be corrected, beyond which the media becomes unusable. Similarly, many applications have an upper bound on the media capture to play-out latency that can be tolerated before the application becomes unusable. The latency bound depends on the application, but typical values range from the order of a few hundred milliseconds for voice telephony and interactive conferencing up to several seconds for some video-on-demand systems.</p><p>As a final circuit breaker, RTP senders SHOULD monitor the reported packet loss and delay to estimate whether the media is likely to be suitable for the intended purpose. If the packet loss rate and/or latency is such that the media has become unusable and has remained unusable for a significant time period, then the application SHOULD cease transmission. Similarly, receivers SHOULD monitor the quality of the media they receive, and if the quality is unusable for a significant time period, they SHOULD terminate the session. The memo intentionally does not define a bound on the packet loss rate or latency that will result in unusable media, as these are highly application dependent. The time period considered significant is also application dependent but is likely on the order of seconds, or tens of seconds.</p><p>Sending media that suffers from such high packet loss or latency that it is unusable at the receiver is both wasteful of resources and of no benefit to the user. It is also highly likely to be congesting the network and disrupting other applications, so the congestion circuit breaker will almost certainly trigger to stop flows where the media would be unusable. However, in pathological scenarios where the congestion circuit breaker does not stop the flow, it is desirable to prevent the application sending unnecessary traffic that might disrupt other uses of the network. The role of the media usability circuit breaker is to protect the network in such cases.</p><p>What it means to cease transmission depends on the application. It could mean stopping a single RTP flow or it could mean that multiple bundled RTP flows are stopped. The intention is that the application will stop sending RTP data packets on a particular 5-tuple until whatever network problem triggered the breaker has dissipated. Flows halted by the circuit breaker SHOULD NOT be restarted automatically unless the sender has received information that the congestion has dissipated or can reasonably be expected to have dissipated. Ideally a human user will be involved in the decision to try to restart the flow, which helps avoid problems with automatic redial systems congesting the network. Implementations that cannot tell whether a flow setup request came from a human or from a scripted component MUST rate limit attempts to restart a flow on the same 5-tuple, so that the reaction to a triggered breaker lasts for at least the triggering interval.</p>",
+      "plainLanguage": "<p>Fourth breaker: the call is still running, but nobody can hear or see anything useful, so keeping the packets flowing is pointless and probably harmful. The application decides when the media has become unusable, since that depends on the codec and the application. The RFC also says how to stop and when to start again. Restarting automatically is discouraged, because a dialler that keeps redialling a congested path makes the congestion worse. Implementations that cannot tell a human from a script must at least rate-limit the retries.</p>"
     },
     {
       "id": "interoperability",
       "number": "5",
-      "title": "Feedback Profiles, XR, ECN and Layers",
-      "content": "<p>With the RTP/AVPF and RTP/SAVPF profiles, reduced-size RTCP reports without an SR or RR MUST be ignored by the congestion breaker but MUST count as received packets for the RTCP timeout breaker. Reduced-size reports that do include an SR or RR are processed like regular reports, which can make the breaker trigger earlier. If <code>T_rr_interval</code> reduces regular reporting, <code>Tdr</code> in the interval formula is replaced by <code>max(T_rr_interval, Tdr)</code>.</p><p>RTCP Extended Report blocks do not change the algorithm, except that ECN Summary Reports are used. ECN does not affect the timeout breakers, and the RFC says there is no consensus yet on how ECN feedback should affect the congestion breaker.</p><p>The breaker works per RTP session. Within a session each SSRC is treated independently by default, but a sender MAY group streams, such as the layers of a layered codec, so one trigger applies to the group, letting enhancement layers stop first. Streams with different DSCP values SHOULD NOT be grouped.</p>",
-      "plainLanguage": "<p>Quick short notes are fine and do not trip the fuse. If a call sends several video qualities at once, they can share one fuse so the extra detail switches off first.</p>"
+      "title": "RTP/AVPF, Extended Reports and ECN",
+      "content": "<p>Use of the Extended RTP Profile for RTCP-based Feedback allows receivers to send early RTCP reports to inform the sender about particular events in the media stream, providing rapid feedback about the onset of congestion. The RTP/SAVPF profile is a secure variant of the RTP/AVPF profile that is treated the same in the context of the RTP circuit breaker. Since the transport-layer feedback reports that would suit a particular congestion control algorithm are not yet defined, and likely very specific to the details of that algorithm, they cannot be used as part of the generic RTP circuit breaker.</p><p>Reduced-size RTCP reports sent under the RTP/AVPF early feedback rules that do not contain an RTCP SR or RR packet MUST be ignored by the congestion circuit breaker, but MUST be counted as received packets for the RTCP timeout circuit breaker. Reduced-size reports that do contain an RTCP SR or RR packet MUST be processed by the congestion circuit breaker as if they were regular RTCP reports, which will potentially make the breaker trigger earlier.</p><p>RTCP Extended Report blocks provide additional reception quality metrics but do not change the RTCP timing rules. With the exception of the RTCP XR ECN Summary Reports, the presence of XR blocks in a compound RTCP packet does not affect the RTP circuit breaker algorithm; for consistency and ease of implementation, only the receiver report blocks contained in RTCP SR packets, RTCP RR packets, or RTCP XR ECN Summary Report packets are used.</p><p>The use of ECN for RTP flows does not affect the RTCP timeout circuit breaker or the media timeout circuit breaker, since these are both connectivity checks that simply determine whether any packets are being received. At the time of writing, there is no consensus on how the receipt of ECN feedback will impact the congestion circuit breaker, or indeed whether it ought to take ECN feedback into account, and a future replacement of the memo is expected to provide guidance. For the media usability circuit breaker, ECN-CE-marked packets arrive at the receiver and are decoded and rendered as normal, so their arrival ought not affect the usability of the media.</p><p>The RTP circuit breaker operates on a per-RTP session basis, and a sender participating in several RTP sessions must treat each session independently. An RTP sender can generate several media streams within a single session, each using a different SSRC, as happens with simulcast or layered media coding. By default each SSRC is treated independently, but the sender may group flows so that a trigger for one applies to the group as a whole. Media streams with different Differentiated Services Code Point values SHOULD NOT be considered as a group, since congestion could be experienced differently depending on the DSCP marking.</p>",
+      "plainLanguage": "<p>The breakers are written for the plain RTCP profile, but they still work when faster feedback is available. A quick report that carries no ordinary report block is ignored by the congestion breaker, though it still counts as proof of life for the timeout breaker. A quick report that does carry a report block is treated exactly like a regular one, which makes the congestion breaker trip earlier. Explicit congestion notification does not change the first two breakers, and the RFC leaves open how it should affect the third.</p>"
     },
     {
       "id": "security-considerations",
       "number": "9",
       "title": "Security Considerations",
-      "content": "<p>The security considerations of RFC 3550 apply, plus those of RFC 4585 and RFC 6679 when rapid feedback or ECN feedback is used. With unauthenticated RTCP, an on-path attacker can trivially forge reports showing high loss and trigger the breaker, disrupting the session. An off-path attacker must guess the random SSRC and sequence number. Authenticating RTCP avoids the attack; options are discussed in RFC 7201.</p><p>A very long RTCP reporting interval, many minutes, can effectively disable the circuit breaker, so implementations are expected to cap the reporting interval they negotiate.</p>",
-      "plainLanguage": "<p>A trickster could send fake report cards to trip the fuse. Signing the report cards stops that.</p>"
+      "content": "<p>The security considerations of the RTP specification apply. If the RTP/AVPF profile is used to provide rapid RTCP feedback, the security considerations of that profile apply. If ECN feedback for RTP over UDP/IP is used, the security considerations of the ECN feedback specification apply.</p><p>If non-authenticated RTCP reports are used, an on-path attacker can trivially generate fake RTCP packets that indicate high packet loss rates and thus cause the circuit breaker to trigger and disrupt an RTP session. This is somewhat more difficult for an off-path attacker, due to the need to guess the randomly chosen RTP SSRC value and the RTP sequence number. The attack can be avoided if RTCP packets are authenticated.</p>",
+      "plainLanguage": "<p>The obvious attack is to forge a report. An attacker on the path can send a fake report claiming heavy loss and the sender will stop, ending the call. Someone off the path has a harder time, because they would have to guess the session identifier and the packet sequence number. Authenticating the reports removes the problem entirely.</p>"
     }
   ],
   "viz": [
     {
-      "type": "compare-table",
-      "anchor": "design",
+      "type": "key-grid",
+      "anchor": "motivation",
       "position": "after",
-      "caption": "THE FOUR RTP/AVP CIRCUIT BREAKERS",
+      "caption": "The four circuit breakers, and what each one watches for",
       "data": {
-        "columns": [
-          "Breaker",
-          "Condition",
-          "Sender action"
-        ],
-        "rows": [
+        "items": [
           {
-            "cells": [
-              "#1 RTCP timeout",
-              "No SR or RR received for at least 3 times Td",
-              "SHOULD cease transmission"
-            ]
+            "title": "1. RTCP timeout",
+            "text": "No report about the sender's media for three reporting intervals. The path back, or the receiver, has gone quiet."
           },
           {
-            "cells": [
-              "#2 Media timeout",
-              "MEDIA_TIMEOUT consecutive reports with non-increasing highest sequence number",
-              "SHOULD cease transmission"
-            ]
+            "title": "2. Media timeout",
+            "text": "Reports arrive but the highest sequence number received stops increasing. The media is not arriving."
           },
           {
-            "cells": [
-              "#3 Congestion",
-              "Sending rate more than 10 * X over CB_INTERVAL reports",
-              "SHOULD cease; MAY first cut the rate about tenfold"
-            ],
-            "self": true
+            "title": "3. Congestion",
+            "text": "The sending rate is more than ten times what a TCP connection would achieve on the same path."
           },
           {
-            "cells": [
-              "#4 Media usability",
-              "Loss or latency leaves media unusable for a significant time",
-              "SHOULD cease transmission"
-            ]
+            "title": "4. Media usability",
+            "text": "The loss or the delay has made the media useless to the application, so sending it helps nobody."
           }
         ]
       }
     },
     {
-      "type": "code",
-      "anchor": "algorithms",
+      "type": "sequence",
+      "anchor": "operation",
       "position": "after",
-      "caption": "KEY FORMULAS FROM SECTIONS 4.2 AND 4.3",
+      "caption": "Illustrative, not from the RFC: the feedback loop the breakers ride on",
       "data": {
-        "title": "Timeout and throughput formulas",
-        "lang": "text",
-        "code": "MEDIA_TIMEOUT = ceil(k * max(Tf, Tr, Tdr) / Tdr)\n\nSimplified TCP throughput (bytes per second):\n  X = s / (Tr * sqrt(2*b*p/3))\n\nCongestion breaker triggers when:\n  sending rate > 10 * X"
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "RTP sender"
+          },
+          {
+            "key": "receiver",
+            "label": "Receiver"
+          },
+          {
+            "key": "network",
+            "label": "The path"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "RTP media packets",
+            "color": "blue",
+            "note": "The flow under test."
+          },
+          {
+            "from": "network",
+            "to": "network",
+            "label": "Loss and queueing",
+            "color": "neutral",
+            "note": "Where congestion shows up as delay and dropped packets."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "RTCP SR or RR",
+            "color": "green",
+            "note": "Reports loss fraction, highest sequence number received, jitter and round-trip time."
+          },
+          {
+            "from": "sender",
+            "to": "sender",
+            "label": "Evaluate the breakers",
+            "color": "neutral",
+            "note": "The sender compares the reports against the four thresholds and stops if one trips."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "The two ways to estimate what TCP would achieve on the path",
+      "data": {
+        "columns": [
+          "Estimate",
+          "Formula",
+          "Trade-off"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Simplified (recommended)",
+              "X = s / (Tr * sqrt(2*b*p/3))",
+              "Much simpler to calculate, and the loss of accuracy is small."
+            ]
+          },
+          {
+            "cells": [
+              "Full",
+              "s / (Tr*sqrt(2*b*p/3) + (t_RTO * (3*sqrt(3*b*p/8) * p * (1+32*p*p))))",
+              "More sensitive to packet loss, so it trips the breaker earlier. Measurements in LTE networks found that helpful."
+            ]
+          }
+        ]
       }
     }
   ],
   "references": [
     {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
       "number": "[RFC3550]",
-      "text": "Schulzrinne, H., et al., \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
       "rfc": 3550
     },
     {
       "number": "[RFC3551]",
-      "text": "Schulzrinne, H. and S. Casner, \"RTP Profile for Audio and Video Conferences with Minimal Control\", STD 65, RFC 3551, July 2003.",
+      "text": "Schulzrinne, H. and D. McGREEvy, \"RTP Profile for the Audio/Video Transport and Control Protocol (RTP/AVP)\", RFC 3551, July 2003.",
       "rfc": 3551
     },
     {
+      "number": "[RFC3168]",
+      "text": "Ramakrishnan, K., et al., \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
+      "rfc": 3168
+    },
+    {
       "number": "[RFC4585]",
-      "text": "Ott, J., et al., \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
+      "text": "Schulzrinne, H., et al., \"Extended RTP Profile for RTCP-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
       "rfc": 4585
     },
     {
       "number": "[RFC5124]",
-      "text": "Ott, J. and E. Carrara, \"Extended Secure RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/SAVPF)\", RFC 5124, February 2008.",
+      "text": "Schulzrinne, H. and S. McGuire, \"Secure Real-time Transport Protocol (SRTP) Profile for RTCP-based Feedback (RTP/SAVPF)\", RFC 5124, February 2010.",
       "rfc": 5124
     },
     {
       "number": "[RFC5348]",
-      "text": "Floyd, S., et al., \"TCP Friendly Rate Control (TFRC): Protocol Specification\", RFC 5348, September 2008.",
+      "text": "Floyd, M., et al., \"TCP Friendly Rate Control (TFRC): Protocol Specification\", RFC 5348, September 2008.",
       "rfc": 5348
     },
     {
       "number": "[RFC6679]",
-      "text": "Westerlund, M., et al., \"Explicit Congestion Notification (ECN) for RTP over UDP\", RFC 6679, August 2012.",
+      "text": "Xia, F., et al., \"An Implementation of the Explicit Congestion Notification (ECN) Protocol for the RTP Transport Protocol\", RFC 6679, July 2012.",
       "rfc": 6679
     },
     {
       "number": "[RFC8084]",
-      "text": "Fairhurst, G., \"Network Transport Circuit Breakers\", BCP 208, RFC 8084, March 2017.",
+      "text": "Perkins, C. and V. Singh, \"Network Transport Circuit Breakers\", RFC 8084, March 2017.",
       "rfc": 8084
-    },
-    {
-      "number": "[RFC8108]",
-      "text": "Lennox, J., et al., \"Sending Multiple RTP Streams in a Single RTP Session\", RFC 8108, March 2017.",
-      "rfc": 8108
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

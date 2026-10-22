@@ -264,4 +264,27 @@ describe('validate', () => {
     expect(validateOutput(768, [], env)[0]).toContain('one JSON object');
     fs.rmSync(`${fx.paths.outDir}/768.json`);
   });
+
+  test('the retired ELI5 framing is rejected, in plain-language text and in the prose beside it', () => {
+    has(
+      errorsFor((o) => (o.plainLanguage.summary = '<p>ELI5: UDP is a little mailbox.</p>')),
+      'retired ELI5 framing',
+    );
+    has(
+      errorsFor((o) => (o.sections[0].plainLanguage = "<p>Think of it like I'm 5: a mailbox for messages.</p>")),
+      "retired Like I'm 5 framing",
+    );
+    has(
+      errorsFor((o) => (o.sections[0].plainLanguage = '<p>Written for a 10-year-old: a mailbox for messages.</p>')),
+      'retired 10-year-old framing',
+    );
+    has(
+      errorsFor((o) => (o.summary = '<p>ELI5 says UDP is a little mailbox.</p>')),
+      'retired ELI5 framing',
+    );
+  });
+
+  test('a citation may quote the old framing; the reader-facing text may not', () => {
+    expect(errorsFor((o) => (o.references[0].text = 'A note titled "ELI5" explains UDP for beginners, IETF, 1980.'))).toEqual([]);
+  });
 });

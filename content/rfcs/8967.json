@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes a cryptographic authentication mechanism for the Babel routing protocol, using message authentication codes, with provisions to avoid replayed messages. It obsoletes RFC 7298.</p>",
   "plainLanguage": {
-    "summary": "<p>A secret handshake stamped onto each routing message, so routers can ignore messages from impostors and old recorded ones.</p>"
+    "summary": "<p>RFC 8967 adds message authentication to Babel routing packets so a router can reject forged routing information. Packet counters and fresh indices help detect replay, and a nonce challenge checks a peer after its counter state is lost; the mechanism uses shared keys and does not encrypt traffic.</p>"
   },
   "questions": [
     "how to authenticate babel messages",
@@ -17,43 +17,31 @@
   ],
   "tags": [
     "Routing",
-    "Authentication",
-    "Babel"
+    "Security",
+    "Authentication"
   ],
-  "subtitle": "A way to stamp every Babel routing packet with a keyed checksum and defeat replays, for both unicast and multicast traffic.",
+  "subtitle": "Authenticates Babel routing packets and uses counters and challenges to limit replay.",
   "tldr": {
-    "problem": "By default Babel trusts every UDP datagram it receives, so an attacker can spoof routes, send malformed packets or replay captured ones to redirect traffic.",
-    "mechanism": "Each packet carries a message authentication code per configured key, plus a packet counter tagged with an index. A node that cannot tell whether a packet is fresh sends a challenge containing a nonce, and the neighbour proves freshness by echoing it in an authenticated reply.",
-    "outcome": "Spoofing is ruled out and replay is limited, with no synchronised clocks or persistent storage needed. RFC 8967 obsoletes RFC 7298 and has been updated by RFC 9467.",
-    "outcomeLabel": "Why it matters"
+    "problem": "Without authentication, a Babel router may accept forged or replayed packets that change routes or disrupt the network.",
+    "mechanism": "Routers append keyed message authentication codes and a packet counter with a fresh index; a challenge and reply verify a peer when its counter state is unknown or reset.",
+    "outcome": "The mechanism supports shared-key authentication, replay protection, incremental deployment, and key rotation, but not confidentiality or asymmetric keys. RFC 8967 obsoletes RFC 7298 and is updated by RFC 9467.",
+    "outcomeLabel": "The trade-off"
   },
   "facts": [
     {
-      "label": "Packet counter",
+      "label": "Packet counter size",
       "value": "32 bits"
     },
     {
-      "label": "Index length",
-      "value": "0 to 32 octets"
+      "label": "Maximum index size",
+      "value": "32 octets"
     },
     {
-      "label": "Nonce length",
-      "value": "0 to 192 octets"
-    },
-    {
-      "label": "TLV types",
-      "value": "16 MAC, 17 PC, 18 Challenge Request, 19 Challenge Reply"
-    },
-    {
-      "label": "Challenge expiry timer",
+      "label": "Challenge lifetime",
       "value": "30 seconds"
-    },
-    {
-      "label": "Default challenge rate limit",
-      "value": "One per 300 ms"
     }
   ],
-  "today": "<p>RFC 8967 is a Proposed Standard that obsoletes <a href='/rfc7298'>RFC 7298</a>, and it has been updated by <a href='/rfc9467'>RFC 9467</a>.</p>",
+  "today": "<p>RFC 8967 is a Proposed Standard that obsoletes <a href='/rfc7298'>RFC 7298</a> and is updated by <a href='/rfc9467'>RFC 9467</a>.</p>",
   "glossary": [
     "tlv",
     "hmac",
@@ -69,161 +57,48 @@
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem and the Approach",
-      "content": "<p>By default the Babel routing protocol (RFC 8966) trusts every UDP datagram it receives on the Babel port. An attacker could spoof a packet that announces a route with a smaller metric, a larger sequence number or a longer prefix, send a malformed packet to crash a fragile implementation, or replay a captured packet.</p><p>Babel uses both unicast and multicast, which makes it hard to protect. Babel over DTLS (RFC 8968) sends everything significant by unicast and uses a standard unicast security protocol. RFC 8967 takes the opposite approach: a cryptographic extension that protects both unicast and multicast and needs very few changes to the core protocol. It obsoletes RFC 7298.</p><p>The protocol assumes all interfaces on a link are equally trusted and share a small set of symmetric keys, usually one, or two during key rotation. It is not suited to asymmetric keying, partial trust or many keys on one link.</p>",
-      "plainLanguage": "<p>Right now a router believes any note it gets. This RFC makes every note carry a secret stamp, so fake notes can be thrown away.</p>"
+      "title": "Authenticating Babel Packets",
+      "content": "<p>Babel normally trusts the information in received packets. An attacker could forge a route, send a malformed packet, or replay an older packet to redirect traffic or disrupt routing.</p><p>This extension adds cryptographic authentication to Babel packets for both unicast and multicast communication. It assumes that interfaces on the same link share a small set of symmetric keys and are equally trusted.</p>",
+      "plainLanguage": "<p>Without packet authentication, a router cannot tell whether a routing update came from an authorized neighbor. This extension lets neighbors check that packets were created by someone who knows a shared key.</p>"
     },
     {
-      "id": "overview",
-      "number": "2",
-      "title": "Packet Counters, Indices and Challenges",
-      "content": "<p>A sender computes one MAC per key and appends them to the packet. A receiver recomputes the MACs and discards the packet if none match.</p><p>To stop replay, the sender keeps a per-interface 32-bit <strong>packet counter</strong> (PC), puts it inside the protected region and raises it by at least one for each packet. A receiver drops a packet unless its PC is strictly greater than the last one from that neighbour.</p><p>A receiver with no state about a neighbour cannot tell a fresh packet from a replay. It discards the packet and sends a <strong>Challenge Request</strong> with a never-used <strong>nonce</strong>. The neighbour answers with a <strong>Challenge Reply</strong> copying the nonce, in a MAC-protected packet with its current PC.</p><p>Because a node may reset its PC, every PC is tagged with an <strong>index</strong>, an arbitrary string of octets. After a reset, or if unsure, the node picks a never-used index. When a receiver sees the index change, it challenges again.</p>",
-      "plainLanguage": "<p>Each message is numbered, and a router only accepts numbers higher than the last one. If a router has forgotten who you are, it asks a question nobody could have answered before, and your correct answer proves you are really you.</p>"
-    },
-    {
-      "id": "operation",
-      "number": "3",
-      "title": "Sending and Receiving",
-      "content": "<p>Before sending, a node appends one PC TLV to the packet body (never more than one), increments the PC by a strictly positive amount, and generates a fresh index if the PC overflows. For each configured key it appends a MAC TLV in the packet trailer.</p><p>On receipt, the node checks for at least one MAC TLV and computes the MAC once per configured key, not once per MAC TLV. If no MAC matches the packet is silently dropped. To resist memory exhaustion, no neighbour table entry is created before the MAC test passes.</p><p>The body is then parsed in a \"preparse\" pass that looks only at PC, Challenge Request and Challenge Reply TLVs. A packet with a successful Challenge Reply is accepted and its PC and index stored. Otherwise, a missing or different index triggers a challenge and the packet is dropped. With a matching index, a PC less than or equal to the stored one is dropped without a challenge, since reordering can be harmless; a greater PC is accepted.</p>",
-      "plainLanguage": "<p>The receiver checks the stamp first, then checks the number. A wrong stamp is ignored, an old number is ignored, and a stranger is asked a question.</p>"
-    },
-    {
-      "id": "parameters",
-      "number": "4",
-      "title": "Challenge Handling and Timers",
-      "content": "<p>When a node sends a challenge it picks a nonce never used with any currently configured key, stores it in the neighbour entry, starts a 30 second challenge expiry timer and sends the request to the neighbour's unicast address. Packets from that neighbour are ignored until the challenge completes.</p><p>Challenge Requests and Replies must be rate limited. The limit <strong>SHOULD</strong> default to one Challenge Request every 300 ms, and one Challenge Reply per peer every 300 ms. A challenge sent to a multicast address <strong>MUST</strong> be silently ignored.</p><p>A reply succeeds only if a challenge is in progress and the nonce matches in length and content. A node must discard a neighbour's (Index, PC) pair within a finite time after the last accepted packet. If a timer is used, it <strong>SHOULD</strong> default to 5 minutes.</p>",
-      "plainLanguage": "<p>The router waits 30 seconds for an answer, and it will not ask the same question over and over too quickly.</p>"
-    },
-    {
-      "id": "migration",
-      "number": "5",
-      "title": "Incremental Deployment and Key Rotation",
-      "content": "<p>To deploy gradually, first configure every node to send authenticated packets without checking them on reception. Once all nodes send authenticated packets, reconfigure them to reject unauthenticated ones.</p><p>To rotate keys, add the new key to all nodes. Both keys are then sent in every packet and a packet is accepted if either key checks out. After that the old key is removed. Implementations <strong>SHOULD</strong> support these modes and let the set of keys change without a restart.</p>",
-      "plainLanguage": "<p>First everyone starts wearing a badge, and only later does the door guard start checking badges. Changing badges works the same way, with both old and new accepted for a while.</p>"
+      "id": "cryptography",
+      "number": "4.1",
+      "title": "Computing the Message Authentication Code",
+      "content": "<p>A sender calculates a Message Authentication Code (MAC) over a pseudo-header and the Babel packet, then adds the result as a MAC TLV in the packet trailer. The pseudo-header includes source and destination IP addresses and UDP ports.</p><p>HMAC-SHA256 is required for implementation. Keyed BLAKE2s with 128-bit digests is recommended, and a receiver accepts a packet only if a computed MAC matches one carried in the packet.</p>",
+      "plainLanguage": "<p>The MAC is a keyed check over the packet and its network addresses. A receiver computes the check with its shared key and discards a packet if none of the checks match.</p>"
     },
     {
       "id": "packet-format",
-      "number": "6",
-      "title": "The Four New TLVs",
-      "content": "<p>The protocol adds four TLVs. The <strong>MAC TLV</strong> (type 16) goes in the packet trailer and is ignored if found in the body. The <strong>PC TLV</strong> (type 17) holds a 32-bit PC followed by an index of 0 to 32 octets. The <strong>Challenge Request</strong> (type 18) and <strong>Challenge Reply</strong> (type 19) hold a nonce of 0 to 192 octets.</p><p>For MAC computation, the node builds a pseudo-header holding the source and destination IP addresses and UDP ports, concatenates it with the Babel packet from the header up to the packet trailer, and computes the MAC. Every implementation <strong>MUST</strong> implement HMAC-SHA256, <strong>SHOULD</strong> implement keyed BLAKE2s with 128-bit digests, and <strong>MAY</strong> implement others.</p>",
-      "plainLanguage": "<p>There are four new kinds of note: the stamp, the number, the question and the answer.</p>"
+      "number": "4.2",
+      "title": "Counters and Fresh Indices",
+      "content": "<p>Each authenticated packet includes a Packet Counter (PC) and an Index in a PC TLV. The sender increases the counter for each packet; if it overflows or may have reset, the sender chooses a fresh index.</p><p>A receiver accepts packets only when their counter is greater than the last accepted counter for the same index. If the index is new or unknown, the receiver does not accept ordinary packets until the sender proves freshness through a challenge exchange.</p>",
+      "plainLanguage": "<p>The counter lets a receiver reject packets it has already seen or that arrived out of order. A new index signals that counter history may have changed, so the receiver asks the sender to prove it is live.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4.3.1",
+      "title": "Challenge and Reply",
+      "content": "<p>The receiver sends a Challenge Request containing a nonce that it has not used before. A peer that knows the shared key returns the same nonce in a MAC-protected Challenge Reply with its current packet counter.</p><p>The receiver accepts that reply only when its nonce matches an unexpired challenge. Challenges and replies are rate-limited to reduce the work an attacker can trigger with replayed packets.</p>",
+      "plainLanguage": "<p>A random challenge asks the peer to prove it can answer now, not just replay an old packet. The peer echoes the challenge in an authenticated reply, allowing the receiver to trust its fresh counter value.</p>"
     },
     {
       "id": "security-considerations",
       "number": "7",
-      "title": "Security Considerations",
-      "content": "<p>The protocol provides authentication only, not confidentiality, and supports only symmetric keys, in small numbers per link. It depends on the MAC being unforgeable and on indices and nonces being unique over the lifetime of a key. 64-bit values are believed large enough, and if uniqueness cannot be guaranteed rekeying is necessary.</p><p>Per-neighbour state must expire, or an attacker could delay an authentic packet indefinitely. Keys should ideally be 32 octets and chosen randomly; a human passphrase should go through a key derivation function such as PBKDF2, bcrypt or scrypt.</p><p>A packet with no correct MAC creates no state. A replayed packet with a correct MAC causes a challenge, which rate limiting bounds. The state an attacker can force is limited by the number of source addresses used with one key.</p>",
-      "plainLanguage": "<p>The stamp proves who sent a note but does not hide what it says. Keep the stamp secret long and random so nobody can guess it.</p>"
+      "title": "Scope and Key Management",
+      "content": "<p>This mechanism provides authentication and replay defenses, but not confidentiality or asymmetric keying. The security properties depend on a MAC that resists forgery and on indices and nonces never being reused with the relevant keys.</p><p>Keys should be difficult to guess, and implementations must expire per-neighbor counter state within a finite time. The protocol supports staged deployment by first accepting unauthenticated packets while sending authenticated ones, and supports key rotation by temporarily using both keys.</p>",
+      "plainLanguage": "<p>The protocol checks who sent a packet but does not hide its contents. Secure operation also depends on strong shared keys and never reusing the values that identify counters and challenges.</p>"
     }
   ],
-  "viz": [
-    {
-      "type": "sequence",
-      "anchor": "overview",
-      "position": "after",
-      "caption": "CHALLENGE EXCHANGE AS DESCRIBED IN RFC 8967 (SIMPLIFIED)",
-      "data": {
-        "lanes": [
-          {
-            "key": "a",
-            "label": "Node A (receiver)"
-          },
-          {
-            "key": "b",
-            "label": "Node B (sender)"
-          }
-        ],
-        "messages": [
-          {
-            "from": "b",
-            "to": "a",
-            "label": "Packet with PC and Index",
-            "color": "neutral",
-            "note": "A has no state for B, so it drops the packet."
-          },
-          {
-            "from": "a",
-            "to": "b",
-            "label": "Challenge Request (nonce)",
-            "color": "blue",
-            "note": "Sent to B's unicast address."
-          },
-          {
-            "from": "b",
-            "to": "a",
-            "label": "Challenge Reply (same nonce)",
-            "color": "green",
-            "note": "In a MAC-protected packet with B's PC."
-          }
-        ]
-      }
-    },
-    {
-      "type": "opcodes",
-      "anchor": "packet-format",
-      "position": "after",
-      "caption": "BABEL TLV TYPES ADDED BY RFC 8967",
-      "data": {
-        "items": [
-          {
-            "code": "16",
-            "label": "MAC",
-            "desc": "MAC of the packet; allowed in the packet trailer."
-          },
-          {
-            "code": "17",
-            "label": "PC",
-            "desc": "32-bit packet counter plus an index of 0 to 32 octets."
-          },
-          {
-            "code": "18",
-            "label": "Challenge Request",
-            "desc": "Carries a nonce of 0 to 192 octets.",
-            "highlight": true
-          },
-          {
-            "code": "19",
-            "label": "Challenge Reply",
-            "desc": "Copies the nonce from the request."
-          }
-        ]
-      }
-    }
-  ],
-  "references": [
-    {
-      "number": "[RFC8966]",
-      "text": "Chroboczek, J. and D. Schinazi, \"The Babel Routing Protocol\", RFC 8966, January 2021.",
-      "rfc": 8966
-    },
-    {
-      "number": "[RFC7298]",
-      "text": "Ovsienko, D., \"Babel Hashed Message Authentication Code Cryptographic Authentication\", RFC 7298, July 2014.",
-      "rfc": 7298
-    },
-    {
-      "number": "[RFC8968]",
-      "text": "Decimo, A., Schinazi, D., and J. Chroboczek, \"Babel Routing Protocol over Datagram Transport Layer Security\", RFC 8968, January 2021.",
-      "rfc": 8968
-    },
-    {
-      "number": "[RFC2104]",
-      "text": "Krawczyk, H., Bellare, M., and R. Canetti, \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104, February 1997.",
-      "rfc": 2104
-    },
-    {
-      "number": "[RFC7693]",
-      "text": "Saarinen, M-J., Ed. and J-P. Aumasson, \"The BLAKE2 Cryptographic Hash and Message Authentication Code (MAC)\", RFC 7693, November 2015.",
-      "rfc": 7693
-    }
-  ],
+  "viz": [],
+  "references": [],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-19"
 }

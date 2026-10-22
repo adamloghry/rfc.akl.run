@@ -224,6 +224,13 @@ describe('TOC scrollspy', () => {
     dispose = init();
     const observer = io.instances[0];
     expect(observer?.targets.map((t) => t.id)).toEqual([
+      // the RFC text tab first (its own table of contents), then the explainer's sections
+      'section-status-of-this-memo',
+      'section-i',
+      'section-ii',
+      'section-iii',
+      'section-iv',
+      'appendix-a',
       'introduction',
       'motivation',
       'design',

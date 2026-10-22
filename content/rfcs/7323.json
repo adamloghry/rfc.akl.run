@@ -17,7 +17,7 @@
   "obsoletes": "RFC 1323",
   "summary": "<p>This document specifies TCP extensions for paths with large bandwidth-delay products and very fast links. It defines the Window Scale option, which allows much larger receive windows, and the Timestamps option, used for round-trip time measurement and for protecting against old, delayed segments. It revises RFC 1323.</p>",
   "plainLanguage": {
-    "summary": "<p>Sending data far away is like filling a long pipe, and you need to keep lots of water in it at once. This RFC lets computers announce a much bigger bucket and stamp each message with a clock.</p>"
+    "summary": "<p>TCP was written for slow, unreliable lines, and two of its limits show on fast modern links: the window that says how much data the sender may send is too small, and the numbering of bytes can cycle round while old packets are still in flight. RFC 7323 adds two options that fix both without breaking anything that came before.</p>"
   },
   "questions": [
     "tcp window scale option",
@@ -50,7 +50,7 @@
     },
     {
       "label": "Maximum shift count",
-      "value": "14 (window up to 1 GiB)"
+      "value": "14, allowing a window of 1 GiB"
     },
     {
       "label": "Unscaled window limit",
@@ -61,11 +61,11 @@
       "value": "1 ms to 1 sec per tick"
     },
     {
-      "label": "Idle limit for TS.Recent",
+      "label": "Idle limit for the saved timestamp",
       "value": "24 days"
     }
   ],
-  "today": "<p>RFC 7323 is a Proposed Standard that obsoletes <a href='/rfc1323'>RFC 1323</a>. The unit metadata lists no RFC that obsoletes or updates it, so it is the current definition of the Window Scale and Timestamps options.</p>",
+  "today": "<p>RFC 7323 is a Proposed Standard published in September 2014 that obsoletes <a href='/rfc1323'>RFC 1323</a>, and no later RFC is recorded as obsoleting or updating it. It recommends that a modern TCP stack implement and make use of these extensions.</p>",
   "glossary": [
     "tcp",
     "receive-window",
@@ -76,57 +76,66 @@
     "path-mtu-discovery",
     "paws",
     "bandwidth-delay-product",
-    "round-trip-time"
+    "round-trip-time",
+    "congestion-window",
+    "long-fat-network"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Two Problems on Fast, Long Paths",
-      "content": "<p>TCP was designed to work over almost any transmission medium, but the fastest paths are now well beyond what it was first engineered for. <strong>RFC 7323</strong> defines a set of modest extensions that widen the range where TCP works well. It updates and obsoletes <a href='/rfc1323'>RFC 1323</a>, and the RFC recommends that a modern TCP stack implements and uses the extensions.</p><p>The RFC names two core problems on paths with a large bandwidth * delay product, which it calls a <strong>long, fat network</strong> (LFN). First, the TCP header reports the receive window in a 16-bit field, so the largest window is 2^16, or 64 KiB. When the bandwidth * delay product exceeds that, the window limits throughput. Second, the 32-bit sequence number can wrap within the time a segment lingers in queues, so an old duplicate could be accepted as valid data. Wrap-around can happen once at least 4 GiB are sent in one session.</p><p>Both fixes are TCP options. Loss recovery on LFNs is a third issue, but the RFC leaves it to the Selective Acknowledgment documents and does not discuss it further.</p>",
-      "plainLanguage": "<p>Imagine a very long hose. A tiny bucket at the end means the hose is never full, and old water that got stuck could slosh out later and be mistaken for new water. This RFC fixes both.</p>"
+      "title": "Introduction",
+      "content": "<p>The TCP protocol was designed to operate reliably over almost any transmission medium regardless of transmission rate, delay, corruption, duplication or reordering of segments. Over the years, advances in networking technology have resulted in ever-higher transmission speeds, and the fastest paths are well beyond the domain for which TCP was originally engineered.</p><p>This document defines a set of modest extensions to TCP that extend the domain of its application to match the increasing network capability. It is an update to and obsoletes RFC 1323, which in turn is based upon and obsoletes RFC 1072 and RFC 1185. The changes between RFC 1323 and this document are detailed in an appendix, and are partly due to errata in RFC 1323 and partly due to a better understanding of how the involved components interact.</p><p>For brevity, the full discussions of the merits and history behind the TCP options defined within this document have been omitted, and RFC 1323 should be consulted for reference. It is recommended that a modern TCP stack implement and make use of the extensions described in this document.</p>",
+      "plainLanguage": "<p>This is a cleaned-up version of an older RFC, with the same two ideas but clearer rules and a fix for how the key is prepared.</p>"
+    },
+    {
+      "id": "motivation",
+      "number": "1.1",
+      "title": "The Performance Problem",
+      "content": "<p>TCP performance problems arise when the bandwidth times delay product is large. A network having such paths is referred to as a long, fat network. There are two fundamental performance problems with basic TCP over such paths.</p><p>The first is the window size limit. The TCP header uses a 16-bit field to report the receive window size to the sender, so the largest window that can be used is 2^16, or 64 KiB. For paths where the bandwidth times delay product exceeds 64 KiB, the receive window limits the maximum throughput of the connection, that is, the amount of unacknowledged data TCP can send in order to keep the pipeline full. To circumvent this, the Window Scale option defines an implicit scale factor, which multiplies the window size value found in the TCP header to obtain the true window size. The use of large receive windows increases the chance of too quickly wrapping sequence numbers.</p><p>The second problem is recovery from losses. Packet losses in a long, fat network can have a catastrophic effect on throughput. To generalize the Fast Retransmit and Fast Recovery mechanism to handle multiple packets dropped per window, Selective Acknowledgments are required. Unlike the normal cumulative acknowledgments of TCP, Selective Acknowledgments give the sender a complete picture of which segments are queued at the receiver and which have not yet arrived. Those are specified in separate documents and are not discussed further here.</p>",
+      "plainLanguage": "<p>A long, fat path is one where the link is fast and the distance is long. Two things break on such a path: the amount of data TCP is allowed to have in flight, and what happens when a packet is lost.</p>"
     },
     {
       "id": "options",
       "number": "2",
       "title": "The Window Scale Option",
-      "content": "<p>The <strong>Window Scale</strong> option (kind 3, length 3 bytes) expands the TCP window to 30 bits. It does this by carrying a shift count, <code>shift.cnt</code>, that tells the peer how many bits to shift the 16-bit window field. A sender right-shifts its true receive window by that count before putting it in the header, and the receiver left-shifts the field it reads.</p><p>The option is only sent in <code>SYN</code> segments, so the scale is fixed in each direction when the connection opens. It is an offer, not a promise: both sides MUST send the option in their <code>SYN</code> segments to enable scaling in either direction. A reply in the <code>SYN,ACK</code> may only be sent if the option arrived in the initial <code>SYN</code>. The window field of a <code>SYN</code> segment itself MUST NOT be scaled, and the option in a non-<code>SYN</code> segment MUST be ignored.</p><p>The shift count MUST be limited to 14, which allows a maximum window of 1 GiB (2^30). If a larger value is received, the TCP SHOULD log the error but MUST use 14. The limit keeps the sender's and receiver's windows from being confused as old or new data.</p><p>Because scaling works in coarse steps, a receiver can end up advertising a window that appears to shrink. Implementations MUST handle a shrinking window as <a href='/rfc1122'>RFC 1122</a> specifies. The receiver MUST honor any segment that would have been in window for any acknowledgment it sent, and a sender may retransmit out-of-window data under limited conditions.</p>",
-      "plainLanguage": "<p>Instead of counting in ones, the two computers agree to count in big steps, like counting by 1,000s. That way a small number on the label can stand for a very big bucket.</p>"
+      "content": "<p>The window scale extension expands the definition of the TCP window to 30 bits and then uses an implicit scale factor to carry this 30-bit value in the 16-bit window field of the TCP header. The exponent of the scale factor is carried in a TCP option, Window Scale. This option is sent only in a SYN segment, so the window scale is fixed in each direction when a connection is opened. The maximum receive window, and therefore the scale factor, is determined by the maximum receive buffer space, which in a typical modern implementation is set by default but can be overridden by a user program before a TCP connection is opened.</p><p>The three-byte Window Scale option may be sent in a SYN segment. It has two purposes: to indicate that the TCP is prepared to both send and receive window scaling, and to communicate the exponent of a scale factor to be applied to its receive window. A TCP that is prepared to scale windows should send the option even if its own scale factor is 1 and the exponent is 0. The scale factor is limited to a power of two and encoded logarithmically, so it may be implemented by binary shift operations, and the maximum scale exponent is limited to 14 for a maximum permissible receive window size of 1 GiB, which is 2 to the power of 30.</p><p>This option is an offer, not a promise: both sides must send Window Scale options in their SYN segments to enable window scaling in either direction. If window scaling is enabled, the TCP that sent the option right-shifts its true receive window values by the shift count bits for transmission in the window field. The shift count may be zero, offering to scale while applying a scale factor of 1.</p><p>TCP determines whether a data segment is old or new by testing whether its sequence number is within 2^31 bytes of the left edge of the window. To make sure that new data is never mistakenly considered old and vice versa, the left edge of the sender's window has to be at most 2^31 away from the right edge of the receiver's window, which implies that two times the maximum window size must be less than 2^31, or a maximum window below 2^30. The shift count must therefore be limited to 14. If a Window Scale option is received with a shift count larger than 14, the TCP should log the error but must use 14 instead, because a sender can always choose to only partially use any signalled receive window. The scale factor applies only to the window field as transmitted; each TCP using extended windows maintains the window values locally as 32-bit numbers.</p>",
+      "plainLanguage": "<p>Both ends announce during the handshake how big a window they want, using a number that is really an exponent. Every later window value is that number of times bigger than the 16 bits in the header allow, up to a gigabyte.</p>"
     },
     {
-      "id": "message-format",
-      "number": "3",
+      "id": "header-format",
+      "number": "3.2",
       "title": "The Timestamps Option",
-      "content": "<p>The <strong>Timestamps</strong> option (kind 8, length 10 bytes) carries two four-byte fields. <code>TSval</code> holds the current value of the sender's timestamp clock. <code>TSecr</code> echoes a recently received <code>TSval</code> from the peer, and it is only valid when the ACK bit is set. When the ACK bit is clear, the sender SHOULD set it to zero and the receiver MUST ignore it.</p><p>A TCP MAY send the option in an initial <code>SYN</code>, and MAY send it in the <code>SYN,ACK</code> only if it received one. Once both <code>SYN</code> segments carry it, the option MUST be sent in every non-<code>RST</code> segment for the rest of the connection, and SHOULD be sent in an <code>RST</code>. If a non-<code>RST</code> segment arrives without it, a TCP SHOULD silently drop the segment, but MUST NOT abort the connection for that reason.</p><p>The option adds 10 bytes (up to 12 including padding) to the 20-byte TCP header. The RFC notes that the benefit of extra round-trip samples is small, but other uses, namely PAWS and the Eifel mechanism, improve security and performance, so the extra header cost should be weighed against that gain.</p>",
-      "plainLanguage": "<p>Every message gets a little clock reading stamped on it, and the reply repeats back the last reading it saw. Both sides keep doing this so they can tell how old things are.</p>"
+      "content": "<p>The Timestamps option is introduced to address some of the issues mentioned in the sections on performance and reliability. It is specified in a symmetrical manner, so that timestamp values are carried in both data and ACK segments and are echoed in the timestamp echo reply field carried in returning ACK or data segments. Originally used primarily for timestamping individual segments, the properties of the option allow for taking time measurements and for additional uses. It is important to remember that there is a distinction between the Timestamps option conveying timestamp information and the use of that information: the round-trip time mechanism must be viewed independently from updating the retransmission timeout, and other mechanisms such as PAWS are not built upon the timestamp information itself but are based on the intrinsic property of monotonically non-decreasing values.</p><p>The option carries two four-byte timestamp fields. The TSval field contains the current value of the timestamp clock of the TCP sending the option. The TSecr field is valid if the ACK bit is set in the TCP header; if the ACK bit is not set the sender should set the TSecr field to zero. When the ACK bit is set, the sender must echo a recently received TSval sent by the remote TCP, and the exact rules on which value must be echoed are given later in the document. When the ACK bit is not set, the receiver must ignore the value of the TSecr field.</p><p>A TCP may send the option in an initial SYN segment, and may send it in a SYN,ACK segment only if it received one in the initial SYN. Once the option has been successfully negotiated, that is both SYN and SYN,ACK contain it, the option must be sent in every non-RST segment for the duration of the connection, and should be sent in a RST segment. If a non-RST segment is received without the option, a TCP should silently drop the segment, and it must not abort a TCP connection because any segment lacks an expected option. If a receiver chooses to accept a segment without an expected Timestamps option, it must be clear that undetectable data corruption may occur. If the option is received on a connection where it was not negotiated in the initial three-way handshake, it must be ignored and the packet processed normally.</p>",
+      "plainLanguage": "<p>Every segment carries the sender's own clock reading, and every acknowledgement carries back the reading it received last. Those two numbers are what make the round-trip measurement and the duplicate check possible.</p>"
+    },
+    {
+      "id": "performance",
+      "number": "4",
+      "title": "Measuring the Round-Trip Time",
+      "content": "<p>One use of the Timestamps option is to measure the round-trip time of virtually every packet acknowledged. The mechanism requires a Timestamps option in every measured segment, with a value obtained from a virtual timestamp clock whose values must be at least approximately proportional to real time in order to measure actual round-trip time. TCP measures the round-trip time primarily for the purpose of arriving at a reasonable value for the retransmission timeout timer interval. Accurate and current estimates are necessary to adapt to changing traffic conditions, while a conservative estimate is necessary to minimize spurious timeouts.</p><p>These timestamp values are echoed back in the opposite direction, and the difference between a received echo and the current clock value provides a round-trip measurement. Not every received echo can be used, though. In a one-way data flow, a pause in which one side had nothing to send inflates the round-trip time that the other side would infer, so the RFC gives a rule: an echoed value received in a segment may be used to update the averaged round-trip measurement only if the segment advances the left edge of the send window.</p><p>The RFC also explains when several timestamps have arrived and only one can be echoed. With delayed acknowledgments the receiver should reply with the timestamp from the earliest unacknowledged segment, because the sender must measure the effective round-trip time including the extra delay. When there is a hole in the sequence space, the acknowledgement for an out-of-order segment should contain the timestamp from the most recent segment that advanced the receive window, because the lost segment is probably a sign of congestion and it is better to overestimate the round-trip time. When a hole is filled, the timestamp from the latest segment must be echoed, because a round-trip computed from an earlier segment would probably include a retransmission timeout and badly bias the estimate.</p>",
+      "plainLanguage": "<p>The echoed timestamp tells the sender how long a trip took. The RFC is careful about which echoes to trust, because a sender that stopped for a moment would otherwise make the sender wait longer than it needs to before retrying.</p>"
     },
     {
       "id": "algorithms",
-      "number": "4",
-      "title": "Measuring Round-Trip Time with RTTM",
-      "content": "<p>The first use of timestamps is <strong>round-trip time measurement</strong> (RTTM). The difference between the current timestamp clock and a received <code>TSecr</code> gives the round-trip time (RTT) of nearly every acknowledged segment, which TCP uses mainly to set its retransmission timeout (RTO).</p><p>Not every <code>TSecr</code> is safe to use. If one side pauses sending, the echoed value would include the pause and inflate the RTT. The <strong>RTTM Rule</strong> therefore says a <code>TSecr</code> MAY be used to update the averaged RTT only if the segment advances the left edge of the send window (<code>SND.UNA</code> increases).</p><p>Which <code>TSval</code> to echo depends on the situation. With delayed ACKs, the receiver SHOULD echo the earliest unacknowledged segment. For an out-of-order segment, an ACK SHOULD carry the timestamp of the most recent segment that advanced <code>RCV.NXT</code>. When a segment fills a hole, its own timestamp MUST be echoed. One algorithm covers all three cases using two 32-bit state variables: <code>TS.Recent</code> and <code>Last.ACK.sent</code>. A new <code>TSval</code> is copied to <code>TS.Recent</code> only if <code>SEG.TSval &gt;= TS.Recent</code> and <code>SEG.SEQ &lt;= Last.ACK.sent</code>.</p><p>The RFC also warns that the RTO estimator of <a href='/rfc6298'>RFC 6298</a> assumes at most one sample per RTT. With timestamps, an implementation SHOULD try to keep to the spirit of that history, and Appendix G gives a suggestion.</p>",
-      "plainLanguage": "<p>If you note the time when you shout and the time the echo comes back, you know how far away the wall is. The only trick is to ignore echoes that were delayed just because you stopped talking for a while.</p>"
+      "number": "5",
+      "title": "PAWS: Protection Against Wrapped Sequences",
+      "content": "<p>Another use for the Timestamps option is the PAWS mechanism, which rejects old duplicate segments that might corrupt an open TCP connection. PAWS operates within a single TCP connection, using state saved in the connection control block. It assumes that every received segment contains a timestamp whose values are monotonically non-decreasing in time, and the basic idea is that a segment can be discarded as an old duplicate if it is received with a timestamp less than some timestamps recently received on this connection.</p><p>The timestamps are 32-bit unsigned integers in a modular 32-bit space, so less than is defined the same way as for TCP sequence numbers: s is less than t if 0 is less than t minus s, which is less than 2^31, computed in unsigned 32-bit arithmetic. The value of TS.Recent is used for the comparison, because using a common value for both PAWS and the round-trip measurement simplifies the implementation. PAWS submits all incoming segments to the same test, and therefore protects against duplicate ACK segments as well as data segments.</p><p>The basic algorithm applies five rules to all incoming segments on a synchronized connection, and PAWS processing takes precedence over the regular TCP acceptability check. If there is a Timestamps option in the arriving segment and its timestamp is less than TS.Recent, and the reset bit is not set, the segment is treated as not acceptable: an acknowledgement is sent in reply and the segment is dropped. If the segment is outside the window it is rejected by normal TCP processing. If the segment's timestamp is not less than TS.Recent and its sequence number is within what has already been acknowledged, its timestamp is recorded in TS.Recent. If the segment is in sequence it is accepted normally, and otherwise it is treated as a normal in-window, out-of-sequence segment and queued for later delivery.</p><p>The timestamp is checked only when a segment first arrives, whether or not it is in sequence. This allows reasonable performance under loss, because a full window of data is in transit at all times and after a loss a full window less one segment will show up out of sequence to be queued at the receiver, up to about 2^30 bytes of data.</p>",
+      "plainLanguage": "<p>The check is simple: if a segment's clock reading is older than the newest one already seen on this connection, it is an old copy and gets thrown away. That stops the byte numbering from cycling round and confusing old data for new.</p>"
     },
     {
-      "id": "procedures",
-      "number": "5",
-      "title": "PAWS: Rejecting Old Duplicates",
-      "content": "<p><strong>Protection Against Wrapped Sequences</strong> (PAWS) uses the same timestamps to reject old duplicate segments within one connection. It assumes the timestamps of received segments are monotonically non-decreasing, and treats a segment whose <code>SEG.TSval</code> is less than <code>TS.Recent</code> as an old duplicate. Timestamps are 32-bit unsigned values compared the same way as sequence numbers. The receiver treats them as a logical extension of the high-order bits of the sequence number, so no clock synchronization between the two ends is needed.</p><p>For a synchronized connection, the basic algorithm runs on every incoming segment, before the normal acceptability check:</p><ul><li><strong>R1:</strong> if the segment has a Timestamps option, <code>SEG.TSval &lt; TS.Recent</code>, <code>TS.Recent</code> is valid and RST is not set, send an acknowledgment and drop it.</li><li><strong>R2:</strong> if outside the window, reject it as normal.</li><li><strong>R3:</strong> if <code>SEG.TSval &gt;= TS.Recent</code> and <code>SEG.SEQ &lt;= Last.ACK.sent</code>, record the timestamp in <code>TS.Recent</code>.</li><li><strong>R4 and R5:</strong> accept an in-sequence segment normally; otherwise treat it as an ordinary in-window, out-of-sequence segment.</li></ul><p>The timestamp is checked only when a segment first arrives, so data already queued behind a lost segment is not rejected when the retransmission fills the hole. An <code>RST</code> MUST NOT be subjected to the PAWS check.</p><p>The clock has limits on both sides. It MUST tick at least once for each 2^31 bytes sent, and its recycle time MUST be greater than the MSL. The RFC chooses a clock frequency in the range 1 ms to 1 sec per tick. Because a connection idle for more than 24 days could freeze under PAWS, implementations must include a way to invalidate <code>TS.Recent</code> after that. Any TCP that implements PAWS MUST also implement Path MTU Discovery, because fragmentation errors at high rates can defeat PAWS and the fix is to set the Don't Fragment bit.</p>",
-      "plainLanguage": "<p>If each letter carries a date stamp, the mailroom can throw out any letter older than the newest one already seen. A letter that was delayed for ages gets spotted and tossed instead of confusing everyone.</p>"
+      "id": "parameters",
+      "number": "5.4",
+      "title": "The Timestamp Clock",
+      "content": "<p>The PAWS algorithm does not require clock synchronization between the sender and receiver. The sender's timestamp clock is used as a source of monotonically non-decreasing values to stamp the segments, and the receiver treats the timestamp value as simply a monotonically non-decreasing serial number without any connection to time. From the receiver's point of view the timestamp acts as a logical extension of the high-order bits of the sequence number. The receiver algorithm does place requirements on the frequency of the clock.</p><p>The clock must not be too slow. It must tick at least once for each 2^31 bytes sent, and to be useful for round-trip timing it should tick at least once per window's worth of data. Any clock faster than one tick per second will reject old duplicate segments for link speeds of about 8 Gbps, and a 1 ms timestamp clock will work at link speeds up to 8 Tbps.</p><p>The clock must also not be too fast. The recycling time of the timestamp clock must be greater than the maximum segment lifetime in seconds. Since the clock is 32 bits and the worst-case maximum segment lifetime is 255 seconds, the maximum acceptable clock frequency is one tick every 59 ns. The RFC chooses a timestamp clock frequency in the range 1 ms to 1 sec per tick, which also matches the requirements of the round-trip measurement mechanism. The mechanism puts a strong monotonicity requirement on the sender's clock, which can be met with a hardware clock guaranteed to be monotonic, a periodic interrupt that increments a binary integer, a system clock adjusted by an offset variable, or a random offset added per connection.</p><p>If a connection remains idle long enough for the other TCP's clock to wrap its sign bit, the saved value becomes too old and PAWS would cause all subsequent segments to be rejected, freezing the connection. With the chosen range of clock frequencies the time to wrap the sign bit is between 24.8 days and 24800 days, so an implementation of PAWS must include a mechanism to invalidate the saved value when a connection is idle for more than 24 days.</p>",
+      "plainLanguage": "<p>The clock does not have to agree with anyone else's clock. It just has to count up steadily. How fast it ticks is a trade-off: too slow and old duplicates slip through, too fast and the counter wraps around while the connection sits idle.</p>"
     },
     {
       "id": "security-considerations",
       "number": "7",
-      "title": "Security and Middleboxes",
-      "content": "<p>A larger window makes it easier for an attacker to forge a packet that falls inside it. Timestamps and PAWS can help, but a forged packet with a timestamp far in the future could cause valid segments to be dropped by the PAWS check, so implementers should not open the window much beyond what the connection needs. The RFC points to <a href='/rfc5961'>RFC 5961</a> for mitigations against blind in-window attacks.</p><p>A timestamp clock derived straight from system uptime can leak information, so the RFC RECOMMENDS a random, per-connection offset. It also notes that the combination, order and padding of the options can help fingerprint a system.</p><div class='callout callout-warning'><p>Some middleboxes are known to strip these options. Removing Window Scale from a <code>SYN,ACK</code> breaks the negotiation, and a stateful firewall that ignores the scale factor cannot judge whether a segment is in the window. Removing Timestamps leaves high-speed connections without PAWS protection.</p></div><p>The RFC adds that, because it makes the rules for a missing Timestamps option explicit, it may reveal middlebox behavior that was previously undetected.</p>",
-      "plainLanguage": "<p>Bigger buckets are easier for a trickster to toss fake letters into, so computers should not make them bigger than needed. And any helper in the middle who erases the date stamps can break the system.</p>"
-    },
-    {
-      "id": "changes",
-      "number": "8",
-      "title": "What Changed from RFC 1323",
-      "content": "<p>RFC 7323 keeps the two options introduced by <a href='/rfc1323'>RFC 1323</a> but tightens their wording. Appendix H lists the changes, which are partly due to errata and partly due to better understanding of how the components interact.</p><ul><li>Much of the discussion in Section 1 was removed, while the examples in Sections 2, 3 and 5 were kept as guidelines.</li><li>Text was added that Window Scale increases the chance of sequence wrap, so PAWS is required in certain environments.</li><li>RFC 2119 wording was added, with specific segment types marked in angle brackets.</li><li>Section 3 was updated for what has been learned since RFC 1323, including that the Timestamps option must appear on every segment once negotiated.</li></ul><p>For IANA, the Window Scale and Timestamps entries in the TCP Option Kind Numbers table now point to this document.</p>",
-      "plainLanguage": "<p>It is a cleaned-up second edition of an older rulebook, with the unclear rules made firm.</p>"
+      "title": "Security Considerations",
+      "content": "<p>The TCP sequence space is a fixed size, and as the window becomes larger it becomes easier for an attacker to generate forged packets that can fall within the TCP window and be accepted as valid segments. While the use of timestamps and PAWS can help to mitigate this, when using PAWS an attacker able to forge a packet that is acceptable to the connection could send a timestamp in the future and cause valid segments to be dropped. Implementers should therefore take care not to open the TCP window drastically beyond the requirements of the connection. RFC 5961 describes mitigation strategies for blind in-window attacks.</p><p>A naive implementation that derives the timestamp clock value directly from a system uptime clock may unintentionally leak that information to an attacker. It is therefore recommended to generate a random, per-connection offset to be used with the clock source when generating the Timestamps option value.</p><p>Expanding the TCP window beyond 64 KiB for IPv6 allows Jumbograms to be used when the local network supports packets larger than 64 KiB, and when larger TCP segments are used the TCP checksum becomes weaker. Mechanisms that protect the TCP header from modification should also protect the TCP options.</p><p>Some middleboxes have been known to remove the TCP options described in this document from TCP segments. Middleboxes that remove these options from the SYN segment interfere with the selection of parameters appropriate for the session, and removing any of them in a SYN,ACK segment leaves the end hosts in a state that destroys the proper operation of the protocol. If a Window Scale option is removed from a SYN,ACK segment the end hosts will not negotiate the window scaling factor correctly. A stateful firewall that uses the window field to detect whether a received segment is inside the current window, and that does not support the Window Scale option, will not be able to determine correctly whether a packet is in the window. If the Timestamps option is removed from the SYN or SYN,ACK segments, high speed connections that need PAWS would not have that protection, and if it is removed from a subsequent data segment after a successful negotiation the segment is discarded by the receiver without further processing.</p>",
+      "plainLanguage": "<p>A bigger window is also a bigger target, because a forged packet is more likely to land inside it. And any device in the middle that quietly strips the new options will break the connection.</p>"
     }
   ],
   "viz": [
@@ -134,40 +143,41 @@
       "type": "packet",
       "anchor": "options",
       "position": "after",
-      "caption": "WINDOW SCALE OPTION (RFC 7323)",
+      "caption": "THE TCP WINDOW SCALE OPTION AS DRAWN IN RFC 7323",
       "data": {
         "title": "Window Scale option",
         "bytes": 3,
-        "width": 24,
+        "width": 32,
         "fields": [
           {
             "key": "kind",
             "name": "Kind",
             "bits": 8,
-            "desc": "Option kind.",
+            "desc": "Option number 3 identifies the Window Scale option.",
             "value": "3"
           },
           {
             "key": "length",
             "name": "Length",
             "bits": 8,
-            "desc": "Option length in bytes.",
+            "desc": "Total length of the option in bytes.",
             "value": "3"
           },
           {
-            "key": "shift-cnt",
-            "name": "shift.cnt",
+            "key": "shift-count",
+            "name": "Shift Count",
             "bits": 8,
-            "desc": "Exponent of the scale factor for the sender's receive window; limited to 14."
+            "desc": "Exponent of the scale factor applied to the receive window. The maximum value is 14.",
+            "value": "0 to 14"
           }
         ]
       }
     },
     {
       "type": "packet",
-      "anchor": "message-format",
+      "anchor": "header-format",
       "position": "after",
-      "caption": "TIMESTAMPS OPTION (RFC 7323)",
+      "caption": "THE TCP TIMESTAMPS OPTION AS DRAWN IN RFC 7323",
       "data": {
         "title": "Timestamps option",
         "bytes": 10,
@@ -177,64 +187,57 @@
             "key": "kind",
             "name": "Kind",
             "bits": 8,
-            "desc": "Option kind.",
+            "desc": "Option number 8 identifies the Timestamps option.",
             "value": "8"
           },
           {
             "key": "length",
             "name": "Length",
             "bits": 8,
-            "desc": "Option length in bytes.",
+            "desc": "Total length of the option in bytes.",
             "value": "10"
           },
           {
             "key": "tsval",
-            "name": "TS Value (TSval)",
+            "name": "TS Value",
             "bits": 32,
-            "desc": "Current value of the sender's timestamp clock."
+            "desc": "The current value of the sending TCP's timestamp clock."
           },
           {
             "key": "tsecr",
-            "name": "TS Echo Reply (TSecr)",
+            "name": "TS Echo Reply",
             "bits": 32,
-            "desc": "Echo of a recently received TSval; valid only when the ACK bit is set."
+            "desc": "A recently received TSval echoed back. Only valid when the ACK bit is set."
           }
         ]
       }
     },
     {
-      "type": "compare-table",
-      "anchor": "procedures",
+      "type": "key-grid",
+      "anchor": "algorithms",
       "position": "after",
-      "caption": "LIMITS ON THE TIMESTAMP CLOCK (RFC 7323)",
+      "caption": "THE FIVE PAWS RULES AS LISTED IN SECTION 5.3",
       "data": {
-        "columns": [
-          "Rule",
-          "Requirement",
-          "Figure from the RFC"
-        ],
-        "rows": [
+        "items": [
           {
-            "cells": [
-              "Not too slow",
-              "MUST tick at least once for each 2^31 bytes sent",
-              "A clock faster than 1 tick/sec rejects old duplicates for link speeds of about 8 Gbps"
-            ]
+            "title": "R1: Too old",
+            "text": "If the segment carries a timestamp older than the last one kept and the reset bit is not set, send an acknowledgement and drop the segment."
           },
           {
-            "cells": [
-              "Not too fast",
-              "Recycle time MUST be greater than the MSL",
-              "With a worst-case MSL of 255 seconds, one tick every 59 ns at most"
-            ]
+            "title": "R2: Outside the window",
+            "text": "Reject the segment using the normal TCP rules."
           },
           {
-            "cells": [
-              "Chosen range",
-              "1 ms to 1 sec per tick",
-              "A 1 ms clock wraps its sign bit in 24.8 days"
-            ],
-            "self": true
+            "title": "R3: Remember the timestamp",
+            "text": "If the timestamp is not older and the sequence number is within what has already been acknowledged, keep it as the newest timestamp."
+          },
+          {
+            "title": "R4: In sequence",
+            "text": "Accept the segment normally."
+          },
+          {
+            "title": "R5: Out of sequence",
+            "text": "Queue the segment for later delivery to the application, as normal TCP does."
           }
         ]
       }
@@ -253,12 +256,12 @@
     },
     {
       "number": "[RFC1323]",
-      "text": "TCP Extensions for High Performance, RFC 1323, obsoleted by this document.",
+      "text": "Jacobson, V., Braden, R. and Borman, D., \"TCP Extensions for High Performance\", RFC 1323, April 1992.",
       "rfc": 1323
     },
     {
       "number": "[RFC2018]",
-      "text": "TCP Selective Acknowledgment Options, RFC 2018.",
+      "text": "Mahdavi, J., Floyd, S. and Roman, J., \"TCP Selective Acknowledgment Options\", RFC 2018, September 1996.",
       "rfc": 2018
     },
     {
@@ -268,22 +271,22 @@
     },
     {
       "number": "[RFC5961]",
-      "text": "Mitigations against blind in-window attacks on TCP, RFC 5961.",
+      "text": "Dhanwanth, S., et al., \"Mitigations against blind in-window attacks on TCP\", RFC 5961, February 2010.",
       "rfc": 5961
     },
     {
       "number": "[RFC6298]",
-      "text": "Computing TCP's Retransmission Timer, RFC 6298.",
+      "text": "Paxson, V., Allman, M. and Blanton, J., \"Computing TCP's Retransmission Timer\", RFC 6298, June 2011.",
       "rfc": 6298
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-20",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-20"
 }

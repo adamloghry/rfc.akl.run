@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This experimental document describes a way to detect whether end-to-end data flows share a common bottleneck. It computes summary statistics from continuous measurements and feeds them to a grouping algorithm that runs wherever the knowledge is needed. It supports coupled congestion control for RTP media.</p>",
   "plainLanguage": {
-    "summary": "<p>If two cars are stuck at the same narrow bridge, they can notice that together. This is a way for traffic streams to figure out they are in the same jam.</p>"
+    "summary": "<p>When one video call sends several streams over the same slow link, the streams slow each other down. This RFC describes how a sender can work out which of its streams share a congested link, by comparing the shape of their delay measurements, so that it can slow all of them together instead of one at a time.</p>"
   },
   "questions": [
     "how to detect a shared bottleneck",
@@ -20,116 +20,204 @@
   ],
   "subtitle": "Detecting when multiple RTP media flows compete for the same bottleneck link.",
   "tldr": {
-    "problem": "When RTP media flows share a bottleneck link, they need to detect this shared congestion so coupled congestion controllers can coordinate their sending rates and avoid unnecessary packet loss and delay.",
-    "mechanism": "The algorithm measures one-way delay and packet loss on each flow, calculates summary statistics that capture the shape of the delay distribution (skewness, variability, oscillation), and groups flows that show similar statistical characteristics.",
-    "outcome": "Flows that share a bottleneck can be grouped together and have their congestion control coordinated, improving the efficiency of multi-party communication applications.",
+    "problem": "The Internet does not tell endpoints which flows share a bottleneck link, so a sender sending media to several peers cannot tell whether those streams are competing with each other.",
+    "mechanism": "Each flow's delay measurements are summarized as a variability estimate, a skewness estimate and an oscillation estimate, with packet loss as a supplementary measure, and flows with similar values are grouped together.",
+    "outcome": "Grouping gives a coupled congestion controller the information it needs to honor flow priorities and avoid unnecessary loss and delay. The RFC is Experimental and carries no IANA actions.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Recommended measurement interval (T)",
-      "value": "350 milliseconds"
+      "label": "Base interval T",
+      "value": "350 ms"
     },
     {
-      "label": "Recommended number of intervals (N)",
-      "value": "50"
+      "label": "History length N",
+      "value": "50 intervals"
     },
     {
-      "label": "Skewness threshold (c_s)",
-      "value": "0.1"
+      "label": "History length M",
+      "value": "30 intervals"
     },
     {
-      "label": "Full accuracy achieved after",
-      "value": "2*M time intervals"
+      "label": "Weighting window F",
+      "value": "20 intervals"
+    },
+    {
+      "label": "Skewness threshold c_s",
+      "value": "0.1, with a range of +0.2 to -0.1"
+    },
+    {
+      "label": "Oscillation sensitivity p_v",
+      "value": "0.7"
     }
   ],
-  "today": "<p>RFC 8382 is an Experimental specification published in June 2018. It has not been obsoleted or updated by later RFCs and remains the primary specification for measurement-based shared bottleneck detection for coupled congestion control.</p>",
+  "today": "<p>RFC 8382 is an Experimental RFC and has not been obsoleted or updated. The algorithm had been evaluated using simulations and small-scale experiments, and the document asks for real network tests to confirm the default parameter choices.</p>",
   "glossary": [
     "rtp",
     "congestion-control",
     "one-way-delay",
-    "packet-loss"
+    "packet-loss",
+    "shared-bottleneck-detection",
+    "rtcp",
+    "ecn",
+    "clock-skew"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction",
-      "content": "<p>In interactive RTP media applications like multi-party video, a single sender often communicates simultaneously with multiple peers, creating multiple data flows. These flows may or may not traverse the same bottleneck links on the Internet. When multiple flows share a bottleneck, they compete for bandwidth and can cause each other to experience increased packet loss and delays.</p><p>RFC 8382 describes a measurement-based approach to detect when flows share a common bottleneck. This detection is essential for <strong>coupled congestion control</strong> schemes, which coordinate the sending rates of multiple flows to honor their priorities and reduce unnecessary packet loss and delay. The mechanism groups flows with similar statistical characteristics and relies on continuous measurements of packet delay and loss.</p>",
-      "plainLanguage": "<p>When you're sending video to multiple people and they're all on the same slow connection, you need to notice that and adjust how fast you send. This is the method to figure out when streams are stuck together.</p>"
+      "title": "Detecting Shared Bottlenecks",
+      "content": "<p>In the Internet, it is not normally known whether flows, such as TCP connections or UDP data streams, traverse the same bottlenecks. Even flows that have the same sender and receiver may take different paths and may or may not share a bottleneck. Flows that share a bottleneck link usually compete with one another for their share of the capacity, and this competition has the potential to increase packet loss and delay. This is especially relevant for interactive applications that communicate simultaneously with multiple peers, such as multi-party video.</p><p>For RTP media applications such as RTCWEB, the coupled congestion control scheme described in the related draft combines the congestion controllers of flows in order to honor their priorities and avoid unnecessary packet loss and delay. That mechanism relies on some form of Shared Bottleneck Detection (SBD), and this document describes a measurement-based approach to it.</p><p>The mechanism groups flows that have similar statistical characteristics together. A major part of the document is concerned with collecting suitable statistics for this purpose. The observation it rests on is that when flows traverse a common bottleneck, each flow's distribution of packet delay measurements has similar shape characteristics.</p><p>Where the detection runs matters for the feedback required. In the sender-side case, a host sends media to two other hosts over a shared link; the two receivers measure one-way delay and packet loss and send either that raw data or the calculated summary statistics back to the sender every T, and the sender can then determine the shared bottleneck and control the send rates. In the receiver-side case, where two senders both send to a third host over a shared link, neither sender alone has enough knowledge; the receiver can detect it by combining the summary statistics related to each sender.</p>",
+      "plainLanguage": "<p>When one video call sends several streams over the same slow link, the streams slow each other down. This RFC describes how a sender can work out which of its streams share a congested link, by comparing the shape of their delay measurements, so that it can slow all of them together instead of one at a time.</p>"
     },
     {
-      "id": "terminology",
-      "number": "2",
-      "title": "Measurement Signals and Key Terms",
-      "content": "<p>The detection mechanism uses two primary signals: <strong>packet loss</strong> and <strong>one-way delay</strong> (OWD). Packet loss indicates congestion but is relatively infrequent and noisy on its own. One-way delay—the time a packet takes to travel from sender to receiver—is a cleaner signal, though it includes delays from every device on the path, not just the bottleneck.</p><p>The algorithm avoids the problem of absolute delay by working with relative one-way delay measurements. Because senders and receiver clocks may not be synchronized, the mechanism computes statistics relative to the mean OWD rather than absolute values. This approach is sufficient because sender and receiver clock skew typically remains constant over the measurement periods used by the algorithm, allowing the offset to be subtracted out mathematically.</p>",
-      "plainLanguage": "<p>The algorithm measures how long packets take to arrive and whether any get lost. It doesn't need perfectly synchronized clocks—just the differences between delays matter.</p>"
+      "id": "concepts",
+      "number": "1.2",
+      "title": "The Signals: Loss, Delay and Path Lag",
+      "content": "<p>The current Internet is unable to explicitly inform endpoints which flows share bottlenecks, so endpoints have to infer this from whatever information is available to them. The mechanism described here uses packet loss and packet delay, but is not restricted to these. As Explicit Congestion Notification becomes more prevalent, it too will become a valuable base signal that can be correlated to detect shared bottlenecks.</p><p>Packet loss is often a relatively infrequent indication that a flow traverses a bottleneck, so on its own it is of limited use for SBD. It is a valuable supplementary measure when it is more prevalent.</p><p>End-to-end delay measurements include noise from every device along the path in addition to the delay perturbation at the bottleneck device, and the noise is often significantly increased if the round-trip time is used. The cleanest signal is obtained by using One-Way Delay (OWD). Measuring absolute OWD is difficult, since it requires both the sender and receiver clocks to be synchronized. However, since the statistics being collected are relative to the mean OWD, a relative OWD measurement is sufficient, and clock skew is not usually significant over the time intervals used by this mechanism. Where it is significant, the document outlines a way of adjusting the calculations.</p><p>Each packet arriving at the bottleneck buffer may experience very different queue lengths and therefore different waiting times, so a single OWD sample does not characterize the path well. Multiple OWD measurements do reflect the distribution of delays experienced at the bottleneck.</p><p>Path lag is the final problem the technique has to handle. Flows that share a common bottleneck may traverse different paths, and those paths often have different base delays, which makes it difficult to correlate changes in delay or loss. The technique uses the long-term shape of the delay distribution as a base for comparison, to counter this.</p>",
+      "plainLanguage": "<p>Two problems make this hard. Different flows travel different routes, so their delays differ even when nothing is congested. And a single delay reading says little, because packets queue for different lengths of time. The technique therefore compares the overall shape of each flow's delay measurements rather than the raw numbers.</p>"
     },
     {
-      "id": "design",
-      "number": "3",
-      "title": "Summary Statistics and Flow Metrics",
-      "content": "<p>The core of the mechanism is computing four summary statistics over a measurement interval. These statistics describe the shape of the delay distribution and work together to discriminate flows that share a bottleneck:</p><p><strong>Skewness estimate</strong> measures whether delays cluster below or above the mean. <strong>Variability estimate</strong> (Mean Absolute Deviation) captures the spread of delays. <strong>Oscillation estimate</strong> counts significant crossings of the mean delay, indicating low-frequency fluctuations. <strong>Packet loss</strong> serves as a supplementary measure—when loss becomes high, it becomes a reliable indicator of congestion.</p><p>These statistics are calculated incrementally over a base time interval T, with parameters controlling the measurement window. Recommended values from practical testing are T=350 milliseconds and N=50, using parameters like skewness threshold c_s=0.1 and oscillation threshold p_f=0.1.</p>",
-      "plainLanguage": "<p>The algorithm calculates four numbers about each stream: how skewed the delays are, how spread out they are, whether they oscillate, and how many packets are lost. Streams with similar numbers are probably stuck together.</p>"
+      "id": "algorithms",
+      "number": "3.2",
+      "title": "The Three Summary Statistics",
+      "content": "<p>Measurements are calculated over a base interval T and summarized over N or M such intervals, and all the summary statistics can be calculated incrementally. The mechanism rests on three key summary statistics, the variability estimate, the skewness estimate and the oscillation estimate, with packet loss used as a supplementary statistic.</p><p>The mean delay is not a useful signal for comparisons between flows, since flows may traverse quite different paths and clocks will not necessarily be synchronized, but it is a base measure for the three summary statistics. The mean delay is the average OWD measured over T, and the moving average over M such values is kept in a cyclic buffer. Setting M to be less than N allows the mechanism to be more responsive to changes, at the expense of a higher error rate.</p><p>The skewness estimate measures how lopsided the delay distribution is. Calculating skewness accurately would require storing every delay measurement over the whole period, so an estimate is made over M times T based on a calculation every T using the previous interval's mean delay. A counter initialized every T increments for OWD samples below the mean and decrements for samples above it, and the skewness estimate is the sum of those counters divided by the number of samples. It is a number between -1 and 1. The mean used excludes the current interval's own mean, so it can be calculated iteratively, and care is needed so that rounding does not bias the result.</p><p>The variability estimate uses the Mean Absolute Deviation (MAD), a robust measure of variability that copes well with different send rates. For each interval, the sum of the absolute differences between each sample and the previous interval's mean is accumulated, and the estimate is that sum over M times T divided by the number of samples.</p><p>The oscillation estimate measures low-frequency oscillation in the delay signal by counting and normalizing significant crossings of the long-term mean. A crossing counts as significant when it extends p_v times the variability estimate from the mean; the document's experiments found p_v = 0.7 to be a good value. The result is a number between 0 and 1.</p><p>Packet loss is the proportion of packets lost over the period N times T. When it is low it is very variable, but when it is high it becomes a stable measure for making grouping decisions.</p>",
+      "plainLanguage": "<p>Each flow gets three numbers that describe the shape of its delay over time: how much the delays vary, how lopsided the distribution is, and how often it swings up and down. Packet loss is used as a fourth, supporting signal.</p>"
     },
     {
       "id": "operation",
-      "number": "4",
-      "title": "Flow Grouping Algorithm",
-      "content": "<p>The grouping algorithm works in stages. First, it identifies which flows are actually experiencing a bottleneck (as opposed to just seeing normal path variation) using the skewness estimate and packet loss. Then it progressively divides flows into groups based on the four statistics.</p><p>The process sorts flows by oscillation estimate and groups those with similar values. It then subdivides each group by variability, then by skewness, and finally by packet loss (when packet loss is high enough to be reliable). This sorting-based approach is simple, efficient for 10 to 20 flows, and uses threshold parameters (p_f, p_mad, p_s, p_d) to decide when flows are similar enough to group.</p><p>The algorithm achieves full accuracy only after collecting measurements over 2*M time intervals, and it includes hysteresis to avoid constantly switching group membership as network conditions fluctuate.</p>",
-      "plainLanguage": "<p>The grouping algorithm sorts streams by how similar their delay patterns are and puts streams with matching patterns into the same group. A group means these streams share a bottleneck.</p>"
+      "number": "3.3.1",
+      "title": "The Flow-Grouping Algorithm",
+      "content": "<p>No single metric is precise enough to group flows, because of noise, so the algorithm uses multiple metrics. Each metric offers a different view of the bottleneck link characteristics, and together they enable a more precise grouping than any one could.</p><p>Flows determined to be transiting a bottleneck are successively divided into groups. The first step decides which flows are transiting a bottleneck at all, because for a flow that is not, the delay-based metrics describe the noise from the rest of the path rather than the bottleneck. Skewness is used for this, with packet loss as a supplementary measure: a flow is inferred to be traversing a bottleneck when its skewness estimate is below c_s, or below c_h while it was also below the threshold in the previous interval, or when its packet loss exceeds p_l. The parameter c_s controls the sensitivity of the detection: a value of 0.0 was used in the earlier work the document builds on, 0.1 is a little more sensitive and -0.1 a little less.</p><p>Those flows are then progressively divided into groups. First, flows whose difference in sorted oscillation estimate is less than p_f are grouped together. Second, each group is subdivided by grouping flows whose difference in sorted variability estimate, taken from highest to lowest, is less than p_mad times that estimate. Third, each group is subdivided again by grouping flows whose difference in sorted skewness estimate is less than p_s. Fourth, when packet loss is high enough to be reliable, that is above p_l, groups are subdivided once more by grouping flows whose difference in packet loss is less than p_d times that loss.</p><p>The procedure sorts estimates from highest to lowest. It is simple to implement and efficient for small numbers of flows, up to 10 to 20. For very large numbers of flows, for example hundreds, a more complex clustering algorithm may be substituted.</p><p>Grouping decisions can be made every T from the second T onwards, but they do not attain full accuracy until after the 2*Nth T interval, and the document recommends not making them until 2*M T intervals have passed. Network conditions and even the congestion controllers can cause bottlenecks to fluctuate, so a coupled congestion controller may decide to couple only groups that remain stable, for example grouped together 90% of the time.</p>",
+      "plainLanguage": "<p>The algorithm works in stages. First it separates the flows that are actually crossing a congested link from the ones that are not. Then it repeatedly splits the remaining flows into smaller sets whose delay numbers are close to each other. Flows left in the same set are treated as sharing a bottleneck.</p>"
     },
     {
-      "id": "deployment",
-      "number": "5",
-      "title": "Deployment Scenarios",
-      "content": "<p>The mechanism can be deployed in three ways. <strong>Sender-based</strong>: senders calculate all statistics from feedback data, determining shared bottlenecks locally. This is recommended when using sender-based congestion control. <strong>Receiver-based</strong>: receivers measure one-way delay and packet loss, compute summary statistics, and send them to senders, which perform grouping. This reduces feedback overhead. <strong>Cooperative</strong>: receivers compute and share statistics, while both senders and receivers can perform grouping determinations, enabling more advanced shared bottleneck detection.</p><p>The RFC also describes enhancements for improving responsiveness under changing conditions (weighting recent measurements more heavily) and removing noise from non-bottleneck paths. Security considerations note that unauthenticated RTCP packets carrying delay measurements or shared bottleneck indications could allow attackers to alter congestion characteristics; the security of the transport protocol and coupled congestion controller apply.</p>",
-      "plainLanguage": "<p>The measurement can happen at senders, receivers, or both, depending on what's convenient. An important reminder: an attacker could mess with the measurement data, so use secure RTP versions.</p>"
+      "id": "parameters",
+      "number": "2.2",
+      "title": "Parameters and Recommended Values",
+      "content": "<p>T is the base time interval over which measurements are made. It should be long enough that enough packets are received during T for a useful estimate of the short-term mean one-way delay and its variation. Making T too large limits the efficacy of the oscillation estimate and increases the response time of the mechanism; making T too small makes the metrics noisier.</p><p>N is the number of base intervals used in some calculations and M the number used in others, where M is at most N. N should be large enough to give a stable estimate of oscillations, and M times T long enough for stable estimates of skewness and mean absolute deviation. F determines the number of intervals over which statistics are considered equally weighted. When F equals M, recent and older measurements are weighted equally, and making F smaller than M can increase responsiveness, but if F is too small the statistics will be too noisy.</p><p>The thresholds follow the same pattern. c_s is the skewness threshold for deciding whether a flow is transiting a bottleneck, and should be set within the range +0.2 to -0.1, low enough that lightly loaded paths do not give a false indication. p_l is the packet loss threshold, which becomes a better indicator than skewness when loss is high. c_h adds hysteresis to the bottleneck determination, large enough to avoid constant switching but low enough that grouping is not attempted when there is no bottleneck. p_v determines the sensitivity of the oscillation estimate to noise: making it smaller yields higher but noisier values, and making it too large renders it ineffective.</p><p>The recommended values are T = 350 ms and N = 50, taken from the earlier work the document builds on. The other parameters have been tightened to reflect the enhancements described later in the document: c_s = 0.1, p_f = p_d = 0.1, p_s = 0.15, p_mad = 0.1, and p_v = 0.7, with M = 30, F = 20 and c_h = 0.3 as additional parameters. These are values that seem to work well over a wide range of practical Internet conditions.</p>",
+      "plainLanguage": "<p>The measurement window, the length of the history used, and the thresholds that decide whether two flows count as similar are all tunable. The document gives one set of values that it says work well across a wide range of Internet conditions.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The security considerations of <a href='/rfc3550'>RFC 3550</a>, <a href='/rfc4585'>RFC 4585</a> and <a href='/rfc5124'>RFC 5124</a> are expected to apply.</p><p>Non-authenticated RTCP packets carrying one-way delay measurements, shared bottleneck indications, or summary statistics could allow attackers to alter the bottleneck-sharing characteristics for private gain or for disruption of other parties' communication. When SBD is used for coupled congestion control as described in the related draft, the security considerations of that draft apply as well.</p><p>The document has no IANA actions, and it asks implementers and testers to document their findings in an Internet-Draft.</p>",
+      "plainLanguage": "<p>The measurement messages need the same protection as the rest of the media traffic. Without it, someone on the path could change which flows appear to share a bottleneck, for their own benefit or to disrupt a call.</p>"
     }
   ],
   "viz": [
     {
+      "type": "key-grid",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "THE SUMMARY STATISTICS COMPARED FOR EACH FLOW",
+      "data": {
+        "items": [
+          {
+            "title": "Variability estimate",
+            "text": "How much the one-way delay varies, measured as a mean absolute deviation. A number in milliseconds."
+          },
+          {
+            "title": "Skewness estimate",
+            "text": "How lopsided the delay distribution is. A number between -1 and 1."
+          },
+          {
+            "title": "Oscillation estimate",
+            "text": "How often the delay swings across its long-term mean. A number between 0 and 1."
+          },
+          {
+            "title": "Packet loss",
+            "text": "The proportion of packets lost over the period. A supplementary measure used when loss is high."
+          }
+        ]
+      }
+    },
+    {
       "type": "tree",
       "anchor": "operation",
       "position": "after",
-      "caption": "Flow grouping algorithm stages",
+      "caption": "THE GROUPING ALGORITHM AS A TREE OF SPLITS",
       "data": {
         "root": {
           "label": "All flows",
           "children": [
             {
-              "label": "Identify bottleneck",
-              "note": "Filter by skewness and packet loss"
-            },
-            {
-              "label": "Bottleneck flows",
+              "label": "Crossing a bottleneck",
+              "note": "Selected by the skewness and loss test",
               "children": [
                 {
-                  "label": "Group by oscillation"
-                },
-                {
-                  "label": "Subdivide by variability"
-                },
-                {
-                  "label": "Subdivide by skewness"
-                },
-                {
-                  "label": "Subdivide by packet loss",
-                  "note": "If loss is high"
+                  "label": "Split by oscillation estimate",
+                  "children": [
+                    {
+                      "label": "Then by variability, skewness and loss",
+                      "note": "Each split produces the final groups"
+                    }
+                  ]
                 }
               ]
+            },
+            {
+              "label": "Not crossing a bottleneck",
+              "note": "Left ungrouped"
             }
           ]
         }
       }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "before",
+      "caption": "THE FOUR GROUPING TESTS",
+      "data": {
+        "columns": [
+          "Step",
+          "Measured quantity",
+          "Group when the difference is below"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "1",
+              "Skewness and packet loss",
+              "c_s, c_h and p_l decide whether the flow crosses a bottleneck at all"
+            ]
+          },
+          {
+            "cells": [
+              "2",
+              "Oscillation estimate",
+              "p_f"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "3",
+              "Variability estimate",
+              "p_mad times the highest value"
+            ]
+          },
+          {
+            "cells": [
+              "4",
+              "Skewness estimate",
+              "p_s"
+            ]
+          },
+          {
+            "cells": [
+              "5",
+              "Packet loss",
+              "p_d times the highest value"
+            ]
+          }
+        ]
+      }
     }
   ],
   "references": [
-    {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
     {
       "number": "[RFC3550]",
       "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
@@ -137,27 +225,45 @@
     },
     {
       "number": "[RFC4585]",
-      "text": "Ott, J., Wenger, S., Sato, N., Burmeister, C., and J. Rey, \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback\", RFC 4585, July 2006.",
+      "text": "Ott, J., Wenger, S., Sato, N., Burmeister, C., and J. Rey, \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
       "rfc": 4585
     },
     {
+      "number": "[RFC5124]",
+      "text": "Ott, J. and E. Carrara, \"Extended Secure RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/SAVPF)\", RFC 5124, February 2008.",
+      "rfc": 5124
+    },
+    {
       "number": "[RFC7679]",
-      "text": "Almes, G., Kalidindi, S., Zekauskas, M., and A. Morton, Ed., \"A One-Way Delay Metric for IP Performance Metrics\", STD 81, RFC 7679, January 2016.",
+      "text": "Almes, G., Kalidindi, S., Zekauskas, M., and A. Morton, Ed., \"A One-Way Delay Metric for IP Performance Metrics (IPPM)\", STD 81, RFC 7679, January 2016.",
       "rfc": 7679
     },
     {
       "number": "[RFC7680]",
-      "text": "Almes, G., Kalidindi, S., Zekauskas, M., and A. Morton, Ed., \"A One-Way Loss Metric for IP Performance Metrics\", STD 82, RFC 7680, January 2016.",
+      "text": "Almes, G., Kalidindi, S., Zekauskas, M., and A. Morton, Ed., \"A One-Way Loss Metric for IP Performance Metrics (IPPM)\", STD 82, RFC 7680, January 2016.",
       "rfc": 7680
+    },
+    {
+      "number": "[RFC6817]",
+      "text": "Shalunov, S., Hazel, G., Iyengar, J., and M. Kuehlewind, \"Low Extra Delay Background Transport (LEDBAT)\", RFC 6817, December 2012.",
+      "rfc": 6817
+    },
+    {
+      "number": "[Hayes-LCN14]",
+      "text": "Hayes, D., Ferlin, S., and M. Welzl, \"Practical Passive Shared Bottleneck Detection using Shape Summary Statistics\", Proc. IEEE Local Computer Networks (LCN), September 2014."
+    },
+    {
+      "number": "[Zhang-Infocom02]",
+      "text": "Zhang, L., Liu, Z., and H. Xia, \"Clock synchronization algorithms for network measurements\", Proc. IEEE INFOCOM, September 2002."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

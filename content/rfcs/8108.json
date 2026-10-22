@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Clarifies behavior of RTP endpoints that use multiple SSRCs, such as sending several streams in one session, with a focus on RTCP, and updates RFC 3550.</p>",
   "plainLanguage": {
-    "summary": "<p>When one sender sends several streams in one call, this explains how to keep the quality reports tidy.</p>"
+    "summary": "<p>Real-time media such as a voice call is carried by RTP, and a separate control channel, RTCP, reports on the quality of what arrives. This RFC covers the case where one machine sends several media streams at once in the same session, for example several cameras, or audio and video together. It says how the control reports from those streams should be counted, packed and timed so that the two ends agree.</p>"
   },
   "questions": [
     "multiple rtp streams in one session",
@@ -18,38 +18,43 @@
   "tags": [
     "RTP",
     "RTCP",
-    "Real-Time Media"
+    "Multimedia",
+    "Conferencing"
   ],
-  "subtitle": "How RTP endpoints that send several streams in one session should behave, especially when sending RTCP reports.",
+  "subtitle": "How RTP and its control protocol behave when one endpoint sends several streams in one session.",
   "tldr": {
-    "problem": "RTP was written assuming each endpoint has one SSRC, but endpoints now send several streams in one session, and the original rules for RTCP reporting, aggregation and timeouts were unclear for that case.",
-    "mechanism": "Every SSRC is treated as a separate participant. Their RTCP reports may be aggregated into compound packets under adjusted size and scheduling rules, feedback SSRC choice is clarified, and one uniform SSRC timeout rule of 5*Td is set.",
-    "outcome": "The RFC updates RFC 3550 and RFC 4585 so that multi-stream endpoints report and time out SSRCs consistently.",
-    "outcomeLabel": "Why it matters"
+    "problem": "RTP was written on the assumption that each endpoint sent one media source, so one synchronization source, and that different media types used different sessions. Endpoints now send several streams in one session: several cameras, audio and video together, or a mixer's output for each participant. The original specification was not consistently written with that in mind.",
+    "mechanism": "The RFC makes each synchronization source a separate participant in the session, so each one keeps its own reporting state and interval. Reports from several sources at one endpoint may then be packed into a single compound RTCP packet, with the average packet size divided among the sources that reported in it so that the reporting interval stays correct.",
+    "outcome": "Several streams can share one session without the control traffic being mis-sized. The RFC also fixes the timeout rules so that endpoints using different profiles do not time each other out too early, and says a session should not mix profiles.",
+    "outcomeLabel": "What it settles"
   },
   "facts": [
     {
-      "label": "Max zero-delay initial RTCP packets",
-      "value": "4"
+      "label": "Initial compound RTCP packets",
+      "value": "at most four, with zero initial delay"
     },
     {
-      "label": "SSRC timeout",
-      "value": "5*Td, with Tmin of 5 seconds"
+      "label": "The limit matches",
+      "value": "the TCP maximum initial window of four packets"
     },
     {
-      "label": "Interop T_rr_interval",
-      "value": "4 seconds"
+      "label": "Average packet size weighting",
+      "value": "1/16 of the new value and 15/16 of the old"
     },
     {
-      "label": "SSRCs supported at default 5% RTCP",
-      "value": "n=9 (under stated assumptions)"
+      "label": "Timeout interval",
+      "value": "5*Td for all four profiles"
     },
     {
-      "label": "Updates",
-      "value": "RFC 3550 and RFC 4585"
+      "label": "Tmin used for the timeout calculation",
+      "value": "5 seconds"
+    },
+    {
+      "label": "Interoperability setting",
+      "value": "T_rr_interval = 4 seconds"
     }
   ],
-  "today": "<p>RFC 8108 is a Proposed Standard published in March 2017. It updates <a href='/rfc3550'>RFC 3550</a> and <a href='/rfc4585'>RFC 4585</a>, and the unit metadata shows nothing that obsoletes or updates it.</p>",
+  "today": "<p>RFC 8108 is a Proposed Standard published in March 2017. It updates <a href='/rfc3550'>RFC 3550</a> and <a href='/rfc4585'>RFC 4585</a>, and the unit metadata lists no RFC that obsoletes or further updates it. The session description and topology documents it builds on are <a href='/rfc3556'>RFC 3556</a> and <a href='/rfc7667'>RFC 7667</a>.</p>",
   "glossary": [
     "rtp",
     "rtcp",
@@ -59,82 +64,182 @@
     "rtp-mixer",
     "srtp",
     "middlebox",
-    "compound-rtcp-packet"
+    "compound-rtcp-packet",
+    "rtp-session",
+    "congestion-control"
   ],
   "sections": [
     {
-      "id": "motivation",
-      "number": "3",
-      "title": "Why Endpoints Send Multiple Streams",
-      "content": "<p>Early RTP assumed one media source, one RTP stream and one <strong>SSRC</strong> per endpoint per session, with separate sessions for each media type. The specification was not consistently written for anything else, so it is unclear in places.</p><p>The RFC lists four use cases:</p><ul><li>Endpoints with several capture devices, such as telepresence rooms with multiple cameras or microphones.</li><li>Several media types, such as audio and video, in a single RTP session to reduce transport flows.</li><li>Central devices that generate several streams, including mixers and the selective forwarding middlebox described in <a href='/rfc7667'>RFC 7667</a>.</li><li>Several SSRCs for one media source, for example a retransmission stream per <a href='/rfc4588'>RFC 4588</a> or the layers of scalable video coding.</li></ul>",
-      "plainLanguage": "<p>One person can have many cameras, send both sound and picture, or send a main stream plus a repair copy. All of them travel in the same call.</p>"
+      "id": "introduction",
+      "number": "1",
+      "title": "Why an Endpoint Might Send Several Streams",
+      "content": "<p>When the Real-Time Transport Protocol was originally designed, and for quite some time after, endpoints in RTP sessions typically transmitted a single media source and therefore used a single RTP stream and synchronization source per session, with separate RTP sessions typically used for each distinct media type. Recently a number of scenarios have emerged in which endpoints wish to send multiple RTP streams, distinguished by distinct synchronization source identifiers, in a single RTP session. The initial design of RTP did consider such scenarios, but the specification was not consistently written with them in mind, and is therefore somewhat unclear in places. This memo updates RFC 3550 to clarify behaviour where endpoints use multiple synchronization sources, and updates RFC 4585 to resolve problems with the timeout of inactive sources and to clarify behaviour around the inclusion of feedback messages.</p><p>Four situations motivate this. An endpoint with multiple capture devices can generate several media sources of the same media type: telepresence systems often have several cameras or microphones covering different areas of a room. Recent work has removed the historical assumption that different media types always go in different sessions, so a single endpoint's audio and video streams are sent in one session to reduce the number of transport-layer flows. A mixer that composites several sources behaves much like a multi-capturer endpoint and sends several similar sources. A selective forwarding middlebox receives streams from several endpoints and forwards modified versions to the others, so a separate source appears for every other source it is connected to, even though many of them are inactive at any moment. And some tools need several synchronization sources for one source of media, such as a retransmission format that needs one source for the media and another for the repair data, or a layered encoding where each layer has its own source.</p>",
+      "plainLanguage": "<p>There are good reasons to send more than one stream from the same machine: several cameras in a meeting room, audio and video together to save ports, or a mixer that sends each participant their own composite. RTP was not written with these cases in mind, so this RFC fills in the gaps.</p>"
     },
     {
-      "id": "concepts",
-      "number": "4",
-      "title": "RTP and Bandwidth With Many SSRCs",
-      "content": "<p>RTP is inherently a group protocol. Unless signaling restricts it, an endpoint can expect data from many SSRCs in one session, whether the transport is point to point or multicast, because the session is defined by its shared SSRC space and not by the transport connections. Mixers can also make some SSRCs visible only in the contributing source (CSRC) list.</p><p>Each endpoint has an allocated share of the session bandwidth. It does not have to divide that share evenly among its streams. It may shift bandwidth between SSRCs, or enable and disable streams, provided its total sending rate stays within its share.</p>",
-      "plainLanguage": "<p>Everyone in a call gets a fixed amount of internet. You may give your main camera more of yours, as long as the total stays the same.</p>"
+      "id": "architecture",
+      "number": "5",
+      "title": "Treat Each Source as a Separate Participant",
+      "content": "<p>RTP is inherently a group communication protocol. Each endpoint in a session uses one or more synchronization sources, as do some kinds of RTP-level middlebox, so unless restrictions on the number of sources have been signalled, endpoints can expect to receive data packets sent with a number of different sources within a single session. This can happen whether the session runs over a point-to-point connection or a multicast group, because middleboxes can join several transport connections into one session; the session is defined by the shared source space, not by the transport connections. If RTP mixers are used, some sources may be visible only in the contributing source list of a packet and in RTCP, and not directly as the source of a data packet.</p><p>Every endpoint has an allocated share of the available session bandwidth, set by signalling and congestion control, and the endpoint must keep its total sending rate within that share. An endpoint that sends several streams does not have to subdivide its share equally or independently between them: it can vary the allocation to different streams according to their needs and change it dynamically, for example with a variable-rate codec, as long as the total stays within its share. That includes enabling or disabling streams, or their redundancy streams, as more or less bandwidth becomes available.</p><p>The description of RTCP in RFC 3550 is phrased in terms of the behaviour of participants, under the assumption that each endpoint is a participant with a single source. For correct operation where endpoints have several source values, implementations MUST treat each source as a separate participant, so an endpoint with several sources counts as several participants. Each source then maintains its own RTCP state and its own reporting interval, which determines when it sends reports.</p>",
+      "plainLanguage": "<p>The central rule is simple: every source identifier counts as its own participant. That means each one keeps its own timer and its own state, and each one is reported on separately. The endpoint's bandwidth allowance is shared across them, but the split between them is up to the endpoint.</p>"
     },
     {
       "id": "operation",
-      "number": "5",
-      "title": "RTCP Reporting With Multiple SSRCs",
-      "content": "<p>The core rule is that implementations <strong>MUST</strong> treat each SSRC as a separate participant. Each SSRC keeps its own RTCP state and interval, and without the optimisation in the Work in Progress draft cited as [MULTI-STREAM-OPT], each SSRC reports on every other one, including those on the same endpoint.</p><p>On joining a unicast session, an endpoint MUST NOT send more than four compound RTCP packets with zero initial delay, regardless of SSRC count. This matches the TCP maximum initial window of four packets from <a href='/rfc3390'>RFC 3390</a>. Those packets MAY aggregate reports from several SSRCs, and senders should be prioritised. Remaining reports follow the normal timing rules.</p><p>Reports from several SSRCs may be <strong>aggregated</strong> into one compound packet if it begins with an SR or RR, <code>avg_rtcp_size</code> is maintained correctly, and scheduling follows the new rules. For each reporting SSRC, <code>avg_rtcp_size</code> is updated with <code>div_packet_size</code>, the packet size divided by the number of SSRCs reporting in it. Peers that skip this get an overly long interval and may time out aggregated SSRCs. If compatibility with non-updated endpoints matters, aggregation SHOULD be limited to two reports or not used.</p><p>For scheduling, each SSRC keeps its own timer tn. When one expires, and the packet is not an early RTCP packet, the endpoint SHOULD add reports from other SSRCs in order of increasing tn while they fit within the path MTU. Afterwards tp, tn and T_rr_last are updated for each SSRC included, using an average effective transmission time. Simulations cited in the RFC found no significant negative impact on scheduling.</p>",
-      "plainLanguage": "<p>Each stream counts as its own person writing reports. To save paper, one envelope may carry several reports, but the envelope size is split fairly so the counting stays honest.</p>"
+      "number": "5.2",
+      "title": "Joining a Session Without a Burst",
+      "content": "<p>When a participant joins a unicast session, RFC 3550 says the delay before sending the initial compound RTCP packet may be zero, and the basic assumption is that this ought to apply with multiple sources too. Caution is needed when an endpoint or middlebox with a large number of sources joins a unicast session, because the immediate transmission of many reports can create a significant burst of traffic and lead to transient congestion and packet loss from queue overflows.</p><p>To keep that initial burst no larger than a TCP connection would produce, an endpoint MUST NOT send more than four compound RTCP packets with zero initial delay when it joins a session, independent of the number of sources it uses. Each of those packets may include aggregated reports from several sources, provided the total packet size does not exceed the MTU and the average RTCP packet size is maintained as described below. Aggregating reports this way allows a substantial number of sources to report immediately. Endpoints SHOULD prioritise reports on sources that are likely to be most immediately useful, for example sources that are initially senders.</p><p>An endpoint that needs to report on more sources than fit into those four packets MUST send the other reports later, following the usual RTCP timing rules including timer reconsideration, and MAY aggregate them as described in the next section. The limit of four is chosen to match the TCP maximum initial window of four packets, and the reason is to be conservative, because an endpoint will often start sending RTP data packets at the same time as these initial RTCP packets.</p>",
+      "plainLanguage": "<p>A machine with twenty sources must not send twenty reports the instant it joins, or the queue will overflow and packets will be lost. The rule caps the initial burst at four compound packets, each of which may carry reports for several sources at once.</p>"
     },
     {
-      "id": "procedures",
-      "number": "5.4",
-      "title": "Feedback Packets and Early RTCP",
-      "content": "<p>With the RTP/AVPF and RTP/SAVPF profiles from <a href='/rfc4585'>RFC 4585</a>, an endpoint with several SSRCs must choose which sends each feedback packet. Feedback about a media type SHOULD come from an SSRC that receives that type. Notifications or indications about data the endpoint processed MUST come from the SSRC used for that data. If separate SSRCs send and receive, the matching one SHOULD be used. Some messages need consistency, since a TMMBR limit must be removed by the same SSRC that set it.</p><p>To schedule early feedback, the RFC changes three things. An endpoint decides point-to-point versus multiparty by counting distinct CNAME values of the SSRCs it sees, and MUST NOT decide from unicast versus multicast or from the SSRC count. The check for an already scheduled feedback packet MUST consider all local SSRCs. And if an SSRC cannot send early, the feedback MAY be queued into any packet within its maximum useful lifetime, T_max_fb_delay.</p><p>The CNAME rule can misclassify some cases, such as a selective forwarding middlebox or an endpoint with several synchronization contexts. Reporting groups from the draft are the suggested fix.</p>",
-      "plainLanguage": "<p>When one person has many voices in a call, the right voice should speak up about the right thing, and the same voice should take back what it said earlier.</p>"
+      "id": "data-transfer",
+      "number": "5.3",
+      "title": "Aggregating Reports into Compound Packets",
+      "content": "<p>Because each source is a separate participant, each one would send a compound RTCP packet in each reporting interval. Since those packets come from the same endpoint, they can be aggregated to reduce overhead. RFC 3550 already allows translators and mixers to do this, and notes that each compound packet must begin with an SR or RR packet, and that if the overall length would exceed the path MTU it should be segmented into several shorter compound packets.</p><p>Endpoints that use several sources can therefore aggregate the RTCP packets sent by their sources into compound packets, provided the resulting packets begin with an SR or RR packet, they maintain the average RTCP packet size, and they schedule transmission and manage aggregation as specified. There is no restriction on the order of the packets inside a compound packet, except that rule about starting with SR or RR, so correctly implemented endpoints will be able to handle compound packets that relate to several sources.</p><p>The average packet size estimate has to change when reports are aggregated. Participants update their estimate of the average RTCP packet size each time they send or receive an RTCP packet. When a compound packet containing packets from several sources is sent or received, the estimate for each source reported upon is updated using the packet size divided by the number of sources reporting in that packet, rather than the actual packet size. The number of sources reporting is found by counting the distinct sources of SR or RR packets within the compound packet; a non-compound RTCP packet is considered to report on a single source.</p><p>An endpoint that ignores this rule and uses the full packet size instead derives a reporting interval that is too large by a factor proportional to the number of sources aggregated and to their share of the total participants. That can cause premature timeouts if the interval becomes more than five times the interval chosen by endpoints that do understand aggregation. A 1500-octet MTU can fit five typical-size reports into a compound packet, so this is a real concern. If compatibility with endpoints that do not follow the rule matters, the number of reports aggregated into one compound packet SHOULD be limited to two, or aggregation should not be used at all.</p>",
+      "plainLanguage": "<p>Reports for several sources can travel together in one packet, which saves overhead. The catch is bookkeeping: the packet is shared between several sources, so when each source works out how often it should report, it counts only its share of the packet size. Getting this wrong makes a source report too rarely, and it can then be declared dead while it is still there.</p>"
     },
     {
-      "id": "management",
+      "id": "connection-management",
       "number": "6",
-      "title": "Adding and Removing SSRCs",
-      "content": "<p>An endpoint always needs at least one SSRC for RTCP, even if it sends no media. Others learn about SSRCs from RTP and RTCP packets or from non-RTP signaling. If an endpoint that has never sent wants to start, it is RECOMMENDED to reuse its existing SSRC, because extra SSRCs lengthen reporting intervals. A second stream needs a new SSRC, and an SSRC cannot change media type or clock rate, so a new stream often needs a new SSRC.</p><p>An SSRC leaves a session either by timing out or by an RTCP BYE packet, and sending BYE is RECOMMENDED. After a BYE, a restarted stream needs a new SSRC. A temporary pause should instead keep sending RTCP so the context stays in place. An endpoint that stops all streams but stays in the session MUST keep at least one SSRC for RTCP reporting and feedback.</p>",
-      "plainLanguage": "<p>Say goodbye properly when you leave for good, but if you only step out for a moment, keep your seat warm.</p>"
+      "title": "Adding and Removing Streams",
+      "content": "<p>An endpoint that has never sent an RTP stream has a source identifier that it uses for RTCP reporting. If it wants to start sending a stream, it is RECOMMENDED that it use that existing identifier, because otherwise the participant count in the session is unnecessarily increased, which leads to a longer reporting interval and larger reports due to cross reporting. To start sending more than one stream, it needs to generate a new identifier for the second and any subsequent streams. An endpoint that has previously stopped sending a stream cannot generally reuse the identifier, and often needs a new one, because an identifier cannot change media type or RTP timestamp clock rate, and because the application may attach a particular meaning to it. A stream can pause and restart with the same identifier, provided RTCP is sent for it during the pause.</p><p>An identifier is removed from a session in one of two ways: by stopping to send RTP and RTCP packets with it, so that it eventually times out, or by explicitly sending an RTCP BYE packet. It is RECOMMENDED that identifiers be removed with a BYE, and RFC 3550 requires that the BYE be the last RTP or RTCP packet sent for that source. An endpoint that needs to restart a stream after sending a BYE needs a new identifier.</p><p>Because a BYE is final, an endpoint has to decide whether a pause is temporary or permanent. A temporary suspension must keep the identifier alive as an active participant by continuing RTCP transmission for it, so that media can resume immediately with the context in place. Permanent shutdown needs a BYE so that other participants can reclaim the RTCP bandwidth and clean up their state. An endpoint that stops transmitting all of its streams but stays in the session MUST keep at least one identifier for RTCP reporting and feedback; as some feedback packets are bound to a media type, there might be a need for one per media type. Any replacement identifier ought to be established before the existing ones are terminated, so that the endpoint does not appear to drop out of the session completely.</p>",
+      "plainLanguage": "<p>Starting a stream is easy: reuse the identifier the endpoint already reports with, so that the session does not gain an extra participant. Stopping one is where care is needed. A pause keeps the identifier alive by continuing to report, so the stream can resume at once. A permanent stop sends a BYE, and the identifier cannot be used again, so a new one has to be minted.</p>"
     },
     {
       "id": "performance",
       "number": "7",
-      "title": "Uneven Rates, SSRC Timeouts and Tuning",
-      "content": "<p>An RTP session has one set of RTCP parameters, so all sending SSRCs share a base reporting interval, and all receivers share another. This is awkward when streams differ widely, such as audio in tens of kilobits per second beside multi-megabit video. Using one session per media source avoids that, but combining them reduces port use and eases NAT and firewall traversal. More SSRCs also means more cross reporting.</p><p>The RTP/AVPF suppression mechanism (T_rr_interval) can stretch the gap between regular reports, up to <code>1.5*T_rr_interval + 1.5/1.21828*Td</code>. Under RTP/AVPF with a non-zero T_rr_interval, a single lost RTCP packet could then time an SSRC out. To fix this, <strong>all SSRCs in a session MUST use the same timeout rule</strong>: for RTP/AVP, RTP/SAVP, RTP/AVPF and RTP/SAVPF the timeout interval SHALL be <code>5*Td</code>, with Td calculated using a Tmin of 5 seconds. This changes the first paragraph of Section 3.5.4 of <a href='/rfc4585'>RFC 4585</a>. Mixing the two profiles in one session is NOT RECOMMENDED, but if done with non-updated RTP/AVPF endpoints, T_rr_interval SHOULD be 4 seconds.</p><p>The RFC also covers tuning. With the AVP profiles, bandwidth settings and the scaled minimum interval are the levers. With AVPF, T_rr_interval gives extra control, and if Td is to be below T_rr_interval it is RECOMMENDED to be under 1/4 of it. There is no way to use different regular reporting intervals per media type except separate RTP sessions.</p>",
-      "plainLanguage": "<p>Everyone in the call must use the same rule for when to decide someone has left, otherwise people get kicked out just because their check-ins are a little slow.</p>"
+      "title": "Streams with Disparate Rates",
+      "content": "<p>An RTP session has a single set of parameters configuring the session bandwidth, the RTCP sender and receiver fractions and, if the RTP/AVPF profile is used, its parameters. The base RTCP reporting interval before randomization is therefore the same for every sending source in the session, and the same for every receiving source, although the two can differ. That uniform interval can result in reports being sent more often, or too seldom, than is desirable for a particular stream. The RFC works through the case of an audio flow of tens of kilobits per second multiplexed with a multi-megabit video flow: if the session bandwidth is configured from the video rate, the RTCP bandwidth can exceed the audio sending rate, and with the reduced minimum interval the audio sources could be expected to send RTCP packets more often than they send audio packets.</p><p>Different media rates also arise with the same media type, for example in a conference where a few video streams are shown in high resolution and the rest as low-resolution thumbnails, with the choice controlled by voice activity. Sending multiple media types in one session also means more sources than separate sessions would, and since each source reports on all the others, the reports get larger and are sent less often for a given RTCP bandwidth. From an RTCP point of view there are therefore advantages in separate sessions, but these are frequently outweighed by the need to reduce port use and to ease NAT and firewall traversal.</p><p>The RFC also fixes the timeout rules, because earlier specifications were inconsistent. For the RTP/AVP, RTP/SAVP, RTP/AVPF and RTP/SAVPF profiles, the timeout interval SHALL be calculated with a multiplier of five times the deterministic reporting interval, that is 5*Td, and Td for the purpose of calculating the timeout SHALL use a Tmin value of 5 seconds and not the reduced minimal interval, even when the reduced minimum is used to calculate transmission intervals. Mixing endpoints that use two different profiles within one session is NOT RECOMMENDED; where mixed profiles are used and the RTP/AVPF endpoints have not been updated to follow the new rules, the session SHOULD be configured to use a T_rr_interval of 4 seconds. The RFC explains that this odd-looking value is deliberate, because the actual reporting intervals under the suppression rules can be longer than expected, and 4 seconds brings them close to the intervals the other profile expects.</p>",
+      "plainLanguage": "<p>One session has one reporting interval for all of its sources, and that interval is not always right. A small audio stream can end up sending control reports more often than it sends audio. The RFC cannot remove that, but it does make the timeout rules identical for every profile, so that one end does not decide the other has gone away when it has not.</p>"
     },
     {
       "id": "security-considerations",
       "number": "8",
       "title": "Security Considerations",
-      "content": "<p>For SRTP (<a href='/rfc3711'>RFC 3711</a>) and RTP/SAVPF (<a href='/rfc5124'>RFC 5124</a>), the cryptographic context of a compound secure RTCP packet is the SSRC of the sender of the first RTCP sub-packet. That may matter for per-SSRC keying such as MIKEY. Otherwise the usual RTP security considerations apply, and sending several streams from one endpoint in one session does not appear to have different security consequences than spreading them over several sessions.</p>",
-      "plainLanguage": "<p>Locks work the same as before. The only detail is that a bundled report uses the key of whoever's report is first in the bundle.</p>"
+      "content": "<p>When the secure RTP protocol or the secure variant of the feedback profile is used, the cryptographic context of a compound secure RTCP packet is the source identifier of the sender of the first RTCP sub-packet. This could matter in some cases, especially for keying mechanisms such as MIKEY that allow per-source keying.</p><p>Otherwise, the standard security considerations of RTP apply. Sending multiple RTP streams from a single endpoint in a single session does not appear to have different security consequences than sending the same number of streams spread across different sessions.</p>",
+      "plainLanguage": "<p>The secure form of the protocol keys a compound control packet on the first source that contributed to it, which matters only for per-source keying schemes. Otherwise, packing several streams into one session is no more or less secure than running several sessions.</p>"
     }
   ],
   "viz": [
     {
-      "type": "key-grid",
-      "anchor": "motivation",
+      "type": "compare-table",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "FOUR REASONS FOR MULTIPLE SSRCS (RFC 8108, SECTION 3)",
+      "caption": "THE FOUR SITUATIONS THAT NEED MULTIPLE SOURCES",
+      "data": {
+        "columns": [
+          "Situation",
+          "What it means"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Multiple capture devices",
+              "One endpoint has several cameras or microphones and sends a stream for each of them."
+            ]
+          },
+          {
+            "cells": [
+              "Several media types in one session",
+              "Audio and video are sent in a single RTP session to reduce the number of transport-layer flows."
+            ]
+          },
+          {
+            "cells": [
+              "Stream mixers",
+              "A mixer composites several sources and sends a separate stream to each connected participant."
+            ]
+          },
+          {
+            "cells": [
+              "Several sources for one media source",
+              "A repair stream or a layered encoding uses a different source identifier for each part."
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "THE RULES AN ENDPOINT MUST FOLLOW",
       "data": {
         "items": [
           {
-            "title": "Multiple capture devices",
-            "text": "Several cameras or microphones of the same type send streams in one session."
+            "title": "One source, one participant",
+            "text": "Each source identifier is treated as a separate participant, with its own reporting state and interval."
           },
           {
-            "title": "Multiple media types",
-            "text": "Audio and video share a single RTP session."
+            "title": "One shared bandwidth allowance",
+            "text": "The endpoint keeps its total sending rate inside its share, and can move that share between streams."
           },
           {
-            "title": "Stream mixers",
-            "text": "Mixers and selective forwarding middleboxes generate many streams."
+            "title": "Aggregate the reports",
+            "text": "Reports from several sources may be packed into one compound RTCP packet, which must begin with an SR or RR."
           },
           {
-            "title": "One source, many SSRCs",
-            "text": "Retransmission or layered video use extra SSRCs."
+            "title": "At most four initial packets",
+            "text": "An endpoint joining a session must not send more than four compound RTCP packets with zero delay."
+          },
+          {
+            "title": "Keep the average size right",
+            "text": "When reports are aggregated, the packet size is divided by the number of sources reporting in it."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "THE AVERAGE PACKET SIZE UPDATE",
+      "data": {
+        "title": "avg_rtcp_size",
+        "lang": "text",
+        "code": "avg_rtcp_size = (1/16) * div_packet_size + (15/16) * avg_rtcp_size\n\ndiv_packet_size : the packet size divided by the number of sources\n                  reporting in that compound packet"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "TUNING THE REPORTING INTERVAL IN THE TWO PROFILES",
+      "data": {
+        "columns": [
+          "Aspect",
+          "RTP/AVP and RTP/SAVP",
+          "RTP/AVPF and RTP/SAVPF"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Minimum interval",
+              "Tmin defaults to 5 seconds",
+              "Tmin is 5 seconds, but is set to zero after the first report when T_rr_interval is used"
+            ]
+          },
+          {
+            "cells": [
+              "Shortening the reporting interval",
+              "Only through the scaled minimum interval, which needs a high session bandwidth",
+              "Through T_rr_interval, which bounds how often the regular reports are sent"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Feedback packets",
+              "Not part of this profile",
+              "Can be sent at any time, even while the regular reports are being suppressed"
+            ]
+          },
+          {
+            "cells": [
+              "Timeout interval",
+              "5*Td, with Td calculated using Tmin of 5 seconds",
+              "5*Td, with Td calculated using Tmin of 5 seconds"
+            ]
           }
         ]
       }
@@ -143,13 +248,23 @@
   "references": [
     {
       "number": "[RFC3550]",
-      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "text": "Schulzrinne, H., S. Casner, R. Frederick and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
       "rfc": 3550
     },
     {
       "number": "[RFC4585]",
-      "text": "Ott, J., Wenger, S., Sato, N., Burmeister, C., and J. Rey, \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
+      "text": "Ott, J., S. Wenger, N. Sato, C. Burmeister and J. Rey, \"Extended RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/AVPF)\", RFC 4585, July 2006.",
       "rfc": 4585
+    },
+    {
+      "number": "[RFC3711]",
+      "text": "Baugher, M., D. McGrew, M. Naslund, E. Carrara and K. Norrman, \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
+      "rfc": 3711
+    },
+    {
+      "number": "[RFC5124]",
+      "text": "Ott, J. and E. Carrara, \"Extended Secure RTP Profile for Real-time Transport Control Protocol (RTCP)-Based Feedback (RTP/SAVPF)\", RFC 5124, February 2008.",
+      "rfc": 5124
     },
     {
       "number": "[RFC5506]",
@@ -157,23 +272,38 @@
       "rfc": 5506
     },
     {
+      "number": "[RFC3551]",
+      "text": "Schulzrinne, H. and S. Casner, \"RTP Profile for Audio and Video Conferences with Minimal Control\", STD 65, RFC 3551, July 2003.",
+      "rfc": 3551
+    },
+    {
+      "number": "[RFC3556]",
+      "text": "Casner, S., \"Session Description Protocol (SDP) Bandwidth Modifiers for RTP Control Protocol (RTCP) Bandwidth\", RFC 3556, March 2003.",
+      "rfc": 3556
+    },
+    {
+      "number": "[RFC3390]",
+      "text": "Allman, M., S. Floyd and C. Partridge, \"Increasing TCP's Initial Window\", RFC 3390, October 2002.",
+      "rfc": 3390
+    },
+    {
+      "number": "[RFC7022]",
+      "text": "Begen, A., C. Perkins, D. Wing and E. Rescorla, \"Guidelines for Choosing RTP Control Protocol (RTCP) Canonical Names (CNAMEs)\", RFC 7022, September 2013.",
+      "rfc": 7022
+    },
+    {
       "number": "[RFC7667]",
       "text": "Westerlund, M. and S. Wenger, \"RTP Topologies\", RFC 7667, November 2015.",
       "rfc": 7667
-    },
-    {
-      "number": "[RFC3711]",
-      "text": "Baugher, M., McGrew, D., Naslund, M., Carrara, E., and K. Norrman, \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
-      "rfc": 3711
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

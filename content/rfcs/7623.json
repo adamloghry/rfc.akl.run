@@ -5,14 +5,15 @@
   "categoryReviewed": false,
   "summary": "<p>Describes how Provider Backbone Bridging can be combined with Ethernet VPN. Customer MAC addresses are aggregated behind provider backbone MAC addresses, which cuts down the number of BGP MAC advertisement routes, helps with MAC mobility, and avoids flushing customer MAC addresses when the topology changes.</p>",
   "plainLanguage": {
-    "summary": "<p>A big school does not list every student at the front gate. It lists classrooms instead. This does the same for network devices, so the lists stay short.</p>"
+    "summary": "<p>In EVPN, every device in a customer's network gets its own route advertised across the provider's backbone. That is a lot of routes for a data centre with many thousands of machines. This document hides those device addresses behind one address per site, so the number of routes depends on how many sites there are rather than how many machines there are.</p>"
   },
   "questions": [
     "what is pbb-evpn",
     "how does pbb reduce bgp mac advertisements in evpn",
     "how does pbb-evpn reduce bgp routes",
     "what is a b-mac address",
-    "how does pbb-evpn handle mac mobility"
+    "how does pbb-evpn handle mac mobility",
+    "how does pbb-evpn do split horizon filtering"
   ],
   "tags": [
     "Ethernet VPN",
@@ -20,10 +21,10 @@
     "MPLS",
     "Bridging"
   ],
-  "subtitle": "How to give EVPN the MAC-address aggregation of Provider Backbone Bridging, so BGP carries one route per site instead of one per host.",
+  "subtitle": "How to give EVPN the address aggregation of Provider Backbone Bridging, so BGP carries one route per site instead of one per host.",
   "tldr": {
     "problem": "In plain EVPN, a provider edge router sends a BGP route for every customer MAC address. With millions of virtual machines that is a lot of routes, and every move of a machine causes more routes to be sent.",
-    "mechanism": "PBB-EVPN puts Backbone Edge Bridge behavior on the provider edge routers. Customer MAC addresses are learned in the data plane and hidden behind a small number of backbone MAC addresses, and only the backbone MAC addresses are advertised in BGP.",
+    "mechanism": "PBB-EVPN puts Backbone Edge Bridge behaviour on the provider edge routers. Customer MAC addresses are learned in the data plane and hidden behind a small number of backbone MAC addresses, and only the backbone MAC addresses are advertised in BGP.",
     "outcome": "The number of MAC Advertisement routes depends on the number of Ethernet segments rather than the number of hosts, customer MAC mobility does not cause new BGP routes, and customer MAC addresses need not be flushed when an all-active multihomed link fails.",
     "outcomeLabel": "Why it matters"
   },
@@ -33,7 +34,7 @@
       "value": "24 bits"
     },
     {
-      "label": "Ethernet Tag in MAC/IP route",
+      "label": "Ethernet Tag in the MAC/IP route",
       "value": "0"
     },
     {
@@ -42,14 +43,18 @@
     },
     {
       "label": "Unused extended communities",
-      "value": "ESI Label, Default Gateway"
+      "value": "ESI Label and Default Gateway"
     },
     {
       "label": "IANA actions",
       "value": "None beyond RFC 7432"
+    },
+    {
+      "label": "Route count",
+      "value": "One per Ethernet segment rather than per host"
     }
   ],
-  "today": "<p>RFC 7623 is a Proposed Standard, and the unit metadata lists no RFC that obsoletes or updates it. It builds on <a href='/rfc7432'>RFC 7432</a>, and it is still the document that defines PBB-EVPN.</p>",
+  "today": "<p>RFC 7623 is a Proposed Standard published in September 2015, and the unit metadata lists no RFC that obsoletes or updates it. It builds on <a href='/rfc7432'>RFC 7432</a>, the BGP MPLS-Based Ethernet VPN specification.</p>",
   "glossary": [
     "evpn",
     "i-sid",
@@ -60,145 +65,170 @@
     "split-horizon",
     "load-balancing",
     "ethernet",
-    "arp"
+    "arp",
+    "vpls",
+    "bridge",
+    "l2vpn",
+    "ethernet-segment",
+    "route-target",
+    "label-switched-path"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why Combine PBB and EVPN",
-      "content": "<p><a href='/rfc7432'>RFC 7432</a> defines EVPN, a way to build multipoint Layer 2 VPN services over an MPLS/IP core. It uses BGP to distribute customer MAC address reachability. Provider Backbone Bridging (<strong>PBB</strong>) is an IEEE architecture where MAC tunneling is used to improve service instance and MAC address scalability.</p><p>This document, <strong>PBB-EVPN</strong>, combines the two. The stated goals are to reduce the number of BGP MAC Advertisement routes by aggregating Customer/Client MAC (C-MAC) addresses behind a Provider Backbone MAC (B-MAC) address, to support C-MAC mobility through that aggregation, to confine C-MAC learning to active flows, to offer per-site policies, and to avoid C-MAC flushing on topology changes.</p>",
-      "plainLanguage": "<p>Normally every device's name goes on a giant public list. This RFC says: put devices behind a few shared group names instead, and only publish the group names.</p>"
+      "title": "Introduction",
+      "content": "<p><a href='/rfc7432'>RFC 7432</a> introduces a solution for multipoint Layer 2 Virtual Private Network services, with advanced multihoming capabilities, using BGP for distributing customer or client MAC address reachability information over the core MPLS/IP network. The IEEE Provider Backbone Bridging architecture defines a way to tunnel MAC addresses, which improves service instance and MAC address scalability in Ethernet as well as VPLS networks.</p><p>This document discusses how Provider Backbone Bridging can be combined with EVPN in order to reduce the number of BGP MAC Advertisement routes by aggregating customer or client MAC addresses behind a provider backbone MAC address, provide client MAC address mobility using that aggregation, confine the scope of client MAC learning to only active flows, offer per-site policies, and avoid client MAC address flushing on topology changes. The combined solution is called PBB-EVPN.</p>",
+      "plainLanguage": "<p>EVPN advertises one route per device address. This document advertises one route per site instead, by giving each site a backbone address of its own.</p>"
     },
     {
       "id": "requirements",
       "number": "3",
-      "title": "Requirements Beyond Plain EVPN",
-      "content": "<p>PBB-EVPN must meet all the EVPN requirements from <a href='/rfc7209'>RFC 7209</a>, plus five more.</p><ul><li><strong>Route scalability:</strong> an EVPN PE normally sends one BGP MAC Advertisement route per C-MAC. In data center interconnect, the number of virtual machines can be in the millions, so a 'MAC summarization' scheme is required.</li><li><strong>Mobility:</strong> with EVPN, a moving virtual machine's MAC must be sent in a BGP route, or traffic goes to the wrong segment. So MAC prefixes cannot be used. PBB defines a B-MAC address space independent of the C-MAC space.</li><li><strong>Learning and confinement:</strong> in EVPN every PE in an instance learns every C-MAC, even PEs not forwarding to it. These addresses still use memory in the routing information base, so visibility should be limited to PEs actively involved.</li><li><strong>Per-site policy:</strong> control which PEs may forward to or from a site. If policy is needed per C-MAC, the C-MAC should be learned in BGP as in RFC 7432.</li><li><strong>No C-MAC flushing</strong> on link, port or node failure for All-Active multihomed segments.</li></ul>",
-      "plainLanguage": "<p>The list of device names gets too long, changes too often, and gets shown to people who do not need it. The new design fixes all three.</p>"
+      "title": "Requirements",
+      "content": "<p>The requirements for PBB-EVPN include all the requirements for EVPN described in RFC 7209, in addition to the following.</p><p><strong>MAC Advertisement route scalability.</strong> In typical operation, an EVPN PE sends a BGP MAC Advertisement route per customer MAC address. In certain applications this poses scalability challenges, as in data centre interconnect scenarios where the number of virtual machines, and hence the number of customer MAC addresses, can be in the millions. In such scenarios it is required to reduce the number of BGP MAC Advertisement routes by relying on a MAC summarisation scheme, as provided by PBB.</p><p><strong>Customer MAC mobility independent of backbone MAC advertisements.</strong> Certain applications, such as virtual machine mobility, require support for fast customer MAC address mobility. When using EVPN, the virtual machine MAC address needs to be transmitted in the BGP MAC Advertisement route, otherwise traffic would be forwarded to the wrong segment when a virtual machine moves from one Ethernet segment to another. This means MAC address prefixes cannot be used in data centre applications. To support customer MAC address mobility while retaining the scalability benefits of MAC summarisation, PBB technology is used, because it defines a backbone MAC address space that is independent of the customer MAC address space and aggregates customer MAC addresses via a single backbone MAC address.</p><p><strong>Customer MAC address learning and confinement.</strong> In EVPN, all the PE nodes participating in the same EVPN instance are exposed to all the customer MAC addresses learned by any one of them, because a customer MAC learned by one PE is advertised in BGP to the others. This is the case even if some of those PEs are not involved in forwarding traffic to or from those addresses. Even if an implementation does not install hardware forwarding entries for customer MAC addresses that are not part of active traffic flows, the device memory is still consumed by keeping a record of them in the routing information base table. With millions of customer MAC addresses this is a non-trivial waste of PE resources, so it is required to confine the scope of visibility of customer MAC addresses to only those PE nodes that are actively involved in forwarding traffic to or from them.</p><p><strong>Per-site policy support</strong> requires the ability to enforce connectivity policy rules at the granularity of a site or segment, including control over which PE nodes may forward traffic to or from a given site. Both EVPN and PBB-EVPN provide this granularity. Where the policy needs to be at the granularity of a single customer MAC address, that address should be learned in the control plane, in BGP, as in RFC 7432.</p><p><strong>No customer MAC address flushing for all-active multihoming</strong> is also required: as in RFC 7432, it is required to avoid customer MAC address flushing upon link, port or node failure for all-active multihomed segments.</p>",
+      "plainLanguage": "<p>The document sets out five things PBB-EVPN has to achieve: fewer routes, machines that can move without new routes, no record of addresses a router is not using, per-site rules, and no flushing of addresses when a link fails.</p>"
     },
     {
       "id": "overview",
       "number": "4",
       "title": "Solution Overview",
-      "content": "<p>The solution puts IEEE <strong>Backbone Edge Bridge</strong> (BEB) functionality on the EVPN PE nodes, like PBB-VPLS does for VPLS PEs. A PE receives 802.1Q Ethernet frames from its attachment circuits, wraps them in a PBB header and forwards them across the IP/MPLS core. The egress PE removes the PBB header after MPLS disposition and delivers the original 802.1Q frame to the customer.</p><p>Each PE does four things:</p><ul><li>Learns C-MAC addresses on attachment circuits in the data plane, as a normal bridge does.</li><li>Learns remote C-MAC to B-MAC bindings in the data plane from traffic arriving from the core.</li><li>Advertises its local B-MAC reachability in BGP to all other PEs in the same set of service instances.</li><li>Builds a forwarding table from remote BGP advertisements that ties remote B-MAC addresses to remote PE IP addresses and MPLS labels.</li></ul>",
-      "plainLanguage": "<p>Each edge router learns which devices sit behind each group name just by watching traffic. Only the group names are announced to everyone.</p>"
+      "content": "<p>The solution involves incorporating IEEE Backbone Edge Bridge functionality on the EVPN PE nodes, similar to PBB-VPLS where that functionality is incorporated in the VPLS PE nodes. The PE devices receive 802.1Q Ethernet frames from their attachment circuits, encapsulate them in the PBB header, and forward the frames over the IP/MPLS core. On the egress EVPN PE, the PBB header is removed following the MPLS disposition, and the original 802.1Q Ethernet frame is delivered to the customer equipment.</p><p>The PE nodes perform four functions. They learn customer MAC addresses over the attachment circuits in the data plane, by normal bridge operation. They learn remote customer MAC to backbone MAC bindings in the data plane, for traffic received from the core, following the bridging operation of PBB. They advertise local backbone MAC address reachability information in BGP to all other PE nodes in the same set of service instances, noting that every PE has a set of backbone MAC addresses that uniquely identifies the device. And they build a forwarding table from the remote BGP advertisements received, associating remote backbone MAC addresses with remote PE IP addresses and the associated MPLS labels.</p>",
+      "plainLanguage": "<p>Each edge router learns the device addresses on its own site by watching traffic, and publishes only its own backbone addresses to the rest of the network. The mapping between device address and backbone address is worked out by watching traffic, not by publishing it.</p>"
     },
     {
-      "id": "encoding",
+      "id": "message-format",
       "number": "5",
-      "title": "BGP Route Encoding",
-      "content": "<p>PBB-EVPN reuses the BGP routes and attributes of <a href='/rfc7432'>RFC 7432</a>, adapted as follows.</p><ul><li><strong>Ethernet Auto-Discovery route:</strong> not needed, because PBB encapsulation gives the needed indirection and an Ethernet Segment can be represented by a B-MAC. The reserved ESI values 0 and MAX-ESI tell the receiving PE it can resolve the path without waiting for this route.</li><li><strong>MAC/IP Advertisement route:</strong> carries B-MAC addresses, not C-MAC addresses. The MAC address field holds the B-MAC, the Ethernet Tag is 0, and the ESI must be 0 (single-homed segments, or multihomed segments with per-I-SID load-balancing) or MAX-ESI (multihomed segments with per-flow load-balancing). It is tagged with the Route Target of its EVI, which is analogous to a B-VID.</li><li><strong>Inclusive Multicast Ethernet Tag route:</strong> used for multicast pruning per I-SID. The Ethernet Tag field holds the I-SID. It has advantages over MMRP: it scales to many PEs and works with any LSP type, while MMRP only works over P2P pseudowires.</li><li><strong>Ethernet Segment route</strong> and ES-Import Route Target: used as in RFC 7432.</li><li><strong>MAC Mobility extended community:</strong> on a B-MAC route it means all C-MAC addresses tied to that B-MAC, across all I-SIDs, must be flushed.</li><li><strong>ESI Label and Default Gateway extended communities:</strong> not used. Split-horizon filtering is done with the B-MAC source address instead.</li></ul>",
-      "plainLanguage": "<p>The announcements still use the old message types. Only the contents change: they name the groups, not the individual devices.</p>"
+      "title": "BGP Encoding",
+      "content": "<p>PBB-EVPN leverages the same BGP routes and attributes defined in RFC 7432, adapted as described here.</p><p>The <strong>Ethernet Auto-Discovery route</strong> and all of its associated modes are not needed in PBB-EVPN, because the PBB encapsulation provides the required level of indirection for customer MAC addresses: an Ethernet segment can be represented by a backbone MAC address for the purposes of data-plane learning and forwarding. The receiving PE knows it need not wait for the Ethernet auto-discovery route for route resolution because of the reserved ESI encoded in the MAC Advertisement route, since the ESI values of 0 and MAX-ESI indicate that the receiving PE can resolve the path without one.</p><p>The <strong>MAC/IP Advertisement route</strong> is used to distribute the backbone MAC addresses of the PE nodes instead of the customer MAC addresses of end stations and hosts, because the customer MAC addresses are learned in the data plane for traffic arriving from the core. The MAC address field contains the backbone MAC address, the Ethernet Tag field is set to 0, and the Ethernet Segment Identifier field must be set to either 0, for single-homed segments or multihomed segments with per-I-SID load-balancing, or to MAX-ESI, for multihomed segments with per-flow load-balancing. All other values are not permitted. The route is tagged with the route target corresponding to its EVI, which is analogous to a backbone VLAN ID.</p><p>The <strong>Inclusive Multicast Ethernet Tag route</strong> is used for multicast pruning per I-SID, and for auto-discovery of the PEs participating in a given I-SID so that a multicast tunnel can be set up for that I-SID. The Ethernet Tag field is set with the appropriate I-SID value, and the route is tagged with a route target, which should be set to a value corresponding to its EVI.</p><p>The <strong>Ethernet Segment route</strong> is used as in RFC 7432, for auto-discovery of the PEs belonging to a given redundancy group. The <strong>ES-Import route target</strong> is used as defined in RFC 7432. The <strong>ESI Label extended community</strong> is not used in PBB-EVPN: in RFC 7432 it is used along with the Ethernet auto-discovery route to advertise an MPLS label for split-horizon filtering, whereas in PBB-EVPN the split-horizon filtering is performed natively using the backbone MAC source address. The <strong>Default Gateway extended community</strong> is also not used.</p><p>The <strong>MAC Mobility extended community</strong> is used with a backbone MAC route. When it is used along with such a route in PBB-EVPN, it indicates that all customer MAC addresses associated with that backbone MAC address across all corresponding I-SIDs must be flushed. When a PE first advertises a backbone MAC, it may advertise it with this extended community where the sticky or static flag is set to 1 and the sequence number is set to zero. To signal the stickiness of a backbone MAC, the PE then advertises it with the MAC Mobility extended community where the sticky flag remains set and the sequence number is incremented.</p>",
+      "plainLanguage": "<p>Most of the BGP machinery stays the same. The advertisement carries the site address rather than the device address, the Ethernet Tag is set to zero, and the segment identifier is limited to two allowed values.</p>"
     },
     {
       "id": "operation",
-      "number": "6",
-      "title": "Multihoming and B-MAC Assignment",
-      "content": "<p>Because C-MACs are learned in the data plane, every PE has one or more unicast B-MAC addresses and those are what BGP carries. How B-MACs are assigned matters for multihoming.</p><p><strong>All-Active (flow-based load-balancing).</strong> All PEs attached to the same CE must share one B-MAC for that site. If they used different ones, a remote PE's table would keep oscillating between them as the CE load-balances. Each site needs its own B-MAC, so PE2 serving two sites in the RFC's example uses two. A remote PE can then load-balance toward a B-MAC across the PEs that advertise it, and if a PE loses its link to the site it just withdraws that B-MAC route. The shared B-MAC can be derived from the CE's LACP System Identifier by flipping the 'Locally Administered' bit. A PE MUST advertise the B-MAC with a downstream-assigned MPLS label.</p><p><strong>Single-Active (per-I-SID load-balancing).</strong> Each PE in the redundancy group gets its own B-MAC. A PE MAY use a shared B-MAC for all its single-homed and Single-Active segments, or a dedicated one per segment. Dedicated B-MACs mean fewer C-MACs are affected by a flush, at the cost of more BGP advertisements. Designated Forwarder filtering applies to unicast and multicast, in both directions.</p><p><strong>Failures.</strong> With a shared B-MAC, the failed PE re-advertises the B-MAC route with the MAC Mobility extended community and an incremented counter, which makes remote PEs flush the C-MACs. With a dedicated B-MAC, it just withdraws the route. On node failure, remote PEs purge the routes when the BGP session drops or a route reflector withdraws them. A multihomed Ethernet network is handled the same way as a Single-Active device, with I-SID load-balancing.</p>",
-      "plainLanguage": "<p>If two doors lead to the same room, both must use the same room name, or visitors get confused about which door to use. If a door breaks, that door just stops announcing the name.</p>"
+      "number": "6.2",
+      "title": "Multihoming and Backbone MAC Assignment",
+      "content": "<p>Every PE has one or more unicast backbone MAC addresses associated with it, and those are the addresses distributed over the core in MAC Advertisement routes. Host MAC addresses need not be distributed in BGP at all; every PE independently learns the customer MAC addresses in the data plane by normal bridging operation.</p><p>In the flow-based load-balancing case, where a customer edge device is multihomed to several PEs in all-active redundancy mode, a given customer MAC address would be reachable via multiple PEs concurrently. Given that any given remote PE binds the customer MAC address to a single backbone MAC address, the various PEs connected to the same device must share the same backbone MAC address. Otherwise the MAC address table of the remote PEs keeps oscillating between the backbone MAC addresses of the various PE devices, and the device's address flip-flops between them depending on the load-balancing decision. Considering that there could be multiple sites multihomed to the same set of PEs, it is required for all the PE devices in a redundancy group to have a unique backbone MAC address per site, which makes fast convergence possible when a link or port failure affects the attachment circuit connecting a single site to a given PE.</p><p>The backbone MAC address used for single-homed or single-active sites can be derived automatically from the hardware, for example from the backplane address or the PE's reserved MAC pool. The backbone MAC address used for all-active sites must be coordinated among the redundancy group members. To automate it, the PE can derive it from the MAC address portion of the customer's Link Aggregation Control Protocol System Identifier by flipping the Locally Administered bit of that address, which guarantees uniqueness within the network and ensures that all PEs connected to the same all-active device use the same value. This automatic provisioning cannot support the uncommon scenario where a device has multiple link bundles within the same LACP session and the service involves hair-pinning traffic from one bundle to another, because the split-horizon filtering relies on backbone MAC addresses rather than Site-ID labels; the operator must configure the address explicitly in that case.</p><p>Whenever a backbone MAC address is provisioned on the PE, whether manually or automatically, the PE MUST transmit a MAC Advertisement route for it with a downstream assigned MPLS label that uniquely identifies that address on the advertising PE.</p><p>In the per-I-SID load-balancing case, multiple unicast backbone MAC addresses are allocated per multihomed segment, with each PE connected to the segment assigned a unique backbone MAC. A PE may use a shared backbone MAC address for all its single-homed segments and all its multi-homed single-active segments, or a dedicated backbone MAC address for each segment operating with per-I-SID load-balancing. The dedicated model means that when customer MAC flushing is needed, fewer customer MAC addresses are impacted, and it gives the disposition PE the ability to avoid a customer MAC destination address lookup, but it has the disadvantage of additional backbone MAC advertisements in BGP. A remote PE initially floods traffic to a destination customer MAC address in a given multihomed segment to all the PEs configured with that I-SID, and then learns the backbone MAC address and next-hop PE in the data path when reply traffic arrives.</p><p>Split-horizon filtering also changes. RFC 7432 uses the Ethernet segment label for egress filtering on the attachment circuit to prevent forwarding loops, whereas in PBB-EVPN the backbone MAC source address serves the same purpose, since it uniquely identifies the originating site of a frame. Ethernet segment labels are therefore not used, and the egress split-horizon filtering is done on the backbone MAC source address.</p>",
+      "plainLanguage": "<p>When a site is connected to several routers, all of them must use the same site address, otherwise traffic flips between them. The address can be worked out from the site's own link aggregation identifier, by flipping one bit.</p>"
     },
     {
-      "id": "data-transfer",
+      "id": "packet-format",
       "number": "6.4",
       "title": "Frame Forwarding and Encapsulation",
-      "content": "<p>Forwarding is split between a Bridge Module, which hosts the PBB BEB function, and an MPLS Forwarder, which imposes and removes MPLS labels.</p><p>For <strong>known unicast</strong>, the PE PBB-encapsulates the frame using the B-MAC source address of the originating site. The B-MAC destination comes from a lookup of the C-MAC destination, learned from reverse traffic. The frame then gets an LSP tunnel label and an EVPN label for the destination B-MAC. If per-flow load-balancing over ECMP is needed, a flow label goes below the B-MAC label. <strong>Unknown unicast</strong> uses the same options as multicast.</p><p>For <strong>multicast and broadcast</strong>, the B-MAC destination is chosen from the I-SID. The MPLS Forwarder then either does ingress replication over MP2P or P2P tunnel LSPs, using the label from the Inclusive Multicast Ethernet Tag route, or uses a P2MP tunnel LSP (Inclusive or Aggregate Inclusive trees, or MP2MP with Inclusive trees).</p><p>PE nodes MAY also run an ARP/ND proxy that snoops ARP and ND messages, keeps an IP/MAC cache and answers requests locally, flooding only on a miss.</p>",
-      "plainLanguage": "<p>The edge router puts the message in a bigger envelope addressed to the group name, then sends it over the long-distance road. At the far end the outer envelope is removed.</p>"
+      "content": "<p>The frame-forwarding functions are divided between the Bridge Module, which hosts the Backbone Edge Bridge functionality, and the MPLS Forwarder, which handles the MPLS imposition and disposition.</p><p>Known unicast traffic received from the attachment circuit is PBB-encapsulated by the PE using the backbone MAC source address corresponding to the originating site. The unicast backbone MAC destination address is determined by a lookup of the customer MAC destination address, and the binding of the two is done by transparent learning of reverse traffic. The resulting frame is then encapsulated with a tunnel label and an EVPN label associated with the backbone MAC destination address. If per-flow load-balancing over equal-cost paths in the MPLS core is required, a flow label is added below the label associated with the backbone MAC address in the label stack. For unknown unicast traffic, the PE forwards the frames over the MPLS core using the same set of options used for multicast and broadcast frames.</p><p>Multi-destination frames received from the attachment circuit are PBB-encapsulated by the PE using the backbone MAC source address corresponding to the originating site. The multicast backbone MAC destination address is selected based on the value of the I-SID. The resulting frame is then forwarded over the MPLS core using one of two options. Either the MPLS Forwarder performs ingress replication over a set of multipoint-to-point or point-to-point tunnel LSPs, with the frame encapsulated with a tunnel label and the EVPN ingress replication label advertised in the Inclusive Multicast Ethernet Tag, or the MPLS Forwarder uses a point-to-multipoint tunnel LSP, including the use of Inclusive or Aggregate Inclusive trees. The MPLS Forwarder can also use a multipoint-to-multipoint tunnel LSP if Inclusive trees are used.</p><p>The encapsulation for transporting PBB frames over MPLS is similar to that of classical Ethernet, with the additional PBB header: an IP/MPLS header, then the PBB header, then the Ethernet header, the Ethernet payload and the Ethernet FCS.</p><p>The PE nodes MAY implement an ARP or ND proxy function in order to minimise the volume of ARP and neighbour discovery traffic broadcast over the MPLS network. Each PE snoops ARP request and response messages received over the access interfaces or the MPLS core and builds a cache of IP to MAC address bindings from them. It then uses the cache to respond to ARP requests ingress on access ports that target hosts in remote sites, dropping the request. If there is no match in the cache, the request is flooded over the MPLS network using either ingress replication or point-to-multipoint LSPs.</p>",
+      "plainLanguage": "<p>Each frame gets an extra header that names the site it came from and the service it belongs to. The provider core then forwards it as an ordinary MPLS packet, and the far end removes the extra header before handing the frame to the customer.</p>"
     },
     {
       "id": "performance",
       "number": "9",
-      "title": "Advantages and Interworking",
-      "content": "<p>The number of MAC Advertisement routes now depends on the number of Ethernet segments, not hosts. The RFC says the volume may be multiple orders of magnitude lower than with EVPN.</p><p>B-MAC locations are fixed, so C-MAC mobility does not cause new BGP routes. The RFC's example: if an EVPN PE advertises N MAC addresses and 50% move, N/2 more routes are sent. In PBB-EVPN the C-MAC to B-MAC bindings simply update through data-plane learning. PEs not in active conversations purge unused C-MACs and keep no control-plane record of them.</p><p>For interworking, B-MAC addresses must be globally unique across PBB-EVPN and IEEE 802.1aq / 802.1Qbp networks, and B-MACs of 802.1aq switches are advertised with the EVPN MAC/IP route. With PBB-EVPN the 802.1aq encapsulation can be carried across the MPLS backbone, keeping C-MACs hidden from the PEs. Per-site policy works by giving each site its own B-MAC. For an All-Active segment, if a link fails, the PE withdraws its B-MAC routes and the remote PE keeps one adjacency, with no C-MAC flush.</p>",
-      "plainLanguage": "<p>Short lists, fewer updates when things move, and no need to forget everything when one road closes.</p>"
+      "title": "Solution Advantages",
+      "content": "<p>The number of MAC Advertisement routes in PBB-EVPN is a function of the number of Ethernet segments, that is, sites, rather than the number of hosts or servers, because the backbone MAC addresses of the PEs are advertised in BGP rather than the customer MAC addresses. There is a one-to-one mapping between all-active multihomed segments and their associated backbone MAC addresses, either a one-to-one or many-to-one mapping between single-active multihomed segments and their backbone MAC addresses, and a many-to-one mapping between single-homed sites and their backbone MAC addresses on a given PE. A single backbone MAC is therefore associated with one or more segments, and each segment can be associated with many customer MAC addresses. The volume of MAC Advertisement routes may be multiple orders of magnitude less than in EVPN.</p><p>Customer MAC mobility does not affect the backbone MAC addresses, because those are associated with segments attached to a PE or with the PE itself, so their locations are fixed. The association between a customer MAC address and a backbone MAC address is learned in the data plane, and customer MAC addresses are not advertised in BGP. To illustrate the difference, consider a PE running EVPN advertising reachability for N MAC addresses via a particular segment, where 50% of those MAC addresses then move to other segments, for example because of virtual machine mobility. N/2 additional MAC Advertisement routes need to be sent for the addresses that moved. With PBB-EVPN, the backbone MAC addresses associated with PE nodes are not subject to mobility, and as customer MAC addresses move, the binding to backbone MAC addresses is updated by data-plane learning.</p><p>Customer MAC address reachability information is built by data-plane learning, so PE nodes not participating in active conversations involving a particular customer MAC address will purge that address from their forwarding tables. Because customer MAC addresses are not distributed in BGP, PE nodes keep no record of them in the control-plane routing table either.</p><p>Per-site policy can be supported through backbone MAC addresses, by assigning a unique backbone MAC address for every site or segment. Since the backbone MAC addresses are sent in BGP MAC/IP route advertisements, it is possible to define per-site, that is, per-backbone-MAC, forwarding policies.</p><p>It is also possible to avoid customer MAC address flushing upon a topology change affecting an all-active multihomed segment. If both PE1 and PE2 advertise the same backbone MAC address to PE3, and PE3 has learned the customer MAC addresses behind the site through data-plane learning, then when one link fails PE3 does not need to flush any of those addresses: PE1 withdraws the MAC Advertisement routes for the backbone MAC address, so PE3 ends up with a single adjacency to PE2, and the topology change is communicated without flushing.</p>",
+      "plainLanguage": "<p>The number of routes follows the number of sites, not the number of machines. Moving a machine does not create a new route, and a router does not keep a record of addresses it is not using.</p>"
     },
     {
       "id": "security-considerations",
       "number": "10",
-      "title": "Security and IANA",
-      "content": "<p>All security considerations in <a href='/rfc7432'>RFC 7432</a> apply, since this document uses a subset of its control plane. The RFC says it adds no new security considerations beyond those of RFC 7432 and <a href='/rfc4761'>RFC 4761</a>: B-MAC addresses are handled as in RFC 7432, and C-MAC addresses as in RFC 4761, with B-MACs learned in the control plane and C-MACs learned in the data plane.</p><p>There are no IANA considerations beyond what RFC 7432 already describes.</p>",
-      "plainLanguage": "<p>It uses the same locks as the system it builds on, and adds no new doors.</p>"
+      "title": "Security Considerations",
+      "content": "<p>All the security considerations in RFC 7432 apply directly, because this document leverages the control plane described there and its associated procedures. The document introduces no new security considerations beyond those of RFC 7432 and RFC 4761, because advertisements and processing of backbone MAC addresses follow RFC 7432 and the processing of customer MAC addresses follows RFC 4761: backbone MAC addresses are learned in the control plane and customer MAC addresses are learned in the data plane.</p>",
+      "plainLanguage": "<p>The backbone addresses are published and protected the same way EVPN protects its addresses, so the usual rules apply.</p>"
     }
   ],
   "viz": [
     {
-      "type": "compare-table",
-      "anchor": "encoding",
+      "type": "layers",
+      "anchor": "packet-format",
       "position": "after",
-      "caption": "HOW PBB-EVPN USES THE RFC 7432 ROUTES",
+      "caption": "PBB OVER MPLS ENCAPSULATION (RFC 7623, SECTION 6.5)",
+      "data": {
+        "layers": [
+          {
+            "label": "IP/MPLS Header",
+            "detail": "The transport across the provider core."
+          },
+          {
+            "label": "PBB Header",
+            "detail": "Carries the backbone MAC addresses and the service instance identifier.",
+            "highlight": true
+          },
+          {
+            "label": "Ethernet Header",
+            "detail": "The original customer Ethernet header."
+          },
+          {
+            "label": "Ethernet Payload",
+            "detail": "The original customer payload."
+          },
+          {
+            "label": "Ethernet FCS",
+            "detail": "The original frame check sequence."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "EVPN AND PBB-EVPN AGAINST THE SAME REQUIREMENTS (RFC 7623, SECTION 9)",
       "data": {
         "columns": [
-          "Route or attribute",
-          "In PBB-EVPN"
+          "Requirement",
+          "EVPN",
+          "PBB-EVPN"
         ],
         "rows": [
           {
             "cells": [
-              "Ethernet Auto-Discovery route",
-              "Not needed"
+              "Number of MAC Advertisement routes",
+              "One per customer MAC address.",
+              "One per Ethernet segment rather than per host."
             ]
           },
           {
             "cells": [
-              "MAC/IP Advertisement route",
-              "Carries the B-MAC; Ethernet Tag is 0"
+              "A customer MAC moving between segments",
+              "New MAC Advertisement routes are sent.",
+              "No new routes, because the binding is learned in the data plane."
             ],
             "self": true
           },
           {
             "cells": [
-              "Inclusive Multicast Ethernet Tag route",
-              "Ethernet Tag holds the I-SID"
+              "Where customer MAC addresses are held",
+              "In the control-plane routing table of every PE in the instance.",
+              "Only on the PEs that are forwarding traffic for them."
             ]
           },
           {
             "cells": [
-              "Ethernet Segment route",
-              "Used as in RFC 7432"
-            ]
-          },
-          {
-            "cells": [
-              "ESI Label extended community",
-              "Not used"
-            ]
-          },
-          {
-            "cells": [
-              "Default Gateway extended community",
-              "Not used"
+              "All-active multihomed link failure",
+              "Customer MAC addresses may need to be flushed.",
+              "No flushing is needed, because the topology change is signalled by a route withdrawal."
             ]
           }
         ]
       }
     },
     {
-      "type": "layers",
-      "anchor": "data-transfer",
+      "type": "key-grid",
+      "anchor": "operation",
       "position": "after",
-      "caption": "PBB OVER MPLS ENCAPSULATION (RFC 7623, FIGURE 3)",
+      "caption": "THE RULES FOR BACKBONE MAC ADDRESSES (RFC 7623, SECTION 6.2)",
       "data": {
-        "layers": [
+        "items": [
           {
-            "label": "IP/MPLS Header",
-            "detail": "Carries the frame across the core"
+            "title": "One address per site",
+            "text": "Every PE in a redundancy group must use the same backbone MAC address for a given site, or the remote MAC tables oscillate between them."
           },
           {
-            "label": "PBB Header",
-            "detail": "Holds the B-MAC addresses and I-SID",
-            "highlight": true
+            "title": "Derive it automatically",
+            "text": "For an all-active site the PE can derive the address from the customer's LACP System Identifier by flipping the Locally Administered bit."
           },
           {
-            "label": "Ethernet Header",
-            "detail": "The customer's original header"
+            "title": "Split horizon on the source address",
+            "text": "The backbone MAC source address replaces the Ethernet segment label for egress split-horizon filtering."
           },
           {
-            "label": "Ethernet Payload",
-            "detail": "The customer's data"
-          },
-          {
-            "label": "Ethernet FCS",
-            "detail": "Frame check sequence"
+            "title": "Advertise it with a label",
+            "text": "Whenever a backbone MAC address is provisioned, the PE MUST advertise it with a downstream assigned MPLS label unique on that PE."
           }
         ]
       }
@@ -206,19 +236,14 @@
   ],
   "references": [
     {
-      "number": "[RFC7432]",
-      "text": "Sajassi, A., Ed., et al., \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
-      "rfc": 7432
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     },
     {
-      "number": "[RFC7209]",
-      "text": "Sajassi, A., et al., \"Requirements for Ethernet VPN (EVPN)\", RFC 7209, May 2014.",
-      "rfc": 7209
-    },
-    {
-      "number": "[RFC7080]",
-      "text": "Sajassi, A., Salam, S., Bitar, N., and F. Balus, \"Virtual Private LAN Service (VPLS) Interoperability with Provider Backbone Bridges\", RFC 7080, December 2013.",
-      "rfc": 7080
+      "number": "[RFC4389]",
+      "text": "Thaler, D., Talwar, M., and C. Patel, \"Neighbor Discovery Proxies (ND Proxy)\", RFC 4389, April 2006.",
+      "rfc": 4389
     },
     {
       "number": "[RFC4761]",
@@ -226,18 +251,32 @@
       "rfc": 4761
     },
     {
-      "number": "[RFC4389]",
-      "text": "Thaler, D., Talwar, M., and C. Patel, \"Neighbor Discovery Proxies (ND Proxy)\", RFC 4389, April 2006.",
-      "rfc": 4389
+      "number": "[RFC7080]",
+      "text": "Sajassi, A., Salam, S., Bitar, N., and F. Balus, \"Virtual Private LAN Service (VPLS) Interoperability with Provider Backbone Bridges\", RFC 7080, December 2013.",
+      "rfc": 7080
+    },
+    {
+      "number": "[RFC7209]",
+      "text": "Sajassi, A., Aggarwal, R., Uttaro, J., Bitar, N., Henderickx, W., and A. Isaac, \"Requirements for Ethernet VPN (EVPN)\", RFC 7209, May 2014.",
+      "rfc": 7209
+    },
+    {
+      "number": "[RFC7432]",
+      "text": "Sajassi, A., Ed., Aggarwal, R., Bitar, N., Isaac, A., Uttaro, J., Drake, J., and W. Henderickx, \"BGP MPLS-Based Ethernet VPN\", RFC 7432, February 2015.",
+      "rfc": 7432
+    },
+    {
+      "number": "[PBB]",
+      "text": "IEEE, \"IEEE Standard for Local and metropolitan area networks - Media Access Control (MAC) Bridges and Virtual Bridged Local Area Networks\", Clauses 25 and 26, IEEE Std 802.1Q."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

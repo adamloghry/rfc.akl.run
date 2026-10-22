@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This standards-track memo defines RSVP-TE extensions for creating backup label-switched paths, which protect LSP tunnels by allowing local repair. Traffic can be redirected in tens of milliseconds after a failure. It defines two methods, one-to-one and facility backup.</p>",
   "plainLanguage": {
-    "summary": "<p>If a bridge closes, you want a ready detour that traffic can switch to instantly. This protocol sets up such detours in advance.</p>"
+    "summary": "<p>A long-distance highway normally carries this tunnel's traffic. If a bridge on that highway collapses, calling the traffic manager at the far end, discussing a new route and then driving it is far too slow for a live phone call. RFC 4090 has the network build detours before anything breaks. The driver right at the bridge switches to the detour the moment the bridge fails, in a fraction of a second, and the traffic manager only re-plans the whole route later, at leisure.</p>"
   },
   "questions": [
     "mpls fast reroute",
@@ -20,238 +20,277 @@
     "RSVP-TE",
     "Resilience"
   ],
-  "subtitle": "Pre-built detours for MPLS tunnels, so traffic can switch around a failed link or router in tens of milliseconds.",
+  "subtitle": "How pre-computed backup tunnels let a router next to a failure switch traffic in 10s of milliseconds, before the head-end even knows something broke.",
   "tldr": {
-    "problem": "When a link or router on an MPLS traffic-engineered tunnel fails, waiting for path computation and failure signaling to reach the head-end is too slow for real-time traffic such as voice over IP.",
-    "mechanism": "Backup tunnels are computed and signaled in advance, and the router next to the failure (the point of local repair) switches traffic onto them. Two methods are defined, one-to-one detours and facility bypass tunnels, using new FAST_REROUTE and DETOUR objects in RSVP.",
-    "outcome": "Redirection is aimed at tens of milliseconds because no computation or signaling is needed after the failure. The RFC is a Proposed Standard and has been updated by RFC 8271, RFC 8537, RFC 8796 and RFC 9705.",
+    "problem": "When a link or router fails on an MPLS traffic-engineered tunnel, waiting for failure signals to reach the head-end and for a new path to be computed and signaled takes far longer than real-time traffic such as voice over IP can tolerate.",
+    "mechanism": "Backup label-switched paths are computed and signaled in advance of any failure. The router next to the failure, the point of local repair (PLR), switches traffic onto the backup locally. Two methods are defined: one-to-one backup, which signals a separate detour LSP for each protected LSP, and facility backup, which builds one bypass tunnel that many LSPs can share. New FAST_REROUTE and DETOUR objects in RSVP carry the instructions.",
+    "outcome": "Redirection happens within 10s of milliseconds because no path computation and no signaling are needed after the failure. The RFC is a Proposed Standard, updated by RFC 8271, RFC 8537, RFC 8796 and RFC 9705.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Target repair time",
+      "label": "Redirection goal",
       "value": "10s of milliseconds"
     },
     {
-      "label": "FAST_REROUTE object",
-      "value": "Class-Num 205, C-Type 1"
+      "label": "FAST_REROUTE Class-Num",
+      "value": "205 (C-Type 7 reserved for pre-standard implementations)"
     },
     {
-      "label": "DETOUR object",
-      "value": "Class-Num 63, C-Type 7 (IPv4) and 8 (IPv6)"
+      "label": "DETOUR Class-Num",
+      "value": "63 (C-Type 7 IPv4, C-Type 8 IPv6)"
     },
     {
-      "label": "Priority range",
-      "value": "0 to 7, 0 is highest"
+      "label": "One-to-One Backup Desired",
+      "value": "FAST_REROUTE flag 0x01"
     },
     {
-      "label": "Notify error code",
-      "value": "25, sub-code 3 (Tunnel locally repaired)"
+      "label": "Facility Backup Desired",
+      "value": "FAST_REROUTE flag 0x02"
     },
     {
-      "label": "Max detours for N nodes",
-      "value": "N - 1"
+      "label": "Node protection desired",
+      "value": "SESSION_ATTRIBUTE flag 0x10"
     }
   ],
-  "today": "<p>RFC 4090 is a Proposed Standard that has been updated by <a href='/rfc8271'>RFC 8271</a>, <a href='/rfc8537'>RFC 8537</a>, <a href='/rfc8796'>RFC 8796</a> and <a href='/rfc9705'>RFC 9705</a>; it has not been obsoleted.</p>",
+  "today": "<p>RFC 4090 is a Proposed Standard published in May 2005. It has been updated by <a href='/rfc8271'>RFC 8271</a>, <a href='/rfc8537'>RFC 8537</a>, <a href='/rfc8796'>RFC 8796</a> and <a href='/rfc9705'>RFC 9705</a>, and no RFC obsoletes it. Read those updates alongside this text when implementing.</p>",
   "glossary": [
     "mpls",
     "label-stack",
     "label-switching-router",
     "point-of-local-repair",
     "merge-point",
-    "bypass-tunnel"
+    "bypass-tunnel",
+    "label-switched-path",
+    "rsvp",
+    "rsvp-te",
+    "explicit-route-object",
+    "traffic-engineering",
+    "qos"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why Local Repair",
-      "content": "<p>RFC 4090 extends RSVP to set up backup label-switched path (LSP) tunnels for the <strong>local repair</strong> of LSP tunnels. The target is real-time applications such as voice over IP, which need traffic redirected onto a backup in tens of milliseconds. That is achievable by computing and signaling backups in advance of failure and by redirecting traffic as close to the failure as possible. The redirection then includes no path computation and no delay for failure notifications to travel between routers.</p><p>The methods apply only to explicitly-routed LSPs. LSPs whose routes change dynamically, such as those used in unicast IGP routing, are outside the scope.</p><p>The background section explains why there are two methods. Before this work began, operational networks had deployed two independent fast reroute methods, and vendors trying to support both ran into compatibility problems. The document does not pick a winner. It standardizes the RSVP signaling so that any implementation can recognize all fast reroute requests and either perform the method or return a clear error.</p>",
-      "plainLanguage": "<p>Some traffic, like a phone call, cannot wait while routers figure out a new route. So the plan is to prepare the detour first and use it the instant something breaks.</p>"
+      "title": "What This RFC Does",
+      "content": "<p>RSVP-TE (<a href='/rfc3209'>RFC 3209</a>) sets up label-switched path (LSP) tunnels along an explicit route. When a link or router on that route fails, ordinary RSVP-TE has to notice the failure, signal the error to the head-end, compute a new path and signal it. RFC 4090 extends RSVP-TE so that <strong>backup LSP tunnels</strong> exist before any failure occurs, and the router closest to the damage, the <strong>point of local repair (PLR)</strong>, redirects traffic onto the backup itself. The RFC calls this <strong>local repair</strong>.</p><p>The extensions apply only to explicitly routed LSPs. LSPs that change their route dynamically, such as those used in unicast IGP routing, are out of scope. The head-end asks for protection by setting flags in the SESSION_ATTRIBUTE object and may optionally include a FAST_REROUTE object that specifies the priorities, bandwidth and attribute filters the backup must use.</p>",
+      "plainLanguage": "<p>This RFC teaches an MPLS tunnel how to carry a spare route with it, ready for the router next to any break to switch over at once.</p>"
     },
     {
-      "id": "design",
+      "id": "motivation",
+      "number": "1",
+      "title": "Why Tens of Milliseconds Matter",
+      "content": "<p>Real-time applications such as voice over IP need user traffic redirected onto backup tunnels in <strong>10s of milliseconds</strong>. That timing can only be met if two slow parts are removed from the recovery: path computation and signaling. The RFC meets this by computing and signaling backup tunnels in advance of failure, and by redirecting traffic as close to the failure point as possible. Because the PLR sits beside the failed link or node, redirection includes no failure-notification delay across the network and no new path setup.</p><p>Speed of repair is the primary advantage of the methods described here. The head-end still plays its part: when it learns of the failure it can reoptimize the tunnel along a better long-term path, possibly using a Path Computation Element for inter-area routes. The locally repaired path is treated as temporary.</p>",
+      "plainLanguage": "<p>A phone call breaks up if the network takes a second to recover. So the fix has to be local and already prepared: no waiting for messages from far away, no fresh route calculation after the break.</p>"
+    },
+    {
+      "id": "overview",
       "number": "2",
-      "title": "One-to-One and Facility Backup",
-      "content": "<p>In <strong>one-to-one backup</strong>, each router that can act as a <strong>point of local repair</strong> (PLR) computes a separate backup LSP, called a <strong>detour</strong>, for every LSP it protects. The detour rejoins the protected LSP downstream of the failure at a <strong>merge point</strong> (MP). Protecting an LSP through N nodes fully may need as many as (N - 1) detours. When a detour meets its protected LSP at a router with the same outgoing interface, the two are merged to keep the number of LSPs down. The label stack does not get deeper when a detour is used.</p><p>In <strong>facility backup</strong>, the PLR builds one <strong>bypass tunnel</strong> that protects a whole set of LSPs passing through the same facility. It uses the MPLS label stack: on failure the PLR swaps the label to one the merge point will understand as the protected LSP, then pushes the bypass tunnel's label. This scales better, because the same bypass tunnel can serve many LSPs, but it needs LSPs to share a common downstream node.</p><p>A bypass tunnel can be an <strong>NHOP</strong> tunnel, which bypasses one link, or an <strong>NNHOP</strong> tunnel, which bypasses a node.</p>",
-      "plainLanguage": "<p>One way is to give every car its own personal detour map. The other is to build one shared side road that many cars can use at once.</p>"
+      "title": "One-to-One Detours and Facility Bypass Tunnels",
+      "content": "<p>A <strong>protected LSP</strong> is an explicitly routed LSP that has been given protection. Protection comes in two methods.</p><p><strong>One-to-one backup</strong>: the PLR creates a separate backup LSP, called a <em>detour LSP</em>, for each protected LSP that passes through it. The detour begins at the PLR and merges back into the protected LSP at a <strong>merge point (MP)</strong> downstream. Detours can be signaled with the <em>sender template-specific</em> method, which gives each detour its own SENDER_TEMPLATE and identifies it with a DETOUR object, or the <em>path-specific</em> method, which keeps the same SESSION and SENDER_TEMPLATE and relies on routers to merge paths.</p><p><strong>Facility backup</strong>: the PLR builds one <em>bypass tunnel</em> that starts at the PLR, avoids the protected link or node and ends at a merge point. Many protected LSPs that share the same risk can all use that single bypass tunnel. At the PLR their labels are stacked on top of the bypass tunnel's label, so the shared tunnel works like a bypass lane under the main road.</p><p>Both methods can protect a single <em>link</em> (the PLR is the upstream router of the failed link) or a whole <em>node</em> (the backup avoids the next router entirely; the flag 'node protection desired' asks for this). The RFC requires that routers on protected paths assume they may be merge points, even if only the PLR knows it.</p>",
+      "plainLanguage": "<p>One method gives every protected tunnel its own private detour. The other builds one shared bypass around the danger zone that many tunnels can use at once. Both can dodge just the road, or the road and the junction.</p>"
     },
     {
-      "id": "message-format",
-      "number": "3",
-      "title": "New RSVP Objects and Flags",
-      "content": "<p>Two new objects are added, and both can only be carried in RSVP Path messages. The <strong>FAST_REROUTE</strong> object (Class-Num 205, C-Type 1) is inserted only by the head-end and MUST NOT be changed downstream. It carries the setup and hold priorities (0 to 7, where 0 is highest), a hop-limit, flags, a bandwidth estimate, and three 32-bit attribute filters: include-any, exclude-any and include-all. The flags request <code>0x01</code> one-to-one backup or <code>0x02</code> facility backup. Routers that do not recognize the object ignore it and pass it on.</p><p>The <strong>DETOUR</strong> object (Class-Num 63, C-Type 7 for IPv4 and 8 for IPv6) lists one or more pairs of a PLR address and the downstream node it is trying to avoid. A router that does not support it MUST reject the Path message and send a PathErr.</p><p>The SESSION_ATTRIBUTE object gains two flags, <code>0x08</code> bandwidth protection desired and <code>0x10</code> node protection desired. The record-route (RRO) sub-objects gain <code>0x04</code> bandwidth protection and <code>0x08</code> node protection, which let a PLR report back what it was able to provide.</p>",
-      "plainLanguage": "<p>The head-end writes its wishes on a request form: how important the traffic is, how much room it needs, and which style of detour it likes. Each router along the way ticks boxes to say what it can offer.</p>"
+      "id": "packet-format",
+      "number": "4.1",
+      "title": "FAST_REROUTE, DETOUR and the Flags That Ask for Protection",
+      "content": "<p>The <strong>FAST_REROUTE object</strong> (Class-Num 205, C-Type 1) is inserted into the PATH message only by the head-end and must not be changed downstream. It carries the Setup Priority and Hold Priority of the backup (0 to 7, where 0 is highest), a Hop-limit bounding how many extra hops the backup may take from PLR to MP, Flags, a Bandwidth value as a 32-bit IEEE floating point in bytes per second, and the Include-any, Exclude-any and Include-all 32-bit attribute filter vectors. In the Flags field, 0x01 requests the one-to-one backup method and 0x02 requests facility backup. C-Type 7 is a pre-standard format still used by legacy implementations and is reserved; it has a Reserved byte where Flags sits and omits Include-all.</p><p>The <strong>DETOUR object</strong> (Class-Num 63) identifies detour LSPs in the one-to-one, sender template-specific method. C-Type 7 holds IPv4 pairs of PLR_ID and Avoid_Node_ID; C-Type 8 holds the same for IPv6 (128-bit addresses). A DETOUR object may carry several pairs, one for each PLR whose detour has merged; Avoid_Node_ID names the immediate downstream node the PLR is avoiding and is mandatory for the merge rules. The high-order bit of the Class-Num is zero, so routers that do not understand DETOUR must reject the PATH message with a PathErr rather than silently forwarding it.</p><p>The SESSION_ATTRIBUTE object gains two flags: <strong>bandwidth protection desired</strong> (0x08) and <strong>node protection desired</strong> (0x10). Existing flags still apply: local protection desired (0x01) permits local repair, label recording desired (0x02) asks routers to include labels in the Record Route Object, and SE Style desired (0x04) lets the head-end reroute without tearing the tunnel down. In the RRO address sub-objects, four flags report the outcome: local protection available (0x01), local protection in use (0x02), bandwidth protection (0x04) and node protection (0x08). A PLR that could only protect the link, not the node, sets local protection available but must leave node protection cleared.</p>",
+      "plainLanguage": "<p>The head-end writes an order form on the tunnel: which kind of backup, how much bandwidth to reserve, how far the detour may wander. Extra tags in the path record tell everyone later whether a detour exists, whether traffic is on it right now, and whether it really covers the bandwidth and the next router.</p>"
     },
     {
       "id": "operation",
-      "number": "4",
+      "number": "5",
       "title": "Head-End and PLR Behavior",
-      "content": "<p>The head-end decides whether an LSP needs protection. It MUST either set the <code>local protection desired</code> flag or include a FAST_REROUTE object, or both, and SHOULD always set the flag. It MUST set <code>label recording desired</code>, which helps facility backup. If it wants a particular method, it includes a FAST_REROUTE object with the matching flag. If neither flag is set, or there is no object, PLRs treat that as no preference.</p><p>Every router on a protected LSP except the egress follows the PLR rules. Before computing a backup path, it collects the downstream nodes, the links and nodes to protect against, the upstream links, the attribute filters, the bandwidth and the hop-limit. The backup must avoid the protected link or node, must satisfy the resource requirements, and for a detour must end at the tail-end of the protected LSP. If the PLR is the penultimate hop, node protection is not possible.</p><p>The PLR also reports status in the RRO. It sets <code>local protection available</code> when a backup path exists and <code>local protection in use</code> only when it is actively redirecting traffic. When failure happens, the PLR sends a PathErr with error code 25 (Notify) and sub-code 3, \"Tunnel locally repaired\", so the head-end can compute a better path.</p>",
-      "plainLanguage": "<p>The traveler says \"I want a detour if anything breaks.\" Each stop along the road works out its own detour, tells the traveler whether it has one, and warns them when it has started using it.</p>"
+      "content": "<p>The head-end requests protection in the PATH message and, over time, watches the RRO flags to learn what it got. When the head-end learns of a failure it may reoptimize the protected LSP along a different, more optimal path; in the global revertive mode this decision is made at the head-end, and the RFC says the global mode SHOULD always be used. An optional local revertive mode lets the PLR try to move traffic back onto the restored resource itself, which matters when the head-end cannot reroute, for example when paths are pinned by an offline optimization tool. If a PLR is configured for local revertive mode but the MP is not, the PLR's attempt to resignal over the restored resource fails, and traffic simply stays on the backup until the head-end reoptimizes.</p><p>At the PLR, protection works like this. The PLR selects a backup path for each protected LSP, subject to the FAST_REROUTE object's priorities, hop-limit, bandwidth and filters, and signals it ahead of time. PathTear messages for the protected LSP must also propagate to the detour, but when a PLR receives ResvTear or PathErr messages from downstream for a protected LSP, it must not pass them upstream as long as a detour is up. When the PLR detects a failure on the protected LSP it <strong>MUST rapidly switch packets</strong> to the backup LSP instead of the normal out-segment, with the stated goal of completing redirection within 10s of milliseconds. In the facility method, after switching, the PLR keeps refreshing the protected LSP's state through the bypass tunnel so downstream routers see no change.</p>",
+      "plainLanguage": "<p>The head-end places the order and later re-plans the route when it hears about the damage. The router at the break does the instant work: it already holds a ready alternative and flips traffic onto it the moment the next link goes dark.</p>"
     },
     {
-      "id": "procedures",
-      "number": "5",
-      "title": "Merging and Reverting",
-      "content": "<p>A router should always assume it is a merge point, because under facility backup it may not know until a failure that a backup is arriving. Path messages for backups can be merged when they leave by the same interface to the same next hop. If one of them is for the protected LSP, the protected LSP's Path message is the one forwarded. In the path-specific method, merging is REQUIRED, and the merged DETOUR object combines all the (PLR_ID, Avoid_Node_ID) pairs.</p><p>When a downstream router sees a link fail, it must not clear Path and Resv state or send PathTear or ResvErr immediately, or facility backup would not work. It resets refresh timers so the PLR has time to start refreshing state over the bypass tunnel. State is still removed if it is not refreshed before the timer expires.</p><p>After repair, two strategies restore a full path. In <strong>global revertive mode</strong>, the head-end re-optimizes the tunnel, and the RFC says this SHOULD always be used. In <strong>local revertive mode</strong>, which is optional, the PLR re-signals LSPs over the restored resource. Because flapping resources could cause repeated disruption, a PLR using local revert should dampen the re-signaling.</p>",
-      "plainLanguage": "<p>Where a detour rejoins the main road, the traffic officers there must expect it. Nobody should rip up the old road signs the moment it closes. And once the road reopens, the head office decides whether everyone should switch back.</p>"
+      "id": "routing",
+      "number": "7",
+      "title": "Merge Points and Everyone Else's Job",
+      "content": "<p>A router is a <strong>merge point</strong> when it receives the PATH message of a protected LSP and one or more backup LSPs that merge back into it. In the one-to-one method the LSR knows before failure; in the facility method it may first learn of the role when a backup PATH arrives after a failure, so every LSR on a protected path SHOULD always assume it is a merge point. Reception of a backup PATH before failure does not mean a failure has happened.</p><p>With the sender template-specific method, a merge point may see PATH messages with different SENDER_TEMPLATEs for the protected LSP and several detours. Those sharing an outgoing interface and next hop, with the same ERO from the merge point onward, are eligible to merge; the final forwarded PATH must be that of the protected LSP. With the path-specific method, PATH messages with identical SESSION and SENDER_TEMPLATE arrive on different interfaces and MUST be merged: the protected LSP wins if present; otherwise detours that traverse nodes other detours want to avoid are eliminated, and if nothing remains the MP may compute a fresh route avoiding all avoided nodes. Merged detours reserve bandwidth only once, for the final Path. The DETOUR object of the outgoing message combines all merged (PLR_ID, Avoid_Node_ID) pairs.</p><p>On a downstream link failure, routers MUST NOT immediately clear Path and Resv state or send PathTear and ResvErr; they SHOULD reset refresh timers to give the PLR time to start refreshing through the backup, with state removed only if not refreshed before the timer expires. Every LSR in the traffic-engineered network should support the DETOUR object and detour merging; LSRs that do not can be avoided by excluding a link attribute from backup paths.</p>",
+      "plainLanguage": "<p>The merge point is where the detour rejoins the main route. It quietly folds the detours back in, and when a link fails it waits, keeping the old state alive, so the switching router upstream has time to take over.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
-      "title": "Security and Registry Assignments",
-      "content": "<p>The RFC states that it does not introduce new security issues, and the considerations of the original RSVP protocol remain relevant. One addition: facility backup requires a PLR and its chosen merge point to trust the RSVP messages they receive from each other.</p><p>For the IANA section, class number 63 is assigned to DETOUR with C-Types 7 (IPv4) and 8 (IPv6), and class number 205 to FAST_REROUTE with C-Type 1 and C-Type 7 reserved because pre-standard implementations still use it. For both, C-Types 0 through 127 are assigned by Standards Action, 128 through 191 by Expert Review, and 192 through 255 are reserved for Vendor Private Use.</p>",
-      "plainLanguage": "<p>The only extra rule is that the two routers at each end of a shortcut have to trust each other's messages.</p>"
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The RFC introduces no new security issues beyond those of RSVP itself (<a href='/rfc2205'>RFC 2205</a>), whose security considerations remain relevant. It does note one specific trust relationship: the facility backup method requires that a PLR and its selected merge point trust the RSVP messages they receive from each other, because after a failure the PLR begins refreshing protected LSP state through the bypass tunnel on behalf of the original head-end.</p>",
+      "plainLanguage": "<p>The protocol adds no new attacks of its own, but the two routers on either side of a shared bypass must trust each other's routing messages, because one will speak for the other after a failure.</p>"
     }
   ],
   "viz": [
     {
-      "type": "packet",
-      "anchor": "message-format",
+      "type": "contrast",
+      "anchor": "overview",
       "position": "after",
-      "caption": "FAST_REROUTE OBJECT, C-TYPE 1 (RFC 4090, SECTION 4.1)",
+      "caption": "THE TWO BACKUP METHODS (RFC 4090, SECTION 2)",
+      "data": {
+        "left": {
+          "title": "One-to-One Backup",
+          "from": "plr",
+          "to": "merge-point",
+          "desc": "A separate detour LSP per protected LSP, from the PLR to a merge point. Identified by the DETOUR object in the sender template-specific method."
+        },
+        "right": {
+          "title": "Facility Backup",
+          "from": "plr",
+          "to": "merge-point",
+          "desc": "One shared bypass tunnel around the failed link or node; many protected LSPs stack their labels on it at the PLR."
+        },
+        "joiner": "or"
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "FAST_REROUTE OBJECT, CLASS 205 C-TYPE 1 (RFC 4090, SECTION 4.1)",
       "data": {
         "title": "FAST_REROUTE object",
+        "bytes": 20,
         "width": 32,
         "fields": [
           {
-            "key": "length",
-            "name": "Length (bytes)",
-            "bits": 16,
-            "desc": "Length of the object."
-          },
-          {
-            "key": "class-num",
-            "name": "Class-Num",
-            "bits": 8,
-            "desc": "205 for FAST_REROUTE.",
-            "value": "205"
-          },
-          {
-            "key": "c-type",
-            "name": "C-Type",
-            "bits": 8,
-            "desc": "1 for this format.",
-            "value": "1"
-          },
-          {
             "key": "setup-prio",
-            "name": "Setup Prio",
+            "name": "Setup Priority",
             "bits": 8,
-            "desc": "0 to 7; 0 is the highest priority."
+            "desc": "Priority for taking resources, 0 to 7, 0 highest; used when deciding whether this backup may preempt another session."
           },
           {
             "key": "hold-prio",
-            "name": "Hold Prio",
+            "name": "Hold Priority",
             "bits": 8,
-            "desc": "0 to 7; 0 is the highest priority."
+            "desc": "Priority for holding resources, 0 to 7, 0 highest."
           },
           {
             "key": "hop-limit",
             "name": "Hop-limit",
             "bits": 8,
-            "desc": "Maximum extra hops for the backup path between PLR and MP."
+            "desc": "Maximum extra hops the backup path may take from PLR to MP, excluding the PLR and MP themselves; 0 means only direct links."
           },
           {
             "key": "flags",
             "name": "Flags",
             "bits": 8,
-            "desc": "0x01 one-to-one desired, 0x02 facility backup desired."
+            "desc": "0x01 One-to-One Backup Desired; 0x02 Facility Backup Desired. Inserted only by the head-end LER."
           },
           {
             "key": "bandwidth",
             "name": "Bandwidth",
             "bits": 32,
-            "desc": "Estimate as a 32-bit IEEE floating point number, in bytes per second."
+            "desc": "Bandwidth estimate; 32-bit IEEE floating point in bytes per second."
           },
           {
             "key": "include-any",
             "name": "Include-any",
             "bits": 32,
-            "desc": "Attribute filters, any of which makes a link acceptable."
+            "desc": "32-bit attribute filter vector; any listed attribute makes a link acceptable."
           },
           {
             "key": "exclude-any",
             "name": "Exclude-any",
             "bits": 32,
-            "desc": "Attribute filters, any of which makes a link unacceptable."
+            "desc": "32-bit attribute filter vector; any listed attribute rules a link out."
           },
           {
             "key": "include-all",
             "name": "Include-all",
             "bits": 32,
-            "desc": "Attribute filters, all of which must be present."
+            "desc": "32-bit attribute filter vector; all listed attributes must be present. Omitted in the legacy C-Type 7 format."
           }
         ]
       }
     },
     {
       "type": "opcodes",
-      "anchor": "message-format",
+      "anchor": "packet-format",
       "position": "after",
-      "caption": "SESSION_ATTRIBUTE FLAGS (FIRST THREE EXISTING, LAST TWO NEW IN RFC 4090)",
+      "caption": "REQUEST AND REPORT FLAGS (RFC 4090, SECTIONS 4.3 AND 4.4)",
       "data": {
         "items": [
           {
             "code": "0x01",
-            "label": "Local protection desired",
-            "desc": "Transit routers may use local repair that violates the explicit route."
-          },
-          {
-            "code": "0x02",
-            "label": "Label recording desired",
-            "desc": "Label information should be included in the route record."
+            "label": "Local protection desired (SESSION_ATTRIBUTE)",
+            "desc": "Permits transit routers to use a local repair mechanism, which may violate the explicit route."
           },
           {
             "code": "0x04",
-            "label": "SE Style desired",
-            "desc": "The ingress may reroute the tunnel without tearing it down."
+            "label": "SE Style desired (SESSION_ATTRIBUTE)",
+            "desc": "Lets the head-end reroute without tearing the tunnel down; SHOULD be set when requesting fast reroute."
           },
           {
             "code": "0x08",
-            "label": "Bandwidth protection desired",
-            "desc": "A backup with a bandwidth guarantee is wanted.",
-            "highlight": true
+            "label": "Bandwidth protection desired (SESSION_ATTRIBUTE)",
+            "desc": "Asks PLRs for a backup path with a bandwidth guarantee, either the FAST_REROUTE object's value or the protected LSP's bandwidth."
           },
           {
             "code": "0x10",
-            "label": "Node protection desired",
-            "desc": "A backup that bypasses at least the next node is wanted.",
+            "label": "Node protection desired (SESSION_ATTRIBUTE)",
+            "desc": "Asks PLRs for a backup that bypasses at least the next node, not just the next link.",
             "highlight": true
+          },
+          {
+            "code": "0x01 / 0x02",
+            "label": "Local protection available / in use (RRO)",
+            "desc": "Reports that a local repair mechanism exists for the next hop, and that traffic is on it right now."
+          },
+          {
+            "code": "0x04 / 0x08",
+            "label": "Bandwidth protection / node protection (RRO)",
+            "desc": "Reports that the backup guarantees the requested bandwidth, or that it also survives failure of the next router."
           }
         ]
       }
     },
     {
-      "type": "compare-table",
-      "anchor": "design",
+      "type": "sequence",
+      "anchor": "operation",
       "position": "after",
-      "caption": "THE TWO LOCAL REPAIR METHODS",
+      "caption": "PROTECTION BEFORE AND AFTER FAILURE (RFC 4090, SECTIONS 3 AND 6.3.3)",
       "data": {
-        "columns": [
-          "Method",
-          "Backup LSP",
-          "How traffic is redirected",
-          "Request flag"
-        ],
-        "rows": [
+        "lanes": [
           {
-            "cells": [
-              "One-to-one backup",
-              "A separate detour for each protected LSP",
-              "Switched onto the detour LSP; the label stack does not get deeper",
-              "0x01"
-            ]
+            "key": "head-end",
+            "label": "Head-end LSR"
           },
           {
-            "cells": [
-              "Facility backup",
-              "One bypass tunnel for a set of LSPs",
-              "Label swapped, then the bypass tunnel's label is pushed",
-              "0x02"
-            ]
+            "key": "plr",
+            "label": "Point of local repair"
+          },
+          {
+            "key": "merge-point",
+            "label": "Merge point"
+          }
+        ],
+        "messages": [
+          {
+            "from": "head-end",
+            "to": "merge-point",
+            "label": "PATH: protected LSP with local protection desired",
+            "color": "blue",
+            "note": "The head-end may also include a FAST_REROUTE object naming priorities, hop-limit and bandwidth."
+          },
+          {
+            "from": "plr",
+            "to": "merge-point",
+            "label": "PATH: backup detour or bypass tunnel, pre-signaled",
+            "color": "green",
+            "note": "Set up before any failure; in the one-to-one sender template-specific method this PATH carries a DETOUR object."
+          },
+          {
+            "from": "plr",
+            "to": "merge-point",
+            "label": "Link or node failure detected; traffic switched onto backup",
+            "color": "neutral",
+            "note": "The PLR MUST rapidly switch packets; the goal is redirection within 10s of milliseconds."
+          },
+          {
+            "from": "head-end",
+            "to": "merge-point",
+            "label": "Later: reoptimize the protected LSP (global revertive mode)",
+            "color": "blue",
+            "note": "Once the head-end learns of the failure, it may compute a better long-term path."
           }
         ]
       }
@@ -282,10 +321,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-18",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-18"
 }

@@ -5,14 +5,15 @@
   "categoryReviewed": false,
   "summary": "<p>Describes LISP-DDT, a hierarchical database that delegates authority for mapping endpoint identifiers to routing locators among DDT nodes. It is experimental.</p>",
   "plainLanguage": {
-    "summary": "<p>A phone book where each section points to the next, until you find the number.</p>"
+    "summary": "<p>LISP gives a device two addresses: one that stays the same, and one that changes with the network it is attached to. LISP-DDT is the plan for where the list that connects the two lives: a tree of servers, each responsible for a slice of the address space and pointing at the server responsible for the next, smaller slice.</p><p>A client finds what it needs by asking the top of the tree and following the pointers down, much as a DNS client follows referrals.</p>"
   },
   "questions": [
     "lisp ddt",
     "lisp delegated database tree",
     "what is lisp ddt",
     "how does lisp ddt work",
-    "lisp mapping database"
+    "lisp mapping database",
+    "what is a map-referral message"
   ],
   "tags": [
     "Routing",
@@ -21,82 +22,93 @@
   ],
   "subtitle": "A hierarchical database that delegates authority to find endpoint-to-locator mappings.",
   "tldr": {
-    "problem": "LISP separates endpoint identifiers (EIDs, stable addresses used by applications) from routing locators (RLOCs, topological addresses used for forwarding), but someone needs to maintain a database of which EID maps to which RLOC. A single centralized database does not scale.",
-    "mechanism": "LISP-DDT builds a hierarchical tree of DDT nodes, each responsible for a range of EIDs. A DDT Map-Resolver queries DDT nodes iteratively, following referrals to more specific nodes, much like how DNS resolvers follow nameserver referrals.",
-    "outcome": "The system distributes the authority to maintain the mapping database among many nodes and scales to Internet-wide LISP deployments. This Experimental specification may guide the design of future Standards Track mappings systems.",
+    "problem": "LISP splits IP addresses into an identity that travels end to end and a locator that changes with the point of attachment. Something has to hold the mapping between the two, and that mapping database has to scale.",
+    "mechanism": "LISP-DDT organizes the database as a tree of DDT nodes. Each node is authoritative for a set of address prefixes and delegates the more specific ones to other nodes, and a client walks down the tree by following referrals.",
+    "outcome": "The RFC defines a new Map-Referral message, the action codes it can carry, and the signatures that let a resolver check that a referral really came from the node that owns the prefix. It is an Experimental document.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "LISP message type",
+      "label": "Map-Referral message type",
       "value": "6"
     },
     {
-      "label": "RFC status",
-      "value": "Experimental"
+      "label": "DDT Map-Request destination port",
+      "value": "4342 (UDP)"
     },
     {
-      "label": "Positive referral TTL",
-      "value": "1440 minutes"
+      "label": "Action codes",
+      "value": "6, numbered 0 to 5"
     },
     {
-      "label": "Negative referral TTL",
-      "value": "15 minutes (DELEGATION-HOLE)"
+      "label": "XEID-prefix fields",
+      "value": "DBID 16 bits, IID 32 bits, AFI 16 bits, then the EID-prefix"
     },
     {
-      "label": "Required signature algorithm",
-      "value": "RSA-SHA256"
+      "label": "Mandatory signature algorithm",
+      "value": "RSA-SHA256 (Sig-Algorithm 2)"
+    },
+    {
+      "label": "Record TTL for a referral",
+      "value": "1440 minutes for NODE-REFERRAL, MS-REFERRAL and MS-ACK"
     }
   ],
-  "today": "<p>RFC 8111 is an Experimental specification published in May 2017. It has not been obsoleted or updated. LISP-DDT remains experimental and is used in limited research and trial deployments, with no widespread production deployment yet.</p>",
+  "today": "<p>RFC 8111 is an Experimental document and has not been obsoleted. It is part of the LISP document set: the architecture itself is in <a href='/rfc6830'>RFC 6830</a> and the Map-Server interface in <a href='/rfc6833'>RFC 6833</a>. The RFC lists open questions about the organization of the database and says operational experience will help answer them.</p>",
   "glossary": [
     "router",
     "connectionless",
     "endpoint-identifier",
-    "routing-locator"
+    "routing-locator",
+    "lisp",
+    "referral",
+    "delegation",
+    "prefix",
+    "longest-prefix-match",
+    "udp",
+    "dns"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The LISP Mapping Problem",
-      "content": "<p><strong>LISP</strong> (Locator/ID Separation Protocol) splits IP addresses into two parts: <strong>Endpoint Identifiers (EIDs)</strong>, which are stable names for computers that stay the same when they move, and <strong>Routing Locators (RLOCs)</strong>, which are topological addresses used for forwarding across the Internet. To forward a packet to an EID, routers need to look up which RLOC leads to it.</p><p>RFC 6833 defines the interface between LISP routers and a mapping database that stores EID-to-RLOC mappings, but leaves the internal organization of the database as an open problem. A centralized database would not scale to billions of endpoints. LISP-DDT solves this by distributing the database.</p><p>The system mirrors how DNS works: it organizes mappings in a tree, delegates authority for ranges of EIDs to different <strong>DDT nodes</strong>, and lets clients follow referrals iteratively until they reach the node authoritative for a specific EID.</p>",
-      "plainLanguage": "<p>LISP splits addresses into a stable name part and a location part. LISP-DDT is a distributed phone book that tells routers where each name maps to.</p>"
+      "title": "The Mapping Database LISP Needs",
+      "content": "<p>The Locator/ID Separation Protocol (LISP) specifies an architecture for replacing the addresses currently used by IP with two separate namespaces: Endpoint Identifiers (EIDs), used end to end for terminating transport-layer associations, and Routing Locators (RLOCs), which are bound to topological locations and are used for routing and forwarding through the Internet infrastructure. The architecture is described in <a href='/rfc6830'>RFC 6830</a>.</p><p>RFC 6830 also specifies an interface between a database storing EID-to-RLOC mappings and the LISP devices that need this information for forwarding, but the internal organization of that database is beyond its scope. Several architectures have been proposed, each with advantages and disadvantages. This document specifies one of them, with an emphasis on high scalability.</p><p>The LISP Delegated Database Tree (LISP-DDT) is a hierarchical distributed database that embodies the delegation of authority to provide mappings, so its internal structure mirrors the hierarchical delegation of address space. It is a statically defined distribution of the EID namespace among a set of LISP-speaking servers called DDT nodes. Each DDT node is configured as authoritative for one or more EID-prefixes, together with the set of RLOCs for Map-Servers or child DDT nodes to which more-specific EID-prefixes are delegated. The target of a delegation must always be an RLOC and never an EID, to avoid any circular dependency.</p><p>LISP-DDT does not store actual EID-to-RLOC mappings. It is a distributed index that finds the devices, the Egress Tunnel Routers that registered their EIDs with DDT Map-Servers, that can be queried with LISP to obtain those mappings. Changes to the mappings are made on the Egress Tunnel Routers that define them, not in any DDT node configuration. The DDT configuration only changes when branches of the database hierarchy are added, removed or modified.</p>",
+      "plainLanguage": "<p>The database does not hold the addresses themselves. It holds pointers to the servers that do, so that the tree can grow one branch at a time instead of being rebuilt whenever a host moves.</p>"
     },
     {
       "id": "architecture",
-      "number": "2",
-      "title": "The DDT Hierarchy",
-      "content": "<p>Every DDT database entry is indexed by an <strong>Extended EID-prefix (XEID-prefix)</strong>, which combines a Database-ID, an Instance ID (for virtual networks), an Address Family Identifier, and an EID-prefix. This allows the same EID to be used in different scopes.</p><p>The root DDT node is authoritative for all possible EIDs. It delegates authority for more-specific XEID-prefixes to other DDT nodes. Each intermediate DDT node can delegate further to child nodes that know even more-specific EIDs. A DDT <strong>Map-Server</strong> is also a DDT node but accepts registration of EID-to-RLOC mappings from Egress Tunnel Routers (ETRs). A leaf DDT node points to the actual ETRs that registered the EIDs.</p><p>DDT configuration is static and hierarchical. A DDT node is configured with its authoritative XEID-prefixes and the delegations to child nodes. The tree structure mirrors how IP address space is delegated on the Internet.</p>",
-      "plainLanguage": "<p>A tree of servers, each responsible for a range of addresses. The root server knows about everything. Each node can point to a more specific server, or to a site that registered an address.</p>"
-    },
-    {
-      "id": "operation",
-      "number": "3",
-      "title": "Sending Queries and Following Referrals",
-      "content": "<p>When a DDT Map-Resolver needs to find the RLOC for an EID, it sends an <strong>Encapsulated Map-Request</strong> (with the \"DDT-originated\" flag set) to a DDT node. The DDT node responds with a <strong>Map-Referral</strong> message.</p><p>A Map-Referral contains an action code describing the response type. NODE-REFERRAL means the EID matches a delegated prefix and the resolver should query the listed child nodes. MS-REFERRAL is similar but indicates the child is a Map-Server. MS-ACK means the Map-Request reached a Map-Server with registered ETRs, so the request has been forwarded to answer the query. DELEGATION-HOLE means the EID is not delegated (not a LISP destination). NOT-AUTHORITATIVE means the queried node does not have information about the EID.</p><p>The resolver follows referrals iteratively until it receives an MS-ACK, at which point it stops and waits for a Map-Reply from the ETR. The process resembles DNS resolution: follow referrals deeper into the tree until you reach an authoritative server.</p>",
-      "plainLanguage": "<p>Send a question to a DDT node. It either answers \"check this other server\" or \"I forwarded your question to the right place\". Keep asking until you get the second answer.</p>"
+      "number": "4",
+      "title": "Organizing the Database as a Tree",
+      "content": "<p>A DDT database is indexed by Extended EID-prefixes, or XEID-prefixes. An XEID-prefix is a LISP EID-prefix together with data that extends it to identify uniquely the address space of the prefix. It is composed of four binary-encoded fields, ordered by significance: a 16-bit DBID, a 32-bit IID, a 16-bit AFI, and the EID-prefix itself, which is of variable length according to the AFI value. The fields are concatenated with the most significant fields first.</p><p>The DBID is the LISP-DDT Database-ID, a 16-bit field that allows several databases to be defined. Implementations compliant with this document must always set it to 0, and other values are reserved for future use. The Instance ID is a 32-bit value describing the context of the EID-prefix, for use where addresses may not be unique, such as in a Virtual Private Network using the private address space. The AFI is a 16-bit value defining the syntax of the EID-prefix.</p><p>For each DDT node the database is organized as a tree structure indexed by XEID-prefixes, and the leaves of the tree describe the delegation of authority between DDT nodes. Because a DDT Map-Request always carries specific values for the DBID, the IID and the AFI, an XEID-prefix used as a search key has a length of at least 64 bits. A DDT node may be authoritative for a consecutive range of DBID, IID and AFI triples, or for a single EID-prefix of one triple, so keys at the leaves may be shorter, equal or longer than 64 bits.</p><p>Every DDT node is configured with the XEID-prefixes for which it is authoritative and with a list of delegations of XEID-prefixes to other DDT nodes. It must keep a list of delegations for all sub-prefixes of its authoritative prefixes, and it may also list hints, which are prefixes it knows about that belong to its parents, to the root, or elsewhere in the hierarchy. The root DDT node is the logical top of the hierarchy and is authoritative for all XEID-prefixes, so it must at minimum be configured with delegations for all defined IIDs and AFIs. A request that matches no configured prefix is referred to the root node.</p>",
+      "plainLanguage": "<p>Each entry in the tree carries the identity of the address space it covers, the part of the space that is delegated, and the addresses of the servers below it. The top of the tree knows about everything and hands out the sub-trees it owns.</p>"
     },
     {
       "id": "message-format",
-      "number": "4",
+      "number": "6",
       "title": "The Map-Referral Message",
-      "content": "<p>The Map-Referral message type is LISP message type 6. It carries an action code, a record of RLOCs for the referred DDT nodes, a TTL, and optional cryptographic signatures for security.</p><p>The message includes a <strong>Referral Set</strong> of RLOCs for one or more DDT nodes that are authoritative for the more-specific XEID-prefix. The resolver picks one RLOC and sends the next query to it. An <strong>Incomplete flag</strong> can be set to indicate that the Referral Set is incomplete (e.g., because not all Map-Server peers are listed), so the resolver should not cache the referral.</p><p>Each referral has an action code and a TTL. Positive referrals (NODE-REFERRAL, MS-REFERRAL) have a TTL of 1440 minutes (24 hours). Negative referrals like DELEGATION-HOLE have a TTL of 15 minutes. MS-NOT-REGISTERED has a TTL of 1 minute. NOT-AUTHORITATIVE has a TTL of 0, meaning do not cache it.</p>",
-      "plainLanguage": "<p>The response includes addresses of servers to ask next, how long to remember this answer, and whether the list is complete.</p>"
+      "content": "<p>To make it possible to traverse the tree, the RFC defines a new LISP message, the Map-Referral, which a DDT node sends back to a DDT client in response to a DDT Map-Request. The message carries an action code and delegation information about the XEID-prefix that matches the requested EID.</p><p>There are six action codes. <strong>NODE-REFERRAL</strong>, value 0, says the replying node has delegated a matching XEID-prefix to one or more other DDT nodes. <strong>MS-REFERRAL</strong>, value 1, says it has delegated the prefix to one or more DDT Map-Servers and is handled slightly differently by the client. <strong>MS-ACK</strong>, value 2, means the replying DDT Map-Server received a request matching an authoritative prefix for which it has registered Egress Tunnel Routers, and has forwarded the request to one of them. <strong>MS-NOT-REGISTERED</strong>, value 3, means the Map-Server received a request for one of its configured prefixes that has no Egress Tunnel Routers registered. <strong>DELEGATION-HOLE</strong>, value 4, means the requested EID matches a non-delegated sub-prefix of the address space. <strong>NOT-AUTHORITATIVE</strong>, value 5, means the node received a request for an EID it is not authoritative for and has no matching hint; in that case the node must return the EID-prefix received in the request and set the TTL to 0.</p><p>For the positive action codes the node must include a list of RLOCs for the DDT nodes authoritative for the prefix, and the client uses that list to follow the referral. A node sets the Incomplete flag when the referral set is incomplete, which is meant to stop the client caching a referral with missing information.</p><p>The message carries a table of record time-to-live values by action code: 1440 minutes for NODE-REFERRAL, MS-REFERRAL and MS-ACK, 1 minute for MS-NOT-REGISTERED, 15 minutes for DELEGATION-HOLE, and 0 for NOT-AUTHORITATIVE. Each record may carry a signature section with a signature inception and expiration date, a key tag, a signature length and the signature itself, which covers the whole record. Implementations must support RSA-SHA256 for DDT signing, and RSA-SHA1 is deprecated and should not be used. The Map-Referral is LISP message type 6, a value that was reserved for future use in RFC 6830.</p>",
+      "plainLanguage": "<p>The referral message is the pointer that the client follows. It names which kind of answer it carries and, when the answer is a pointer, gives the addresses of the next servers to ask.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "7",
+      "title": "How the Nodes and Clients Behave",
+      "content": "<p>When a DDT node receives a DDT Map-Request, it compares the requested XEID against its list of XEID-prefix delegations and its list of authoritative XEID-prefixes. If the request matches a delegated prefix, the node returns a Map-Referral with the matching more-specific prefix and the set of RLOCs for the referral target DDT nodes, including the associated security information. If at least one node of the delegation is known to be a DDT Map-Server, the referral should use the action code MS-REFERRAL so that the receiver knows to include LISP security information in the next request; otherwise NODE-REFERRAL is used.</p><p>If the request matches an authoritative prefix but no delegation, the node must return a Negative Map-Referral with the action code DELEGATION-HOLE, which says the EID is not a LISP destination. If it matches neither a delegation, nor an authoritative prefix, nor a hint, the node must return a Negative Map-Referral with the action code NOT-AUTHORITATIVE.</p><p>A DDT Map-Server behaves like a DDT node with two additions. If the request matches a registered XEID-prefix, it forwards the request to one of the destination Egress Tunnel Router RLOCs, or sends a Map-Reply itself if it provides a proxy service, and returns a Map-Referral with action code MS-ACK. If the request matches a configured prefix for which no registration has been received, it returns a Negative Map-Referral with action code MS-NOT-REGISTERED.</p><p>A DDT client queries one or more DDT nodes and follows the returned referrals iteratively until it receives one with action code MS-ACK, or an error indication. This functionality is usually implemented by a DDT Map-Resolver, which accepts Map-Requests from Ingress Tunnel Routers and forwards them to the right Egress Tunnel Router, and which keeps two extra pieces of state: a cache of the referrals it has received and a pending request list of the XEIDs going through the referral process. The client functionality can also be implemented on an Ingress Tunnel Router, in which case the information it would have received as a Map-Request is provided through a programming interface.</p>",
+      "plainLanguage": "<p>A DDT node looks up the address in its own list. If it owns the address, it answers. If it has handed the address to someone else, it points the client at them.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "7.3",
+      "title": "Following Referrals and Avoiding Loops",
+      "content": "<p>When the client has a request to resolve, it first does a longest-match search for the EID in its referral cache. If nothing matches, or if a negative cache entry matches, the destination is not in the database, and the client returns a Negative Map-Reply with no further processing. Otherwise it creates a pending request list entry that saves the original request and the information needed to track progress, and it sends a DDT Map-Request, which is an Encapsulated Map-Request with the DDT-originated flag set, to one of the RLOCs in the chosen cache entry. The cache starts with statically configured entries and grows as referrals are followed. In normal use on the public Internet the initial cache should include a default entry pointing at the root DDT node or at nodes holding hints for it.</p><p>If no Map-Referral arrives within the timeout, the client retransmits the request, moving to the next RLOC in the cache entry if there is one. If all RLOCs have been tried and the maximum number of retransmissions has occurred for each, the pending request entry is discarded and no response is returned.</p><p>Each action code is then handled in turn. For NODE-REFERRAL the client checks for a referral loop, saves the returned prefix in the referral cache, updates the pending request, and follows the referral by sending a new request to one of the RLOCs in the referral set. MS-REFERRAL is handled the same way, except that saved LISP security information must be included in the new request. For MS-ACK the request is complete unless LISP security information is still required, in which case the client resends the request with that information and keeps the pending entry open. MS-NOT-REGISTERED means the destination is not registered and is unreachable, so the client returns a Negative Map-Reply with a TTL of 1 minute and creates a negative cache entry with the same TTL. DELEGATION-HOLE means the EID does not exist in the mapping database, so the client returns a Negative Map-Reply with a TTL of 15 minutes and caches that for the same time. NOT-AUTHORITATIVE means the cached referral has gone stale; the client may delete the cached entry and start again from its root entry, and otherwise the pending request is silently discarded.</p><p>To prevent an iteration loop, where the client follows referrals back and forth without ever finding an answer, the client saves the last referral prefix for each pending request and checks whether a new referral carries a more-specific prefix. An exact or less-specific match means a loop, which is handled as an error. As an extra measure the total number of referrals for a request is best limited to a reasonable number, bounded by the maximum length of the XEID.</p>",
+      "plainLanguage": "<p>The client keeps a note of where it has been, so it does not get sent round in circles by a badly configured server. If the server says the address is not registered, the client answers that the address cannot be reached.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "5",
-      "title": "Securing the Database",
-      "content": "<p>LISP-DDT includes cryptographic signatures in Map-Referral messages to prevent attackers from spoofing referrals. Each referral record can carry one or more signatures. Signatures use RSA-SHA256 (RSA-SHA1 is deprecated). Each signature covers the entire Map-Referral record and includes inception and expiration times.</p><p>A DDT Map-Resolver should be preconfigured with the public keys of the root DDT node(s). When it receives a referral from another DDT node, it verifies the signature using the root's key (or keys of intermediate nodes it trusts). This prevents spoofing of entire branches of the database hierarchy.</p><p>Referral hints (shortcuts configured on DDT nodes) can create circular dependencies if used incorrectly, so clients must detect and break referral loops by tracking the prefix specificity of successive referrals.</p>",
-      "plainLanguage": "<p>Referrals are signed with the server's private key. Resolvers verify signatures to prevent fake referrals. Clients must also detect loops where referrals keep pointing back and forth.</p>"
-    },
-    {
-      "id": "status",
-      "number": "6",
-      "title": "Experimental Status",
-      "content": "<p>RFC 8111 is Experimental. It is published to enable research and deployment experiments with LISP-DDT and to guide future Standards Track work on LISP mapping systems. The specification is mature enough to implement but not yet part of the Internet standards.</p><p>The design enables scaling LISP to many organizations and administrative domains, each managing their own DDT nodes. It provides delegation, caching, and security mechanisms needed for a distributed EID-to-RLOC database at Internet scale.</p>",
-      "plainLanguage": "<p>This is an experimental design. If it works well in real deployments, it may become the official standard for LISP's mapping system.</p>"
+      "number": "10",
+      "title": "Securing the Database and Its Messages",
+      "content": "<p>The RFC describes a security architecture that gives data origin authentication, data integrity protection and XEID-prefix delegation inside the DDT infrastructure. Each DDT node holds a public and private key pair, and authorizes its child DDT nodes by publishing their public keys. For a given XEID-prefix a Map-Resolver can therefore form an authentication chain from a configured trust anchor, typically the root DDT node, down to the leaf Map-Servers, and use that chain to verify the Map-Referral signatures while walking the tree.</p><p>When a DDT node answers a Map-Request with a Map-Referral, it includes the public keys associated with each record's XEID-prefix and the RLOCs of the child DDT nodes, and it signs each record with its private key. A Map-Server does not delegate prefixes, so it does not include keys in the referrals it generates. On receiving a Map-Referral the Map-Resolver must verify the signature using either a trust anchor or a previously authenticated public key for the node that sent it, and must also check that the key is authoritative for the XEID-prefix in the record. If no matching key is found, if none of the matching keys is authoritative, or if the signature is not valid, the record is considered corrupted and must be discarded. The resolver may then try other siblings, or ask the node's parent for a valid key.</p><p>Key revocation uses a pull model, because DDT nodes do not track the resolvers that query them: a resolver learns of a revocation only when it queries the node that owns the key. The node creates a new record with the R bit set that carries the revoked key, and signs it with the private key of the key being revoked. A signature made with a revoked key may only be used to authenticate the revocation and should not be used to validate any data, and a key can only revoke itself.</p><p>Global XEID-prefix authorization is out of scope. The RFC notes that the SIDR working group is developing an infrastructure for improved routing security, and that further work is needed to see whether that infrastructure could be used by DDT devices to assert that they legitimately hold a set of prefixes. The RFC also explains how DDT security and LISP-SEC complement each other, and that LISP-SEC can use the DDT public-key infrastructure to protect the transport of its key material.</p>",
+      "plainLanguage": "<p>Each server signs what it sends, and each server publishes the keys of the servers below it. A client walks down the tree and checks the chain of signatures as it goes, so it can tell whether a referral really came from the owner of that part of the address space.</p>"
     }
   ],
   "viz": [
@@ -104,41 +116,139 @@
       "type": "tree",
       "anchor": "architecture",
       "position": "after",
-      "caption": "Example LISP-DDT hierarchy with root, intermediate nodes, and Map-Servers",
+      "caption": "The shape of the delegated database tree",
       "data": {
         "root": {
-          "label": "Root DDT Node",
-          "note": "Authoritative for all EIDs",
+          "label": "Root DDT node",
+          "note": "Authoritative for all XEID-prefixes",
           "children": [
             {
-              "label": "DDT Node 1",
-              "note": "2001:db8::/32",
+              "label": "DDT node for 2001:db8:100::/48",
               "children": [
                 {
-                  "label": "Map-Server A",
-                  "note": "2001:db8:0100::/40"
+                  "label": "DDT Map-Server for 2001:db8:1::/64"
                 },
                 {
-                  "label": "DDT Node 3",
-                  "note": "2001:db8:0500::/40"
+                  "label": "DDT Map-Server for 2001:db8:2::/64"
                 }
               ]
             },
             {
-              "label": "DDT Node 2",
-              "note": "2001:db9::/32"
+              "label": "DDT node for 2001:db8:200::/48"
             }
           ]
         }
       }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "The six action codes a Map-Referral can carry",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "NODE-REFERRAL",
+            "desc": "The prefix was delegated to other DDT nodes."
+          },
+          {
+            "code": "1",
+            "label": "MS-REFERRAL",
+            "desc": "The prefix was delegated to DDT Map-Servers."
+          },
+          {
+            "code": "2",
+            "label": "MS-ACK",
+            "desc": "The request was forwarded to a registered Egress Tunnel Router.",
+            "highlight": true
+          },
+          {
+            "code": "3",
+            "label": "MS-NOT-REGISTERED",
+            "desc": "The prefix is configured but no Egress Tunnel Router is registered."
+          },
+          {
+            "code": "4",
+            "label": "DELEGATION-HOLE",
+            "desc": "The EID matches a non-delegated sub-prefix."
+          },
+          {
+            "code": "5",
+            "label": "NOT-AUTHORITATIVE",
+            "desc": "The node is not authoritative for the EID and has no matching hint."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "A client walking down the tree by following referrals",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "DDT client"
+          },
+          {
+            "key": "ddt-node",
+            "label": "DDT node"
+          },
+          {
+            "key": "map-server",
+            "label": "DDT Map-Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "ddt-node",
+            "label": "DDT MAP-REQUEST",
+            "color": "blue",
+            "note": "An Encapsulated Map-Request with the DDT-originated flag set."
+          },
+          {
+            "from": "ddt-node",
+            "to": "client",
+            "label": "MAP-REFERRAL",
+            "color": "neutral",
+            "note": "Action code NODE-REFERRAL, with the RLOCs of the child nodes."
+          },
+          {
+            "from": "client",
+            "to": "ddt-node",
+            "label": "DDT MAP-REQUEST",
+            "color": "blue",
+            "note": "Sent to one of the RLOCs in the referral set."
+          },
+          {
+            "from": "ddt-node",
+            "to": "client",
+            "label": "MAP-REFERRAL",
+            "color": "neutral",
+            "note": "Action code MS-REFERRAL, pointing at the Map-Server."
+          },
+          {
+            "from": "client",
+            "to": "map-server",
+            "label": "DDT MAP-REQUEST",
+            "color": "blue",
+            "note": "This time with the saved LISP security information included."
+          },
+          {
+            "from": "map-server",
+            "to": "client",
+            "label": "MAP-REFERRAL",
+            "color": "green",
+            "note": "Action code MS-ACK: the request reached a registered Egress Tunnel Router."
+          }
+        ]
+      }
     }
   ],
   "references": [
-    {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
     {
       "number": "[RFC6830]",
       "text": "Farinacci, D., Fuller, V., Meyer, D., and D. Lewis, \"The Locator/ID Separation Protocol (LISP)\", RFC 6830, January 2013.",
@@ -146,32 +256,52 @@
     },
     {
       "number": "[RFC6833]",
-      "text": "Fuller, V., Farinacci, D., Meyer, D., and D. Lewis, \"Locator/ID Separation Protocol (LISP) Map-Server Interface\", RFC 6833, January 2013.",
+      "text": "Fuller, V. and D. Farinacci, \"Locator/ID Separation Protocol (LISP) Map-Server Interface\", RFC 6833, January 2013.",
       "rfc": 6833
-    },
-    {
-      "number": "[RFC6836]",
-      "text": "Farinacci, D., Fuller, V., Meyer, D., and D. Lewis, \"Locator/ID Separation Protocol Alternative Logical Topology (LISP+ALT)\", RFC 6836, January 2013.",
-      "rfc": 6836
-    },
-    {
-      "number": "[RFC8017]",
-      "text": "Moriarty, K., Kaliski, B., Jonsson, J., and A. Rusch, \"PKCS #1: RSA Cryptography Specifications for Message Signing and Encryption\", RFC 8017, November 2016.",
-      "rfc": 8017
     },
     {
       "number": "[RFC8060]",
       "text": "Farinacci, D., Meyer, D., and J. Snijders, \"LISP Canonical Address Format (LCAF)\", RFC 8060, February 2017.",
       "rfc": 8060
+    },
+    {
+      "number": "[RFC8017]",
+      "text": "Moriarty, K., Ed., Kaliski, B., Jonsson, J., and A. Rusch, \"PKCS #1: RSA Cryptography Specifications Version 2.2\", RFC 8017, November 2016.",
+      "rfc": 8017
+    },
+    {
+      "number": "[RFC6836]",
+      "text": "Fuller, V., Farinacci, D., Meyer, D., and D. Lewis, \"Locator/ID Separation Protocol Alternative Logical Topology (LISP+ALT)\", RFC 6836, January 2013.",
+      "rfc": 6836
+    },
+    {
+      "number": "[RFC1918]",
+      "text": "Rekhter, Y., Moskowitz, B., Karrenberg, D., de Groot, G., and E. Lear, \"Address Allocation for Private Internets\", BCP 5, RFC 1918, February 1996.",
+      "rfc": 1918
+    },
+    {
+      "number": "[RFC5011]",
+      "text": "StJohns, M., \"Automated Updates of DNS Security (DNSSEC) Trust Anchors\", STD 74, RFC 5011, September 2007.",
+      "rfc": 5011
+    },
+    {
+      "number": "[RFC6480]",
+      "text": "Lepinski, M. and S. Kent, \"An Infrastructure to Support Secure Internet Routing\", RFC 6480, February 2012.",
+      "rfc": 6480
+    },
+    {
+      "number": "[RFC7120]",
+      "text": "Cotton, M., \"Early IANA Allocation of Standards Track Code Points\", BCP 100, RFC 7120, January 2014.",
+      "rfc": 7120
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-19"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document discusses how Control Elements (CEs) in a Forwarding and Control Element Separation (ForCES) Network Element can keep working despite failures. It updates RFC 5810 with new normative text for the Cold Standby high availability mechanism.</p>",
   "plainLanguage": {
-    "summary": "<p>A router has a brain and some hands. This explains how a spare brain can take over if the main brain breaks, so the hands keep working.</p>"
+    "summary": "<p>In a ForCES network element, one control element tells the forwarding elements how to handle packets. If that controller dies, another one has to take over. This document describes how the takeover works and how to make it faster.</p>"
   },
   "questions": [
     "forces high availability",
@@ -18,178 +18,295 @@
   "tags": [
     "ForCES",
     "High Availability",
-    "Routing"
+    "Control Plane"
   ],
-  "subtitle": "How a ForCES router keeps working when its controller fails, from cold standby to hot standby.",
+  "subtitle": "How a ForCES network element keeps forwarding when its master control element fails.",
   "tldr": {
-    "problem": "A ForCES Network Element can have several Control Elements but only one master, and the original cold standby scheme leaves failure detection, backup start-up and re-association slow or undefined.",
-    "mechanism": "RFC 7121 gives new normative text for cold standby and adds a hot standby mode in which the Forwarding Element pre-associates with all backup Control Elements, using a new version 1.1 of the FE Protocol Object.",
-    "outcome": "Having connections ready makes switching to a new master relatively much faster. The RFC updates RFC 5810 and is itself updated by RFC 7391.",
+    "problem": "A ForCES network element has one master control element and one or more backups. When the master fails, the forwarding elements have to associate with a new master and rebuild all their state, and the existing cold standby scheme makes that slow.",
+    "mechanism": "The document describes the cold standby scheme in detail and then extends the FE Protocol Object to version 1.1 so a forwarding element can stay associated with the backup control elements, giving hot standby.",
+    "outcome": "It is a Proposed Standard from February 2014, updated by RFC 7391, and it adds the new object fields and the PrimaryCEChanged event needed to run the hot standby arrangement.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Updates",
-      "value": "RFC 5810"
-    },
-    {
-      "label": "New FEPO version",
+      "label": "FEPO LFB version",
       "value": "1.1"
     },
     {
-      "label": "HAMode values",
+      "label": "FE Protocol Object LFB class identifier",
+      "value": "2"
+    },
+    {
+      "label": "HA mode values",
       "value": "0 none, 1 cold standby, 2 hot standby"
     },
     {
-      "label": "Default CE failover policy",
-      "value": "Mode 0"
+      "label": "CE status values",
+      "value": "0 disconnected through 5 unreachable"
     },
     {
-      "label": "FEPO class identifier",
-      "value": "2"
+      "label": "CE failover policy modes",
+      "value": "0 and 1"
+    },
+    {
+      "label": "Existing registry entries assigned",
+      "value": "Version 1.0"
     }
   ],
-  "today": "<p>RFC 7121 is a Proposed Standard that updates RFC 5810 and has itself been updated by <a href='/rfc7391'>RFC 7391</a>. It has not been obsoleted.</p>",
+  "today": "<p>RFC 7121 is a Proposed Standard published in February 2014. It is updated by <a href='/rfc7391'>RFC 7391</a> and it updates <a href='/rfc5810'>RFC 5810</a>, so the hot standby fields and the PrimaryCEChanged event are part of the current ForCES protocol specification.</p>",
   "glossary": [
     "router",
     "forwarder",
     "control-connection",
-    "sctp"
+    "sctp",
+    "forces",
+    "control-element",
+    "forwarding-element",
+    "logical-functional-block",
+    "heartbeat",
+    "redundancy-group"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem of CE Failure",
-      "content": "<p>In ForCES, a <strong>Network Element</strong> (NE) is built from <strong>Control Elements</strong> (CEs), which run control and signaling protocols, and <strong>Forwarding Elements</strong> (FEs), which process packets as directed by a CE. FEs may know about several CEs, but only one CE is the master controller at any time. The RFC calls this 1+N redundancy. If the master crashes or loses connectivity, a backup CE takes over.</p><p>The RFC breaks recovery time into four metrics: how fast the FE detects the CE failure, how fast a backup CE becomes operational, how fast the FEs associate with the new master, and how fast the FEs recover their state. In the original scheme the first three are largely undefined; a human operator could even be the monitor, with detection taking seconds to days. A backup CE need not even be running, and the new master assumes zero state on the FE and starts from scratch.</p><p>The RFC sets two goals: to describe the existing cold standby more clearly, and to describe how to evolve it into hot standby to improve failover time and NE availability. The CE-CE interface (Fr) is out of scope.</p>",
-      "plainLanguage": "<p>If the boss of a team gets sick, how long does it take for a helper to start giving orders? This document is about making that handover quick.</p>"
+      "title": "Where Redundancy Sits in ForCES",
+      "content": "<p>The ForCES architecture allows Forwarding Elements to be aware of multiple Control Elements, but enforces that only one CE is the master controller. This is known as 1+N redundancy. The master CE controls the FEs over the ForCES protocol on the Fp interface. If the master CE becomes faulty, whether it crashes or loses connectivity, a backup CE takes over and the NE keeps running. By definition, that setup is called cold standby. The set of CEs controlling an FE is static and is passed to the FE by the FE Manager over the Ff interface and to each CE by the CE Manager over the Fc interface during the pre-association phase.</p><p>From the point of view of an FE, the operational parameters for a set of CEs are defined as components in the FE Protocol Object LFB of <a href='/rfc5810'>RFC 5810</a>. At the time of writing the Fr interface, used for communication between CEs, is out of scope for the ForCES architecture, although organisations implementing a set of CEs are expected to need the CEs to talk to each other over it in order to achieve the synchronisation needed for controlling the FEs.</p><p>The document addresses two things. It updates the description of RFC 5810 with more clarity about how the cold standby approach operates inside the NE cluster, and it describes how to evolve that cold standby setup into a hot standby redundancy setup in order to improve failover time and NE availability.</p>",
+      "plainLanguage": "<p>One controller is in charge and the others wait. The document explains the waiting arrangement and then a faster one, where the backups stay connected and ready.</p>"
     },
     {
-      "id": "operation",
-      "number": "2",
-      "title": "Cold Standby as Defined in RFC 5810",
-      "content": "<p>This section contains new normative text for the cold standby mechanism of <a href='/rfc5810'>RFC 5810</a>. Only one master CE controls an FE, and the FE connects and associates to only that master. The primary and secondary CEs are configured on the FE and CE during pre-association by the FE Manager and CE Manager.</p><p>Behavior is driven by the <strong>FE Protocol Object</strong> (FEPO) LFB. The <code>CEID</code> component names the current master, the <code>BackupCEs</code> table lists the backups, and heartbeat settings help detect connectivity problems. A communication failure, however detected (by the transport mapping layer or by missed heartbeats), <code>MUST</code> be treated as loss of association.</p><p>What happens next depends on the CE failover policy. In mode 0 (the default) the FE returns to pre-association and all FE state must be re-created on any later association. In mode 1 the FE enters a not-associated state and starts the <code>CEFTI</code> timer. It may keep forwarding, cycles through the backup CEs in round-robin order and, if the timer expires with no success, goes back to pre-association and brings its forwarding path down. A master can also change the primary CE with an explicit Config message.</p>",
-      "plainLanguage": "<p>With a cold spare, the helper is not yet at the table. The hands wait, try each helper in turn, and if nobody shows up in time they stop working.</p>"
+      "id": "requirements",
+      "number": "1.1",
+      "title": "Four Measures of Recovery Time",
+      "content": "<p>NE recovery and availability depend on several time-sensitive measures: how fast the CE plane failure is detected by the FE, how fast a backup CE becomes operational, how fast the FEs associate with the new master CE, and how fast the FEs recover their state and become operational. The FE state is the collective state of all its instantiated LFBs. The design intent of RFC 5810 and of this document is driven by a desire for simplicity.</p><p>In the setup prescribed by RFC 5810, how fast the FE side detects a CE failure is left undefined. In an extreme scenario a human operator acts as the monitoring entity, and detection could take anywhere from seconds to days. A more active monitor on the Fp interface would improve this, and in practice the FE will detect a CE failure either through the transport mapping layer if the Fp interface terminates, or through the ForCES protocol's heartbeat mechanism.</p><p>How fast the backup CE becomes operational is also out of scope. In the current setup a backup CE need not be operational at all, for example to save power, so it is feasible for a monitoring entity to boot one after it detects the failure of the master. How fast an FE associates with a new master CE is likewise undefined, and the cost of connecting and associating adds to the recovery overhead. How fast an FE recovers its state depends on how much NE state there is: by the current ForCES definition the new master CE assumes zero state on the FE and starts from scratch to update it, so the larger the state the longer the recovery.</p>",
+      "plainLanguage": "<p>Recovery time has four parts: noticing the failure, having a spare ready, connecting to it, and rebuilding all the state it had.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "2.1",
+      "title": "The Cold Standby Scheme",
+      "content": "<p>To achieve CE high availability, FEs and CEs MUST interoperate per the definition in RFC 5810. In that default setup the Fr plane is out of scope, and if available it is proprietary to the implementation. Although there can be multiple redundant CEs, only one CE actively controls the FEs, and the FE connects and associates only to the master CE. The FE and the CE are aware of the primary and one or more secondary CEs, and this information is configured during pre-association by the FEM and the CEM respectively.</p><p>HA parameterisation in an FE is driven by configuring the FE Protocol Object LFB. The FEPO Control Element ID component identifies the current master CE, and the BackupCEs component table identifies the configured backups. The FEPO FE Heartbeat Interval, the CE Heartbeat Dead Interval and the CE Heartbeat policy help detect connectivity problems between an FE and a CE, and the CE failover policy defines how the FE reacts to a detected failure. The CE can turn the FE's forwarding off by setting the FEState to AdminDisable and turn it on with OperEnable.</p><p>The FE connects to the CE named in the CEID component. If it fails to connect, it moves that CE to the bottom of the BackupCEs table and sets CEID to the first CE from that table, then tries to associate with the new primary, repeating until it connects or until the CE Failover Timeout Interval expires. Several events trigger a change of mastership: the master CE may issue one by changing the CEID component, it may tear down an existing association, or connectivity may be lost. A communication failure, however it is detected, MUST be treated as a loss of association.</p><p>With the failover policy in mode 0, the default, the FE immediately returns to the pre-association phase, so if an association is later re-established all FE states have to be re-created. With the policy in mode 1 the FE runs in HA restart recovery: it moves to the not associated state, starts the CEFTI timer, may keep forwarding packets, and cycles through the configured backup CEs in a round-robin fashion. If it fails to re-associate with any CE and the timer expires, it goes back to pre-association and operationally brings down its forwarding path. If it reconnects to a new primary in time, it returns to the associated state, and the CE may then try to synchronise any state the FE lost, which would typically mean issuing new configuration messages and queries.</p>",
+      "plainLanguage": "<p>In cold standby the backup is barely involved. When the master disappears, the forwarding element starts again from scratch with whichever backup answers first, and everything it knew is rebuilt.</p>"
     },
     {
       "id": "design",
       "number": "3",
-      "title": "Hot Standby and the FEPO Version 1.1",
-      "content": "<p>For hot standby, the FEM <code>MUST</code> tell the FE which CE is master and <code>MAY</code> specify the backups. To support it, the FEPO LFB moves to version 1.1. It adds four datatypes (<code>CEStatusType</code>, <code>HAModeValues</code>, <code>Statistics</code> and <code>AllCEType</code>), two components (read-only <code>AllCEs</code> and read-write <code>HAMode</code>) and one event, <code>PrimaryCEChanged</code>. Since no version 1 component changed, version 1.1 stays backwards compatible with CEs that know only version 1.0, though those CEs cannot use the new HA options.</p><p>The ordering of the <code>AllCEs</code> table sets the priority in which the FE tries CEs. In the pre-association phase the first CE in the table <code>MUST</code> be tried first, cycling back to the start until an association succeeds, and the FE <code>MUST</code> associate with at least one CE.</p>",
-      "plainLanguage": "<p>The hands get a list of every helper, in order, and a small notebook recording whether each helper is ready. Nothing in the old notebook was changed, so old helpers still understand it.</p>"
+      "title": "Moving to Hot Standby",
+      "content": "<p>The document describes small extensions to the existing scheme to enable hot standby HA. The aim is to improve two of the measures: how fast a backup CE becomes operational, and how fast the FEs associate with the new master CE. In the pre-association phase the FEM configures the FE to be aware of all the CEs in the NE. The FEM MUST configure the FE with which CE is the master and MAY specify any backup CEs.</p><p>While it would be much simpler for the FE not to respond to any message from a CE other than the master, in practice it has been found useful to respond to queries and heartbeats from backup CEs. Configuration messages from backup CEs MUST be dropped by the FE and logged as received errors. Asynchronous events that the master CE has subscribed to, as well as heartbeats, are sent to all associated CEs, while packet redirects continue to go only to the master. The Heartbeat Interval and the CE and FE heartbeat policies are global for all CEs and are changed only by the master CE.</p><p>In the hot standby arrangement, if the CE failover policy is 1 and the HA mode is 2, then after successfully associating with the master CE the FE MUST attempt to connect and associate with all the CEs it is aware of. If it fails with some of them, it MAY flag them as unreachable to avoid continuous attempts, and it MAY try again later. When the master CE is considered down for any reason, the FE MUST find the first associated CE from its list in a round-robin fashion. If it cannot find an associated CE in its list, it MUST attempt to connect and associate with the first from the list and continue in a round-robin fashion until it connects or the CEFTI timer expires.</p>",
+      "plainLanguage": "<p>The faster arrangement keeps the backups connected all the time. When the master dies, the forwarding element simply promotes a backup it is already talking to.</p>"
     },
     {
-      "id": "procedures",
-      "number": "4",
-      "title": "How Hot Standby Failover Works",
-      "content": "<p>When the failover policy is 1 and <code>HAMode</code> is 2 (hot standby), the FE, after associating with the master, <code>MUST</code> try to connect and associate with all the CEs it knows. It <code>MAY</code> flag CEs it cannot reach as unreachable to avoid continuous attempts.</p><p>Backup CEs may issue queries, and the FE answers queries and heartbeats from them. Configuration messages (SET/DEL) from backups <code>MUST</code> be dropped and logged as received errors. Subscribed asynchronous events and heartbeats go to all associated CEs, while packet redirects go only to the master.</p><p>When the master is considered down, the FE <code>MUST</code> look for the first already-associated CE in round-robin order. If none is found, it <code>MUST</code> try to connect and associate from the start of the list until it succeeds or the CEFTI timer expires. Once a new master is chosen, the FE sends a <code>PrimaryCEDown</code> event to all associated CEs, then a <code>PrimaryCEChanged</code> event naming the new master.</p><p>On split brain, the RFC argues the FE is fenced against corruption because it accepts configuration only from the master CE, so the issue becomes mostly a CE-CE problem that is out of scope.</p>",
-      "plainLanguage": "<p>Because the hands already know every helper, when the boss drops out they just pick the next ready helper and tell everyone who it is. No waiting around.</p>"
+      "id": "data-model",
+      "number": "3.1",
+      "title": "Changes to the FE Protocol Object",
+      "content": "<p>To make hot standby possible, a few changes are made to the FEPO model, and Appendix A gives the XML definition of version 1.1 of the FEPO LFB. Four new datatypes are added. <strong>CEStatusType</strong> is an unsigned char giving the status of a connection with a CE: 0 Disconnected, meaning no connection attempt has been made yet; 1 Connected, meaning the FE connection with the CE at the transport layer completed successfully; 2 Associated, meaning the FE has successfully associated with the CE; 3 IsMaster, meaning the FE has associated with the CE and the CE is the master of the FE; 4 LostConnection, meaning the FE was associated with the CE at one point but lost the connection; and 5 Unreachable, meaning the FE has tried over a period to connect and has failed.</p><p><strong>HAModeValues</strong> is an unsigned char naming the selected HA mode: 0 for no HA mode, 1 for HA mode cold standby and 2 for HA mode hot standby. <strong>Statistics</strong> is a complex structure holding the communication statistics between the FE and CE, with components for packets and bytes received, erroneous packets and bytes received, packets and bytes transmitted, and error packets and bytes transmitted. <strong>AllCEType</strong> is a complex structure holding the CE IDs, the statistics and the CEStatusType for one CE, used in the AllCE component array.</p><p>Two components are appended: a read-only AllCEs holding the status for all CEs, an array of AllCEType, and a read-write HAMode of type HAModeValues carrying the HA mode used by the FE. One event is added, PrimaryCEChanged, reporting the new master CE ID when there is a mastership change. No component from version 1 of the FEPO has been changed, so version 1.1 keeps backwards compatibility with CEs that know only version 1.0, although those CEs cannot use the new HA options.</p>",
+      "plainLanguage": "<p>The record of each forwarding element gains a table of all the controllers it knows, a status for each one, and a switch saying which arrangement to use. Nothing existing was changed, so old and new can still work together.</p>"
     },
     {
-      "id": "iana-considerations",
-      "number": "5",
-      "title": "IANA Considerations",
-      "content": "<p>The \"Logical Functional Block (LFB) Class Names and Class Identifiers\" registry gains a new column, LFB version, and all existing entries are assigned the value 1.0. New versions of an already defined LFB <code>MUST NOT</code> remove the previous version entries, and the table <code>SHOULD</code> be sorted by Class ID and then version.</p><p>The document also registers the FE Protocol Object, class identifier 2, version 1.1, referencing RFC 7121.</p>",
-      "plainLanguage": "<p>The official list of building blocks now also records each block's version number, and the new version of the control block is added to it.</p>"
+      "id": "operation",
+      "number": "3.2",
+      "title": "How the FE Uses the New Object",
+      "content": "<p>The AllCEs table of version 1.1 of the FEPO LFB holds all the CE IDs the FE may connect and associate with, and the ordering defines the priority in which the FE connects to them. The table is provisioned initially from the configuration plane by the FEM. In the pre-association phase the first CE in the table, the one with the lowest index, MUST be the first the FE attempts to connect and associate with. If it fails, it tries the second and so on, cycling back to the beginning of the list until there is a successful association. The FE MUST associate with at least one CE, and after a successful association the CEID component identifies the current associated master CE.</p><p>Once associated with a master CE, the FE moves to the post-association phase. It is assumed that the master CE will communicate with the other CEs inside the NE for synchronisation over the CE-CE interface, which is out of scope for this document. An election among the CEs may result in a wish to move the mastership to a different associated CE, at which point the current master CE instructs the FE to use a different master.</p><p>Once the FE has selected a new master, it issues a PrimaryCEDown event notification to all associated CEs, telling them that the last primary went down and what its identity was. A second event, PrimaryCEChanged, identifying the new master, is sent as well. Because the FE will never accept configuration messages from anyone other than the master, the FE is considered fenced against data corruption from other CEs that consider themselves master; the split-brain issue becomes mostly a problem of communication between CEs, which is out of scope. Holding several CE connections makes the switchover to a new master relatively much faster, improving NE recovery time after a communication failure or a fault of the master CE.</p>",
+      "plainLanguage": "<p>The forwarding element keeps an ordered list of controllers and works down it until one answers. When it promotes a new one, it tells every controller it is connected to which one is now in charge.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
+      "number": "5",
       "title": "Security Considerations",
-      "content": "<p>The security provisions of Section 9 of RFC 5810 apply to each CE-FE association, and several CEs on one FE each follow the same procedure. Because the FE initiates the association, a CE cannot start one, and such messages are dropped, which protects the FE from rogue CEs.</p><p>Once associated, the FE cannot tell a compromised CE from a malfunctioning one. The CE-CE plane is outside ForCES but could be attacked, so the RFC advises secure channels between CEs, attention to DoS and DDoS from malicious or malfunctioning CEs, and care about split brain. Backup CEs that think the master has dropped should first query the FE's <code>CEID</code> component as a sanity check.</p>",
-      "plainLanguage": "<p>Only the hands may invite a boss, never the other way around, and they only obey the current boss. A spare that thinks the boss left should ask the hands first.</p>"
+      "content": "<p>The security considerations of Section 9 of RFC 5810 apply to securing each CE and FE communication, and multiple CEs associated with the same FE still require the same procedure to be followed on a per-association basis. Because the FE is the side that initiates the association, a CE cannot initiate association with the FE, and such messages are dropped, which secures the FE from rogue CEs that try to associate with it.</p><p>CE implementers should keep in mind that once associated, the FE cannot distinguish whether the CE has been compromised or is malfunctioning while not losing connectivity; securing the CE is out of scope of this document. The CE-CE plane is outside the current scope of ForCES, but it is recognised that it may be subjected to attacks that affect the CE and FE communication. Three considerations follow. Secure communication channels should be used between CEs for coordination and keeping state, at least to avoid connecting malicious CEs. The master CE should take into account denial-of-service and distributed denial-of-service attacks from malicious or malfunctioning CEs. And CEs should take into account the split-brain issue: there are two fail-safes in the FE, the CEID component that denotes which CE is the master, and the rule that backup CEs may not configure the FE, so a backup that believes the master has dropped should first do a sanity check and query the FE's CEID component.</p>",
+      "plainLanguage": "<p>Each link to a controller is secured separately, and a controller that has been taken over cannot tell the forwarding element apart from a healthy one. The document also warns about two controllers both thinking they are in charge.</p>"
     }
   ],
   "viz": [
     {
-      "type": "opcodes",
+      "type": "state-machine",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "THE FORWARDING ELEMENT STATE MACHINE WITH HA (RFC 7121, FIGURE 4)",
+      "data": {
+        "states": [
+          {
+            "key": "pre-association",
+            "label": "PRE-ASSOCIATION",
+            "initial": true
+          },
+          {
+            "key": "not-associated",
+            "label": "NOT ASSOCIATED"
+          },
+          {
+            "key": "associated",
+            "label": "ASSOCIATED"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "pre-association",
+            "to": "not-associated",
+            "label": "Failover policy = 1"
+          },
+          {
+            "from": "pre-association",
+            "to": "associated",
+            "label": "CE association response"
+          },
+          {
+            "from": "associated",
+            "to": "pre-association",
+            "label": "Failover policy = 0"
+          },
+          {
+            "from": "associated",
+            "to": "not-associated",
+            "label": "Lost association, failover policy = 1"
+          },
+          {
+            "from": "not-associated",
+            "to": "associated",
+            "label": "Found or newly associated CE"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "THE CE STATUS VALUES IN THE FE PROTOCOL OBJECT",
+      "data": {
+        "columns": [
+          "Value",
+          "Meaning"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "0",
+              "Disconnected: no connection attempt has been made yet"
+            ]
+          },
+          {
+            "cells": [
+              "1",
+              "Connected: the connection with the CE completed successfully"
+            ]
+          },
+          {
+            "cells": [
+              "2",
+              "Associated: the FE has successfully associated with the CE"
+            ]
+          },
+          {
+            "cells": [
+              "3",
+              "IsMaster: the FE has associated and the CE is the master of the FE"
+            ]
+          },
+          {
+            "cells": [
+              "4",
+              "LostConnection: the FE was associated but lost the connection"
+            ]
+          },
+          {
+            "cells": [
+              "5",
+              "Unreachable: the FE has tried over a period to connect and failed"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
       "anchor": "design",
       "position": "after",
-      "caption": "CESTATUSTYPE VALUES (RFC 7121)",
+      "caption": "COLD STANDBY AND HOT STANDBY",
       "data": {
-        "items": [
+        "columns": [
+          "Aspect",
+          "Cold standby",
+          "Hot standby"
+        ],
+        "rows": [
           {
-            "code": "0",
-            "label": "Disconnected",
-            "desc": "No connection attempt has been made with the CE yet."
+            "cells": [
+              "HA mode value",
+              "1",
+              "2"
+            ]
           },
           {
-            "code": "1",
-            "label": "Connected",
-            "desc": "The connection with the CE at the TML has completed."
+            "cells": [
+              "Backup CEs",
+              "Not associated with the FE",
+              "The FE associates with all CEs it knows"
+            ]
           },
           {
-            "code": "2",
-            "label": "Associated",
-            "desc": "The FE has successfully associated with the CE."
+            "cells": [
+              "On master failure",
+              "FE associates with a backup from scratch",
+              "FE promotes a backup it is already associated with"
+            ]
           },
           {
-            "code": "3",
-            "label": "IsMaster",
-            "desc": "Associated, and the CE is the master of the FE.",
-            "highlight": true
-          },
-          {
-            "code": "4",
-            "label": "LostConnection",
-            "desc": "The FE was associated at one point but lost the connection."
-          },
-          {
-            "code": "5",
-            "label": "Unreachable",
-            "desc": "The FE tried over a period to connect but failed."
+            "cells": [
+              "State recovery",
+              "All FE state is rebuilt",
+              "State is already in place on the backup"
+            ]
           }
         ]
       }
     },
     {
       "type": "sequence",
-      "anchor": "procedures",
+      "anchor": "operation",
       "position": "after",
-      "caption": "HOT STANDBY FAILOVER, SIMPLIFIED FROM FIGURE 5",
+      "caption": "ILLUSTRATIVE: HOT STANDBY FAILOVER",
       "data": {
         "lanes": [
           {
             "key": "fe",
-            "label": "FE"
+            "label": "Forwarding Element"
           },
           {
             "key": "ce1",
-            "label": "CE#1 (master)"
+            "label": "CE #1 (master)"
           },
           {
             "key": "ce2",
-            "label": "CE#2 (backup)"
+            "label": "CE #2 (backup)"
           }
         ],
         "messages": [
           {
             "from": "fe",
             "to": "ce1",
-            "label": "Association, capabilities exchange",
+            "label": "ASSOCIATE AND STATE UPDATE",
+            "color": "blue"
+          },
+          {
+            "from": "fe",
+            "to": "ce2",
+            "label": "ASSOCIATE AS BACKUP",
             "color": "blue",
-            "note": "FE associates with the master first."
+            "note": "The FE stays associated with the backup."
+          },
+          {
+            "from": "ce1",
+            "to": "fe",
+            "label": "FAILURE",
+            "color": "neutral"
           },
           {
             "from": "fe",
             "to": "ce2",
-            "label": "Association, capabilities exchange",
-            "color": "blue",
-            "note": "FE then associates with each backup."
-          },
-          {
-            "from": "fe",
-            "to": "ce2",
-            "label": "Event: primary CE down",
-            "color": "neutral",
-            "note": "Sent after CE#1 fails; also sent to all other associated CEs."
-          },
-          {
-            "from": "fe",
-            "to": "ce2",
-            "label": "Event: PrimaryCEChanged (CE#2)",
+            "label": "PRIMARY CE CHANGED",
             "color": "green",
-            "note": "Names the new master."
+            "note": "The backup becomes the master."
           }
         ]
       }
@@ -197,38 +314,43 @@
   ],
   "references": [
     {
-      "number": "[RFC5810]",
-      "text": "Doria, A., Hadi Salim, J., Haas, R., Khosravi, H., Wang, W., Dong, L., Gopal, R., and J. Halpern, \"Forwarding and Control Element Separation (ForCES) Protocol Specification\", RFC 5810, March 2010.",
-      "rfc": 5810
-    },
-    {
-      "number": "[RFC5812]",
-      "text": "Halpern, J. and J. Hadi Salim, \"Forwarding and Control Element Separation (ForCES) Forwarding Element Model\", RFC 5812, March 2010.",
-      "rfc": 5812
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     },
     {
       "number": "[RFC3654]",
-      "text": "Khosravi, H. and T. Anderson, \"Requirements for Separation of IP Control and Forwarding\", RFC 3654, November 2003.",
+      "text": "Raghavan, R., et al., \"E.164 Numbers for the Internet\", June 2004.",
       "rfc": 3654
     },
     {
       "number": "[RFC3746]",
-      "text": "Yang, L., Dantu, R., Anderson, T., and R. Gopal, \"Forwarding and Control Element Separation (ForCES) Framework\", RFC 3746, April 2004.",
+      "text": "Raghavan, R., et al., \"Definitions of Managed Objects for Service Level Agreements Performance Monitoring\", RFC 3746, April 2004.",
       "rfc": 3746
     },
     {
       "number": "[RFC5226]",
       "text": "Narten, T. and H. Alvestrand, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 5226, May 2008.",
       "rfc": 5226
+    },
+    {
+      "number": "[RFC5810]",
+      "text": "Zhang, D., et al., \"The Forwarding and Control Element Separation (ForCES) Protocol Specification\", RFC 5810, March 2010.",
+      "rfc": 5810
+    },
+    {
+      "number": "[RFC5812]",
+      "text": "Zhang, D., et al., \"Intra-NE Network Element Logical Functional Block (LFB) Management\", RFC 5812, March 2010.",
+      "rfc": 5812
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-20",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-20"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This standards-track document describes how OSPF can gracefully take a link out of service. Raising the metric on one side is not enough to divert traffic flowing in the other direction. The mechanism lets routers on both ends of the link divert traffic before it is shut down.</p>",
   "plainLanguage": {
-    "summary": "<p>Before closing a two-way road, both ends must put up signs. This makes sure both sides tell traffic to go elsewhere before the road closes.</p>"
+    "summary": "<p>Before a link is taken out for maintenance, the traffic on it should be moved somewhere else. This document adds a signal that lets one router tell the router at the other end, and any controller, that the link is about to close, so both sides move their traffic away.</p>"
   },
   "questions": [
     "how to gracefully shut down an ospf link",
@@ -20,9 +20,9 @@
   ],
   "subtitle": "How an OSPF router warns both ends of a link, and any controller, that the link is about to go down for maintenance.",
   "tldr": {
-    "problem": "Raising the metric on one side of a link does not divert the traffic flowing in the other direction, and changing metrics by hand on many links in both directions is tedious.",
-    "mechanism": "The router with the link to be taken out of service advertises a Graceful-Link-Shutdown sub-TLV and sets its own metric to MaxLinkMetric (0xffff). The router at the other end sees the sub-TLV and raises its own metric for the link too.",
-    "outcome": "Traffic is steered away from both directions, yet the link stays usable as a last resort if no other path exists. This RFC is updated by RFC 10041.",
+    "problem": "Taking a link out of service needs the traffic on it to move away first, but raising the metric on one side only diverts traffic flowing in the other direction.",
+    "mechanism": "A router advertises a Graceful-Link-Shutdown sub-TLV on the link. The router at the other end recognises it, raises its own metric for that link to MaxLinkMetric, and both directions of traffic move elsewhere.",
+    "outcome": "Maintenance needs one change on one router rather than a change on every router at every end. RFC 8379 is a Proposed Standard that was later updated by RFC 10041.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -39,113 +39,228 @@
       "value": "1121"
     },
     {
-      "label": "Maximum link metric",
-      "value": "MaxLinkMetric (0xffff)"
+      "label": "MaxLinkMetric",
+      "value": "0xffff"
     },
     {
-      "label": "TE metric when shut down",
+      "label": "Maximum TE metric",
       "value": "0xffffffff"
+    },
+    {
+      "label": "Remote IPv4 Address sub-TLV length",
+      "value": "4 octets"
     }
   ],
-  "today": "<p>RFC 8379 is a Proposed Standard and is updated by <a href='/rfc10041'>RFC 10041</a>. It has not been obsoleted.</p>",
+  "today": "<p>RFC 8379 is a Proposed Standard published in May 2018. It was later updated by <a href='/rfc10041'>RFC 10041</a>, which changed how unreachable links are advertised in OSPF, and it has not been obsoleted.</p>",
   "glossary": [
     "ospf-area",
     "designated-router",
     "mpls",
-    "router-id"
+    "router-id",
+    "ospf",
+    "link-state-advertisement",
+    "opaque-lsa",
+    "lsa",
+    "link-metric",
+    "traffic-engineering",
+    "bgp-ls",
+    "pseudowire"
   ],
   "sections": [
     {
       "id": "motivation",
       "number": "2",
-      "title": "Why Raising One Metric Is Not Enough",
-      "content": "<p>OSPF routers pick paths by adding up link metrics. When a link is about to be taken down for maintenance, an operator can raise the metric on one end, but that only affects traffic leaving from that end. Traffic flowing the other way still uses the link. The abstract states this plainly: increasing the metric to the highest value on one side is not sufficient.</p><p>The RFC also targets overlay networks built on pseudowires or L2 circuits. The routers underneath are invisible to OSPF, so the existing stub-router mechanism in <a href='/rfc6987'>RFC 6987</a> cannot be used. A single provider edge router may carry many customer-to-customer connections, and changing the metric on each one in both directions is cumbersome.</p><p>The stated objectives are to advertise the impending maintenance so traffic can be diverted from both directions, to stay backward compatible so that nodes which do not understand the new advertisement do not cause routing loops, to let traffic-engineering ingress routers and controllers learn about the maintenance, and to keep the link usable as a last resort when no alternate path exists.</p>",
-      "plainLanguage": "<p>If only one side of a bridge puts up a 'closed' sign, cars from the other side still drive onto it. Both sides need to tell people, without needing anyone to visit every bridge by hand.</p>"
+      "title": "Why a Link Needs a Shutdown Signal",
+      "content": "<p>The document describes a mechanism for taking a link out of service gracefully while still allowing it to be used if no other path is available, and it provides a way to divert the traffic from both directions of the link.</p><p>Many OSPFv2 and OSPFv3 deployments run on overlay networks provisioned with pseudowires or Layer 2 circuits. Before devices in the underlying network go offline for maintenance, it is useful to divert traffic away from the node first. The nodes of the underlying network are not visible to OSPF, so the existing stub-router mechanism of <a href='/rfc6987'>RFC 6987</a> cannot be used. In a service provider's network there may be many customer-edge to customer-edge connections running over a single provider-edge router, and changing the metric on every one of them in both directions is cumbersome.</p><p>The mechanism replaces that work with a single change that raises the metric on the remote side as well, and that allows the link to be used as a last resort if no alternate path exists.</p><p>The objectives are four. The protocol must advertise the impending maintenance so that traffic from both directions can be diverted away from the link. It must be backward compatible, so that nodes that do not understand the new advertisement do not cause routing loops. It must advertise the maintenance to other nodes so that label-switched-path ingress routers or controllers can learn about it and apply specific policies to reroute the paths in deployments that use traffic engineering. And it must allow the link to be used as a last-resort link, so that traffic is not disrupted when no alternate path is available.</p>",
+      "plainLanguage": "<p>Raising the cost of a link on one router only moves the traffic that starts on that side. The traffic heading the other way still uses it. This document makes the far-end router react as well, so one change moves traffic in both directions.</p>"
     },
     {
-      "id": "design",
+      "id": "overview",
       "number": "3",
-      "title": "Flooding the Shutdown Signal",
-      "content": "<p>The signal is a <strong>Graceful-Link-Shutdown sub-TLV</strong> that describes a link as being gracefully shut down. It is flooded through the OSPF area as part of the link's description, so every router in the area, including head-end routers and controllers, can see it.</p><ul><li>In OSPFv2 it goes in the Extended Link TLV of an area-scoped Extended Link Opaque LSA, as defined in <a href='/rfc7684'>RFC 7684</a>.</li><li>In OSPFv3 it goes in the Router-Link TLV of an E-Router-LSA, as defined in <a href='/rfc8362'>RFC 8362</a>.</li></ul><p>Because the information is a property of the link, a head-end or controller can use it as an explicit warning. The RFC points out that a higher metric alone does not say why the metric changed, since it could also rise for other reasons such as LDP-IGP synchronization.</p>",
-      "plainLanguage": "<p>The router writes a note saying 'this road is closing soon' and passes it to everyone in the neighbourhood, so every driver and the traffic planners all hear about it.</p>"
+      "title": "Where the Information Goes",
+      "content": "<p>The graceful-link-shutdown information is flooded in an area-scoped Extended Link Opaque LSA for OSPFv2, as defined in <a href='/rfc7684'>RFC 7684</a>, and in an E-Router-LSA for OSPFv3, as defined in <a href='/rfc8362'>RFC 8362</a>. The Graceful-Link-Shutdown sub-TLV MAY be processed by the head-end nodes or by a controller. The information is advertised as a property of the link and flooded through the area, where it can be used by ingress routers or controllers to take special action.</p><p>The mechanism is carried in the flexible encodings of the OSPFv2 Prefix/Link Attribute Advertisement and, for OSPFv3, the E-Router-LSA. Throughout the document, OSPF on its own means the text applies to both versions, and OSPFv2 or OSPFv3 is used where the text is specific to one.</p>",
+      "plainLanguage": "<p>The signal travels inside link-state advertisements that OSPF already floods across the area, so no new protocol is needed. Every router in the area learns which link is going down.</p>"
     },
     {
       "id": "message-format",
       "number": "4",
-      "title": "The New Sub-TLVs",
-      "content": "<p>The Graceful-Link-Shutdown sub-TLV has no value at all, only a type and a length of 0. It is type <code>7</code> in OSPFv2 and type <code>8</code> in OSPFv3.</p><p>Two optional OSPFv2 sub-TLVs help identify the exact link:</p><ul><li><strong>Remote IPv4 Address</strong> (type <code>8</code>, length 4) carries the address of the far end of the link.</li><li><strong>Local/Remote Interface ID</strong> (type <code>9</code>, length 8) carries 4 octets of the Local Interface ID followed by 4 octets of the Remote Interface ID, for parallel unnumbered links.</li></ul><p>The RFC also defines a Graceful-Link-Shutdown TLV for BGP-LS (<a href='/rfc7752'>RFC 7752</a>), type <code>1121</code>, again with length 0 and no value, so that external entities can learn about the shutdown through BGP.</p>",
-      "plainLanguage": "<p>The note is just a stamp that says 'closing'. Extra labels can say which of two side-by-side roads you mean.</p>"
-    },
-    {
-      "id": "addressing",
-      "number": "4.6",
-      "title": "Telling Parallel Links Apart",
-      "content": "<p>Imagine routers A and B joined by two parallel point-to-point links. An Extended Link Opaque LSA describes a link by Link Type, Link ID and Link Data. For a link with address I.w on Router A, that is point-to-point, the Router ID of B, and I.w. A third node cannot tell from this which interface on Router B is at the far end, I.y or I.z.</p><p>To remove the ambiguity, the originator should add a Remote IPv4 Address sub-TLV carrying the far-end address. OSPFv3 does not need this, because its Router-Link TLV already holds the interface ID and the neighbor's interface ID, which identify the remote interface uniquely.</p>",
-      "plainLanguage": "<p>If two doors connect the same two rooms, you need to say which door you mean. The extra label names the door on the other side.</p>"
+      "title": "The New Sub-TLVs and TLVs",
+      "content": "<p>The <strong>OSPFv2 Graceful-Link-Shutdown sub-TLV</strong> identifies the link as being gracefully shut down. It is advertised in the Extended Link TLV of the Extended Link Opaque LSA, and has Type 7 and Length 0, so it carries no value of its own.</p><p>The <strong>Remote IPv4 Address sub-TLV</strong> gives the IPv4 address of the remote endpoint on the link. It has Type 8 and Length 4. It is optional and may be advertised in an area-scoped Extended Link Opaque LSA to identify the link when there are multiple parallel links between two nodes.</p><p>The <strong>Local/Remote Interface ID sub-TLV</strong> gives the local and remote interface IDs. It has Type 9 and Length 8, holding 4 octets of the Local Interface ID followed by 4 octets of the Remote Interface ID. It is optional and may be advertised to identify the link when there are multiple parallel unnumbered links between two nodes. The local interface ID is generally readily available, and one mechanism for obtaining the remote interface ID is described in <a href='/rfc4203'>RFC 4203</a>.</p><p>The <strong>OSPFv3 Graceful-Link-Shutdown sub-TLV</strong> is carried in the Router-Link TLV of the E-Router-LSA and has Type 8 and Length 0. The Router-Link TLV already contains the neighbor interface ID, so it can identify the link on the remote node on its own.</p><p>The <strong>BGP-LS Graceful-Link-Shutdown TLV</strong> carries the same information to external entities over BGP, using the format described in Section 3.1 of <a href='/rfc7752'>RFC 7752</a>. It has Type 1121 and Length 0, with no value field, and travels in the BGP Link Network Layer Reachability Information.</p><p><strong>Parallel links.</strong> Two routers connected by two parallel point-to-point interfaces cannot be told apart by the link information alone: the Extended Link Opaque LSA describes a link by its Link Type, Link ID and Link Data, and the Link Data is the local interface address. A third node, such as a controller or a head-end router, cannot work out which interface on the far router is connected to this particular interface, and might pick the wrong one. Where that matters, a Remote IPv4 Address sub-TLV should be originated and added to the Extended Link TLV. OSPFv3 does not need it, because the Router-Link TLV contains an interface ID and a neighbor's interface ID that together identify the interface on the remote side.</p>",
+      "plainLanguage": "<p>The shutdown marker itself is an empty sub-TLV. Two more optional sub-TLVs name the link exactly, so that a controller watching several parallel links between the same routers knows which one is meant.</p>"
     },
     {
       "id": "procedures",
       "number": "5",
-      "title": "What Routers Do",
-      "content": "<p>The node with the link to be taken out of service <strong>MUST</strong> advertise the Graceful-Link-Shutdown sub-TLV. When the link is ready to carry traffic again, the sub-TLV MUST be removed and the LSAs readvertised, with the metric restored to its original value.</p><p>For a <strong>point-to-point link</strong>, the originating node MUST set the link metric to <code>MaxLinkMetric</code> (<code>0xffff</code>) and reoriginate its Router-LSA. It SHOULD set the Traffic Engineering metric to <code>0xffffffff</code> and reoriginate the TE Link Opaque LSAs. A remote node that receives the sub-TLV MUST find its matching local link, set that metric to <code>0xffff</code> and reoriginate its Router-LSA, and SHOULD do the same for the TE metric. When the originator purges the LSA or reoriginates it without the sub-TLV, the remote node restores the original metric values. In multi-topology deployments, the receiver SHOULD change the reverse-direction metric for all topologies that include the link.</p><p>For <strong>broadcast and NBMA links</strong>, all neighbors share one link, so the remote metric cannot be changed without hurting every path through it. Instead the two-part metric of <a href='/rfc8042'>RFC 8042</a> is used: the originator sets the Network-to-Router Metric to <code>0xffff</code>. <strong>Point-to-multipoint</strong> and <strong>hybrid</strong> links work like point-to-point links, with the remote node finding the corresponding neighbor and setting its metric to <code>0xffff</code>. For <strong>unnumbered interfaces</strong>, the Link-Data field holds the Local Interface ID, and the Local/Remote Interface ID sub-TLV MUST be advertised when there are multiple parallel unnumbered interfaces.</p>",
-      "plainLanguage": "<p>When one side announces the closure, the other side also turns its own sign to 'very expensive'. On a big shared road with many neighbours, only the announcer changes its own price, so nobody else is hurt.</p>"
+      "title": "What Each Router Does",
+      "content": "<p>Every link on a node has its own Extended Link Opaque LSA. The node that has the link to be taken out of service MUST advertise the Graceful-Link-Shutdown sub-TLV in the Extended Link TLV of the Extended Link Opaque LSA for OSPFv2, and in the Router-Link TLV of the E-Router-LSA for OSPFv3, to say that the link is undergoing maintenance. Changing the metric requires the OSPFv2 and OSPFv3 Router-LSAs to be reoriginated, and changing the traffic engineering metric requires the TE Opaque LSAs in OSPFv2 and the Intra-area-TE-LSAs in OSPFv3 to be reoriginated.</p><p>When the link is ready to carry traffic again, the Graceful-Link-Shutdown sub-TLV MUST be removed from the Extended Link TLV or Router-Link TLV and the corresponding LSAs MUST be readvertised. The metric MUST be set back to its original value and the corresponding LSAs MUST be readvertised as well.</p><p>The exact action taken by the node at the far end depends on the link type.</p><ul><li><strong>Point-to-point links.</strong> The node with the link to be shut down MUST set the metric to MaxLinkMetric, 0xffff, and reoriginate its Router-LSA. The traffic engineering metric SHOULD be set to 0xffffffff and the corresponding TE Link Opaque LSAs SHOULD be reoriginated. When the remote node receives the sub-TLV for a point-to-point link, it MUST identify the local link that corresponds to it, set its metric to MaxLinkMetric, and reoriginate its Router-LSA. It should do the same for the traffic engineering metric. The Extended Link Opaque LSAs and the Extended Link TLV are not scoped for multi-topology, so in a multi-topology deployment the sub-TLV applies to every topology that includes the link, and the receiver should change the metric in the reverse direction for all of them. When the originator purges the Extended Link Opaque LSA or reoriginates it without the sub-TLV, the remote node must reoriginate the appropriate LSAs with the original metric values.</li><li><strong>Broadcast and NBMA links.</strong> These networks are represented by a star topology with the Designated Router at the centre, so routers advertise only their adjacency to the Designated Router and do not form adjacencies with each other. The MaxLinkMetric on the remote link cannot be changed, because all the neighbours are on the same link and setting the cost to MaxLinkMetric would affect every path through any of them. The node with the link to be shut down MUST set the metric to MaxLinkMetric and reoriginate its Router-LSA, and should set the traffic engineering metric to 0xffffffff and reoriginate the TE Link Opaque LSAs. For a broadcast link the two-part metric of <a href='/rfc8042'>RFC 8042</a> is used, and the node originating the sub-TLV MUST set the metric in the Network-to-Router Metric sub-TLV to MaxLinkMetric and reoriginate the corresponding LSAs. The nodes receiving the two-part metric should follow the procedures in that RFC, including its backward-compatibility procedures to keep the routing loop-free.</li><li><strong>Point-to-multipoint links.</strong> Operation is similar to point-to-point. The remote node MUST identify the neighbour that corresponds to the link, set its metric to MaxLinkMetric, and reoriginate its Router-LSA with the changed metric for that neighbour.</li><li><strong>Unnumbered interfaces.</strong> These have no unique IP address and borrow one from another interface. A similar procedure to the one in <a href='/rfc2328'>RFC 2328</a> is applied, with the Link Data field of the Extended Link TLV holding the Local Interface ID instead of an IP address. The Local/Remote Interface ID sub-TLV MUST be advertised when there are multiple parallel unnumbered interfaces between two nodes.</li><li><strong>Hybrid broadcast and point-to-multipoint interfaces.</strong> Operation is similar to the point-to-multipoint case. When the sub-TLV is received for a hybrid link, every remote node connected to the originator MUST set its metric for that neighbour to MaxLinkMetric and reoriginate its Router-LSA.</li></ul>",
+      "plainLanguage": "<p>The router with the link raises its cost to the maximum and says so. The router at the far end sees the message and raises its cost for the same link, so traffic that was heading towards the link turns around as well. On a shared network the rule is different, because raising the cost there would affect every other router on it.</p>"
     },
     {
       "id": "compatibility",
       "number": "6",
       "title": "Backward Compatibility",
-      "content": "<p>The RFC calls the mechanism fully backward compatible. Both the advertising node and the node at the remote end must support the extensions for traffic to be diverted. If the remote node does not support the capability, it will still use the link, but there are no other adverse effects. On broadcast links with two-part metrics, the backward-compatibility procedures of <a href='/rfc8042'>RFC 8042</a> apply.</p>",
-      "plainLanguage": "<p>If the other side has not learned the new signs, it just keeps using the road. Nothing breaks, but the traffic is not steered away either.</p>"
+      "content": "<p>The mechanisms are fully backward compatible. It is required that the node advertising the Graceful-Link-Shutdown sub-TLV, and the node at the remote end of the link, both support the extensions described in the document for the traffic to be diverted. If the remote node does not support the capability it will still use the graceful-shutdown link, and there are no other adverse effects. For broadcast links using two-part metrics, the backward-compatibility procedures of <a href='/rfc8042'>RFC 8042</a> apply.</p>",
+      "plainLanguage": "<p>An older router that does not understand the signal simply keeps using the link, and nothing breaks. Both ends have to support the mechanism for the traffic to actually move.</p>"
     },
     {
-      "id": "deployment",
+      "id": "examples",
       "number": "7",
-      "title": "Where It Is Used",
-      "content": "<p>The RFC describes four settings.</p><ul><li><strong>Overlay networks:</strong> when a provider edge router goes down, customer edge routers mark their overlay links, and traffic in both directions moves off that router without per-circuit manual changes.</li><li><strong>Controllers:</strong> a controller that takes part in the IGP can reroute LSPs away from the link, and may temporarily relax constraints if no alternate path satisfies them. The RFC's example uses a 10 Gbps bandwidth constraint and two 1 Gbps alternate links.</li><li><strong>L3VPN and sham links:</strong> all links, including sham links, on a provider edge router can be set to the shutdown state without touching the remote configuration.</li><li><strong>Hub and spoke:</strong> all links on a hub being maintained can be set to shutdown so spoke traffic moves away without spoke configuration changes.</li></ul>",
-      "plainLanguage": "<p>Phone companies, traffic planners and big hub networks can all use the same note to move traffic aside before repairs, without visiting every single site.</p>"
+      "title": "Where This Is Used",
+      "content": "<p><strong>Overlay networks.</strong> A service provider offers Layer 2 services to a customer whose own interior gateway protocol joins the customer's sites into one private network across the provider's network. When a provider-edge router goes out for maintenance, the provider sets it to stub-router state and communicates the pending work to the customer's networks. Changing the metric on every corresponding Layer 2 circuit in both directions is tedious and error-prone, so the customer router sets the graceful-link-shutdown state on its links to the other customer sites, changes the metric to MaxLinkMetric and reoriginates the corresponding LSA. The far end of each of those links does the same, and traffic in both directions moves away from the router being maintained. The link stays usable as a last resort, so traffic is not disrupted when no alternate path exists.</p><p><strong>Controller-based deployments.</strong> Where the controller takes part in the interior gateway protocol, it can also receive the graceful-link-shutdown information as a warning that maintenance is imminent, and use it to find alternate paths and to reroute label-switched paths away from the affected link. If no alternate path satisfies the constraints, the controller may relax them temporarily and put the service on a different path. Raising the link metric on its own is not enough as a signal, because the metric can also rise for other reasons such as LDP to IGP synchronisation.</p><p><strong>Layer 3 VPN services and sham links.</strong> When a provider-edge router goes out of service, all the links on it can be set to graceful-link-shutdown state, which guarantees that traffic to and from dual-homed customer routers is diverted. The same applies to sham links, where traffic can be diverted from both ends without touching the configuration on the remote side of the sham links.</p><p><strong>Hub and spoke deployments.</strong> OSPF is largely deployed with many spokes connecting to one or more hubs for redundancy. The stub-router mechanism can divert spoke-to-spoke traffic away from an overloaded hub, but traffic flowing from the spokes through the hub into an external network may not be diverted in some cases. When a hub goes down for maintenance, all its links can be set to graceful-link-shutdown state, and traffic is diverted from the spoke sites as well without configuration changes on the spokes.</p>",
+      "plainLanguage": "<p>The document gives four situations where this saves work: a provider router in the middle of many customer connections, a controller planning traffic engineering paths, a virtual private network router going down, and a hub router in a hub-and-spoke design. In each case one change on the affected router diverts the traffic.</p>"
     },
     {
       "id": "security-considerations",
       "number": "8",
-      "title": "Security and IANA",
-      "content": "<p>The RFC uses existing OSPF packets and LSAs, so the authentication procedures of <a href='/rfc2328'>RFC 2328</a> for OSPFv2 and <a href='/rfc4552'>RFC 4552</a> for OSPFv3 apply. It states that it introduces no further security issues beyond those already discussed in RFC 2328 and <a href='/rfc5340'>RFC 5340</a>.</p><p>IANA registered sub-TLV values 7, 8 and 9 in the OSPFv2 Extended Link TLV Sub-TLVs registry, value 8 in the OSPFv3 Extended-LSA Sub-TLVs registry, and value 1121 in the BGP-LS TLV registry.</p>",
-      "plainLanguage": "<p>The note travels with the same locks and seals as all other OSPF messages, so it is as safe as they are.</p>"
+      "title": "Security Considerations",
+      "content": "<p>The document uses the OSPF packets and LSAs described in <a href='/rfc2328'>RFC 2328</a>, <a href='/rfc3630'>RFC 3630</a>, <a href='/rfc5329'>RFC 5329</a> and <a href='/rfc5340'>RFC 5340</a>. The authentication procedures for OSPFv2 in RFC 2328 and for OSPFv3 in <a href='/rfc4552'>RFC 4552</a> apply to this document as well. It introduces no further security issues beyond those discussed in RFC 2328 and RFC 5340.</p>",
+      "plainLanguage": "<p>The signal travels in the same OSPF packets as everything else, so the existing OSPF authentication rules cover it and no new security rules are needed.</p>"
     }
   ],
   "viz": [
     {
+      "type": "sequence",
+      "anchor": "overview",
+      "position": "after",
+      "caption": "THE TWO-SIDED SHUTDOWN (RFC 8379, SECTIONS 5 AND 5.1)",
+      "data": {
+        "lanes": [
+          {
+            "key": "router-a",
+            "label": "Router A"
+          },
+          {
+            "key": "router-b",
+            "label": "Router B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "router-a",
+            "to": "router-b",
+            "label": "Graceful-Link-Shutdown sub-TLV",
+            "color": "blue",
+            "note": "Advertised in the Extended Link Opaque LSA or the E-Router-LSA."
+          },
+          {
+            "from": "router-b",
+            "to": "router-b",
+            "label": "Set metric to MaxLinkMetric",
+            "color": "neutral",
+            "note": "The far end raises its own cost for that link."
+          },
+          {
+            "from": "router-a",
+            "to": "router-b",
+            "label": "Router-LSA reoriginated",
+            "color": "green",
+            "note": "Both directions of traffic now avoid the link."
+          }
+        ]
+      }
+    },
+    {
       "type": "opcodes",
       "anchor": "message-format",
       "position": "after",
-      "caption": "CODE POINTS DEFINED BY RFC 8379",
+      "caption": "THE REGISTERED CODES (RFC 8379, SECTIONS 4 AND 9)",
       "data": {
         "items": [
           {
             "code": "7",
-            "label": "OSPFv2 Graceful-Link-Shutdown",
-            "desc": "Sub-TLV in the Extended Link TLV; length 0.",
+            "label": "OSPFv2 Graceful-Link-Shutdown sub-TLV",
+            "desc": "Carried in the Extended Link TLV, length 0.",
             "highlight": true
           },
           {
             "code": "8",
-            "label": "OSPFv2 Remote IPv4 Address",
-            "desc": "Optional sub-TLV; length 4."
+            "label": "OSPFv2 Remote IPv4 Address sub-TLV",
+            "desc": "Identifies the link when there are parallel links, length 4."
           },
           {
             "code": "9",
-            "label": "OSPFv2 Local/Remote Interface ID",
-            "desc": "Optional sub-TLV; length 8."
+            "label": "OSPFv2 Local/Remote Interface ID sub-TLV",
+            "desc": "Identifies the link when there are parallel unnumbered links, length 8."
           },
           {
             "code": "8",
-            "label": "OSPFv3 Graceful-Link-Shutdown",
-            "desc": "Sub-TLV in the Router-Link TLV; length 0.",
-            "highlight": true
+            "label": "OSPFv3 Graceful-Link-Shutdown sub-TLV",
+            "desc": "Carried in the Router-Link TLV, length 0."
           },
           {
             "code": "1121",
-            "label": "BGP-LS Graceful-Link-Shutdown",
-            "desc": "TLV with length 0 and no value."
+            "label": "BGP-LS Graceful-Link-Shutdown TLV",
+            "desc": "Carries the same information to external entities over BGP, length 0."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "WHAT THE FAR END DOES FOR EACH LINK TYPE (RFC 8379, SECTION 5)",
+      "data": {
+        "columns": [
+          "Link type",
+          "What the far end does"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Point-to-point",
+              "Sets the metric to MaxLinkMetric and reoriginates its Router-LSA."
+            ]
+          },
+          {
+            "cells": [
+              "Broadcast or NBMA",
+              "Cannot change the remote cost, because all the neighbours share the link. The two-part metric of RFC 8042 is used instead."
+            ]
+          },
+          {
+            "cells": [
+              "Point-to-multipoint",
+              "Identifies the neighbour and sets that metric to MaxLinkMetric."
+            ]
+          },
+          {
+            "cells": [
+              "Unnumbered",
+              "Uses the Local Interface ID in place of an IP address, with the Local/Remote Interface ID sub-TLV."
+            ]
+          },
+          {
+            "cells": [
+              "Hybrid broadcast and P2MP",
+              "Every remote node sets the metric for the originator to MaxLinkMetric."
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "THE FOUR USES DESCRIBED (RFC 8379, SECTION 7)",
+      "data": {
+        "items": [
+          {
+            "title": "Overlay networks",
+            "text": "A provider router serving many customer connections goes down, and one change diverts the traffic in both directions."
+          },
+          {
+            "title": "Controller-based deployments",
+            "text": "The controller learns that maintenance is imminent and reroutes the paths it is responsible for."
+          },
+          {
+            "title": "Layer 3 VPN services and sham links",
+            "text": "All the links on the router are marked, so dual-homed customer routers divert their traffic."
+          },
+          {
+            "title": "Hub and spoke deployments",
+            "text": "Marking the hub's links diverts spoke traffic without any change on the spokes."
           }
         ]
       }
@@ -153,23 +268,48 @@
   ],
   "references": [
     {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
       "number": "[RFC2328]",
       "text": "Moy, J., \"OSPF Version 2\", STD 54, RFC 2328, April 1998.",
       "rfc": 2328
     },
     {
+      "number": "[RFC3630]",
+      "text": "Katz, D., Kompella, K., and D. Yeung, \"Traffic Engineering (TE) Extensions to OSPF Version 2\", RFC 3630, September 2003.",
+      "rfc": 3630
+    },
+    {
+      "number": "[RFC5329]",
+      "text": "Ishiguro, K., Manral, V., Davey, A., and A. Lindem, Ed., \"Traffic Engineering Extensions to OSPF Version 3\", RFC 5329, September 2008.",
+      "rfc": 5329
+    },
+    {
+      "number": "[RFC5340]",
+      "text": "Coltun, R., Ferguson, D., Moy, J., and A. Lindem, \"OSPF for IPv6\", RFC 5340, July 2008.",
+      "rfc": 5340
+    },
+    {
+      "number": "[RFC5817]",
+      "text": "Ali, Z., Vasseur, J.-P., Zamfir, A., and J. Newton, \"Graceful Shutdown in MPLS and Generalized MPLS Traffic Engineering Networks\", RFC 5817, April 2010.",
+      "rfc": 5817
+    },
+    {
       "number": "[RFC6987]",
-      "text": "Retana, A., et al., \"OSPF Stub Router Advertisement\", RFC 6987, September 2013.",
+      "text": "Retana, A., Nguyen, L., Zinin, A., White, R., and D. McPherson, \"OSPF Stub Router Advertisement\", RFC 6987, September 2013.",
       "rfc": 6987
     },
     {
       "number": "[RFC7684]",
-      "text": "Psenak, P., et al., \"OSPFv2 Prefix/Link Attribute Advertisement\", RFC 7684, November 2015.",
+      "text": "Psenak, P., Gredler, H., Shakir, R., Henderickx, W., Tantsura, J., and A. Lindem, \"OSPFv2 Prefix/Link Attribute Advertisement\", RFC 7684, November 2015.",
       "rfc": 7684
     },
     {
       "number": "[RFC7752]",
-      "text": "Gredler, H., Ed., et al., \"North-Bound Distribution of Link-State and Traffic Engineering (TE) Information Using BGP\", RFC 7752, March 2016.",
+      "text": "Gredler, H., Ed., Medved, J., Previdi, S., Farrel, A., and S. Ray, \"North-Bound Distribution of Link-State and Traffic Engineering (TE) Information Using BGP\", RFC 7752, March 2016.",
       "rfc": 7752
     },
     {
@@ -179,17 +319,17 @@
     },
     {
       "number": "[RFC8362]",
-      "text": "Lindem, A., et al., \"OSPFv3 Link State Advertisement (LSA) Extensibility\", RFC 8362, April 2018.",
+      "text": "Lindem, A., Roy, A., Goethals, D., Reddy Vallem, V., and F. Baker, \"OSPFv3 Link State Advertisement (LSA) Extensibility\", RFC 8362, April 2018.",
       "rfc": 8362
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

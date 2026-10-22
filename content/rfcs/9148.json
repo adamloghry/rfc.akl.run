@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines how to carry Enrollment over Secure Transport (EST) messages over secure CoAP instead of HTTPS. EST is a way for devices to get certificates, and CoAP is a lightweight protocol common on small, low-power devices. This lets constrained devices reuse existing EST functionality to obtain certificates.</p>",
   "plainLanguage": {
-    "summary": "<p>A tiny device wants an ID card from the office. Instead of the long form, it uses a short, light version of the same request.</p>"
+    "summary": "<p>RFC 9148 carries the certificate enrolment protocol, EST, over CoAP instead of over HTTP. CoAP is the lightweight protocol that small, low-power devices already speak, and DTLS protects it in the same way TLS protects HTTP. The enrolment messages stay the same; what changes is the transport, the shorter URLs and the binary payloads.</p>"
   },
   "questions": [
     "how do iot devices get certificates",
@@ -63,145 +63,194 @@
     "csr",
     "trust-anchor",
     "certificate-authority",
-    "x509-certificate"
+    "x509-certificate",
+    "cbor"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "EST for Constrained Devices",
-      "content": "<p><strong>Enrollment over Secure Transport</strong> (EST, <a href='/rfc7030'>RFC 7030</a>) lets an endpoint get a certificate, and optionally a key, from a Certification Authority (CA) or Registration Authority (RA). EST carries its messages over HTTPS.</p><p>Some Internet of Things devices use the Constrained Application Protocol (CoAP) instead of HTTP. RFC 9148 defines a new transport for EST that uses DTLS and <a href='/rfc7252'>CoAP</a> in place of TLS and HTTP. EST responses can be large, so it also uses CoAP Block-Wise Transfer (<a href='/rfc7959'>RFC 7959</a>) to fragment messages at the CoAP layer.</p><p>The document profiles EST for certificate-based client authentication only. HTTP Basic and Digest authentication are not supported, and the client MUST be authenticated for all functions, even those that RFC 7030 allows without authentication.</p><div class='callout callout-info'><p>Much of the text is directly traceable to RFC 7030. The EST-coaps design follows the EST design closely.</p></div>",
-      "plainLanguage": "<p>Big computers get their ID cards through a busy front desk. Tiny devices cannot handle that crowd, so this gives them a quiet side door that does the same job.</p>"
+      "title": "Introduction",
+      "content": "<p>Classical Enrollment over Secure Transport (EST) of <a href='/rfc7030'>RFC 7030</a> is used for authenticated and authorized endpoint certificate enrollment, and optionally for key provisioning, through a Certification Authority or Registration Authority. EST transports its messages over HTTPS.</p><p>This document defines a new transport for EST based on the Constrained Application Protocol (CoAP), because some Internet of Things devices use CoAP instead of HTTP. It therefore uses DTLS and CoAP in place of TLS and HTTP.</p><p>EST responses can be relatively large, so this specification also uses CoAP Block-Wise Transfer of <a href='/rfc7959'>RFC 7959</a> to offer a fragmentation mechanism for EST messages at the CoAP layer.</p><p>The document also profiles the use of EST to support certificate-based client authentication only. Neither HTTP Basic nor Digest authentication, as described in Section 3.2.3 of RFC 7030, is supported.</p>",
+      "plainLanguage": "<p>EST is how a device asks a certificate authority for a certificate. It normally runs over HTTPS, which is heavy for a small sensor. This RFC runs the same messages over CoAP with DTLS, and it adds a way to split a large reply into blocks so that no IP packet has to be fragmented.</p>"
     },
     {
-      "id": "cryptography",
-      "number": "2",
-      "title": "DTLS Security and Authentication",
-      "content": "<p>EST-coaps relies on a secure transport for CoAP, and DTLS is the one it uses. In line with the IoT profiles in <a href='/rfc7925'>RFC 7925</a>, the mandatory cipher suite is <code>TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8</code>, and the curve <code>secp256r1</code> MUST be supported. The text notes that support for Curve25519 will likely be required in future IoT profiles.</p><p>The client authenticates the server with certificates in the DTLS handshake. The client MUST be configured with at least an Implicit Trust Anchor database so that it can check the server the first time, before it updates its trust anchors. The server authenticates the client with a client certificate. That can be a previously issued certificate, which is common for simple re-enrollment, or a previously installed one such as a manufacturer IDevID. If an IDevID has expired, the server MAY still accept it.</p><p>Proof that the client holds the private key (<strong>proof-of-possession</strong>) is OPTIONAL. When it is wanted, the client puts channel-binding information into the <code>challengePassword</code> attribute of its PKCS #10 request: the DTLS Finished message (<code>tls-unique</code>) for DTLS 1.2, or a 32-byte <code>tls-exporter</code> value for DTLS 1.3.</p><p>Unlike plain EST, an EST-coaps DTLS connection MAY stay open for several EST transactions in a row, for example a <code>/crts</code> request followed by a <code>/sen</code> request. It SHOULD only be kept alive for requests close together. For devices that sleep, connection IDs (<a href='/rfc9146'>RFC 9146</a>) or DTLS session resumption can avoid a full new handshake.</p>",
-      "plainLanguage": "<p>Before the office hands over an ID card, the device and the office show each other proof of who they are, like two people checking each other's badges at a locked door.</p>"
-    },
-    {
-      "id": "addressing",
+      "id": "design",
       "number": "3",
-      "title": "Short URIs and Discovery",
-      "content": "<p>Packets on low-resource networks are small, so EST-coaps shortens the EST paths. Resources live under <code>/.well-known/est/</code>, optionally followed by an arbitrary label that a CA can use to pick a certificate profile, then a short name. Clients and servers MUST support the short URIs.</p><p>Not every EST function is required. <code>/cacerts</code>, <code>/simpleenroll</code> and <code>/simplereenroll</code> are mandatory to implement. <code>/serverkeygen</code> and <code>/csrattrs</code> are optional. <code>/fullcmc</code> is not specified because it was judged too expensive for low-resource devices.</p><p>A client that does not know what a server offers sends a GET to <code>/.well-known/core</code> with the resource type <code>ace.est*</code>. The server MUST support the default <code>/.well-known/est</code> root resource and SHOULD support discovery when it uses other paths or ports. The first three resources (<code>crts</code>, <code>sen</code>, <code>sren</code>) MUST be listed in a discovery response; the others appear only if implemented.</p>",
-      "plainLanguage": "<p>The long street address is shortened to a nickname so it fits on a tiny label. If you do not know what the office offers, you can ask it for a menu first.</p>"
+      "title": "Security Profile and Authentication",
+      "content": "<p>EST-coaps can transport certificates and private keys. Certificates are responses to re-enrollment requests or to requests for a trusted certificate list, and private keys can be transported as responses to a server-side key generation request. The protocol depends on a secure transport that secures the exchanged CoAP messages, and DTLS is one such protocol. No other change is needed to the secure transport of EST messages.</p><p>In accordance with the profiles for low-resource devices in <a href='/rfc7925'>RFC 7925</a>, the mandatory cipher suite for DTLS in EST-coaps is <code>TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8</code>. The curve secp256r1 must be supported, and it is equivalent to the NIST P-256 curve. DTLS 1.2 implementations must use the Supported Elliptic Curves and Supported Point Formats extensions of <a href='/rfc8422'>RFC 8422</a>, and must also support the uncompressed point format. DTLS 1.3 implementations differ, because they do not support point format negotiation in favour of a single point format per curve, so support for DTLS 1.3 does not mandate the point format extensions, and the Supported Elliptic Curves extension has been renamed to Supported Groups.</p><p>CoAP was designed to avoid IP fragmentation. DTLS secures CoAP messages, but fragmentation is still possible at the DTLS layer during the handshake, and DTLS provides a mechanism for splitting a handshake message over a number of records that can each be transmitted separately, which avoids IP fragmentation.</p><p>The server is authenticated to the client by certificate authentication in the DTLS handshake, and the client must be configured with at least an Implicit Trust Anchor database, which lets it authenticate the server the first time, before it has an Explicit Trust Anchor. The client must be authenticated with a client certificate in the handshake, which can be a previously issued client certificate, for example one issued by the EST CA, or a previously installed certificate such as a manufacturer IDevID. IDevIDs are expected to have a very long life, as long as the device, but can expire under some conditions, and the server may then authenticate the client certificate against its trust store even though it has expired.</p><p>Connection-based proof-of-possession is optional. When it is wanted, a set of actions is required for the use of <code>tls-unique</code>, which consists of the contents of the first Finished message in the handshake. The client adds the Finished message as a challengePassword in the attributes section of the PKCS #10 certification request, to prove that it is in control of the private key at the time the session was established. For DTLS 1.3, where there is no equivalent of tls-unique, a 32-byte tls-exporter binding can be derived from the master secret and used in the same way.</p>",
+      "plainLanguage": "<p>The security profile is fixed: one cipher suite is mandatory and one elliptic curve must be supported. The server proves who it is with a certificate, and the client must also present a certificate, either one it already got from this authority or one that came with the device. The client may additionally prove that it holds the private key for the key it is enrolling by putting a value from the handshake into the request.</p>"
     },
     {
-      "id": "message-format",
-      "number": "4",
-      "title": "Payload Formats and Response Codes",
-      "content": "<p>EST sends Base64 text. EST-coaps does not need to: the payload follows the ASN.1 structure of the media type and is sent as plain binary, which the RFC says is 30% smaller for DER-encoded ASN.1. The CoAP <strong>Content-Format</strong> option (the HTTP Content-Type equivalent) says which EST message is inside. Format <code>281</code> carries certificates in a PKCS #7 container and MUST be supported by servers; <code>287</code> carries a single certificate; <code>286</code> is used for enrollment requests and <code>285</code> for CSR attribute responses.</p><p>Server-side key generation answers use Content-Format <code>62</code> (<code>application/multipart-core</code>), a CBOR array that pairs each part with its own Content-Format identifier, so the private key and the certificate can come in either order.</p><p>Response codes map from HTTP to CoAP: <code>2.05</code> is success for GET requests (<code>/crts</code>, <code>/att</code>), <code>2.04</code> is success for POST requests, and <code>4.04</code> means the resource is not available. HTTP 400, 401, 403, 404 and 503 map to <code>4.00</code>, <code>4.01</code>, <code>4.03</code>, <code>4.04</code> and <code>5.03</code>. Requests are RECOMMENDED to be sent as Confirmable CoAP messages.</p>",
-      "plainLanguage": "<p>Instead of writing a message in a long coded alphabet, the device just sends the raw bytes, which makes the message much shorter. A little tag on the front says what kind of message it is.</p>"
+      "id": "negotiation",
+      "number": "4.1",
+      "title": "Discovery and URIs",
+      "content": "<p>EST-coaps is meant for low-resource networks with small packets. Two kinds of installation are possible: a rigid one, where the address and the supported functions of the EST server are known, and a flexible one, where the server and its functions have to be discovered. For both, saving header space matters, so this document specifies short EST-coaps URIs, which are shorter than those of RFC 7030, of the form <code>coaps://example.com:&lt;port&gt;/.well-known/est/&lt;short-est&gt;</code> and <code>coaps://example.com:&lt;port&gt;/.well-known/est/ArbitraryLabel/&lt;short-est&gt;</code>. Arbitrary labels are usually defined and used by EST certificate authorities to route client requests to the right certificate profile, and implementers should consider short labels to reduce transmission overhead. The URIs obtained through discovery have the form <code>coaps://example.com:&lt;port&gt;/&lt;root-resource&gt;/&lt;short-est&gt;</code>.</p><p>The mapping from the EST path to the short EST-coaps path is given in the table: <code>/cacerts</code> becomes <code>/crts</code>, <code>/simpleenroll</code> becomes <code>/sen</code>, <code>/simplereenroll</code> becomes <code>/sren</code>, <code>/serverkeygen</code> becomes <code>/skg</code> for a certificate in a PKCS #7 container or <code>/skc</code> for a single <code>application/pkix-cert</code> certificate, and <code>/csrattrs</code> becomes <code>/att</code>. Clients and servers must support the short URIs.</p><p>Discovery in CoAP is done by sending a GET request to <code>/.well-known/core</code> with a resource type parameter of <code>ace.est*</code>. The response lists the resources with their resource types, <code>ace.est.crts</code>, <code>ace.est.sen</code>, <code>ace.est.sren</code>, <code>ace.est.att</code>, <code>ace.est.skg</code> and <code>ace.est.skc</code>, and their content formats. The first three entries must be returned if the server supports resource discovery, and the last three are included only if the corresponding function is implemented. Discoverable port numbers can be returned in the response payload. The server must support the default <code>/.well-known/est</code> root resource, and should support resource discovery when it uses non-default URIs or ports.</p>",
+      "plainLanguage": "<p>The URLs are shortened so that a small device does not spend many bytes on them: /crts for the list of authority certificates, /sen and /sren for enrolling and re-enrolling, /skg and /skc for asking the server to make the key, and /att for the attributes to put in a request. A client that does not know the addresses asks the well-known core path with a resource type, and the server answers with the list of resources it offers and the formats it can produce.</p>"
     },
     {
       "id": "operation",
-      "number": "5",
+      "number": "4.2",
+      "title": "Functions and Payload Formats",
+      "content": "<p>The specification has a set of required-to-implement functions, optional functions, and functions that are not specified. The unspecified ones are deemed too expensive for low-resource devices in payload and calculation times: <code>/cacerts</code>, <code>/simpleenroll</code> and <code>/simplereenroll</code> must be implemented, <code>/serverkeygen</code> and <code>/csrattrs</code> are optional, and <code>/fullcmc</code> is not specified. While RFC 7030 permits several EST functions to be used without authentication, this specification requires that the client must be authenticated for all functions.</p><p>EST-coaps is designed for low-resource devices, so it does not need to send Base64-encoded data. Simple binary is more efficient, 30% smaller for DER-encoded ASN.1, and well supported by CoAP, so the payload for a media type follows the ASN.1 structure of that media type and is transported in binary form. The Content-Format option of CoAP takes the place of the HTTP Content-Type header and determines which EST message is carried in the payload, and the combination of URI path and Content-Format must map to an allowed combination of URI and media type in EST.</p><p>Content-Format 287 can be used instead of 281 to carry a single certificate rather than a PKCS #7 container in a <code>/crts</code>, <code>/sen</code>, <code>/sren</code> or <code>/skg</code> response. Format 281 must be supported by servers, and servers may also support 287, while the client may support only 281, only 287, or both, and expresses its preference with a CoAP Accept Option. If the request has no Accept Option, the client expresses no preference and the server should choose 281. Format 286 is used in the <code>/sen</code>, <code>/sren</code> and <code>/skg</code> requests, and 285 in the <code>/att</code> responses.</p><p>A representation with Content-Format 62 holds a collection of representations with their own content formats, and identifies the media type <code>application/multipart-core</code>. A server-side key generation response can therefore carry a private key in PKCS #8 with format 284 and a certificate in a PKCS #7 container with format 281, which in diagnostic CBOR notation looks like <code>[284,h'0123456789abcdef', 281,h'fedcba9876543210']</code>.</p>",
+      "plainLanguage": "<p>Three functions are required and two are optional, and every one of them needs the client to be authenticated. The payloads are sent as binary rather than as Base64 text, which is about 30% smaller for the DER-encoded structures that certificates use. A number of content formats tell the client and the server what a body holds, and a client can ask for a single certificate rather than a container of them.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4.6",
       "title": "Fragmentation and Delayed Responses",
-      "content": "<p>Certificates can be bigger than one small packet. For 256-bit curves, ECDSA certificates are commonly 500 to 1000 bytes, and 384-bit ones can reach 1.5KB. A <code>/cacerts</code> response may hold several. CoAP suggests upper bounds of 1152 bytes for a message and 1024 bytes for its payload when nothing is known about the headers, so EST-coaps must split messages.</p><p>It uses the <code>Block1</code> option for request payloads and <code>Block2</code> for responses. Servers MUST implement both. Clients MUST implement <code>Block2</code>, and <code>Block1</code> only if they send requests larger than the path MTU. <code>Size1</code> and <code>Size2</code> are optional.</p><p>A server may need time to produce a certificate. A moderately slow server sends an empty ACK (<code>0.00</code>) and later returns the certificate as <code>2.04</code>. A very slow server (the RFC mentions manual intervention taking minutes) SHOULD answer with <code>5.03</code> and a <code>Max-Age</code> option. The client SHOULD wait that long and then resend the identical CSR, repeating until it gets the certificate or gives up.</p>",
-      "plainLanguage": "<p>If a parcel is too big for the mail slot, you send it in pieces. If the office needs time to make your card, it tells you to come back in a while and ask again.</p>"
+      "content": "<p>DTLS defines fragmentation only for the handshake and not for the exchange of data records, and the records should be sized so that they fit within any path MTU estimate the record layer has obtained. That is not always possible in EST-coaps. Even with ECC, certificate sizes vary greatly with the signature algorithms, key sizes and object identifiers used: for 256-bit curves, common ECDSA certificate sizes are 500 to 1000 bytes, and for 384-bit curves they can sometimes reach 1.5KB. A response with the whole set of authority certificates can be larger still. CoAP gives good upper bounds of 1152 bytes for the message size and 1024 bytes for the payload size, and suggests that IPv4 implementations may want to limit themselves to 576 bytes. Even so, EST-coaps messages can exceed the path MTU, so the protocol has to be able to split them into several DTLS datagrams.</p><p>CoAP Block-Wise Transfer does that with the Block1 option for the request payload and the Block2 option for the response payload, and block-wise transfers should be used in Confirmable messages to avoid the exacerbation of lost blocks. Servers must implement Block1 and Block2, clients must implement Block2, and clients must implement Block1 only if they expect to send requests larger than the path MTU. The Size1 and Size2 options, which give size information about the representation, may be supported.</p><p>Server responses can sometimes be delayed. A slow server can acknowledge the request with an empty ACK and send the resource later. In particular, a slow server can answer an enrollment request with an empty ACK with code 0.00 before sending the certificate after a short delay, and if the certificate response is large it will need more than one Block2 block. The client sends the request in N1+1 Block1 blocks, the server announces the delayed response with an empty 0.00 ACK, and the response then arrives in 2.04 messages carrying N2+1 Block2 options, the first of which is Confirmable and is acknowledged by the client, and after which the client acknowledges each further block.</p><p>If the server is very slow, for example when a person has to approve the request, it should reply with an ACK carrying response code 5.03, service unavailable, and a Max-Age option giving the time the client should wait. After that delay the client should resend the identical request, and it keeps doing so for as long as the server answers 5.03 with a Max-Age, until the server returns the certificate or the client gives up.</p>",
+      "plainLanguage": "<p>Certificates are often too big for one small packet, so the message is split into blocks and reassembled at the other end. The server may also need time to issue a certificate. When it does, it answers the request with an empty acknowledgement and sends the certificate later, or, if it needs minutes, it answers with a service-unavailable code and a waiting time, and the client repeats the request until the certificate is ready.</p>"
     },
     {
       "id": "key-management",
-      "number": "6",
+      "number": "4.8",
       "title": "Server-Side Key Generation",
-      "content": "<p>A client can ask the server to generate its private key as well as the certificate. The RFC lists reasons: it may be more secure to generate the key centrally, key generation may be expensive for the device, or policy may require central control. The server treats the CSR like any other, except that it MUST ignore the public key and signature in it.</p><p>A <code>/skg</code> request asks for a PKCS #7 certificate plus the key. A <code>/skc</code> request asks for a single <code>application/pkix-cert</code> certificate plus the key. Either way, a private key MUST be returned.</p><p>The key comes back either unprotected as PKCS #8 (Content-Format <code>284</code>) or inside CMS (Content-Format <code>280</code>), when the CSR carries SMIMECapabilities and a decrypt key identifier. Implementations that support server-side key generation MUST support unprotected keys. Encrypting the key SHOULD be supported where end-to-end encryption is needed between client and server, for example when a Registrar sits in between.</p>",
-      "plainLanguage": "<p>Sometimes the office makes the secret key for you, because that is easier for a tiny device. It can lock the key in a box that only you can open.</p>"
+      "content": "<p>Private keys can be generated on the server, which suits cases where it is considered more secure to generate the long-lived random private key that identifies the client at the server, where the resources spent on generating a random private key at the client are scarce, or where the policy requires the certificate and key to be generated and controlled centrally.</p><p>When the client asks for server-side key generation, it asks the server or proxy to generate the private key and the certificate, which are transferred back in the response. The server treats the request as it treats any other enrollment request, with one distinction: it must ignore the public key values and the signature in the request. Those are included only so that existing code for generating and parsing such requests can be reused.</p><p>The <code>/skg</code> request is for a certificate in a PKCS #7 container and a private key in two <code>application/multipart-core</code> elements, while an <code>/skc</code> request is for a single <code>application/pkix-cert</code> certificate and a private key. The private key format the client wants is stated in the PKCS #10 request. If that request contains SMIMECapabilities together with DecryptKeyIdentifier or AsymmetricDecryptKeyIdentifier, the client expects format 280 for the private key, and the key is then encrypted symmetrically or asymmetrically as RFC 7030 describes. A request without SMIMECapabilities expects an unencrypted PKCS #8 private key with format 284.</p><p>The response is an <code>application/multipart-core</code> body containing a CBOR array with four items, and the two representations need not be in a particular order because each is preceded by its content format. The private key can be in unprotected PKCS #8 format, with format 284, or protected inside CMS SignedData, with format 280. The SignedData, in the outermost container, is signed by the party that generated the private key, which may be the EST server or the EST CA. Clients and servers that support server-side key generation must support unprotected PKCS #8 private keys, and should support the symmetric or asymmetric encryption of the key for deployments that need end-to-end encryption between the client and the server, such as when an entity between the client and the authority terminates the DTLS connection.</p>",
+      "plainLanguage": "<p>Sometimes the device should not make its own key. The client asks the server to generate one, and the server ignores the key material in the request and returns a fresh key and its certificate instead. The key normally travels as plain PKCS #8, and can also be wrapped in a signed and encrypted container for deployments that need the key protected all the way to the client.</p>"
     },
     {
       "id": "architecture",
-      "number": "7",
-      "title": "The EST-coaps-to-HTTPS Registrar",
-      "content": "<p>The EST server may live outside the constrained network and speak TLS and HTTP. A <strong>Registrar</strong> at the edge then terminates EST-coaps on the device side and opens EST over TLS to the server on the other side. It MUST authenticate the client, may authorize it, and MUST itself be authenticated by the EST server or CA.</p><p>The Registrar translates URIs using the short-path table, maps CoAP codes to HTTP status codes, and converts between CBOR byte strings and Base64. It MUST reassemble blocks before translating a message and MUST support resource discovery. The CMS-encrypted private key is converted without being decrypted.</p><p>There is a cost. Proof-of-possession linking cannot be enforced end to end, because the Registrar sets up a new TLS connection upstream. The EST server learns it is talking to a Registrar from the <code>id-kp-cmcRA</code> extended key usage in its certificate. The RFC also says it is up to network designers which devices run EST at all, since some classes of constrained devices will not have enough resources for the payloads.</p>",
-      "plainLanguage": "<p>A helper stands at the edge of the little network. It speaks the device's short language on one side and the office's long language on the other, and passes messages back and forth.</p>"
+      "number": "5",
+      "title": "The Registrar at the CoAP Boundary",
+      "content": "<p>In real deployments the EST server does not always sit inside the CoAP boundary. It can exist outside the constrained network, in which case it supports TLS and HTTP instead of CoAPS, and EST-coaps is used by the client inside the boundary while TLS carries the EST messages outside it. A Registrar at the edge is then required to operate between the CoAP environment and the external HTTP network.</p><p>The Registrar must terminate EST-coaps downstream and start EST connections over TLS upstream. It must authenticate, and optionally authorize, the client requests, and it must itself be authenticated by the EST server or CA. The trust relationship between the Registrar and the EST server should be established in advance, so that the Registrar can proxy the connections on behalf of several clients.</p><p>The proof-of-possession linking information is lost between the EST-coaps client and the EST server when a Registrar is present, because the Registrar terminates the DTLS connection and starts a new TLS connection with the authority. The EST server learns that a Registrar is present from its TLS client certificate, which includes the id-kp-cmcRA extended key usage extension. The EST server can then be configured to accept proof-of-possession information that does not match the current TLS session, because the authenticated Registrar is assumed to have verified it downstream.</p><p>The Registrar must follow the URI mappings and the response code mappings, and it must convert from CBOR major type 2 to Base64 encoding. If CMS end-to-end encryption is used for the private key, the encrypted blob must be converted at the Registrar to binary CBOR type 2 for the client, which is a format conversion that does not require decryption. Because large messages are fragmented into blocks, the Registrar must reassemble the blocks before translating the binary content to Base64 and relaying the message upstream. It must also support resource discovery.</p>",
+      "plainLanguage": "<p>The certificate authority often sits outside the small network, so something has to translate between the two worlds. That translator, the Registrar, ends the CoAP session at the edge of the constrained network and opens a TLS session to the authority. It checks the client, and the authority trusts the Registrar to be doing that on its behalf. One thing is lost in the translation: the proof that the client holds its own key can no longer be checked end to end, so the client has to trust the Registrar.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "8",
+      "number": "9",
       "title": "Security Considerations",
-      "content": "<p>Most of the security considerations of RFC 7030 still apply, except those about passwords, since HTTP Basic authentication is not supported. The RFC stresses good random numbers: many constrained devices lack the entropy sources of a PC, so suitable hardware matters. Moving a private key from server to device is described as inherently risky, and anyone deploying server-side key generation SHOULD analyze whether it raises or lowers the risk of identity theft.</p><p>The Implicit Trust Anchor database should be carefully managed, and disabled after the CA certificates are received, which limits exposure to the first exchange. A client that sends other requests on the same DTLS connection after a <code>/crts</code> SHOULD revalidate the server chain against the updated Explicit trust anchors.</p><p>Cipher suites with <code>_EXPORT_</code> or <code>_DES_</code> in the name MUST NOT be used. For DTLS 1.2, <code>tls-unique</code> is still used even though the 3SHAKE attack is a known risk, because that attack does not expose EST-coaps messages. Implementers should use the Extended Master Secret extension, and DTLS 1.3 uses <code>tls-exporter</code> instead. With a Registrar and no end-to-end encryption, the Registrar may see a server-generated private key, so the client must trust it.</p>",
-      "plainLanguage": "<p>Keep the list of people you trust short and well checked, make your secret numbers truly random, and remember that a helper in the middle could peek at a secret key unless it is locked in a box.</p>"
+      "content": "<p>The security considerations of RFC 7030 are only partly valid here, because HTTP Basic authentication is not supported, so the advice about passwords does not apply. The rest of it continues to apply.</p><p>Modern security protocols need random numbers during the run, for nonces and for ephemeral key generation, and a device that generates its own key needs them too. A device that uses server-side key generation still needs locally generated random numbers, and the transport of keys generated at the server is inherently risky, so a deployment analysis should establish whether server-side key generation increases or decreases the probability of digital identity theft. The sources of randomness that laptops and desktops draw on, such as mouse movement or the movement of hard drive heads, are not available on many constrained devices, so other sources have to be used or dedicated hardware added.</p><p>It is recommended that the Implicit Trust Anchor database used for server authentication be managed carefully, to reduce the chance of a third-party authority with poor practices being trusted, and that it be disabled after the client has successfully received the list of authority certificates, which limits any weakness to the first exchange. Alternatively, when a <code>/sen</code> request immediately follows a <code>/crts</code>, a client may keep the connection authenticated by the Implicit Trust Anchor open for efficiency, but a client that interleaves other requests in the same DTLS connection should revalidate the server certificate chain against the updated Explicit Trust Anchor first, and should close the connection if the chain does not authenticate. Cipher suites whose names include <code>_EXPORT_</code> and <code>_DES_</code> must not be used.</p><p>In DTLS 1.2, including tls-unique in the certificate request links the proof-of-possession to the proof of identity, which implies but does not prove that only the authenticated client has access to the private key. The 3SHAKE attack poses a risk by letting an attacker who is on the path inject itself between client and server, even when channel binding is in use, so implementers should use the Extended Master Secret extension in DTLS. The specification still depends on tls-unique for DTLS 1.2, because a 3SHAKE attack does not expose the messages exchanged with EST-coaps, while DTLS 1.3 uses the tls-exporter binding instead, which avoids that risk. Interpreters of ASN.1 structures should take appropriate measures against invalid length fields, buffer overflows and malicious content.</p><p>The Registrar must be deployed with care, and only when direct client-server connections are not possible. It should be deployed only when direct connections are not possible, and the client should confirm that the server is acting as a registration authority by the presence of the id-kp-cmcRA extended key usage in the server certificate. In a server-side key generation case without end-to-end encryption, the Registrar may be able to see the private key, so the client has to put its trust in the Registrar.</p>",
+      "plainLanguage": "<p>The device needs a good source of random numbers, which small devices often lack. The list of trusted authorities has to be looked after, and the bootstrap trust should be dropped once the real list has arrived. The proof that the client holds its key is weaker than it looks in DTLS 1.2, and the RFC explains why that is acceptable here. And where a Registrar sits between the device and the authority, the device has to trust that the Registrar does its job.</p>"
     }
   ],
   "viz": [
     {
       "type": "layers",
-      "anchor": "cryptography",
-      "position": "before",
-      "caption": "EST-COAPS PROTOCOL LAYERS (RFC 9148, FIGURE 1)",
+      "anchor": "design",
+      "position": "after",
+      "caption": "The EST-coaps layers, as drawn in the RFC",
       "data": {
         "layers": [
           {
-            "label": "EST request/response messages",
-            "detail": "Enrollment, re-enrollment, CA certificates",
-            "highlight": true
+            "label": "EST request and response messages",
+            "detail": "The same enrolment messages as over HTTPS"
           },
           {
             "label": "CoAP",
-            "detail": "Message transfer and signaling"
+            "detail": "Message transfer and signalling",
+            "highlight": true
           },
           {
             "label": "Secure transport",
-            "detail": "DTLS secures the CoAP messages"
+            "detail": "DTLS"
           }
         ]
       }
     },
     {
       "type": "compare-table",
-      "anchor": "addressing",
+      "anchor": "negotiation",
       "position": "after",
-      "caption": "SHORT EST-COAPS PATHS (RFC 9148, TABLE 1)",
+      "caption": "The EST paths and their shorter EST-coaps names",
       "data": {
         "columns": [
-          "EST",
-          "EST-coaps"
+          "EST path",
+          "EST-coaps path",
+          "What it does"
         ],
         "rows": [
           {
             "cells": [
               "/cacerts",
-              "/crts"
+              "/crts",
+              "Get the complete set of CA certificates"
             ]
           },
           {
             "cells": [
               "/simpleenroll",
-              "/sen"
+              "/sen",
+              "Enroll a client public key for signing"
             ]
           },
           {
             "cells": [
               "/simplereenroll",
-              "/sren"
+              "/sren",
+              "Enroll again for a new key"
             ]
           },
           {
             "cells": [
               "/serverkeygen",
-              "/skg (PKCS #7)"
+              "/skg",
+              "Server-generated key, certificate in a PKCS #7 container"
             ]
           },
           {
             "cells": [
               "/serverkeygen",
-              "/skc (application/pkix-cert)"
+              "/skc",
+              "Server-generated key, certificate as application/pkix-cert"
             ]
           },
           {
             "cells": [
               "/csrattrs",
-              "/att"
+              "/att",
+              "The fields to put in a certification request"
             ]
           }
         ]
       }
     },
     {
-      "type": "sequence",
+      "type": "opcodes",
       "anchor": "operation",
       "position": "after",
-      "caption": "ENROLLMENT WITH A LONG WAIT, SIMPLIFIED FROM FIGURE 4",
+      "caption": "The Content-Format identifiers used by EST-coaps",
+      "data": {
+        "items": [
+          {
+            "code": "280",
+            "label": "server-generated-key",
+            "desc": "A private key protected inside CMS SignedData."
+          },
+          {
+            "code": "281",
+            "label": "certs-only",
+            "desc": "Certificates in a PKCS #7 container. Servers must support this one.",
+            "highlight": true
+          },
+          {
+            "code": "284",
+            "label": "application/pkcs8",
+            "desc": "An unprotected private key."
+          },
+          {
+            "code": "285",
+            "label": "application/csrattrs",
+            "desc": "The attributes to put in a certification request."
+          },
+          {
+            "code": "286",
+            "label": "application/pkcs10",
+            "desc": "A certification request."
+          },
+          {
+            "code": "287",
+            "label": "application/pkix-cert",
+            "desc": "A single certificate instead of a container."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "Enrollment with a short wait, as drawn in the RFC",
       "data": {
         "lanes": [
           {
@@ -217,37 +266,30 @@
           {
             "from": "client",
             "to": "server",
-            "label": "POST /est/sen (Block1 blocks)",
+            "label": "POST /sen, Block1 blocks",
             "color": "blue",
-            "note": "The CSR is sent in fragments."
+            "note": "The certification request is sent in N1+1 blocks."
           },
           {
             "from": "server",
             "to": "client",
             "label": "ACK 2.31 Continue",
             "color": "neutral",
-            "note": "Sent for each block except the last."
+            "note": "Each request block is acknowledged."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "ACK 5.03 + Max-Age",
+            "label": "Empty ACK 0.00",
             "color": "neutral",
-            "note": "The certificate is not ready yet."
-          },
-          {
-            "from": "client",
-            "to": "server",
-            "label": "POST /est/sen again",
-            "color": "blue",
-            "note": "After Max-Age, the identical CSR is resent."
+            "note": "The server acknowledges the request and prepares the certificate."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "ACK 2.04 Changed (Block2 blocks)",
+            "label": "2.04 Changed, Block2 blocks",
             "color": "green",
-            "note": "The certificate arrives in fragments."
+            "note": "The certificate is sent in N2+1 blocks and the client acknowledges each one."
           }
         ]
       }
@@ -256,47 +298,42 @@
   "references": [
     {
       "number": "[RFC7030]",
-      "text": "Pritikin, M., Ed., Yee, P., Ed., and D. Harkins, Ed., \"Enrollment over Secure Transport\", RFC 7030.",
+      "text": "Pritikin, M., Ed., Yee, P., Ed., and D. Harkins, Ed., \"Enrollment over Secure Transport\", RFC 7030, June 2013.",
       "rfc": 7030
     },
     {
       "number": "[RFC7252]",
-      "text": "Shelby, Z., Hartke, K., and C. Bormann, \"The Constrained Application Protocol (CoAP)\", RFC 7252.",
+      "text": "Shelby, Z., Hartke, K., and C. Bormann, \"The Constrained Application Protocol (CoAP)\", RFC 7252, June 2014.",
       "rfc": 7252
     },
     {
       "number": "[RFC7959]",
-      "text": "Bormann, C. and Z. Shelby, Ed., \"Block-Wise Transfers in the Constrained Application Protocol (CoAP)\", RFC 7959.",
+      "text": "Bormann, C. and Z. Shelby, Ed., \"Block-Wise Transfers in the Constrained Application Protocol (CoAP)\", RFC 7959, August 2016.",
       "rfc": 7959
     },
     {
       "number": "[RFC6347]",
-      "text": "Rescorla, E. and N. Modadugu, \"Datagram Transport Layer Security Version 1.2\", RFC 6347.",
+      "text": "Rescorla, E. and N. Modadugu, \"Datagram Transport Layer Security Version 1.2\", RFC 6347, January 2012.",
       "rfc": 6347
     },
     {
       "number": "[RFC7925]",
-      "text": "Tschofenig, H., Ed. and T. Fossati, \"Transport Layer Security (TLS) / Datagram Transport Layer Security (DTLS) Profiles for the Internet of Things\", RFC 7925.",
+      "text": "Tschofenig, H., Ed. and T. Fossati, \"Transport Layer Security (TLS) / Datagram Transport Layer Security (DTLS) Profiles for the Internet of Things\", RFC 7925, April 2016.",
       "rfc": 7925
     },
     {
-      "number": "[RFC9147]",
-      "text": "Rescorla, E., Tschofenig, H., and N. Modadugu, \"The Datagram Transport Layer Security (DTLS) Protocol Version 1.3\", RFC 9147.",
-      "rfc": 9147
-    },
-    {
-      "number": "[RFC9146]",
-      "text": "Rescorla, E., Ed., Tschofenig, H., Ed., Fossati, T., and A. Kraus, \"Connection Identifier for DTLS 1.2\", RFC 9146.",
-      "rfc": 9146
+      "number": "[RFC7251]",
+      "text": "McGrew, D., Bailey, D., Campagna, M., and R. Dugal, \"AES-CCM Elliptic Curve Cryptography (ECC) Cipher Suites for TLS\", RFC 7251, June 2014.",
+      "rfc": 7251
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

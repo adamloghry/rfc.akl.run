@@ -5,176 +5,221 @@
   "categoryReviewed": false,
   "summary": "<p>Moves the F-RTO algorithm for TCP from Experimental to the standards track. F-RTO helps a sender tell whether a retransmission timeout was spurious, meaning the data was only delayed and not lost, so it can avoid needless retransmissions. SCTP support in RFC 4138 stays Experimental.</p>",
   "plainLanguage": {
-    "summary": "<p>Sometimes a sender thinks a letter was lost when it was just slow, and sends it again for nothing. This trick helps the sender notice the letter was only late, so it does not waste effort.</p>"
+    "summary": "<p>TCP waits for an acknowledgment, and if none arrives in time it assumes the data was lost and sends it again. Sometimes that assumption is wrong: the data was only slow, for example because the device moved between networks.</p><p>This document gives the sending side a way to notice. After a timeout, it watches the next acknowledgments. If one of them acknowledges data that was sent before the timeout, the data was not lost and there is no need to resend the whole window.</p>"
   },
   "questions": [
     "what is f-rto",
     "how to detect spurious retransmission timeouts in tcp",
     "how does tcp detect spurious timeouts",
     "what is a spurious retransmission timeout",
-    "what is the difference between f-rto and eifel"
+    "what is the difference between f-rto and eifel",
+    "how does f-rto differ from eifel"
   ],
   "tags": [
     "Transport",
     "TCP",
     "Loss Recovery"
   ],
-  "subtitle": "How a TCP sender can tell that a retransmission timeout fired too early, and skip the needless resending.",
+  "subtitle": "Lets a TCP sender recognise a retransmission timeout that fired because data was delayed rather than lost.",
   "tldr": {
-    "problem": "A TCP retransmission timer can expire when no segment was lost, only delayed. The sender then needlessly retransmits a whole window of data and floods the network when the late acknowledgments arrive.",
-    "mechanism": "After the timeout, the F-RTO sender retransmits one segment, then sends up to two new segments and watches the next two acknowledgments. If they acknowledge data that was not retransmitted, the timeout is declared spurious. A duplicate ACK sends it back to normal RTO recovery.",
-    "outcome": "F-RTO is a sender-only change that needs no TCP options. It moves the TCP part of RFC 4138 from Experimental to Standards Track, and it behaves like conventional RTO recovery whenever it cannot be sure.",
-    "outcomeLabel": "Why it matters"
+    "problem": "TCP retransmits when its timer fires, but the timer can fire even though nothing was lost, for example after a hand-off to a slower path. The sender then retransmits a whole window of data that had already arrived, and it inflates the congestion window in a way that pushes far more data into the network than the acknowledgments can account for.",
+    "mechanism": "After the timer fires, the sender retransmits the first unacknowledged segment as usual, then watches the next two acknowledgments. If the second one acknowledges data that was sent before the timeout, the timeout was spurious and the sender stops retransmitting.",
+    "outcome": "The sender avoids the unnecessary retransmissions and can measure the round-trip time of the delayed segments, which makes the retransmission timer more accurate on links prone to delay spikes. The algorithm needs no TCP options and changes only the sender. It replaces the TCP part of RFC 4138 and moves it to the standards track.",
+    "outcomeLabel": "What it does"
   },
   "facts": [
     {
-      "label": "Applies to",
-      "value": "TCP sender only, no options needed"
+      "label": "Congestion window cap in branch 3a",
+      "value": "3 * MSS"
     },
     {
-      "label": "New segments sent in step 2",
+      "label": "Congestion window cap in SACK branch 2a",
+      "value": "2 * MSS"
+    },
+    {
+      "label": "New segments sent in branch 2b",
       "value": "Up to two"
     },
     {
-      "label": "Window cap on step 3 duplicate ACK",
-      "value": "No more than 3 * MSS"
+      "label": "Variable reporting the outcome",
+      "value": "SpuriousRecovery, set to SPUR_TO or FALSE"
     },
     {
-      "label": "Updates",
-      "value": "RFC 4138"
+      "label": "Congestion window during RTO recovery",
+      "value": "Initialized to one segment"
     },
     {
-      "label": "SCTP support",
-      "value": "Stays Experimental in RFC 4138"
+      "label": "Earlier specification of F-RTO",
+      "value": "RFC 4138, Experimental"
     }
   ],
-  "today": "<p>RFC 5682 is a Proposed Standard that updates <a href='/rfc4138'>RFC 4138</a>, moving the TCP part of F-RTO from Experimental to Standards Track. Its metadata shows no later RFC obsoleting or updating it.</p>",
+  "today": "<p>RFC 5682 is a Proposed Standard and has not been obsoleted. It updates <a href='/rfc4138'>RFC 4138</a>, replacing the F-RTO functionality with TCP and moving the algorithm from Experimental to Standards Track; the F-RTO support for SCTP described in RFC 4138 remains with Experimental status.</p>",
   "glossary": [
     "tcp",
     "retransmission",
     "congestion-control",
     "sctp",
     "spurious-timeout",
-    "standards-track"
+    "standards-track",
+    "retransmission-timeout",
+    "congestion-window",
+    "slow-start",
+    "mss"
   ],
   "sections": [
     {
-      "id": "motivation",
+      "id": "introduction",
       "number": "1",
-      "title": "Spurious Timeouts and Why They Hurt",
-      "content": "<p>A TCP sender has two ways to trigger a retransmission: a run of duplicate acknowledgments, or a <strong>retransmission timeout</strong> (RTO) when the timer expires before data is acknowledged. After an RTO the sender sets its congestion window to one segment and resends unacknowledged data using slow start.</p><p>The timer can expire <strong>spuriously</strong>, when no segments have been lost. Then the late acknowledgments of the original segments arrive and usually trigger unnecessary retransmission of a whole window of data. A conventional sender also grows its congestion window on each late ACK in slow start, which injects a large number of segments within one round-trip time and violates the packet conservation principle.</p><p>The RFC lists causes of sudden delay: a hand-off in a mobile network, a hand-off from a low latency path to a high latency path, competing traffic on a low-bandwidth link, and a persistently reliable link layer that loses a frame and several of its retransmissions. It does not distinguish between them.</p>",
-      "plainLanguage": "<p>If a friend is slow to answer, you might shout your question again and again. When the first answers finally come in, you have made a lot of noise for nothing.</p>"
-    },
-    {
-      "id": "overview",
-      "number": "1.1",
-      "title": "How F-RTO Differs from Other Detectors",
-      "content": "<p>F-RTO (Forward RTO-Recovery) only tries to detect spurious timeouts that follow an RTO. Unlike the <strong>Eifel</strong> detection algorithm, which uses TCP timestamps, and the DSACK-based algorithms, which need the SACK option with the DSACK extension, F-RTO needs no TCP options and can be implemented by modifying only the TCP sender. Eifel and DSACK can also catch unnecessary retransmissions caused by other events, such as packet reordering.</p><p>The idea in short: retransmit the first unacknowledged segment as usual, then try to send new, previously unsent data on the first acknowledgment that advances the window. If the second acknowledgment also advances the window by acknowledging data that was not retransmitted, the sender declares the timeout spurious and exits RTO recovery. If either of the two is a duplicate ACK, the evidence is too thin and the sender retransmits in slow start as before.</p><p>This document specifies F-RTO for TCP only. The algorithm can also be applied to SCTP, but that support stays Experimental in <a href='/rfc4138'>RFC 4138</a>.</p>",
-      "plainLanguage": "<p>Other tricks need a special note stuck on each letter. F-RTO needs nothing extra. Only the sender has to be smarter.</p>"
-    },
-    {
-      "id": "algorithms",
-      "number": "2",
-      "title": "The Basic F-RTO Algorithm",
-      "content": "<p>A sender MUST follow these steps after the retransmission timer expires, and MUST restart from step 1 if the timer expires again meanwhile. The result is recorded in a <code>SpuriousRecovery</code> variable, which is either <code>SPUR_TO</code> (spurious) or <code>FALSE</code> (follow conventional RTO recovery).</p><ul><li><strong>Step 1:</strong> on timeout, retransmit the first unacknowledged segment and set <code>SpuriousRecovery</code> to <code>FALSE</code>. If the sender is already in RTO recovery and <code>recover</code> is at least <code>SND.UNA</code>, skip step 2 and carry on with ordinary slow-start retransmissions.</li><li><strong>Step 2:</strong> on the first ACK after the retransmission, store the highest sequence number sent in <code>recover</code>. If the ACK is a duplicate, or covers <code>recover</code> but no more, or does not acknowledge all the data retransmitted in step 1, revert to conventional RTO recovery. Otherwise, if it advances the window and does not cover <code>recover</code>, send up to two new segments and go to step 3.</li><li><strong>Step 3:</strong> on the second ACK, a duplicate ACK means the congestion window is set to no more than 3 * MSS and slow-start retransmission continues. An ACK that advances the window, acknowledging data not retransmitted, means the timeout is declared spurious: <code>SpuriousRecovery</code> becomes <code>SPUR_TO</code> and <code>recover</code> is set to <code>SND.UNA</code>.</li></ul><p>ACKs that neither acknowledge new data nor are duplicates SHOULD be ignored. If the sender uses a loss recovery algorithm other than Reno or NewReno, F-RTO SHOULD NOT be entered when earlier fast recovery is underway.</p>",
-      "plainLanguage": "<p>After shouting again, you send one brand new message and listen. If answers come back for the old messages that you never repeated, they were just slow, not lost. If you hear only a repeated complaint, you go back to the cautious way.</p>"
+      "title": "Why a Timeout Can Fire Without a Loss",
+      "content": "<p>TCP has two methods for triggering retransmissions. First, it relies on incoming duplicate acknowledgments, which indicate that the receiver is missing some of the data. After a required number of successive duplicate ACKs have arrived, the sender retransmits the first unacknowledged segment and continues with a loss recovery algorithm such as NewReno or SACK-based loss recovery. Second, the sender maintains a retransmission timer that triggers retransmission of segments if they have not been acknowledged before the retransmission timeout occurs. When the timer fires, the sender enters RTO recovery, where the congestion window is initialized to one segment and unacknowledged segments are retransmitted using the slow-start algorithm. The timer itself is adjusted dynamically, based on the measured round-trip times.</p><p>The retransmission timer can expire spuriously and cause unnecessary retransmissions when no segments have been lost. After such a timeout, the late acknowledgments of the original segments arrive at the sender, usually triggering unnecessary retransmissions of a whole window of segments during the RTO recovery. Furthermore, after a spurious timeout a conventional TCP sender increases the congestion window on each late acknowledgment in slow start, which injects a large number of data segments into the network within one round-trip time and thus violates the packet conservation principle.</p><p>There are a number of potential reasons for spurious retransmission timeouts. Some mobile networking technologies involve sudden delay spikes on transmission because of actions taken during a hand-off. A hand-off may take place from a low latency path to a high latency path, suddenly increasing the round-trip time beyond the current RTO value. On a low-bandwidth link, the arrival of competing traffic, or some other change in available bandwidth, can cause a sudden increase of the round-trip time. A persistently reliable link layer can also cause a sudden delay when a data frame and several retransmissions of it are lost. This document does not distinguish between the different causes of such a delay spike; it discusses the spurious retransmission timeouts caused by a delay spike in general.</p><p>The algorithm described here is based on the detection mechanism of the Forward RTO-Recovery algorithm, which avoids unnecessary retransmissions following the retransmission timeout. When the timeout is not spurious, the algorithm reverts to the conventional RTO recovery algorithm and therefore has similar behavior and performance. In contrast to alternative algorithms for detecting unnecessary retransmissions, F-RTO does not require any TCP options for its operation and it can be implemented by modifying only the TCP sender. The Eifel algorithm uses TCP timestamps for detecting a spurious timeout upon arrival of the first acknowledgment after the retransmission, and the DSACK-based algorithms require the TCP Selective Acknowledgment option with the DSACK extension. F-RTO only attempts to detect and avoid unnecessary retransmissions after an RTO, whereas Eifel and DSACK can also detect unnecessary retransmissions caused by other events, such as packet reordering.</p><p>This document specifies the F-RTO algorithm for TCP only, replacing the F-RTO functionality with TCP in RFC 4138 and moving it from Experimental to Standards Track status. The algorithm can also be applied to SCTP, which has acknowledgment and packet retransmission concepts similar to TCP, but the F-RTO support for SCTP remains with Experimental status.</p>",
+      "plainLanguage": "<p>TCP sends data and waits for an acknowledgment. If the wait runs out, it assumes the data was lost and sends it again, then restarts its congestion window from one segment and grows it again as the late acknowledgments arrive.</p><p>That is the right response to a real loss, and a wasteful response to a delay. When the path suddenly gets slower, for instance because a phone moves from a fast cell to a slow one, the timer fires even though every byte arrived.</p>"
     },
     {
       "id": "design",
-      "number": "2.2",
-      "title": "Why the Steps Are Cautious",
-      "content": "<p>The RFC explains each guard. Duplicate ACKs may mean segments really were lost, so the sender falls back to conventional recovery. The check in step 1 stops F-RTO when an earlier RTO recovery is underway, because ACKs for retransmitted segments could falsely make the sender declare a spurious timeout. If the first ACK covers <code>recover</code>, there is not enough evidence that a non-retransmitted segment reached the receiver, which is common when a fast retransmission is lost and then resent after an RTO.</p><p>Requiring the first ACK to cover all the data retransmitted in step 1 stops a malicious receiver acknowledging partial segments. Sending two new segments is allowed because a conventional sender would also send two when the first new ACK arrives. If new data cannot be sent, because there is none or the advertised window forbids it, the recommendation is to skip step 3 and use conventional RTO recovery so the transfer does not stall.</p><p>When a timeout is declared spurious, setting <code>recover</code> to <code>SND.UNA</code> allows fast retransmit, so three duplicate ACKs afterwards are treated as a probable loss. A side effect is that the sender can take round-trip time samples from the delayed segments, so the RTO is likely to be more accurate and larger after a spurious timeout.</p>",
-      "plainLanguage": "<p>Each rule is a safety check so the sender does not fool itself. When in doubt, it does what an ordinary careful sender would do.</p>"
+      "number": "2",
+      "title": "The Basic F-RTO Algorithm",
+      "content": "<p>A timeout is considered spurious if it would have been avoided had the sender waited longer for an acknowledgment to arrive. F-RTO affects the TCP sender behavior only after a retransmission timeout; otherwise the TCP behavior remains the same. When the timer expires, the algorithm monitors incoming acknowledgments, and if the sender gets an acknowledgment for a segment that was not retransmitted due to the timeout, the timeout is declared spurious. The actions taken in response are not specified in this document.</p><p>The algorithm uses a <code>SpuriousRecovery</code> variable to indicate whether the retransmission is declared spurious, which can be <code>SPUR_TO</code> or <code>FALSE</code>, and it uses the <code>recover</code> variable from the NewReno algorithm. If the retransmission timer expires again during the execution of the algorithm, the sender MUST restart the processing from step 1, and if the sender implements a loss recovery algorithm other than Reno or NewReno, the algorithm SHOULD NOT be entered when earlier fast recovery is underway.</p><p>The algorithm takes different actions depending on whether an incoming acknowledgment advances the cumulative acknowledgment point for a received in-order segment, or whether it is a duplicate acknowledgment indicating an out-of-order segment. It does not specify actions for a segment that neither acknowledges new data nor is a duplicate acknowledgment, and the sender SHOULD ignore such segments.</p><p><strong>Step 1.</strong> When the retransmission timer expires, retransmit the first unacknowledged segment and set <code>SpuriousRecovery</code> to FALSE. If the sender is already in RTO recovery and <code>recover</code> is larger than or equal to SND.UNA, the oldest unacknowledged sequence number, do not enter step 2; instead store the highest sequence number transmitted so far in <code>recover</code> and continue with slow-start retransmissions following the conventional RTO recovery algorithm.</p><p><strong>Step 2.</strong> When the first acknowledgment after the RTO retransmission arrives, store the highest sequence number transmitted so far in <code>recover</code>. If the acknowledgment is a duplicate ACK, or the Acknowledgment field covers <code>recover</code> but not more than it, or the acknowledgment does not acknowledge all of the data that was retransmitted in step 1, revert to the conventional RTO recovery and continue by retransmitting unacknowledged data in slow start, without entering step 3; <code>SpuriousRecovery</code> remains FALSE. Otherwise, if the acknowledgment advances the window and does not cover <code>recover</code>, transmit up to two new, previously unsent segments and enter step 3. If there is not enough unsent data only one segment is sent, and the sender MAY override the Nagle algorithm and send immediately if needed. Sending two segments is allowed by the TCP congestion control requirements, because an F-RTO sender simply chooses different segments to transmit. If there is no new data to send, or the advertised window prohibits new transmissions, the recommended action is to skip step 3 and continue with slow-start retransmissions.</p><p><strong>Step 3.</strong> When the second acknowledgment after the RTO retransmission arrives, either a duplicate ACK or an acknowledgment that advances the window applies. If it is a duplicate ACK, set the congestion window to no more than 3 * MSS and continue with the slow-start algorithm, retransmitting unacknowledged segments; the congestion window can be set to 3 * MSS because two round-trip times have elapsed since the RTO and a conventional sender would have increased its window to 3 during the same time. If the acknowledgment advances the window, that is, if it acknowledges data that was not retransmitted after the timeout, declare the timeout spurious, set <code>SpuriousRecovery</code> to <code>SPUR_TO</code>, and set <code>recover</code> to SND.UNA so that fast retransmit is allowed.</p>",
+      "plainLanguage": "<p>The test is simple to state. After the timeout, the sender resends one segment and then sends up to two new ones. If the next acknowledgment confirms data that was sent before the timeout, that data was not lost, so the timeout was spurious.</p><p>The sender is deliberately cautious. If any of the acknowledgments is a duplicate, or confirms only the retransmitted data, it assumes the loss was real and behaves like ordinary TCP.</p>"
     },
     {
-      "id": "options",
+      "id": "algorithms",
       "number": "3",
       "title": "The SACK-Enhanced Version",
-      "content": "<p>When the TCP Selective Acknowledgment option is enabled, a sender MAY apply the SACK-enhanced algorithm, and if it does it MUST follow its steps. With SACK, spurious timeouts can be detected in most cases of packet reordering or duplication, even when duplicate ACKs follow the RTO. It SHOULD NOT be applied if the sender is already in loss recovery.</p><p>It uses a <code>RecoveryPoint</code> variable and resets the SACK scoreboard on timeout. In step 2, the sender waits for the acknowledgment of the retransmitted data, adjusting the scoreboard on duplicate ACKs. If the cumulative ACK covers <code>RecoveryPoint</code> but no more, it reverts to conventional recovery with the congestion window at no more than 2 * MSS. If the ACK is larger than <code>SND.UNA</code> but does not cover <code>RecoveryPoint</code>, it sends up to two new segments and proceeds to step 3.</p><p>In step 3, an ACK or SACK information that covers more than <code>RecoveryPoint</code> means conventional recovery with the congestion window at no more than 3 * MSS. An ACK that does not cover more than <code>RecoveryPoint</code> but acknowledges data not acknowledged earlier means the timeout is declared spurious, because the segment was sent before the timeout.</p>",
-      "plainLanguage": "<p>With a more detailed receipt from the receiver, the sender can say what arrived even when some answers are repeated. So it can spot a slow reply more often.</p>"
+      "content": "<p>The SACK-enhanced version of the algorithm uses the TCP Selective Acknowledgment option. By using the SACK option the sender detects spurious timeouts in most of the cases when packet reordering or packet duplication is present: if the SACK information acknowledges new data that was not transmitted after the RTO retransmission, the sender may declare the timeout spurious, even when duplicate ACKs follow the RTO.</p><p>Given that the Selective Acknowledgment option is enabled for a connection, a sender MAY apply the SACK-enhanced algorithm, and if it does it MUST follow the stated steps. The algorithm SHOULD NOT be applied if the sender is already in loss recovery when a retransmission timeout occurs, and if the timer expires again during the execution of the algorithm the sender MUST restart from step 1.</p><p><strong>Step 1.</strong> When the retransmission timer expires, retransmit the first unacknowledged segment and set <code>SpuriousRecovery</code> to FALSE. Following the recommendation in the SACK specification, reset the SACK scoreboard. If <code>RecoveryPoint</code> is larger than or equal to SND.UNA, do not enter step 2; instead set <code>RecoveryPoint</code> to the highest sequence number transmitted so far and continue with slow-start retransmissions following the conventional RTO recovery algorithm.</p><p><strong>Step 2.</strong> Wait until the acknowledgment of the data retransmitted due to the timeout arrives. If duplicate ACKs arrive before the cumulative acknowledgment for retransmitted data, adjust the scoreboard according to the incoming SACK information, stay in step 2 and wait for the next new acknowledgment. If the timer expires again, go back to step 1. When a new acknowledgment arrives, set <code>RecoveryPoint</code> to the highest sequence number transmitted so far. If the Cumulative Acknowledgment field covers <code>RecoveryPoint</code> but not more than it, revert to the conventional RTO recovery and set the congestion window to no more than 2 * MSS, like a regular TCP would do. Otherwise, if the Cumulative Acknowledgment field does not cover <code>RecoveryPoint</code> but is larger than SND.UNA, transmit up to two new segments and proceed to step 3. If the sender cannot transmit any previously unsent data, the recommended action is to refrain from entering step 3 and continue with slow-start retransmissions.</p><p><strong>Step 3.</strong> The next acknowledgment arrives; either a duplicate ACK or a new cumulative acknowledgment applies, and other types are ignored. If the Cumulative Acknowledgment field or the SACK information covers more than <code>RecoveryPoint</code>, set the congestion window to no more than 3 * MSS and proceed with the conventional RTO recovery, retransmitting unacknowledged segments; this branch also applies when the acknowledgment is a duplicate ACK and does not acknowledge any new data below <code>RecoveryPoint</code> in the SACK information. Otherwise, if the Cumulative Acknowledgment field or a SACK information in the ACK does not cover more than <code>RecoveryPoint</code> and acknowledges data that was not acknowledged earlier, declare the timeout spurious and set <code>SpuriousRecovery</code> to <code>SPUR_TO</code>, because the segment acknowledged with this ACK was transmitted before the timeout.</p><p>If there are unacknowledged holes between the received SACK information, those segments are retransmitted similarly to the conventional SACK recovery algorithm. If the algorithm exits with <code>SpuriousRecovery</code> set to <code>SPUR_TO</code>, <code>RecoveryPoint</code> is set to SND.UNA, allowing fast recovery on incoming duplicate acknowledgments.</p>",
+      "plainLanguage": "<p>The basic algorithm gives up as soon as a duplicate acknowledgment arrives, because a duplicate can mean a real loss. With the selective acknowledgment option, the receiver can also report which later blocks it has received even when earlier ones are missing, and that extra information is what makes the test reliable in the presence of reordering.</p>"
     },
     {
       "id": "operation",
       "number": "4",
-      "title": "Responding to a Spurious Timeout",
-      "content": "<p>This document does not specify what to do once a timeout is found spurious. It says the sender should stop retransmitting based on the timeout. For example, a sender that was in congestion avoidance sending new data should keep sending new data in congestion avoidance.</p><p>Two response algorithms are named: the Eifel Response Algorithm and an algorithm for adapting the retransmission timeout after a spurious RTO. If none is implemented, TCP SHOULD respond conservatively, applying the TCP congestion control specification, <a href='/rfc5681'>RFC 5681</a>.</p>",
-      "plainLanguage": "<p>Finding out that the delay was harmless means you stop repeating yourself and go on with what you were doing.</p>"
+      "title": "What to Do After a Spurious Timeout",
+      "content": "<p>Upon a retransmission timeout, a conventional TCP sender assumes that outstanding segments are lost and starts retransmitting the unacknowledged segments. When the timeout is detected to be spurious, the sender should not continue retransmitting on the basis of the timeout. For example, if the sender was in the congestion avoidance phase transmitting new, previously unsent segments, it should continue transmitting previously unsent segments in congestion avoidance.</p><p>There are two alternatives specified for a spurious timeout response algorithm: the Eifel Response Algorithm and an algorithm for adapting the retransmission timeout after a spurious RTO. If no specific response algorithm is implemented, the TCP SHOULD respond to the spurious timeout conservatively, applying the TCP congestion control specification.</p><p>The appendix on window-limited cases discusses what a sender can do when it cannot send new data in step 2 of the basic algorithm. One option is to reserve an unused space of the size of one or two segments in the advertised window, so that algorithms such as F-RTO or Limited Transmit can still be used in receiver window-limited situations, while ensuring that the window of outstanding segments stays large enough for proper use of the available pipe. Another option is to use additional information if available, such as TCP timestamps with the Eifel Detection algorithm, noting that Eifel detection may yield different results from F-RTO when acknowledgment losses and an RTO occur within the same round-trip time. The appendix also considers retransmitting data from the tail of the retransmission queue and continuing with step 3, which it does not recommend because the retransmission may be made unnecessarily; sending a zero-sized segment below SND.UNA, similar to a TCP keep-alive probe, which does not send data unnecessarily but delays the recovery by one round-trip time in cases where the timeout was not spurious and is therefore not encouraged; and, in receiver-limited cases, sending one octet of new data regardless of the advertised window limit and continuing with step 3, on the grounds that the receiver may have free buffer space by the time the segment has propagated through the network, and that if it cannot receive the segment it rejects it and sends a duplicate ACK.</p>",
+      "plainLanguage": "<p>Detecting the spurious timeout is only half the job. The sender also has to decide what its congestion window should be, and the RFC deliberately leaves that choice open, pointing to two published response algorithms and telling implementers without one to behave conservatively.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "5",
+      "title": "Experience with F-RTO",
+      "content": "<p>F-RTO was first specified in an Experimental RFC, RFC 4138, that has been implemented in a number of operating systems since it was published. The experience gained has been documented in a separate document and can be summarized as follows. If the TCP sender employs F-RTO, it is able to detect spurious RTOs and avoid the unnecessary retransmission of the whole window of data. Because F-RTO avoids those retransmissions it is able to adhere to the packet conservation principle, unlike a regular TCP that enters slow-start recovery unnecessarily and inappropriately restarts the ACK clock while there are segments outstanding in the network. When a spurious RTO has been detected, a sender can select an appropriate congestion control response instead of setting the congestion window to one segment. Because F-RTO avoids unnecessary retransmissions, it is able to take the round-trip time of the delayed segments into account when calculating the RTO estimate, which may help in avoiding further spurious retransmission timeouts.</p><p>Experimental results with the basic F-RTO have been reported in an emulated network using a Linux implementation. Different congestion control responses along with the SACK-enhanced version were tested in a similar environment. There are publications analyzing F-RTO performance over commercial W-CDMA networks, and in an emulated HSDPA network. Microsoft reported positive experiences with their implementation of F-RTO at the IETF-68 meeting.</p><p>It is known that some spurious RTOs may remain undetected by F-RTO if duplicate acknowledgments arrive at the sender immediately after the spurious RTO, for example due to packet reordering or packet loss. There are rare corner cases where F-RTO could hide a packet loss and therefore lead to inappropriate behavior with non-conservative congestion control response. First, if a massive packet reordering occurred so that the acknowledgment of the RTO retransmission arrived at the sender before the acknowledgments of the original transmissions, the sender might not detect the loss of the segment that triggered the RTO. Second, a malicious receiver could lead F-RTO to make a wrong conclusion after an RTO by acknowledging segments it has not received; such a receiver would risk breaking the consistency of the TCP state between the sender and receiver, causing the connection to become unusable, which cannot be of any benefit to the receiver. Finally, the loss of the unnecessary RTO retransmission cannot be detected without using some explicit acknowledgment scheme such as DSACK, which is common to the other mechanisms for detecting spurious RTO and to regular TCP that does not use DSACK. If the congestion control response to a spurious RTO is conservative enough, these corner cases do not cause problems due to increased congestion.</p><p>The appendix on changes since RFC 4138 lists what moved: the algorithms were modified to prevent the sender from applying F-RTO if the retransmission timer expires when an earlier RTO recovery is underway, except when the timer expires multiple times for the same segment; the behaviour on multiple timeouts was clarified; a paragraph on acknowledgments that do not acknowledge new data but are not duplicate acknowledgments was added; the SACK algorithm was clarified; the SCTP considerations were removed, with the F-RTO support for SCTP remaining with Experimental status in RFC 4138; and a section summarising the evaluation of RFC 4138 was added.</p>",
+      "plainLanguage": "<p>The algorithm has been implemented and measured. The main benefit reported is that the sender avoids retransmitting a whole window that had already arrived, and can measure the true round-trip time of the delayed segments, which makes the retransmission timer more accurate on a path that has delay spikes.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
-      "title": "Limits and Security Considerations",
-      "content": "<p>F-RTO can miss a spurious timeout if duplicate ACKs arrive right after it, for example from reordering or loss, and then it simply acts like regular RTO recovery. The evaluation section also notes rare corner cases where F-RTO could hide a packet loss, such as massive reordering, and that the loss of the unnecessary RTO retransmission cannot be detected without something like DSACK.</p><p>The main security threat is a receiver misleading the sender into a too large congestion window after an RTO. It could acknowledge data it has not received, or delay acknowledging a segment until the sender has entered step 3. The RFC judges the first attack unlikely to help the receiver, since the sender could never retransmit the segment that never arrived. For the second, it suggests that when an RTO occurs during fast recovery, the sender should not fully revert the congestion window even if the timeout was declared spurious, and should reduce it to 1.</p>",
-      "plainLanguage": "<p>A tricky receiver could pretend things arrived. The rules are written so that this rarely helps it, and the sender stays careful in risky cases.</p>"
-    },
-    {
-      "id": "status",
-      "number": "5",
-      "title": "Experience with RFC 4138",
-      "content": "<p>F-RTO was first specified in the Experimental <a href='/rfc4138'>RFC 4138</a>, which the document says has been implemented in a number of operating systems. The experience it reports is that F-RTO detects spurious RTOs, avoids resending the whole window, and adheres to packet conservation. Microsoft reported positive experiences at the IETF-68 meeting.</p><p>Changes from RFC 4138 include: F-RTO is not applied if the timer expires during an earlier RTO recovery (except repeated expiry for the same segment), clarified multiple-timeout behaviour, a paragraph on ACKs that are neither new nor duplicate, a clearer SACK description, removal of the SCTP considerations, and a new evaluation section.</p>",
-      "plainLanguage": "<p>The idea was tried first as an experiment. People who tried it liked it, so it was promoted to a proper standard.</p>"
+      "title": "Security Considerations",
+      "content": "<p>The main security threat regarding F-RTO is the possibility that a receiver could mislead the sender into setting too large a congestion window after an RTO. There are two possible ways a malicious receiver could trigger a wrong output from the algorithm. First, the receiver can acknowledge data that it has not received. Second, it can delay acknowledgment of a segment it has received earlier, and acknowledge the segment after the sender has been deluded to enter algorithm step 3.</p><p>If the receiver acknowledges a segment it has not really received, the sender can be led to declare a spurious timeout in step 3. However, because the sender will have an incorrect state, it cannot retransmit the segment that has never reached the receiver, so this attack is unlikely to be useful for the receiver to maliciously gain a larger congestion window.</p><p>A common case for a retransmission timeout is that a fast retransmission of a segment is lost. If all other segments have been received, the RTO retransmission causes the whole window to be acknowledged at once, and this case is recognized in algorithm branch (2a). However, if the receiver only acknowledges one segment after receiving the RTO retransmission, and then the rest of the segments, it could cause the timeout to be declared spurious when it is not. It is therefore suggested that, when an RTO occurs during the fast recovery phase, the sender should not fully revert the congestion window even if the timeout was declared spurious, but instead reduce the congestion window to 1.</p><p>If there is more than one segment missing at the time of a retransmission timeout, the receiver does not benefit from misleading the sender to declare a spurious timeout, because the sender would have to go through another recovery period to retransmit the missing segments, usually after an RTO has elapsed.</p>",
+      "plainLanguage": "<p>A receiver that lies about what it has received could make the sender think the timeout was spurious and keep a larger sending window. The RFC argues this is of little use to an attacker: the sender's state is now wrong, so it cannot resend data that never arrived, and if several segments are genuinely missing the sender still has to recover them.</p>"
     }
   ],
   "viz": [
     {
       "type": "state-machine",
-      "anchor": "algorithms",
+      "anchor": "design",
       "position": "after",
-      "caption": "BASIC F-RTO STEPS (RFC 5682 SECTION 2.1, SIMPLIFIED)",
+      "caption": "THE BASIC F-RTO ALGORITHM (RFC 5682, SECTION 2.1)",
       "data": {
         "states": [
           {
-            "key": "step-1",
-            "label": "STEP 1: RETRANSMIT",
+            "key": "rto",
+            "label": "Timeout expired",
             "initial": true
           },
           {
-            "key": "step-2",
-            "label": "STEP 2: FIRST ACK"
+            "key": "first-ack",
+            "label": "First ACK seen"
           },
           {
-            "key": "step-3",
-            "label": "STEP 3: SECOND ACK"
-          },
-          {
-            "key": "spurious",
-            "label": "SPUR_TO"
+            "key": "second-ack",
+            "label": "Second ACK seen"
           },
           {
             "key": "conventional",
-            "label": "RTO RECOVERY"
+            "label": "Conventional RTO recovery"
+          },
+          {
+            "key": "spurious",
+            "label": "Timeout declared spurious"
           }
         ],
         "transitions": [
           {
-            "from": "step-1",
-            "to": "step-2",
-            "label": "first ACK arrives"
+            "from": "rto",
+            "to": "first-ack",
+            "label": "Retransmit the first unacknowledged segment and record the highest sequence number sent"
           },
           {
-            "from": "step-2",
+            "from": "first-ack",
             "to": "conventional",
-            "label": "duplicate ACK"
+            "label": "The ACK is a duplicate, or confirms only the retransmitted data"
           },
           {
-            "from": "step-2",
-            "to": "step-3",
-            "label": "advances window, send new data"
+            "from": "first-ack",
+            "to": "second-ack",
+            "label": "The ACK advances the window; send up to two new segments"
           },
           {
-            "from": "step-3",
+            "from": "second-ack",
             "to": "conventional",
-            "label": "duplicate ACK"
+            "label": "The ACK is a duplicate; cap the congestion window at 3 * MSS"
           },
           {
-            "from": "step-3",
+            "from": "second-ack",
             "to": "spurious",
-            "label": "advances window"
+            "label": "The ACK confirms data sent before the timeout"
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "design",
+      "position": "after",
+      "caption": "DETECTING A SPURIOUS TIMEOUT",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "TCP sender"
           },
           {
-            "from": "step-2",
-            "to": "step-1",
-            "label": "timer expires again"
+            "key": "receiver",
+            "label": "TCP receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "DATA",
+            "color": "neutral",
+            "note": "Sent before the timeout; the acknowledgments for it are late."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "RETRANSMITTED SEGMENT",
+            "color": "blue",
+            "note": "The timer fired, so the first unacknowledged segment is sent again."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "FIRST ACK",
+            "color": "green",
+            "note": "Advances the window, so up to two new segments are sent."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "NEW DATA",
+            "color": "blue",
+            "note": "Newly sent data, not a retransmission."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "SECOND ACK",
+            "color": "green",
+            "note": "Acknowledges data sent before the timeout, so the timeout was spurious."
           }
         ]
       }
@@ -182,19 +227,14 @@
   ],
   "references": [
     {
-      "number": "[APB09]",
-      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
-      "rfc": 5681
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     },
     {
-      "number": "[BAFW03]",
-      "text": "Blanton, E., Allman, M., Fall, K., and L. Wang, \"A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP\", RFC 3517, April 2003.",
-      "rfc": 3517
-    },
-    {
-      "number": "[FHG04]",
-      "text": "Floyd, S., Henderson, T., and A. Gurtov, \"The NewReno Modification to TCP's Fast Recovery Algorithm\", RFC 3782, April 2004.",
-      "rfc": 3782
+      "number": "[Pos81]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
     },
     {
       "number": "[MMFR96]",
@@ -207,28 +247,38 @@
       "rfc": 2988
     },
     {
-      "number": "[SK05]",
-      "text": "Sarolahti, P. and M. Kojo, \"Forward RTO-Recovery (F-RTO): An Algorithm for Detecting Spurious Retransmission Timeouts with TCP and the Stream Control Transmission Protocol (SCTP)\", RFC 4138, August 2005.",
-      "rfc": 4138
+      "number": "[BAFW03]",
+      "text": "Blanton, E., Allman, M., Fall, K., and L. Wang, \"A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP\", RFC 3517, April 2003.",
+      "rfc": 3517
     },
     {
-      "number": "[LM03]",
-      "text": "Ludwig, R. and M. Meyer, \"The Eifel Detection Algorithm for TCP\", RFC 3522, April 2003.",
-      "rfc": 3522
+      "number": "[FHG04]",
+      "text": "Floyd, S., Henderson, T., and A. Gurtov, \"The NewReno Modification to TCP's Fast Recovery Algorithm\", RFC 3782, April 2004.",
+      "rfc": 3782
     },
     {
       "number": "[LG05]",
       "text": "Ludwig, R. and A. Gurtov, \"The Eifel Response Algorithm for TCP\", RFC 4015, February 2005.",
       "rfc": 4015
+    },
+    {
+      "number": "[SK05]",
+      "text": "Sarolahti, P. and M. Kojo, \"Forward RTO-Recovery (F-RTO): An Algorithm for Detecting Spurious Retransmission Timeouts with TCP and the Stream Control Transmission Protocol (SCTP)\", RFC 4138, August 2005.",
+      "rfc": 4138
+    },
+    {
+      "number": "[APB09]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

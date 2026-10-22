@@ -5,50 +5,55 @@
   "categoryReviewed": false,
   "summary": "<p>Proposes Limited Transmit, a TCP tweak that sends new data after the first duplicate acknowledgments. This helps recover from loss without waiting for a timeout, especially when the congestion window is small. It is on the standards track.</p>",
   "plainLanguage": {
-    "summary": "<p>When a friend says they missed one ball, you keep throwing a few more instead of waiting. This helps a lost piece get noticed sooner.</p>"
+    "summary": "<p>When a packet goes missing, TCP normally waits either for three identical acknowledgments or for a timeout of at least a second. This RFC makes the sender answer the first two identical acknowledgments by sending a little more data, which often produces the third acknowledgment that triggers the fast repair.</p>"
   },
   "questions": [
     "what is tcp limited transmit",
     "faster loss recovery for small windows",
     "what is fast retransmit in tcp",
     "why does tcp need three duplicate acks",
-    "how does tcp recover from loss with a small window"
+    "how does tcp recover from loss with a small window",
+    "how does limited transmit avoid a retransmission timeout"
   ],
   "tags": [
     "Transport",
     "Congestion Control",
     "Loss Recovery"
   ],
-  "subtitle": "A small TCP tweak: send new data on the first two duplicate ACKs so a lost segment is found by Fast Retransmit instead of a slow timeout.",
+  "subtitle": "Send new data on the first two duplicate ACKs, so a lost segment is found by fast retransmit instead of a slow timeout.",
   "tldr": {
-    "problem": "When a TCP connection has a small congestion window, or many segments are lost in one window, too few duplicate ACKs arrive to trigger Fast Retransmit, so the sender must wait for a costly retransmission timeout.",
-    "mechanism": "Limited Transmit has the sender send a new data segment on each of the first two duplicate ACKs, within a limit of 2 segments beyond the congestion window and without changing the window. This produces extra ACKs, so the standard threshold of three duplicate ACKs can be reached.",
-    "outcome": "Loss is more often recovered by Fast Retransmit rather than by a timeout, and sending is less bursty. The RFC says the security impact is minimal.",
-    "outcomeLabel": "Why it matters"
+    "problem": "TCP only resends a lost segment quickly when three duplicate acknowledgments arrive, so a connection with a small congestion window often waits for a retransmission timeout instead, and the minimum timeout is a whole second.",
+    "mechanism": "Limited Transmit tells the sender to send new data on the first two consecutive duplicate acknowledgments, as long as the receiver's window allows it and no more than two segments beyond the congestion window are outstanding.",
+    "outcome": "The extra acknowledgments usually supply the third duplicate acknowledgment that Fast Retransmit needs, so the loss is repaired without waiting for the timer.",
+    "outcomeLabel": "The trick"
   },
   "facts": [
+    {
+      "label": "Duplicate ACKs that trigger new data",
+      "value": "The first two consecutive duplicate ACKs"
+    },
+    {
+      "label": "Extra data allowed beyond the window",
+      "value": "2 segments"
+    },
     {
       "label": "Fast Retransmit threshold",
       "value": "3 duplicate ACKs"
     },
     {
-      "label": "Limited Transmit trigger",
-      "value": "First 2 duplicate ACKs"
-    },
-    {
-      "label": "Extra data allowed",
-      "value": "Up to cwnd plus 2 segments outstanding"
-    },
-    {
-      "label": "Congestion window",
-      "value": "MUST NOT be changed"
-    },
-    {
-      "label": "Minimum RTO",
+      "label": "Minimum retransmission timeout",
       "value": "1 second"
+    },
+    {
+      "label": "Retransmissions after timeout expiry",
+      "value": "Roughly 56% in the busy web server study"
+    },
+    {
+      "label": "Timeout retransmissions avoidable",
+      "value": "25% with limited transmit, 4% with SACK"
     }
   ],
-  "today": "<p>RFC 3042 is a Proposed Standard, and the unit metadata shows no RFC that obsoletes or updates it. It builds on the congestion control rules of <a href='/rfc2581'>RFC 2581</a> and the base protocol in <a href='/rfc793'>RFC 793</a>.</p>",
+  "today": "<p>RFC 3042 is a Proposed Standard and has not been obsoleted. It describes a change to TCP senders, and the RFC says it is implemented in the ns network simulator, where the mechanism can be enabled for a connection with the option named singledup_.</p>",
   "glossary": [
     "tcp",
     "tcp-segment",
@@ -58,109 +63,159 @@
     "duplicate-acknowledgment",
     "fast-retransmit",
     "congestion-window",
-    "retransmission-timeout"
+    "retransmission-timeout",
+    "selective-acknowledgment",
+    "ecn",
+    "packet-loss"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "Introduction",
-      "content": "<p>RFC 3042 proposes the <strong>Limited Transmit</strong> algorithm, a small change to the sender side of TCP. It targets two situations: a connection whose congestion window is small, and one where a large number of segments are lost in a single transmission window.</p><p>The RFC notes that a small window can come from only a limited amount of data to send, from the receiver-advertised window, or from end-to-end congestion control on a connection with a small bandwidth-delay product. In these cases TCP's usual loss recovery does not work well.</p>",
-      "plainLanguage": "<p>When only a few packets are in flight, TCP has a hard time noticing that one got lost. This RFC gives it a simple trick to notice sooner.</p>"
+      "title": "Why TCP Recovers Slowly",
+      "content": "<p>TCP's loss recovery does not work well when the congestion window at the sender is small. That happens when there is only a limited amount of data to send, when the receiver-advertised window limits it, or when end-to-end congestion control constrains a connection with a small bandwidth-delay product.</p><p>TCP has two ways to recover from a missing segment. The first is the retransmission timeout: if an acknowledgment for a segment does not arrive within a certain time, the segment is resent. The second is Fast Retransmit, which resends a segment when three duplicate acknowledgments arrive at the sender. Duplicate acknowledgments are also triggered by packet reordering in the Internet, so the sender waits for three of them to tell loss and reordering apart. Once in a loss recovery phase, the segment can be resent using slow start-based recovery, Fast Recovery, NewReno, or loss recovery based on selective acknowledgments.</p><p>The retransmission timeout is based on measured round-trip times, and to avoid resending segments that are only delayed rather than lost, the minimum timeout is conservatively chosen to be 1 second. So it pays to detect and recover from as many losses as possible without waiting for a long timeout, particularly when the connection is idle. But if not enough duplicate acknowledgments arrive, Fast Retransmit is never triggered, which happens when the congestion window is small or when many segments in a window are lost. With a congestion window of three segments, one dropped segment produces at most two duplicate acknowledgments, and since three are needed, a timeout is required to resend the dropped packet.</p><p>The RFC cites a study in which roughly 56% of the retransmissions sent by a busy web server were sent after the timeout expired, while only 44% were handled by Fast Retransmit, and in which only 4% of the timeout-based retransmissions could have been avoided with SACK. Using the technique in this document, 25% of those timeout-based retransmissions would likely have been avoided.</p>",
+      "plainLanguage": "<p>TCP normally waits for three identical acknowledgments before it resends a lost packet, and otherwise it waits for a timeout of at least a second. When the amount of data in flight is small, only one or two identical acknowledgments arrive, so the sender ends up waiting for the timer instead.</p>"
     },
     {
-      "id": "background",
+      "id": "operation",
       "number": "2",
-      "title": "Why Small Windows Recover Badly",
-      "content": "<p>TCP detects a missing segment in one of two ways. Either the acknowledgment (ACK) does not arrive in time and a <strong>retransmission timeout</strong> fires, or the <strong>Fast Retransmit</strong> algorithm resends a segment after three duplicate ACKs arrive. The sender waits for three because duplicate ACKs are also caused by packet reordering, and it wants to tell loss apart from reordering.</p><p>The minimum retransmission timeout is conservatively chosen to be 1 second, so a timeout is expensive. The RFC gives a concrete case: with a congestion window of three segments, one dropped segment produces at most two duplicate ACKs. Three are required to trigger Fast Retransmit, so the sender must wait for a timeout.</p>",
-      "plainLanguage": "<p>A friend tells you a ball is missing only after three reminders. If you only threw three balls and one is lost, they can only remind you twice, so you wait a long time before trying again.</p>"
-    },
-    {
-      "id": "algorithms",
-      "number": "3",
       "title": "The Limited Transmit Algorithm",
-      "content": "<p>When a TCP sender has previously unsent data queued, it <code>SHOULD</code> use Limited Transmit. The sender transmits new data when each of the first two consecutive duplicate ACKs arrives, provided two conditions hold:</p><ul><li>The receiver's advertised window allows the segment to be sent.</li><li>The amount of outstanding data stays less than or equal to the congestion window plus 2 segments.</li></ul><p>The congestion window (<code>cwnd</code>) <code>MUST NOT</code> be changed when these segments are sent. If the new segments and their ACKs are not dropped, they generate further duplicate ACKs, so the sender can still use the standard Fast Retransmit threshold of three. This is more robust to reordering than retransmitting an old segment on the first or second duplicate ACK.</p><div class='callout callout-warning'><p>With selective acknowledgments (SACK), the sender <code>MUST NOT</code> send new segments in response to duplicate ACKs that contain no new SACK information, because a misbehaving receiver could generate such ACKs.</p></div>",
-      "plainLanguage": "<p>When your friend says they missed one, you throw up to two extra balls, but you never throw more than you are allowed. Those extra throws give your friend more chances to tell you which one was lost.</p>"
+      "content": "<p>When a TCP sender has previously unsent data queued for transmission, it should use the Limited Transmit algorithm, which calls for the sender to transmit new data upon the arrival of the first two consecutive duplicate acknowledgments, provided two conditions hold.</p><p>The first condition is that the receiver's advertised window allows the transmission of the segment. The second is that the amount of outstanding data would remain less than or equal to the congestion window plus 2 segments. In other words, the sender may send at most two segments beyond the congestion window.</p><p>The congestion window must not be changed when these new segments are transmitted. Assuming that the new segments and the corresponding acknowledgments are not dropped, the procedure allows the sender to infer loss using the standard Fast Retransmit threshold of three duplicate acknowledgments. This is more robust to reordered packets than retransmitting an old packet on the first or second duplicate acknowledgment would be.</p><p>One restriction comes with selective acknowledgments. If the connection is using SACK, the data sender must not send new segments in response to duplicate acknowledgments that carry no new SACK information, because a misbehaving receiver can generate such acknowledgments to trigger inappropriate transmission of data segments.</p>",
+      "plainLanguage": "<p>The rule is short. When a duplicate acknowledgment arrives, the sender may put one more new segment on the wire, but only if the receiver has room for it and only if the connection is not already two segments over its limit. The congestion window itself does not move.</p>"
     },
     {
-      "id": "performance",
-      "number": "4",
-      "title": "Congestion Control and Burstiness",
-      "content": "<p>The RFC argues that Limited Transmit follows the conservation of packets principle. Each of the first two duplicate ACKs shows that a segment has left the network, and the sender has not yet decided that a segment was dropped, so it has no reason to think its congestion state is wrong.</p><p>Reordering is not rare. Because the earlier specification (RFC 2581) does not allow sending on the first two duplicate ACKs, a burst of segments goes out when an ACK for new data finally arrives after reordering. With Limited Transmit, segments are clocked out by incoming ACKs, so sending is less bursty.</p><p>The RFC cites a study of a busy web server in which roughly 56% of retransmissions were sent after the timeout expired, and 44% were handled by Fast Retransmit. Using this technique, 25% of the timeout-based retransmissions in that data would likely have been avoided.</p>",
-      "plainLanguage": "<p>Each reminder from your friend means one ball has been caught, so you are allowed to throw one more. That keeps the game fair and stops you from throwing a big pile all at once later.</p>"
+      "id": "design",
+      "number": "2",
+      "title": "Why This Does Not Break Congestion Control",
+      "content": "<p>Limited Transmit follows the conservation of packets principle of congestion control. Each of the first two duplicate acknowledgments indicates that a segment has left the network, and the sender has not yet decided that a segment has been dropped, so it has no reason to believe that the current congestion control state is inaccurate. Sending segments in this situation therefore does not deviate from the spirit of TCP's congestion control principles.</p><p>Packet reordering is not a rare network event, and the earlier TCP specification, RFC 2581, provides no way to send data on the first two duplicate acknowledgments that arrive at the sender. That causes a burst of segments to be sent when an acknowledgment for new data does arrive after a reordering. With Limited Transmit, data packets are clocked out by incoming acknowledgments, so the transmission is not as bursty.</p><p>The algorithm is implemented in the ns network simulator, where it can be enabled for a given TCP connection with the option named singledup_.</p>",
+      "plainLanguage": "<p>Each duplicate acknowledgment tells the sender that a packet did get through, so the network is not obviously congested and sending two more packets is fair. Sending them one at a time as the acknowledgments arrive also spreads the traffic out, instead of releasing a burst later.</p>"
     },
     {
       "id": "related-work",
-      "number": "5",
-      "title": "Related Work: ECN and Rate-Halving",
-      "content": "<p>The RFC points to Explicit Congestion Notification (ECN) as another way to help connections with small windows. ECN signals congestion without dropping segments, so the sender can avoid many Fast Retransmits and retransmission timeouts. When ECN-enabled traffic competes with non-ECN traffic, it can receive up to 30% higher goodput.</p><p>The Rate-Halving algorithm uses a form of limited transmit too. It sends a data segment on every second duplicate ACK, whereas Limited Transmit always sends a new segment on the second duplicate ACK that arrives.</p>",
-      "plainLanguage": "<p>Other tricks exist too. One lets the network say \"slow down\" without throwing any ball away, and another sends an extra ball after every second reminder.</p>"
+      "number": "3",
+      "title": "Related Work: ECN and Rate Halving",
+      "content": "<p>Deployment of Explicit Congestion Notification may benefit connections with small congestion windows. ECN gives a way of indicating congestion to the end host without dropping segments, so a sender can avoid many of the Fast Retransmits and retransmission timeouts that would otherwise be needed to detect dropped segments.</p><p>The RFC notes that when ECN-enabled TCP traffic competes with traffic that does not use ECN, the ECN-enabled traffic can receive up to 30% higher goodput. For bulk transfers the relative benefit of ECN is greatest when, on average, each flow has 3-4 outstanding packets during each round-trip time. The RFC uses this as an estimate of the performance impact of a flow using Limited Transmit, since both ECN and Limited Transmit reduce the reliance on the retransmission timer for signalling congestion.</p><p>The Rate-Halving congestion control algorithm uses a form of limited transmit, calling for a data segment to be transmitted on every second duplicate acknowledgment that arrives at the sender. That algorithm decouples the decision of what to send from the decision of when to send it. However, like Limited Transmit, it always sends a new data segment on the second duplicate acknowledgment.</p>",
+      "plainLanguage": "<p>Two other pieces of work touch on the same idea. ECN lets a network signal congestion instead of dropping packets, and a related algorithm called Rate Halving also sends a new segment on the second duplicate acknowledgment.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
+      "number": "4",
       "title": "Security Considerations",
-      "content": "<p>The RFC says the additional security implications compared with TCP's existing weaknesses are minimal. The concern is \"false\" duplicate ACKs, which do not acknowledge new data. They can come from duplicated ACKs in the network or from a misbehaving receiver trying to subvert congestion control.</p><p>With SACK, the sender has fairly strong protection, because it can check that a duplicate ACK reports new data it actually sent. The most important protection is that the potential for harm is limited. A misbehaving receiver could send two duplicate ACKs after each regular ACK, but the sender may only exceed the congestion window by less than the duplicate ACK threshold of three segments. If at least a threshold number of duplicate ACKs arrive, a sender with Limited Transmit behaves essentially like one without it: the window is halved and loss recovery begins.</p>",
-      "plainLanguage": "<p>A sneaky friend might shout fake reminders to make you throw more. But you are only allowed two extra throws, so the trick cannot make you flood the game.</p>"
+      "content": "<p>The RFC judges the extra security implications of the change to be minimal compared with TCP's existing weaknesses. The concern is the subversion of end-to-end congestion control by false duplicate acknowledgments, where a false duplicate acknowledgment is one that does not actually acknowledge new data received at the receiver. False duplicate acknowledgments could come from duplicate acknowledgments that are themselves duplicated in the network, or from misbehaving receivers that send them on purpose.</p><p>When the receiver has agreed to use SACK, the sender has fairly strong protection. A duplicate acknowledgment that acknowledges new data reports the sequence numbers of that new data, so the sender can check that an arriving duplicate acknowledgment acknowledges data it has actually sent and for which no previous acknowledgment has been received, before sending new data in response. For further protection the sender could keep a record of packet boundaries for transmitted data packets and recognise at most one valid acknowledgment for each packet.</p><p>Some limited protection is possible without SACK, by keeping a record of the number of packets transmitted and recognising at most one acknowledgment per packet as a trigger for sending new data, but that accounting would need extra state and complexity at the sender and does not seem necessary.</p><p>The most important protection comes from the limited potential of duplicate acknowledgments to subvert congestion control. When the sender receives fewer duplicate acknowledgments than the threshold, a misbehaving receiver might send two duplicate acknowledgments after each regular acknowledgment, and one might imagine the sender then sending at three times its allowed rate. With Limited Transmit the sender may only exceed the congestion window by less than the duplicate acknowledgment threshold of three segments, so it would not send a new packet for each duplicate acknowledgment received. When the sender receives at least a threshold number of duplicate acknowledgments, a TCP with Limited Transmit behaves essentially the same as one without it: the congestion window is halved and a loss recovery period is started.</p>",
+      "plainLanguage": "<p>Someone on the path could send fake duplicate acknowledgments to make the sender send more than it should. The RFC argues that the rule limits how much that helps an attacker, because the sender may only go two segments beyond its window and cannot send a packet for every fake acknowledgment it receives.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "algorithms",
+      "anchor": "operation",
       "position": "after",
-      "caption": "LIMITED TRANSMIT, ONE LOST SEGMENT (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "caption": "ILLUSTRATIVE: limited turning two duplicate ACKs into three",
       "data": {
         "lanes": [
           {
             "key": "sender",
-            "label": "Sender"
+            "label": "TCP sender"
           },
           {
             "key": "receiver",
-            "label": "Receiver"
+            "label": "TCP receiver"
           }
         ],
         "messages": [
           {
-            "from": "receiver",
-            "to": "sender",
-            "label": "Duplicate ACK (first)",
-            "color": "neutral",
-            "note": "A segment was lost, so this ACK repeats the previous one."
-          },
-          {
             "from": "sender",
             "to": "receiver",
-            "label": "New data segment",
-            "color": "blue",
-            "note": "Limited Transmit; cwnd is not changed."
+            "label": "DATA 1",
+            "color": "blue"
           },
           {
             "from": "receiver",
             "to": "sender",
-            "label": "Duplicate ACK (second)",
+            "label": "ACK 1",
             "color": "neutral"
           },
           {
             "from": "sender",
             "to": "receiver",
-            "label": "New data segment",
+            "label": "DATA 2",
             "color": "blue",
-            "note": "Second and last extra segment."
-          },
-          {
-            "from": "receiver",
-            "to": "sender",
-            "label": "Duplicate ACK (third)",
-            "color": "neutral",
-            "note": "The standard threshold of three is reached."
+            "note": "Lost in the network."
           },
           {
             "from": "sender",
             "to": "receiver",
-            "label": "Fast Retransmit of lost segment",
+            "label": "DATA 3",
+            "color": "blue"
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "DUPLICATE ACK 1",
+            "color": "neutral"
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "NEW DATA",
+            "color": "green",
+            "note": "First limited transmit."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "DUPLICATE ACK 2",
+            "color": "neutral"
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "NEW DATA",
+            "color": "green",
+            "note": "Second limited transmit."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "DUPLICATE ACK 3",
+            "color": "neutral",
+            "note": "Three duplicates trigger Fast Retransmit."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "RETRANSMIT DATA 2",
             "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "operation",
+      "position": "before",
+      "caption": "When a sender may send new data",
+      "data": {
+        "items": [
+          {
+            "title": "First two duplicate ACKs",
+            "text": "The new data goes out on the first two consecutive duplicate acknowledgments."
+          },
+          {
+            "title": "Room in the window",
+            "text": "The receiver's advertised window must allow the segment."
+          },
+          {
+            "title": "Two segments of slack",
+            "text": "Outstanding data must stay within the congestion window plus 2 segments."
+          },
+          {
+            "title": "The window does not move",
+            "text": "The congestion window must not be changed when the new segments are sent."
+          },
+          {
+            "title": "Not with SACK",
+            "text": "With SACK in use, no new data is sent for a duplicate ACK carrying no new SACK information."
           }
         ]
       }
@@ -173,21 +228,6 @@
       "rfc": 793
     },
     {
-      "number": "[RFC2018]",
-      "text": "Mathis, M., Mahdavi, J., Floyd, S. and A. Romanow, \"TCP Selective Acknowledgement Options\", RFC 2018, October 1996.",
-      "rfc": 2018
-    },
-    {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
-    {
-      "number": "[RFC2481]",
-      "text": "Ramakrishnan, K. and S. Floyd, \"A Proposal to Add Explicit Congestion Notification (ECN) to IP\", RFC 2481, January 1999.",
-      "rfc": 2481
-    },
-    {
       "number": "[RFC2581]",
       "text": "Allman, M., Paxson, V. and W. Stevens, \"TCP Congestion Control\", RFC 2581, April 1999.",
       "rfc": 2581
@@ -198,18 +238,33 @@
       "rfc": 2582
     },
     {
-      "number": "[PA00]",
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S. and A. Romanow, \"TCP Selective Acknowledgement Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC2988]",
       "text": "Paxson, V. and M. Allman, \"Computing TCP's Retransmission Timer\", RFC 2988, November 2000.",
       "rfc": 2988
+    },
+    {
+      "number": "[RFC2884]",
+      "text": "Salim, J. and U. Ahmed, \"Performance Evaluation of Explicit Congestion Notification (ECN) in IP Networks\", RFC 2884, July 2000.",
+      "rfc": 2884
+    },
+    {
+      "number": "[RFC2481]",
+      "text": "Ramakrishnan, K. and S. Floyd, \"A Proposal to Add Explicit Congestion Notification (ECN) to IP\", RFC 2481, January 1999.",
+      "rfc": 2481
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-19"
 }

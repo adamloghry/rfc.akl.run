@@ -10,6 +10,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { isVizType, validateViz } from '../../src/components/viz/validate';
+import { checkRetiredFraming, retiredFramingMessage } from '../../src/lib/plain-language';
+import { walkStrings } from '../../src/lib/sanitize-check';
 import { glossarySchema, rfcSchema } from '../../src/lib/schemas';
 import { applyOutput, OUTPUT_KEYS, REQUIRED_KEYS } from './apply';
 import {
@@ -332,6 +334,22 @@ function termListsRfc(env: Env, id: string, n: number): boolean {
 
 const numberErrors = (l: string[]) => [...new Set(l)].map((m, i) => `${i + 1}. ${m}`);
 
+/** A citation quotes the RFC's own bibliography, so it may name the old framing without the site adopting it. */
+const CITATION_POINTER = /^\/references\/\d+\/text$/;
+/** The reader-facing texts: only these may talk about who the text is written for. */
+const AUDIENCE_POINTER = /^\/(?:plainLanguage(?:\/summary)?|sections\/\d+\/plainLanguage|glossaryTerms\/\d+\/plainLanguage)$/;
+
+/**
+ * The retired ELI5 framing must not come back: the explainers are ISO Plain Language (ISO 24495-1:2023) written for
+ * an adult reader who does not work in networking (AGENTS.md, SPEC.md section 8).
+ */
+function checkFraming(out: Obj, err: Errors) {
+  walkStrings(out, (s, ptr) => {
+    if (CITATION_POINTER.test(ptr)) return;
+    for (const found of checkRetiredFraming(s, AUDIENCE_POINTER.test(ptr))) err.add(ptr, retiredFramingMessage(found, found));
+  });
+}
+
 /** All structural errors for one output (empty = valid). `raw` is the parsed JSON. */
 export function validateOutput(n: number, raw: unknown, env: Env): string[] {
   const err = new Errors();
@@ -339,6 +357,7 @@ export function validateOutput(n: number, raw: unknown, env: Env): string[] {
   if (!isObj(raw)) return ['1. the file must contain one JSON object'];
   const tier = tierOf(n, env.summary, env.april);
   checkKeys(raw, err);
+  checkFraming(raw, err);
   const sectionIds = checkSections(raw, tier, env, err);
   checkViz(raw, tier, sectionIds, env, err);
   checkSmall(raw, env, sectionIds, err);

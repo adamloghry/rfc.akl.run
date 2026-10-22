@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This informational document describes a framework for preventing the transient loops that can occur in link-state routing when topology changes. It does so by correctly ordering the forwarding information base (FIB) updates on routers. It suits planned shutdowns, restarts, and metric changes, and can work alongside fast reroute.</p>",
   "plainLanguage": {
-    "summary": "<p>When roads change, drivers need to update maps in the right order or they go in circles. This sets the order so traffic does not loop.</p>"
+    "summary": "<p>Routers can briefly disagree about routes after a network change, which can make packets loop. RFC 6976 describes how ordering forwarding-table updates could prevent those temporary loops.</p>"
   },
   "questions": [
     "ordered fib",
@@ -20,28 +20,24 @@
     "Convergence",
     "Loop Prevention"
   ],
-  "subtitle": "Preventing packet loops by updating router forwarding tables in the right order.",
+  "subtitle": "An illustrative way to order router updates during topology changes",
   "tldr": {
-    "problem": "When a link or router fails or changes in a network, routers briefly have inconsistent forwarding tables. Packets can loop between routers during this period, causing loss and disruption even when the network remains connected.",
-    "mechanism": "The oFIB approach computes a rank for each router based on the topology change, then stages their forwarding table updates in order. Routers closer to the failure update first, then others in sequence, so packets always follow a consistent path.",
-    "outcome": "Loop-free convergence is guaranteed for single topology changes if all routers follow the ordering. The mechanism works for managed changes (maintenance, metric updates) and can accelerate fast reroute.",
-    "outcomeLabel": "Where it stands now"
+    "problem": "During a routing change, routers can temporarily use inconsistent forwarding tables. Packets may loop or be lost while the network converges.",
+    "mechanism": "The ordered FIB approach computes an update rank for routers and delays their forwarding-table changes until a safe order is reached. Completion messages can shorten the wait.",
+    "outcome": "RFC 6976 describes an illustrative framework, not a protocol specification. It says further work is needed before implementation or deployment of the described mechanism.",
+    "outcomeLabel": "Status and scope"
   },
   "facts": [
     {
-      "label": "Target convergence time",
-      "value": "Seconds to minutes (T0 + H + rank × MAX_FIB)"
+      "label": "Update-time formula",
+      "value": "T0 + H + (rank × MAX_FIB)"
     },
     {
-      "label": "Failure scope",
-      "value": "Single link, router, or line card"
-    },
-    {
-      "label": "Required router support",
-      "value": "All routers in domain"
+      "label": "Failure assumption",
+      "value": "Loop-free convergence for a single failure"
     }
   ],
-  "today": "<p>RFC 6976 is Informational and remains current. It describes a framework that has been subject to simulation and one experimental deployment. Routers still use traditional convergence by default; implementations of oFIB or similar loop-free convergence mechanisms are found in some carrier deployments.</p>",
+  "today": "<p>RFC 6976 is an Informational document and the batch metadata lists no RFC that obsoletes or updates it. The RFC says the described framework is illustrative and that further work is needed before its implementation or deployment.</p>",
   "glossary": [
     "fib",
     "link-state-routing",
@@ -52,114 +48,69 @@
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Transient Loop Problem",
-      "content": "<p>Link-state routing protocols like OSPF and IS-IS let each router learn the whole network topology and compute the best paths. When a link fails or changes—whether by accident or as planned maintenance—some routers learn the change before others. Until all routers have updated their forwarding information bases (FIBs), they have different ideas of the best path to a destination. Packets can bounce between routers that disagree, looping until a router updates its table or a TTL expires.</p><p>The oFIB (Ordered Forwarding Information Base) framework prevents this by controlling the <strong>order</strong> in which routers update their FIBs. Instead of letting each router update as soon as it learns the change, oFIB computes a safe schedule so that at every moment during the update, the routers have consistent enough routing that no loops occur.</p>",
-      "plainLanguage": "<p>Each driver gets a number telling them when to update their map. If they follow the numbers, traffic never gets stuck.</p>"
+      "title": "Why Routers Can Form Temporary Loops",
+      "content": "<p>Link-state routing protocols such as IS-IS and OSPF make routers recalculate forwarding after topology changes. Some routers learn about a change before others, so their forwarding information bases (FIBs) can temporarily disagree. Packets may loop or be lost during this period even when destinations remain reachable in the new topology.</p><p>RFC 6976 presents the ordered Forwarding Information Base (oFIB) approach: sequence router FIB updates to maintain consistent forwarding during convergence. It is an illustrative framework and explicitly does not constitute a protocol specification.</p>",
+      "plainLanguage": "<p>After a network change, routers may update their forwarding tables at different times. Packets can loop while the tables disagree.</p>"
     },
     {
-      "id": "concepts",
+      "id": "procedures",
       "number": "2",
-      "title": "Link Down and Link Up Rules",
-      "content": "<p>The oFIB approach distinguishes between link-down events (failure or shutdown) and link-up events (restoration or new link).</p><p>When a link goes down, routers that <strong>send traffic through the affected router</strong> must update their tables <strong>before</strong> that router does. This ensures packets following an old route reach the far end of the failed link, where there is no longer a way back, so they take the new best path forward. Once upstream routers have rerouted, the affected router can safely update.</p><p>When a link comes up, the rule reverses. Routers must update <strong>before</strong> routers that will use them as the next hop to reach the new link. This way, traffic can reach the new link without first arriving at a router that has not yet learned the faster path.</p>",
-      "plainLanguage": "<p>When a road closes, tell neighbors to find new routes first, then tell the closed road's endpoint. When a road opens, tell the endpoint first so traffic can find the shortcut.</p>"
+      "title": "The Safe Update Order",
+      "content": "<p>For a link-down event or metric increase, a router must wait until routers that send traffic through it and the affected link have updated first. For a link-up event or metric decrease, a router updates before other routers that will use it to reach the changed link.</p><p>The same ordering principles extend to router and line-card changes. The RFC assumes that all routers in the routing domain can use oFIB; if routers lack that capability, normal convergence is used.</p>",
+      "plainLanguage": "<p>When a link goes down, routers using it update before the affected router. When a link comes up, the router that makes the new route usable updates first.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "3",
+      "title": "Detecting Changes and Computing Rank",
+      "content": "<p>Routers collect link-state notifications during a hold-down period to determine whether they describe one event. The approach applies when the notifications share a common router and describe an eligible link-down, link-up, or metric change. If the changes conflict or do not fit the assumptions, a router falls back to conventional convergence.</p><p>For an eligible event, each router computes a rank from the topology. The rank determines when it may update its FIB. The RFC gives the update time as T0 + H + (rank × MAX_FIB), where T0 is notification arrival, H is the hold-down time, and MAX_FIB is a network-wide value agreed by the routers.</p>",
+      "plainLanguage": "<p>Routers first gather related change notices. Each then calculates a rank that sets its place in the update order.</p>"
     },
     {
       "id": "operation",
-      "number": "3",
-      "title": "Computing Router Rank and Timing",
-      "content": "<p>Each router computes a <strong>rank</strong> that determines when it can safely update. For a failure, rank is the distance (in hops) from the router to the failed element in the old topology: routers closest to the failure get a lower rank and update sooner.</p><p>The actual update time is calculated as T0 + H + (rank × MAX_FIB), where T0 is when the change was announced, H is a hold-down time to let all routers hear the news, and MAX_FIB is a network-wide constant representing the maximum time to update a table. This simple formula ensures that routers waiting for a neighbor to update will not have to wait too long, so convergence happens in predictable time.</p>",
-      "plainLanguage": "<p>Each router gets a number based on how far it is from the broken link. It waits (number × fixed time) before updating, so closer routers go first.</p>"
+      "number": "5",
+      "title": "Using Completion Messages",
+      "content": "<p>The basic rank timer is conservative. A router can send a completion message after finishing its FIB changes. A router waiting for that neighbor can update as soon as all required completion messages arrive, rather than waiting for its full rank timer.</p><p>Completion messages are an optimization only. If a message is lost, the waiting router follows its rank timer, so the ordering does not depend on receiving the message.</p>",
+      "plainLanguage": "<p>A router can tell its neighbors when its update is complete. Neighbors may then update sooner, while a lost notice only means they wait for their timer.</p>"
     },
     {
       "id": "state-machine",
-      "number": "4",
-      "title": "State Machine and Safety Fallback",
-      "content": "<p>An oFIB-capable router moves through states: from stable, to holding (collecting change notifications), to ongoing (during the timed update window), and back to stable. During the holding and ongoing states, the router watches for events that would break the ordered process: a second failure before the first has converged, or a change affecting a different part of the topology. If such an event occurs, the router abandons oFIB and reverts to <strong>normal convergence</strong> (often called fast convergence), which happens as fast as possible but risks transient loops.</p><p>This safety fallback (called \"Abandoning All Hope\" in the RFC) ensures that oFIB cannot make things worse when its assumptions break.</p>",
-      "plainLanguage": "<p>If another road closes before the first one has settled, stop the careful plan and just let everyone fix their maps right away.</p>"
-    },
-    {
-      "id": "deployment",
       "number": "5",
-      "title": "Use Cases and Limitations",
-      "content": "<p>oFIB is suited for managed, non-urgent changes: planned link shutdowns, metric changes, and scheduled maintenance. It can also accelerate fast reroute, where a protection mechanism (like MPLS FRR) instantly reroutes traffic around a failure and oFIB then manages the orderly FIB convergence afterward.</p><p>oFIB handles single failures only. If multiple independent failures happen, or if the topology diverges from the assumptions built into the rank computation, convergence reverts to normal mode. All routers in the domain must support oFIB; if some do not, the network uses normal convergence instead.</p>",
-      "plainLanguage": "<p>Works best for planned changes and when one thing breaks at a time. If two things break or a router does not support the system, just do it the fast way.</p>"
+      "title": "Fallback, Management, and Security",
+      "content": "<p>If a router receives a conflicting topology event while ordered convergence is underway, or detects incomplete or inconsistent link-state information, it may abandon oFIB and return to conventional convergence. The RFC discusses candidate methods for coordinating this fallback, called Abandoning All Hope (AAH).</p><p>Operators need records of convergence behavior to diagnose it and should study packet reordering caused by delayed updates. The RFC says the framework adds no significant security risks beyond minor routing-protocol changes, but a full analysis belongs in protocol-specific specifications. It also notes that an excessively large timer can delay convergence.</p>",
+      "plainLanguage": "<p>If new changes break the assumptions, routers return to ordinary convergence. The RFC also calls for operational records and says a full security analysis belongs in later protocol specifications.</p>"
     }
   ],
-  "viz": [
-    {
-      "type": "sequence",
-      "anchor": "operation",
-      "position": "after",
-      "caption": "oFIB Update Order for a Link Down Event",
-      "data": {
-        "lanes": [
-          {
-            "key": "upstream-r",
-            "label": "Upstream Router"
-          },
-          {
-            "key": "failed-router-x",
-            "label": "Router X (Failure Point)"
-          },
-          {
-            "key": "downstream-r",
-            "label": "Downstream Router"
-          }
-        ],
-        "messages": [
-          {
-            "from": "upstream-r",
-            "to": "upstream-r",
-            "label": "Update FIB (rank 1)",
-            "color": "blue",
-            "note": "Routers using the failed link reroute first."
-          },
-          {
-            "from": "downstream-r",
-            "to": "downstream-r",
-            "label": "Update FIB (rank 2)",
-            "color": "blue",
-            "note": "Downstream routers update next."
-          },
-          {
-            "from": "failed-router-x",
-            "to": "failed-router-x",
-            "label": "Update FIB (rank 3)",
-            "color": "green",
-            "note": "The affected router updates last."
-          }
-        ]
-      }
-    }
-  ],
+  "viz": [],
   "references": [
     {
-      "number": "[1]",
+      "number": "[RFC5715]",
       "text": "Shand, M. and S. Bryant, \"A Framework for Loop-Free Convergence\", RFC 5715, January 2010.",
       "rfc": 5715
     },
     {
-      "number": "[2]",
-      "text": "Francois, P. and O. Bonaventure, \"Avoiding transient loops during the convergence of link-state routing protocols\", IEEE/ACM Transactions on Networking, Vol. 15, No. 6, 2007."
-    },
-    {
-      "number": "[3]",
+      "number": "[RFC5714]",
       "text": "Bryant, S. and S. Previdi, \"IP Fast Reroute Framework\", RFC 5714, January 2010.",
       "rfc": 5714
     },
     {
-      "number": "[4]",
+      "number": "[RFC2328]",
       "text": "Moy, J., \"OSPF Version 2\", RFC 2328, April 1998.",
       "rfc": 2328
+    },
+    {
+      "number": "[RFC4090]",
+      "text": "Pan, P., Swallow, G., and A. Atlas, \"Fast Reroute Extensions to RSVP-TE for LSP Tunnels\", RFC 4090, May 2005.",
+      "rfc": 4090
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-19"
 }

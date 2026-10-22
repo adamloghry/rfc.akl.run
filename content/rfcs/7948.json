@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Bilateral BGP sessions between exchange participants have long been the norm, but the overhead of managing many of them has made route servers popular. This informational document describes operational considerations for running and using route servers at Internet Exchange Points. It complements the route server specification.</p>",
   "plainLanguage": {
-    "summary": "<p>If one post office passes mail between many neighbors, someone must run it well. This is advice for people who run or use that post office at an internet exchange point.</p>"
+    "summary": "<p>An Internet exchange is a place where networks connect with each other. This document explains the machine many exchanges now use to share routing information instead of wiring every participant to every other one, and the care an operator has to take to keep it safe and reliable.</p>"
   },
   "questions": [
     "route server operational practices",
@@ -18,119 +18,188 @@
   "tags": [
     "Routing",
     "BGP",
-    "Operations",
-    "Infrastructure"
+    "Internet Exchange"
   ],
-  "subtitle": "Operational guidance for running and using BGP route servers at Internet Exchange Points.",
+  "subtitle": "How an Internet exchange runs BGP route servers, and what the operator has to watch out for.",
   "tldr": {
-    "problem": "Internet Exchange Points connect hundreds of networks through BGP routing. Traditionally, each network sets up direct BGP sessions with every other network on the exchange (bilateral peering), requiring administrative overhead that scales quadratically with the number of participants.",
-    "mechanism": "Route servers (specialized BGP speakers) redistribute routes received from all clients to all other clients according to policy. Each participant needs only one BGP session to the route server instead of sessions with every other participant, reducing sessions from n*(n-1)/2 to n.",
-    "outcome": "Route servers dramatically simplify IXP operations and enable new participants to gain immediate interconnection with all others, but operators must address operational challenges including path hiding, scaling limits, security vulnerabilities, and layer 2 problems.",
-    "outcomeLabel": "Simplified with challenges"
+    "problem": "At an Internet exchange, each participant that wants an open policy has to peer with every other participant, and the number of sessions grows as the square of the number of routers, with the configuration work to match.",
+    "mechanism": "A route server sits in the middle, takes BGP routes from its clients and redistributes them to the other clients under a policy, leaving the NEXT_HOP attribute untouched so traffic still flows directly between the participants.",
+    "outcome": "Each router then needs one session instead of many, and the sessions fall from n*(n-1)/2 to n, at the cost of new failure modes that the document works through: path hiding, scaling limits, prefix leaks and NEXT_HOP hijacking.",
+    "outcomeLabel": "The trade-off"
   },
   "facts": [
     {
-      "label": "Bilateral peering formula",
-      "value": "n * (n-1) / 2 sessions"
+      "label": "BGP sessions with a full mesh",
+      "value": "n*(n-1)/2"
     },
     {
-      "label": "Route server peering formula",
-      "value": "n sessions"
+      "label": "BGP sessions with a route server",
+      "value": "n"
     },
     {
-      "label": "For 100 IXP participants",
-      "value": "Bilateral: 4,950 sessions; Route server: 100 sessions"
+      "label": "CPU and memory scaling",
+      "value": "O(P * N)"
     },
     {
-      "label": "Recommended route servers per IXP",
-      "value": "Multiple for redundancy"
+      "label": "Network bandwidth scaling",
+      "value": "O(P_tot * N), O(N^2) in the worst case"
+    },
+    {
+      "label": "BGP Community value size",
+      "value": "6 octets or fewer"
     }
   ],
-  "today": "<p>RFC 7948 is an Informational RFC published in September 2016 that represents IETF community consensus on operational best practices. It remains the primary operational reference for Internet Exchange Points deploying or operating BGP route servers.</p>",
+  "today": "<p>RFC 7948 is an Informational document published in September 2016. It has not been obsoleted or updated, and it complements rather than replaces the route server specification in <a href='/rfc7947'>RFC 7947</a>, which defines how the route server itself behaves.</p>",
   "glossary": [
     "bgp",
     "route-server",
     "autonomous-system",
-    "connectionless"
+    "connectionless",
+    "internet-exchange-point",
+    "prefix",
+    "as-path",
+    "next-hop",
+    "bgp-community",
+    "rpsl",
+    "path-hiding",
+    "loc-rib"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "BGP Peering at Internet Exchanges",
-      "content": "<p>An <strong>Internet Exchange Point (IXP)</strong> is a facility where many networks connect to exchange traffic and routing information. Historically, networks at an IXP established <strong>bilateral BGP sessions</strong>: each network pair configures a BGP session between their routers to exchange reachability information about the networks they control. For an exchange with n participants that all want to connect to all others, this requires n*(n-1)/2 sessions—a full mesh of connections.</p><p>The administrative overhead scales quadratically. When a new network joins, existing participants must all configure a BGP session with the newcomer. For a large IXP with hundreds of members, each new participant triggers dozens of configuration changes across the exchange. Route servers eliminate this problem by acting as a <strong>multilateral interconnection hub</strong>. Instead of configuring BGP with every other network, each participant configures a single session to the route server, receiving routes from all others in return. This reduces sessions from n*(n-1)/2 to n and allows new participants to immediately interconnect with all others without configuration changes to existing members.</p>",
-      "plainLanguage": "<p>Bilateral is like everyone calling everyone else. If you have 100 people and want full mesh, you need 5,000 calls. A route server is like a conference call where 100 people call one switchboard number and hear everyone.</p>"
+      "title": "Why Exchanges Use Route Servers",
+      "content": "<p>Internet Exchange Points provide IP data interconnection facilities for their participants, using data link-layer protocols such as Ethernet. The Border Gateway Protocol is normally used to exchange network reachability information over these media.</p><p>Bilateral interconnection means interconnecting routers using individual BGP sessions between each pair of participant routers. If an IXP participant wishes to implement an open interconnection policy, a policy of interconnecting with as many other participants as possible, it has to liaise with each of its intended interconnection partners, and a BGP session is configured on both routers. If every participant interconnects with every other participant, a full mesh of BGP sessions is needed.</p><p>The number of BGP sessions at an exchange has an upper bound of n*(n-1)/2, where n is the number of routers at the exchange. Since many exchanges have large numbers of participating networks, the administrative and operational overhead needed for an open interconnection scales quadratically. New participants need significant initial resourcing before they get value from their connection, and existing participants have to commit ongoing resources to interconnect with each new one.</p><p>Multilateral interconnection is implemented using a route server configured to distribute BGP routes among client routers. A route server redistributes the BGP routes it receives from its clients to other clients according to a prespecified policy, and it can be viewed as similar to an EBGP equivalent of an IBGP route reflector.</p>",
+      "plainLanguage": "<p>If every network at an exchange wants to reach every other network, each pair needs its own BGP session. With twenty routers that is a hundred and ninety sessions, and every new router means a session on every existing router. A route server replaces all of that with one session per router.</p>"
     },
     {
-      "id": "operation",
-      "number": "2",
-      "title": "How Route Servers Work",
-      "content": "<p>A route server is not a router: it receives BGP routes from clients, stores them in a <strong>Loc-RIB (Local Routing Information Base)</strong> for each client, applies configured routing policies, and sends updated routes to clients. Critically, the route server preserves the <strong>NEXT_HOP attribute</strong> unchanged. This attribute specifies the IP address to use to reach the announced destination; leaving it pointing to the announcing client allows direct traffic flow between clients without the route server touching data.</p><p>Route server operators must carefully manage several operational challenges. <strong>Path hiding</strong> occurs when the route server applies conflicting policies to different clients viewing the same destination, causing some clients to receive incomplete routing information. <strong>Scaling</strong> is a super-linear problem: the route server's computational requirements scale approximately as O(P * N), where P is the number of unique paths and N is the number of clients with unique policies. Network bandwidth requirements scale even worse at O(N^2) in the worst case. <strong>Prefix leakage</strong> happens when a misconfigured client announces routes it should not, potentially spreading to all other clients and beyond. Route server operators must implement inbound prefix filtering and per-client limits to prevent damage.</p>",
-      "plainLanguage": "<p>A route server listens to everyone, remembers who said what, and tells everyone else. But it has to be careful about what it tells each person, it can get overwhelmed if there are too many people, and if one person says the wrong thing, it might spread to everyone.</p>"
-    },
-    {
-      "id": "section-1",
+      "id": "architecture",
       "number": "3",
-      "title": "Operational and Security Challenges",
-      "content": "<p><strong>Scaling issues</strong> require careful attention. For large IXPs, operators can deploy multiple route servers and selectively split prefixes across them (destination splitting) to reduce each server's load. They can also merge clients with identical routing policies into a single view or use view decomposition to track delta differences from a master view, reducing memory requirements.</p><p><strong>Layer 2 reachability problems</strong> specific to route servers can cause serious outages. If two IXP participants can reach the route server but cannot reach each other due to a switch forwarding bug, traffic between them will fail, but only for traffic destined to each other—a silent failure mode that bilateral peering would not produce. Bidirectional Forwarding Detection (BFD) can partially mitigate this, but currently offers no automatic session configuration between route server clients.</p><p><strong>BGP NEXT_HOP hijacking</strong> is a critical security risk. A route server client can announce BGP routes with NEXT_HOP set to a different IXP participant's address, redirecting traffic through that participant or causing denial-of-service. Route server operators SHOULD validate that announced NEXT_HOP values match the announcing client's interface address, and SHOULD drop routes where NEXT_HOP points to a different AS, with exceptions only for traffic engineering within the same AS. Route servers should also disable AS_PATH consistency checks on clients (since the route server does not prepend AS numbers) and use robust BGP configuration following <a href='/rfc7454'>RFC 7454</a> BGP operations best practices.</p>",
-      "plainLanguage": "<p>Too many routes crash the server. Broken network switches can cause strange failures. Bad clients can trick the server into redirecting someone else's traffic, like address spoofing a package. Operators need to prevent these.</p>"
+      "title": "How a Route Server Works",
+      "content": "<p>The route server preserves the BGP NEXT_HOP attribute from all the routes it receives and passes them on with an unchanged NEXT_HOP to its clients, according to its configured routing policy. Using this method, an IXP participant router can receive an aggregated list of BGP routes from all the other route server clients using a single BGP session to the route server, instead of depending on BGP sessions with every router at the exchange. This reduces the overall number of BGP sessions at an exchange from n*(n-1)/2 to n, where n is the number of routers at the exchange.</p><p>Although a route server uses BGP to exchange reachability information with each of its clients, it does not forward traffic itself and is therefore not a router. In practice this allows dense interconnection between participants with low administrative overhead and significantly simpler and smaller router configurations. New participants benefit from immediate and extensive interconnection, and existing route server participants receive reachability information from these new participants without necessarily having to modify their configurations.</p><p>Multilateral and bilateral interconnections are not exclusive, and it is not unusual to have both sorts of session configured in parallel at an IXP. That configuration leads to additional paths being available to the BGP Decision Process, which calculates a best path as normal.</p>",
+      "plainLanguage": "<p>The route server passes routes on without changing where they point. It never carries the traffic itself, so a call or a connection still goes directly from one participant to another. The route server only decides which routes each client is allowed to hear about.</p>"
     },
     {
-      "id": "section-2",
-      "number": "4",
-      "title": "Routing Policy and Redundancy",
-      "content": "<p>Route servers support multiple mechanisms for clients to express routing policies. <strong>BGP Communities</strong> allow clients to tag routes with community values that the route server uses to decide which clients receive which routes. However, standard and extended communities are limited to 6 octets total, forcing route server operators to plan carefully for compatibility with 4-octet AS numbers. Alternatively, operators can use <strong>Internet Routing Registries</strong> (IRRDBs) to look up client policies in standards-based databases, or build their own <strong>client-accessible policy database</strong> allowing clients to specify routing policies without modifying the route server configuration.</p><p><strong>Redundancy</strong> is essential for reliability. The RFC recommends deploying multiple route servers on each Layer 2 domain at an IXP, with identical configuration so that all clients receive identical route information from each server. If one route server fails, clients continue receiving routes from others. Operators need not use identical BGP implementations or operating systems across servers, but must ensure routing views remain synchronized.</p>",
-      "plainLanguage": "<p>Route servers can use labels on routes to decide who gets what. Or they can look up policies in a shared database. They need backups in case one fails, so traffic keeps flowing.</p>"
+      "id": "design",
+      "number": "4.1",
+      "title": "Path Hiding and Per-Client Policies",
+      "content": "<p>Path hiding is the process whereby a route server masks individual paths by applying conflicting routing policies to its Loc-RIB. When this happens, route server clients receive incomplete information from the route server about network reachability.</p><p>Several approaches exist to mitigate the effect of path hiding. However, the only method that does not require explicit support from the route server client is for the route server itself to maintain an individual Loc-RIB for each client that is the subject of conflicting routing policies.</p><p>The price of that approach is computing resources. Because the BGP Decision Process has to be applied to all Loc-RIBs deployed on the route server, both CPU and memory requirements scale approximately according to O(P * N), where P is the total number of unique paths received by the route server and N is the number of clients that require a unique Loc-RIB. Because this is a super-linear relationship, large route servers may benefit from deploying per-client Loc-RIBs only where they are required.</p>",
+      "plainLanguage": "<p>If two clients get different sets of routes, one of them cannot see paths that exist. The fix is to give each client its own routing table on the route server, and that fix costs processor time and memory, so it is worth doing only for the clients that need it.</p>"
     },
     {
-      "id": "section-3",
+      "id": "performance",
+      "number": "4.2",
+      "title": "Scaling: What Becomes Expensive",
+      "content": "<p>Regardless of whether any Loc-RIB optimization technique is implemented, the route server's theoretical upper-bound network bandwidth requirements scale according to O(P_tot * N), where P_tot is the total number of unique paths received by the route server and N is the total number of route server clients. If the average number of unique paths received per client, P_avg, stays roughly constant as the number of connected clients increases, then the total number of prefixes equals the average number of prefixes multiplied by the number of clients, which is written as P_tot = P_avg * N. Assuming the worst case, where each prefix is associated with a different set of BGP path attributes and so must be transmitted individually, the bandwidth scaling function becomes O((P_avg * N) * N), or O(N^2). This quadratic upper bound indicates that the route server model may not scale well for larger numbers of clients.</p><p>In practice, most prefixes are associated with a limited number of BGP path attribute sets, which allows more efficient transmission than the theoretical analysis suggests. P_tot will increase monotonically with the number of clients but has an upper limit of the size of the full default-free routing table of the network in which the IXP is located. Observations from production route servers show that most clients generally avoid using custom routing policies, and so the route server may not need per-client Loc-RIBs at all. These practical bounds reduce the theoretical worst case to the point where route server deployments are manageable even on larger IXPs.</p><p>The scaling analysis points to three practical challenges: route processor CPU overhead for BGP Decision Process calculations, memory for handling many different BGP path entries, and network bandwidth for distributing routes to each client. Three techniques are described for the first two.</p><p><strong>View merging and decomposition</strong> optimises memory and CPU where multiple clients are subject to exactly the same routing policies: several Loc-RIB views can be merged into one. If the operator has prior knowledge of interconnection relationships, it can configure separate Loc-RIBs only for clients with unique policies, which requires each client to share its policies, in an internal provisioning database or in an external data store such as an Internet Routing Registry Database. Alternatively the implementation can create virtual Loc-RIBs from a single in-memory master Loc-RIB, with delta differences for each prefix subject to different policies, which is more fine-grained but needs a more complex in-memory structure. Whatever method is chosen, pathological edge cases can scale no better than fully non-optimized per-client Loc-RIBs.</p><p><strong>Destination splitting</strong> has clients connect to multiple route servers and send non-overlapping sets of prefixes to each. Each route server computes the best path for its own set, so the quadratic requirement operates on smaller sets. In practice the operator would need every client to send a full set of routes to each route server and then filter selectively, using BGP Outbound Route Filtering or inbound prefix filters configured on the client sessions.</p><p><strong>NEXT_HOP resolution</strong> can be simplified. Route servers are usually deployed at IXPs where all connected routers are on the same Layer 2 broadcast domain, so recursive resolution of the NEXT_HOP attribute is generally not required and can be replaced by a simple check that the NEXT_HOP value for each received route is a network address in the IXP LAN's IP address range.</p>",
+      "plainLanguage": "<p>The model gets expensive as more clients join, and the worst case is traffic growing with the square of the client count. In practice it is smaller, because most clients use the same rules and most prefixes share the same path attributes. Three techniques exist for the processor and memory side: share one table between clients with identical rules, split prefixes across several route servers, and skip the full next-hop lookup.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "4.3",
+      "title": "Leaks, Redundancy and Next-Hop Hijacking",
+      "content": "<p><strong>Prefix leakage mitigation.</strong> Prefix leakage occurs when a BGP client unintentionally distributes BGP routes to neighbouring BGP routers. Leakage to a route server can cause serious connectivity problems at an IXP if each client is configured to accept all routes from the route server. Because of the potential for collateral damage, route server operators are recommended to deploy prefix leakage mitigation measures to prevent unintentional announcements or else limit the scale of any such leak. Per-client inbound prefix limits can restrict the damage in many cases, though they are not foolproof; per-client inbound prefix filtering is a more deterministic and usually more reliable means, but requires more administrative resources to maintain. Where per-client filtering is implemented, the operator is also recommended to build in mechanisms that automatically compare the Adj-RIB-In received from each client with the inbound prefix lists configured for those clients. Many network operators do not carefully manage their published routing policies, and it is not uncommon to see significant variation between the two sets of prefixes.</p><p><strong>Redundancy.</strong> Because the purpose of an IXP route server is to provide a reliable reachability brokerage service, it is recommended that operators provision multiple route servers on each shared Layer 2 domain. There is no requirement to use the same implementation or operating system for each, but where more than one server is provisioned on the same shared Layer 2 domain, each should be configured equivalently so that the path reachability information from each system is identical.</p><p><strong>AS_PATH consistency check.</strong> BGP requires every speaker that advertises a route to an external speaker to prepend its own AS number as the last element of the AS_PATH, so the leftmost AS in an AS_PATH should equal the AS number of the speaker that sent the route. Because route servers are not supposed to modify the AS_PATH, a consistency check on the AS_PATH of a route received by a route server client would normally fail, and clients are recommended to disable that check towards the route server.</p><p><strong>Export routing policies.</strong> A route server export policy affects prefixes sent from the route server to a client. Prefixes sent to the route server are commonly tagged with standard BGP Communities or Extended Communities values agreed between the operator and all clients, and the routes may then be propagated to all other clients, a subset, or none, which lets clients instruct the operator to implement per-client export policies. Because both standard and Extended Communities values are restricted to 6 octets or fewer, it is not possible for both the global and local administrator fields to fit a 4-octet AS number, so the operator should take care that the communities mechanism used is compatible with 4-octet AS numbers. Alternatively, Internet Routing Registry databases can be used to construct per-client policies, with RPSL providing a grammar for describing interconnection relationships and tools existing to translate it into route server configurations. An operator who wants neither may run its own policy database, which should allow a client to update its routing policy and to specify whether it wishes to exchange all its prefixes with any other client.</p><p><strong>Layer 2 reachability.</strong> Ethernet switch forwarding bugs have occasionally been observed to cause non-transitive reachability: if two participants can reach the route server but cannot reach each other, traffic between them may be dropped until the Layer 2 forwarding problem is resolved. This does not tend to happen with bilateral interconnection, where the routing control path between two hosts is usually the same as the data path. Bidirectional Forwarding Detection can partly mitigate the problem, but there is currently no protocol to configure BFD sessions automatically between route server clients, and if two clients did run BFD between each other and detected a non-transitive loss of reachability, each would mark the other's prefixes as unreachable via the route server's path, which could cause sub-optimal routing or complete connectivity loss if there were no alternative paths.</p><p><strong>NEXT_HOP hijacking.</strong> The rule that lets an external BGP speaker change the NEXT_HOP address of a received route to a different address on the same subnet is what allows route servers to operate on a shared Layer 2 IXP network, and it can be abused to redirect traffic for a client's prefixes to another IXP participant's router. If AS1 and AS2 both announce routes for AS99, AS1 could set the NEXT_HOP address for AS99's routes to the address of AS2's router, diverting traffic for AS99 via AS2 and overriding the routing policies of AS99 and AS2. Worse, if the operator does not use inbound prefix filtering, AS1 could announce any arbitrary prefix with the NEXT_HOP address of any other participant, which could be used as a denial-of-service mechanism. The problem is not specific to route servers and can also be implemented with bilateral BGP sessions, but the potential damage is amplified because a single BGP session can affect many networks at once. Because clients cannot easily implement next-hop policy checks against route server sessions, the operator should check that the NEXT_HOP attribute for routes received from a client matches that client's interface address, and SHOULD drop the route where the addresses differ and the announcing client is in a different AS from the client that uses the next-hop address. Permitting next-hop rewriting within the same AS lets an organisation with several connections into an IXP direct traffic off the IXP infrastructure through any of them.</p>",
+      "plainLanguage": "<p>The operator has a long checklist. Filter what each client is allowed to announce, so one mistake cannot black out the whole exchange. Run more than one route server, configured to agree. Turn off the path check that route servers would otherwise fail. Set the routing rules with communities, with the routing registries, or with a database of your own. Watch the switching fabric, because participants that can reach the route server but not each other will lose traffic between them. And check the next-hop address on every route, because otherwise one participant can point another participant's traffic at a third router.</p>"
+    },
+    {
+      "id": "security-considerations",
       "number": "5",
-      "title": "Best Practices for Route Server Operations",
-      "content": "<p>Successful route server deployment requires implementing multiple protective measures. Inbound <strong>prefix filtering</strong> prevents leakage of unauthorized routes, either through explicit per-client prefix limits (simpler but less precise) or detailed filter lists (more reliable but resource-intensive). Operators deploying detailed filters should build automated systems to compare announced prefixes against configured filter lists, alerting operators to discrepancies between published policies and actual behavior.</p><p>Route servers should implement <strong>automatic monitoring</strong> to detect when policies and actual routing information diverge. Many network operators do not carefully maintain published policies, creating security risks. Comparing the Adj-RIB-In (what the route server receives from each client) against configured prefix lists can surface policy violations early. Additionally, route servers should operate in compliance with <a href='/rfc7454'>RFC 7454</a>'s BGP security recommendations for hardening, logging, and monitoring, adjusted as needed for the route server context. The combination of technical controls (prefix filtering, NEXT_HOP validation), redundancy (multiple servers), monitoring (policy compliance checks), and standards compliance (RFC 7454) provides a robust operational foundation for reliable IXP interconnection.</p>",
-      "plainLanguage": "<p>Good operations mean checking what clients announce against what they said they would announce, having backup servers, following security best practices, and watching for trouble.</p>"
+      "title": "Security Considerations",
+      "content": "<p>On route server installations that do not employ path-hiding mitigation techniques, the path-hiding problem could be used by an IXP participant to prevent the route server from sending any BGP routes for a particular prefix to other clients, even where a valid path existed via another client. That is, one participant could silence a destination for everyone else.</p><p>If the route server operator does not implement prefix leakage mitigation, it is trivial for clients to carry out denial-of-service attacks against arbitrary Internet networks by leaking BGP routes to a route server. Route server installations should be secured against BGP NEXT_HOP hijacking.</p>",
+      "plainLanguage": "<p>Two of the problems are useful to an attacker. One client can hide a destination from everyone else, and one client can flood the route server with routes for someone else's address space. Filtering what clients announce and checking the next-hop address close both of those.</p>"
     }
   ],
   "viz": [
     {
       "type": "compare-table",
-      "anchor": "operation",
+      "anchor": "motivation",
       "position": "after",
-      "caption": "Bilateral vs. Multilateral Interconnection Scaling",
+      "caption": "BILATERAL SESSIONS AGAINST A ROUTE SERVER (RFC 7948, SECTIONS 2 AND 3)",
       "data": {
         "columns": [
-          "Metric",
-          "Bilateral (Full Mesh)",
-          "Multilateral (Route Server)"
+          "Aspect",
+          "Bilateral sessions",
+          "Route server"
         ],
         "rows": [
           {
             "cells": [
-              "Number of IXP participants",
-              "n",
+              "BGP sessions at the exchange",
+              "n*(n-1)/2",
               "n"
             ]
           },
           {
             "cells": [
-              "BGP sessions required",
-              "n * (n-1) / 2",
-              "n"
+              "What each router needs",
+              "A session with every other router",
+              "One session to the route server"
             ]
           },
           {
             "cells": [
-              "Configuration per new member",
-              "Requires changes to all n-1 existing members",
-              "Only the new member configures one session"
+              "A new participant",
+              "Every existing participant adds a session",
+              "Existing clients receive its routes without changing their configuration"
             ]
           },
           {
             "cells": [
-              "For 100 participants",
-              "4,950 sessions",
-              "100 sessions"
-            ],
-            "self": true
+              "Who carries the traffic",
+              "The participants' routers",
+              "The participants' routers; the route server only redistributes routes"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "WHERE THE ROUTE SERVER MODEL GETS EXPENSIVE (RFC 7948, SECTION 4.2)",
+      "data": {
+        "items": [
+          {
+            "title": "CPU and memory",
+            "text": "Both scale about O(P * N), where P is the unique paths received and N the clients needing their own Loc-RIB."
+          },
+          {
+            "title": "Network bandwidth",
+            "text": "Scales O(P_tot * N), and in the worst case O(N^2), so the model may not scale well for larger numbers of clients."
+          },
+          {
+            "title": "Three levers",
+            "text": "Merging views for clients with the same rules, splitting prefixes across several route servers, and simplifying the NEXT_HOP check."
+          },
+          {
+            "title": "What keeps it manageable",
+            "text": "Most prefixes share a limited number of path attribute sets, and most clients avoid custom routing policies."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "operational-considerations",
+      "position": "after",
+      "caption": "THE OPERATOR'S CHECKLIST (RFC 7948, SECTIONS 4.3 TO 4.8)",
+      "data": {
+        "items": [
+          {
+            "title": "Filter what clients announce",
+            "text": "Per-client inbound prefix filtering, checked against what each client actually sends."
+          },
+          {
+            "title": "Run more than one route server",
+            "text": "Multiple route servers on each shared Layer 2 domain, configured so their paths are identical."
+          },
+          {
+            "title": "Disable the AS_PATH check",
+            "text": "Clients should turn off the AS_PATH consistency check towards the route server."
+          },
+          {
+            "title": "Check the NEXT_HOP address",
+            "text": "The operator should verify the NEXT_HOP matches the client's interface address, and drop the route when it does not."
           }
         ]
       }
@@ -144,7 +213,7 @@
     },
     {
       "number": "[RFC4271]",
-      "text": "Rekhter, Y., Li, T., and S. Hares (Eds.), \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
       "rfc": 4271
     },
     {
@@ -153,9 +222,14 @@
       "rfc": 4456
     },
     {
-      "number": "[RFC7454]",
-      "text": "Durand, J., Pepelnjak, I., and G. Doering, \"BGP Operations and Security\", BCP 194, RFC 7454, February 2015.",
-      "rfc": 7454
+      "number": "[RFC1997]",
+      "text": "Chandra, R., Traina, P., and T. Li, \"BGP Communities Attribute\", RFC 1997, August 1996.",
+      "rfc": 1997
+    },
+    {
+      "number": "[RFC2622]",
+      "text": "Alaettinoglu, C., Villamizar, C., Gerich, E., Kessens, D., Meyer, D., Bates, T., Karrenberg, D., and M. Terpstra, \"Routing Policy Specification Language (RPSL)\", RFC 2622, June 1999.",
+      "rfc": 2622
     },
     {
       "number": "[RFC5881]",
@@ -163,18 +237,22 @@
       "rfc": 5881
     },
     {
-      "number": "[RFC2622]",
-      "text": "Alaettinoglu, C. et al., \"Routing Policy Specification Language (RPSL)\", RFC 2622, June 1999.",
-      "rfc": 2622
+      "number": "[RFC7454]",
+      "text": "Durand, J., Pepelnjak, I., and G. Doering, \"BGP Operations and Security\", BCP 194, RFC 7454, February 2015.",
+      "rfc": 7454
+    },
+    {
+      "number": "[RS-ARCH]",
+      "text": "Govindan, R., Alaettinoglu, C., Varadhan, K., and D. Estrin, \"A Route Server Architecture for Inter-Domain Routing\", 1995."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

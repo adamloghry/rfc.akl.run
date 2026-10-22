@@ -5,50 +5,55 @@
   "categoryReviewed": false,
   "summary": "<p>Serves as a guide to implementing a Transport Services system, which provides the protocol-independent Transport Services API based on an asynchronous, event-driven pattern. It is informational.</p>",
   "plainLanguage": {
-    "summary": "<p>This is a how-to for builders of the system that picks the right delivery method for an app.</p>"
+    "summary": "<p>Transport Services is an application programming interface that lets a program say what it needs from the network, such as low latency or a reliable stream, without naming the protocol. Behind that interface sits a system that works out which protocol, which network path and which address to use. This RFC explains how to build that system, step by step, with worked examples.</p>"
   },
   "questions": [
     "implement transport services",
     "taps implementation guide",
     "transport services system",
     "how to select protocols for connection",
-    "candidate racing algorithm"
+    "candidate racing algorithm",
+    "what are the three objects in the transport services api"
   ],
   "tags": [
     "Transport",
     "API",
     "Network protocols"
   ],
-  "subtitle": "Guide to implementing a system that selects and manages transport protocols for applications.",
+  "subtitle": "How to build a system that picks and manages the transport protocol for an application.",
   "tldr": {
-    "problem": "Applications need to use diverse transport protocols flexibly, but building systems that select protocols and paths intelligently is complex and inconsistent across platforms.",
-    "mechanism": "A Transport Services implementation provides the underlying system that takes application requirements and automatically selects and manages the best transport protocol stack and network path for communication.",
-    "outcome": "Applications can focus on their functionality while the Transport Services system handles protocol selection, connection establishment, and multipath management. This guide helps implementers build these systems correctly.",
+    "problem": "Applications want to use transport protocols flexibly, but building systems that select protocols and paths well is complicated, and the results differ from one platform to the next.",
+    "mechanism": "The document walks through the whole implementation: the objects an application sees, the tree of candidate paths, protocols and endpoints, the three ways of racing them, message framing, connection management and cached state.",
+    "outcome": "Implementers get a blueprint with worked examples and the trade-offs spelled out. The guide is advisory, not prescriptive: an implementation is free to take any form as long as it honours the API.",
     "outcomeLabel": "Implementation blueprint"
   },
   "facts": [
     {
-      "label": "Two core phases",
-      "value": "Candidate Gathering and Candidate Racing"
+      "label": "Connection objects",
+      "value": "3: Preconnection, Connection, Listener"
+    },
+    {
+      "label": "Establishment phases",
+      "value": "2: Candidate Gathering and Candidate Racing"
     },
     {
       "label": "Racing strategies",
-      "value": "Simultaneous, Staggered, Failover"
+      "value": "3: simultaneous, staggered, failover"
     },
     {
       "label": "Branch types",
-      "value": "Derived Endpoints, Network Paths, Protocol Options"
+      "value": "3: derived endpoints, network paths, protocol options"
     },
     {
-      "label": "Cache types",
-      "value": "Protocol State and Performance Metrics"
+      "label": "Recommended branching order",
+      "value": "Network paths, then protocol options, then derived endpoints"
     },
     {
-      "label": "Status",
-      "value": "Informational RFC"
+      "label": "Property processing order",
+      "value": "Prohibit, Require, Prefer, Avoid"
     }
   ],
-  "today": "<p>RFC 9623 is an Informational RFC published in January 2025. It provides the implementation guide for Transport Services systems, complementing RFC 9621 (architecture) and RFC 9622 (API). Multiple implementations of Transport Services are in development.</p>",
+  "today": "<p>RFC 9623 is an Informational RFC published in January 2025 and has not been obsoleted. It is the implementation guide for Transport Services, complementing the architecture in <a href='/rfc9621'>RFC 9621</a> and the API in <a href='/rfc9622'>RFC 9622</a>.</p>",
   "glossary": [
     "zero-rtt",
     "session-key",
@@ -59,68 +64,72 @@
     {
       "id": "introduction",
       "number": "1",
-      "title": "Transport Services Implementation Overview",
-      "content": "<p>A <strong>Transport Services System</strong> implements the Transport Services API, which allows applications to request transport communication using abstract properties rather than choosing specific protocols directly. The implementation's job is to translate these abstract requirements into decisions about which protocols to use, which network paths to attempt, and how to establish and manage connections.</p><p>The system must handle three layers of properties: application preferences (stated via the API), dynamic system policy (based on current network state and OS policy), and default implementation policy. These are combined to determine which protocols and paths are eligible for a connection.</p><p>This implementation guide provides practical recommendations for how to structure a Transport Services System, including how to gather candidate protocols and paths, how to race multiple connection attempts, and how to manage established connections.</p>",
-      "plainLanguage": "<p>A Transport Services implementation is the system that makes smart choices about how to send data. It checks what the app needs, what the network can do, and what policies are in place, then picks the best way to send the data.</p>"
+      "title": "The Objects an Application Sees",
+      "content": "<p>The Transport Services Architecture defines a system that lets applications flexibly use transport networking protocols, and the API that such a system exposes to applications is defined separately. That API is designed to be generic across multiple transport protocols and sets of protocol features. This document is a guide to implementing a system that provides the API. It offers suggestions to developers but is not prescriptive: implementations are free to take any desired form as long as the API specification is honoured. The job of such an implementation is to turn the requests of an application into decisions on how to establish connections and how to transfer data over them once established.</p><p>Three objects are exposed to applications. The <strong>Preconnection</strong> is the bundle of Properties that describes the application's constraints on, and preferences for, the transport. The <strong>Connection</strong> is the basic object that represents a flow of data as Messages in either direction between the Local and Remote Endpoints. The <strong>Listener</strong> is a passive waiting object that delivers new Connections.</p><p>Preconnection objects should be implemented as bundles of Properties that the application can both read and write. A Preconnection influences a Connection at one point in time only: when the Connection is created. Once a Preconnection has been used to create an outbound Connection or a Listener, the implementation should ensure that the copy of the Properties held by the Connection or Listener cannot be mutated by the application changing the original Preconnection object, which may involve a deep copy.</p><p>During establishment the Connection is not necessarily bound to a protocol instance, because several candidate protocol stacks may be raced. Once established, the implementation maps actions and events onto the details of the chosen protocol stack: the same Connection object may end up representing a single transport protocol instance such as a TCP connection, a TLS session over TCP, a UDP flow with fully specified local and remote endpoint identifiers, a DTLS session, an SCTP stream, a QUIC stream or an HTTP/2 stream. Once Initiate has been called, the selection properties and endpoint information of the created Connection are immutable.</p><p>Connection establishment is only a local operation for connectionless protocols, which serves to simplify the local send and receive functions and to filter traffic for the specified addresses and ports.</p>",
+      "plainLanguage": "<p>The application hands over a description of what it wants and gets back a connection object it can send and receive on. What sits behind that object, a TCP connection or a QUIC session, is the system's business and may not even be decided until the connection is being set up.</p>"
     },
     {
-      "id": "architecture",
-      "number": "2",
-      "title": "Connection Objects and Establishment",
-      "content": "<p>Transport Services exposes three main objects to applications: the <strong>Preconnection</strong> (a bundle of properties describing what the connection should do), the <strong>Connection</strong> (the actual communication channel), and the <strong>Listener</strong> (for accepting incoming connections).</p><p>Connection establishment is divided into two phases: <strong>Candidate Gathering</strong> and <strong>Candidate Racing</strong>. During gathering, the implementation identifies which network paths, protocols, and endpoints are available and eligible based on application requirements and system policy. During racing, the implementation attempts multiple candidates and uses the first one that succeeds.</p><p>To manage complex scenarios with multiple paths (Wi-Fi and Cellular), multiple resolved addresses (IPv4 and IPv6), and multiple protocol options (TCP vs QUIC), the implementation can conceptually structure candidates as a tree where each leaf node represents a complete, specific connection attempt.</p>",
-      "plainLanguage": "<p>Before sending data, the system prepares a plan with three parts: list everything available (Wi-Fi or cellular, different addresses), try multiple approaches (TCP or QUIC), and use whichever one works first.</p>"
+      "id": "design",
+      "number": "4.1",
+      "title": "Building the Tree of Candidates",
+      "content": "<p>Establishment begins when the application calls Initiate, and is complete once at least one protocol stack has finished any setup it needs to carry the application's data. It divides into two top-level steps: Candidate Gathering, to identify the paths, protocols and endpoints to use, and Candidate Racing, in which the necessary protocol handshakes are conducted so the system can select which set to use.</p><p>Before that, preestablishment lets the application specify one or more endpoints along with protocol preferences and constraints through Selection Properties and, if desired, Connection Properties. The implementation stores these in the Preconnection object and uses the API's default values for any Selection Property the application did not supply. Two failures should be detected at this point rather than later: a request for Properties that no available protocol can satisfy, and a request for Properties that conflict with each other, such as prohibiting reliability and then requiring per-message reliability. Failing early avoids allocating resources that are not needed. The implementation is also responsible for reconciling application preferences, dynamic system policy compiled from information about available interfaces, supported protocols and current connections, and default implementation policy; a protocol or path that violates any of those is ineligible for use.</p><p>For illustration, the document structures the candidates for racing as a tree. Each leaf node is a single coherent attempt with an endpoint, a network path and a set of protocols that can negotiate and send data. Each non-leaf node is an attempt that is underspecified or has several options: a connection to a hostname and port is underspecified because it needs a resolved IP address, so the node for the hostname is a parent with a child for each address.</p><p>There are three types of branching, and any parent node must use only one. <strong>Derived endpoints</strong> come from resolving a name: the implementation should send all applicable DNS queries, commonly both A and IPv4 and AAAA and IPv6 records, and can include SRV, SVCB and HTTPS records, and the ordering and racing of these addresses should follow the Happy Eyeballs recommendations. <strong>Network paths</strong> are the different ways out of the client, such as Wi-Fi and cellular, ranked by preference, policy and performance. <strong>Protocol options</strong> are different protocol compositions, such as an HTTP proxy, a SOCKS proxy or no proxy, or QUIC over UDP on one branch against HTTP/2 over TLS over TCP on the other, which lets a client survive a protocol that is not working on a server or network.</p><p>The recommended order of branching is network paths first, then protocol options, then derived endpoints. Paths come first because results across interfaces are likely unrelated to one another: endpoint resolution may return different results and the supported protocols may differ across interfaces. Protocol options come next because whether a set of protocols can connect usually does not depend on the specific IP address, and because adding a proxy changes the endpoint identifier itself. Derived endpoints are last and may have several layers, such as DNS service resolution followed by hostname resolution.</p>",
+      "plainLanguage": "<p>Before connecting, the system builds a menu of everything it could try: which interface to leave by, which protocol to speak, and which address to aim at. The document fixes an order for that menu, because the order changes the answers: resolving a name can give different results on different networks, so the network choice has to come first.</p>"
     },
     {
       "id": "operation",
-      "number": "3",
-      "title": "Candidate Gathering and Racing Strategies",
-      "content": "<p><strong>Candidate Gathering</strong> involves discovering which paths, protocols, and endpoints are available. Local endpoint gathering discovers all usable local network interfaces and addresses. Remote endpoint gathering resolves hostnames to IP addresses and may involve services like ICE (Interactive Connectivity Establishment) for peer-to-peer scenarios. Branches in the candidate tree include derived endpoints (DNS results), network paths (different interfaces), and protocol options (different protocol stacks).</p><p>During <strong>Candidate Racing</strong>, implementations attempt multiple candidates and select the first to succeed. The racing strategy can be simultaneous (start all at once, wasteful), staggered (start after delays, balanced), or failover (only start if previous fails, conservative). Staggered racing is recommended for most use cases. The timing between attempts should account for expected handshake latency and path preparation time.</p><p>Implementations should maintain performance caches that track which protocols and paths work well on specific networks, allowing future connections to prioritize historically successful options.</p>",
-      "plainLanguage": "<p>The system makes a list of ways to connect (gather), then tries them one by one with small delays between tries (race). If Wi-Fi is faster to set up, try it first; if it fails, try Cellular. Remember which worked best for next time.</p>"
+      "number": "4.3",
+      "title": "Gathering and Racing the Candidates",
+      "content": "<p>Candidate gathering identifies which paths, protocols and endpoints may be used, as determined by the application's requirements, prohibitions, preferences and avoidances. Both local and remote endpoint candidates must be discovered. In the simple case, gathering local endpoints enumerates the local interfaces and protocols and allocates ephemeral source ports, so a host with Wi-Fi and Ethernet and both address families may have four candidates. If NAT traversal is required, gathering local endpoints becomes broadly equivalent to the ICE candidate gathering phase, with server-reflexive endpoints determined through a STUN server and relayed endpoints through a TURN server. Resolving the remote endpoint is not a local operation: it involves a directory service and may involve a rendezvous server and the exchange of peer addresses, which can expose some or all of the candidate local endpoints to the remote endpoint.</p><p>Candidate racing is the dynamic part: connecting a single leaf node of the tree with as little delay and as few unnecessary attempts as possible. Three approaches are described. <strong>Simultaneous</strong> racing starts several alternate branches without waiting for any one to make progress; it should be avoided, because it consumes extra network resources and establishes state that might not be used. <strong>Staggered</strong> racing starts the first child node immediately, the next after a delay, and so on, until all children have been started or one succeeds; attempts can proceed in parallel, and an earlier attempt should not be terminated when a secondary one starts. Staggered racing between IP addresses should follow the Happy Eyeballs algorithm. The delay before starting a given child ought to be based on how long the previously started child is expected to take, and implementations should define upper and lower bounds for delay times, which may differ by branch type. <strong>Failover</strong> waits for one child to fail before starting the next, and suits a strong preference for one branch over another, such as a preferred proxy against one that bypasses it.</p><p>Establishment completes when one leaf node has completed negotiation or when all nodes have failed. The first leaf node to complete is used by the application, signalled with the Ready event. Successes and failures are reported up towards the root: if a leaf fails, it reports to its parent, which fails if it has no other children, and so on. Once a leaf has succeeded, other attempts should be made ineligible and no new attempts should be started, since the connection as a whole is established. An implementation could let some handshakes finish to gather metrics for future connections, but keeping additional connections is generally not recommended.</p><p>When a leaf is considered connected depends on the protocol. For a protocol with a clear handshake such as TCP, the obvious choice is the three-way handshake. For a connectionless protocol such as UDP, the node may be considered connected the moment a route is known. For a stack with several handshakes, such as TLS over TCP, the implementation can declare the node connected when the TCP handshake completes or wait for TLS as well; declaring it earlier reduces the load from attempts that would be abandoned, but waiting avoids the case where TCP succeeds quickly and TLS then fails, and the implementation should not generate a Ready event until the TLS handshake is complete. If all leaves fail, the system reports an EstablishmentError, as it also does when it finds no usable candidates to race.</p>",
+      "plainLanguage": "<p>Racing means starting several connection attempts and keeping the first that works. Starting them all at once wastes network resources, so the usual approach is staggered: try the best option, and if it has not succeeded after a sensible delay, try the next. The delay should reflect how long the first attempt was expected to take, which is why the system keeps measurements of past round-trip times.</p>"
     },
     {
       "id": "data-transfer",
-      "number": "4",
-      "title": "Sending, Receiving, and Message Framing",
-      "content": "<p>Once a connection is established, applications send and receive messages. The top-level protocol in the Protocol Stack determines what a <strong>Message</strong> represents: for datagram protocols like UDP, each message is a single packet; for byte-stream protocols like TCP, a complete stream is one message; for framing protocols, a message is a frame.</p><p><strong>Message Properties</strong> allow applications to attach metadata to individual messages, such as lifetime limits, reliability requirements, ordering preferences, and whether they are safely replayable. These properties influence how the Transport Services System and underlying protocols handle each message.</p><p><strong>Message Framers</strong> are optional protocol layers that applications or the implementation can add to define custom message formatting. A Framer can handle encoding/decoding messages, implementing protocol handshakes (like STARTTLS), or performing custom message parsing. Framers participate in sender-side encoding and receiver-side parsing, and can transition to passthrough mode once setup is complete.</p>",
-      "plainLanguage": "<p>The system can send messages with special instructions attached: how important they are, whether they need to arrive in order, or how long they can wait. Custom message formatters can be added to handle special message types or protocols.</p>"
+      "number": "5",
+      "title": "Sending and Receiving Data",
+      "content": "<p>The mapping for sending a message depends on the top-level protocol in the established stack. For protocols that deal in discrete packets such as UDP, each Message corresponds to a single datagram. For byte-stream protocols such as TCP, the only delineation the protocol provides is the end of the stream in a given direction, so each Message corresponds to the entire stream of bytes in that direction, and such Messages may be long and sent in multiple parts. For protocols that provide framing, such as length-value protocols or those using delimiters like HTTP/1.1, each Message corresponds to a single frame, which may be sent as a complete Message or in multiple parts.</p><p>Messages consist of bytes passed in the messageData parameter for an application layer, and Message objects can also carry Message Properties passed through the messageContext parameter. When these are protocol-specific Properties they can include metadata that exists separately from a byte encoding, such as name-value pairs like HTTP header fields, so a Message can be empty in messageData and still carry data in the context that the protocol stack interprets.</p><p>Several Properties shape sending. <strong>msgLifetime</strong> is implemented by removing the Message from the queue of pending Messages once the lifetime has expired; a queue inside the implementation can always support this, but once a Message has gone into the send buffer of a protocol only some protocols can remove it, since bytes cannot be removed from a TCP send buffer while data can be removed from an SCTP send buffer using the partial reliability extension. <strong>msgPriority</strong> can be implemented by reordering pending Messages or by giving relative priority hints to protocols that support them. <strong>msgOrdered</strong>, when false, disables the in-order delivery requirement for protocols that support configurable ordering. <strong>safelyReplayable</strong>, when true, means the Message may be delivered more than once, as with racing multiple transports or TCP Fast Open, so protocols that do not protect against duplicates, such as UDP used directly, can only carry Messages that are safely replayable. <strong>final</strong>, when true, means the sender will send no further Messages; the connection need not be closed, and any later Message results in a SendError.</p>",
+      "plainLanguage": "<p>How a message maps onto the wire depends on the protocol underneath. Over UDP a message is a packet. Over TCP the application sees one long stream per direction, so the implementation has to decide where the message boundaries are, which is what message framers are for. Several properties, such as a lifetime or a priority, only work if the protocol underneath can honour them.</p>"
     },
     {
       "id": "management",
-      "number": "5",
-      "title": "Connection Management and Path Changes",
-      "content": "<p>After a connection is established, the Transport Services System must manage various aspects of its lifetime. The implementation can modify connection properties to adjust protocol behavior, handle soft errors from the underlying protocols, and manage error events delivered to applications.</p><p>When the network changes (path becomes unavailable, new interface appears), the implementation must respond appropriately. For protocols that do not support multipath or migration, temporary path losses should not cause immediate disconnection, as the path may recover before timeouts occur. For protocols supporting multipath or migration, new paths should be made available so the transport can adapt.</p><p><strong>Pooled Connections</strong> allow the implementation to distribute messages of a single logical connection across multiple underlying transport connections or streams, without requiring in-order delivery. This is useful for request-response protocols like HTTP where this distribution is transparent to the application.</p><p>The implementation should cache protocol state (DNS results, TLS tickets, TCP Fast Open cookies) and performance metrics (RTT, bandwidth, success rates) to guide future connection establishment attempts.</p>",
-      "plainLanguage": "<p>After connecting, the system watches for network changes, remembers what worked well, and stores certificates or cookies for faster reconnection next time. If the network disappears temporarily, it waits instead of giving up immediately.</p>"
+      "number": "9",
+      "title": "Connection Management, Termination and Cached State",
+      "content": "<p>Beyond a single Connection's lifetime it is useful to keep state and history, because it can improve future establishment by reusing results and credentials and by favouring paths and protocols that performed well in the past. Cached state may be tied to different endpoints depending on what produced it: TLS session tickets are associated with specific endpoints and so should be cached against the hostname, while the performance characteristics of a path are more likely tied to the IP address and subnet in use.</p><p><strong>Protocol state caches</strong> hold long-term state associated with endpoints, which usually expires, so each protocol should be allowed to specify an expiration. Examples are DNS caching resolved addresses with their time to live for future hostname resolutions, TLS caching session state and tickets by hostname for resuming sessions, and TCP caching cookies for Fast Open. This state is mainly used during establishment of a single protocol stack, but it can influence the preference between candidates, for instance choosing between two equally preferred addresses by whether a Fast Open cookie is held for one. Applications can ask that a Connection Group maintain a separate cache for protocol state, so that connections in the group do not use state from connections outside it and the reverse; this may be necessary when application-layer identifiers rotate and the client wants to avoid linkability through trackable TLS tickets or Fast Open cookies.</p><p><strong>Performance caches</strong> hold data that guides future protocol and path selection. Some can be gathered generically across protocols so that they can be compared: observed round-trip time, connection establishment latency, and connection establishment success rate. These can be cached per address and per subnet and averaged, and should be cached per network, since different network attachments have different performance characteristics. Other system entities may also feed the cache, for example signal strength reported by radio modems or information about the device's battery level, and the system may cache the observed maximum throughput on a path as an estimate of available bandwidth. An implementation should use this information where possible to influence preference between candidate paths, endpoints and protocol options, so that options that have historically performed better are selected first. The reasonable lifetime of cached values varies: the establishment success rate to a remote endpoint with a given protocol stack can be stored for a long time, since the capabilities of the remote endpoint are not expected to change quickly.</p>",
+      "plainLanguage": "<p>The system keeps two kinds of memory. One holds credentials and addresses, such as a TLS session ticket or a DNS answer, and is used to speed up the next connection to the same place. The other holds measurements, such as how long connections took and how often they worked, and is used to decide which path to try first next time.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "12",
+      "title": "Security Considerations",
+      "content": "<p>The architecture document outlines general security considerations and requirements for any system that implements the Transport Services Architecture, and the API document provides further discussion on security and privacy implications of the API. This document adds guidance on implementation specifics, so the security considerations in both of those documents apply. Two further points concern the mechanisms described here.</p><p>On candidate gathering, gathering and racing with protocol stacks that do not have equivalent security properties ought not to be attempted. Implementations therefore need to avoid downgrade attacks that allow network interference to cause the implementation to select less secure, or entirely insecure, combinations of paths and protocols.</p><p>On candidate racing, an attacker that knows a particular device is racing several options may be able to block packets for the first attempt, inducing the device to fall back to a secondary attempt, which is a problem if the secondary attempt has worse security properties that enable further attacks. Implementations should ensure that all options have equivalent security properties so that such an attack is not worth attempting. Since results from the network can determine how the attempt tree is built, for example when DNS returns a list of resolved endpoints, it is possible for the network to make an implementation consume significant on-device resources. Implementations should limit the maximum amount of state allowed for any given node, including the number of child nodes, especially when that state comes from network results.</p>",
+      "plainLanguage": "<p>Two dangers come from racing. If one option is more secure than another, an attacker who blocks the first attempt can push the device onto the weaker one, so all options should be equally secure. And because the network can hand back a long list of addresses, the system should cap how much it will hold on to.</p>"
     }
   ],
   "viz": [
     {
       "type": "tree",
-      "anchor": "architecture",
+      "anchor": "design",
       "position": "after",
-      "caption": "Connection establishment candidate tree structure",
+      "caption": "THE CONNECTION ESTABLISHMENT TREE FROM THE RFC",
       "data": {
         "root": {
-          "label": "example.com:443 / Any path / HTTP",
+          "label": "www.example.com:443, any path, TCP",
           "children": [
             {
-              "label": "example.com:443 / Wi-Fi / HTTP",
+              "label": "www.example.com:443, Wi-Fi, TCP",
               "children": [
                 {
-                  "label": "[2001:db8:23::1]:443 / Wi-Fi / HTTPS/TCP"
-                },
-                {
-                  "label": "192.0.2.1:443 / Wi-Fi / HTTPS/TCP"
+                  "label": "[2001:db8:23::1]:443, Wi-Fi, TCP"
                 }
               ]
             },
             {
-              "label": "example.com:443 / Cellular / HTTP",
+              "label": "www.example.com:443, LTE, TCP",
               "children": [
                 {
-                  "label": "[2001:db8:42::1]:443 / Cellular / HTTPS/TCP"
+                  "label": "192.0.2.1:443, LTE, TCP"
                 },
                 {
-                  "label": "192.0.2.2:443 / Cellular / HTTPS/TCP"
+                  "label": "[2001:db8:42::1]:443, LTE, TCP"
                 }
               ]
             }
@@ -129,46 +138,62 @@
       }
     },
     {
-      "type": "sequence",
+      "type": "opcodes",
       "anchor": "operation",
       "position": "after",
-      "caption": "Staggered candidate racing timeline",
+      "caption": "THE THREE WAYS TO RACE CONNECTION ATTEMPTS",
       "data": {
-        "lanes": [
+        "items": [
           {
-            "key": "candidate1",
-            "label": "Wi-Fi IPv6"
+            "code": "Simultaneous",
+            "label": "Start everything at once",
+            "desc": "Several alternate branches are started without waiting. It should be avoided, because it consumes extra network resources and establishes state that might never be used."
           },
           {
-            "key": "candidate2",
-            "label": "Wi-Fi IPv4"
+            "code": "Staggered",
+            "label": "Start the next after a delay",
+            "desc": "The first child starts immediately, the next after a delay, and so on. The delay should reflect how long the previous attempt was expected to take, as in Happy Eyeballs."
           },
           {
-            "key": "candidate3",
-            "label": "Cellular"
+            "code": "Failover",
+            "label": "Wait for a failure",
+            "desc": "The next branch starts only after one has failed. It suits a strong preference for one branch, such as a preferred proxy against one that bypasses it."
           }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "management",
+      "position": "after",
+      "caption": "THE TWO KINDS OF CACHED STATE",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Protocol state caches",
+          "Performance caches"
         ],
-        "messages": [
+        "rows": [
           {
-            "from": "candidate1",
-            "to": "candidate1",
-            "label": "Attempt started",
-            "color": "blue",
-            "note": "Start immediately"
+            "cells": [
+              "What it holds",
+              "Resolved DNS addresses, TLS session state and tickets, TCP cookies for Fast Open",
+              "Observed round-trip time, establishment latency, establishment success rate, maximum throughput"
+            ]
           },
           {
-            "from": "candidate2",
-            "to": "candidate2",
-            "label": "Attempt started",
-            "color": "blue",
-            "note": "Start after ~150ms delay"
+            "cells": [
+              "Keyed by",
+              "The endpoint that produced it, such as the hostname",
+              "The address and subnet, cached per network"
+            ]
           },
           {
-            "from": "candidate1",
-            "to": "candidate1",
-            "label": "Success!",
-            "color": "green",
-            "note": "Connection established, others cancelled"
+            "cells": [
+              "Used for",
+              "Reusing results and credentials on the next connection",
+              "Favouring paths and protocols that performed well in the past"
+            ]
           }
         ]
       }
@@ -177,42 +202,32 @@
   "references": [
     {
       "number": "[RFC9621]",
-      "text": "Brunstrom, A., Pauly, T., Enghardt, R., Tiesel, P., and M. Welzl, \"The Transport Services Architecture\", RFC 9621, DOI 10.17487/RFC9621, January 2025.",
+      "text": "Pauly, T., Ed., Trammell, B., Ed., Brunstrom, A., Fairhurst, G., and C. S. Perkins, \"Architecture and Requirements for Transport Services\", RFC 9621, DOI 10.17487/RFC9621, January 2025.",
       "rfc": 9621
     },
     {
       "number": "[RFC9622]",
-      "text": "Pauly, T., Brunstrom, A., Enghardt, R., Tiesel, P., and M. Welzl, \"The Transport Services API\", RFC 9622, DOI 10.17487/RFC9622, January 2025.",
+      "text": "Trammell, B., Ed., Welzl, M., Ed., Enghardt, R., Fairhurst, G., Kühlewind, M., Perkins, C. S., Tiesel, P. S., and T. Pauly, \"An Abstract Application Programming Interface (API) for Transport Services\", RFC 9622, DOI 10.17487/RFC9622, January 2025.",
       "rfc": 9622
     },
     {
       "number": "[RFC8305]",
-      "text": "Schinazi, D. and T. Pauly, \"Happy Eyeballs Version 2: Better Connectivity Using IPv6/IPv4 Race Logic\", RFC 8305, DOI 10.17487/RFC8305, December 2017.",
+      "text": "Schinazi, D. and T. Pauly, \"Happy Eyeballs Version 2: Better Connectivity Using Concurrency\", RFC 8305, DOI 10.17487/RFC8305, December 2017.",
       "rfc": 8305
-    },
-    {
-      "number": "[RFC8303]",
-      "text": "Stewart, R., Tuexen, M., Enghardt, R., and G. Fairhurst, \"TCP/SCTP RTO Behavior and Changes\", RFC 8303, DOI 10.17487/RFC8303, February 2018.",
-      "rfc": 8303
     },
     {
       "number": "[RFC8445]",
       "text": "Keranen, A., Holmberg, C., and J. Rosenberg, \"Interactive Connectivity Establishment (ICE): A Protocol for Network Address Translator (NAT) Traversal\", RFC 8445, DOI 10.17487/RFC8445, July 2018.",
       "rfc": 8445
-    },
-    {
-      "number": "[RFC9000]",
-      "text": "Iyengar, J. and M. Thomson, \"QUIC: A UDP-Based Multiplexed and Secure Transport\", RFC 9000, DOI 10.17487/RFC9000, May 2021.",
-      "rfc": 9000
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

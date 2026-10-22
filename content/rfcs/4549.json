@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Discusses the issues in building a disconnected IMAP4 client, focusing on the driver portion of the synchronization tool that issues the correct IMAP commands to bring the local copy in step with the server. It is informational guidance for client writers.</p>",
   "plainLanguage": {
-    "summary": "<p>Your phone keeps a copy of your mail so you can read it on a plane. This memo advises programmers on how to make the copy match the real mailbox after you reconnect.</p>"
+    "summary": "<p>When a mail client reconnects after being offline, it has to work out what changed on the server, send back the changes the user made locally, and do it in as few commands as possible. RFC 4549 gives the order of operations, the rules that keep the client from deleting the wrong mail, and the server extensions that save time.</p>"
   },
   "questions": [
     "imap offline sync",
@@ -22,132 +22,229 @@
   ],
   "subtitle": "How a mail client that works offline should use IMAP commands to bring its local copy back in step with the server.",
   "tldr": {
-    "problem": "A disconnected IMAP4 client keeps a local cache of a mailbox and queues the user's changes while offline. Reconnecting over a slow or costly link needs a careful, efficient sync that does not lose or damage mail.",
-    "mechanism": "The RFC describes a two-phase sync. First replay queued client actions, then fetch new messages and flag changes, identifying everything by UID and checking UIDVALIDITY first. It shows how extensions such as UIDPLUS, MULTIAPPEND, LITERAL+ and CONDSTORE cut traffic and round-trips.",
-    "outcome": "It is informational guidance for client writers rather than a standard. It lists pitfalls such as fake UIDs, careless EXPUNGE and bad error recovery.",
-    "outcomeLabel": "Why it matters"
+    "problem": "A mail client that works offline has to replay what the user did, fetch what changed while it was away, and do all of it over a connection it wants to keep short.",
+    "mechanism": "The document gives a sequence for synchronisation, a set of rules about what the local copy may assume, and command-level guidance, including how to avoid expunging messages the user did not delete and how to use the UIDPLUS, MULTIAPPEND, LITERAL+ and CONDSTORE extensions.",
+    "outcome": "It is an Informational document written for client writers, not a protocol specification. It lists the server extensions that would make synchronisation cheaper.",
+    "outcomeLabel": "Status today"
   },
   "facts": [
     {
-      "label": "UID range",
-      "value": "32-bit unsigned integer, excluding 0"
+      "label": "UID size",
+      "value": "A 32-bit unsigned integer excluding 0"
     },
     {
-      "label": "Example fetch group size",
-      "value": "100 messages"
+      "label": "Invalid UID values",
+      "value": "0 and -1"
     },
     {
-      "label": "Connections per server",
-      "value": "Usually two; never one per mailbox"
+      "label": "Example UID range size",
+      "value": "100 messages per group"
     },
     {
-      "label": "Category",
-      "value": "Informational"
+      "label": "Upload round-trips",
+      "value": "3 without MULTIAPPEND and LITERAL+, 1 with them"
+    },
+    {
+      "label": "Largest literal in the example",
+      "value": "16777215 octets"
+    },
+    {
+      "label": "Example age filter",
+      "value": "Messages received in the last week"
     }
   ],
-  "today": "<p>RFC 4549 is an Informational document from June 2006. It has not been obsoleted or updated, according to the unit metadata, and it does not define a standard.</p>",
+  "today": "<p>RFC 4549 is an Informational document from June 2006 and has not been obsoleted or updated. It is guidance for client writers rather than a protocol specification, and it points at the extensions, UIDPLUS, MULTIAPPEND, LITERAL+, CONDSTORE and UNSELECT, that servers can implement to make synchronisation cheaper.</p>",
   "glossary": [
     "imap",
     "mailbox",
     "smtp",
     "mime",
-    "uidvalidity"
+    "uidvalidity",
+    "uid",
+    "expunge",
+    "message-id"
   ],
   "sections": [
     {
-      "id": "overview",
+      "id": "introduction",
+      "number": "1",
+      "title": "What a Disconnected Mail Client Has To Do",
+      "content": "<p>The document addresses the issues involved in building a disconnected IMAP4 client, and in particular the part that could be called the driver: the code responsible for issuing the right set of IMAP4 commands to synchronise the client in the way most likely to please the person using it.</p><p>Several of the recommendations apply to all IMAP clients, but the document concentrates on disconnected ones, and it also suggests IMAP extensions that servers should implement to make disconnected clients easier to build. The UIDPLUS extension in particular was designed to streamline operations such as expunging, uploading and copying messages. The functionality provided by the base IMAP protocol is sufficient to perform basic synchronisation, so none of the extensions is required for the basic job. The document also points readers to RFC 2683, which gives implementation recommendations for IMAP4.</p><p>One term the document defines is idempotence: an IMAP command is idempotent if the result of executing it twice in a row is the same as the result of executing it once. This matters because a client that loses its connection mid-command has to know whether to repeat the command when it reconnects.</p>",
+      "plainLanguage": "<p>The hard part of an offline mail client is not storing mail but replaying it correctly. This document is about the commands a client sends when it reconnects, and the order it sends them in.</p>"
+    },
+    {
+      "id": "design",
       "number": "2",
-      "title": "Design Principles and the Sync Procedure",
-      "content": "<p>This memo concentrates on <strong>disconnected</strong> IMAP4 clients and on the \"driver\" part of a sync tool: the code that issues the right IMAP4 commands. The base IMAP4 protocol is enough for basic synchronization, but the RFC also names extensions that servers should offer to make it easier. It also tells readers to read <a href='/rfc2683'>RFC 2683</a>.</p><p>The design principles are simple. The client's copy of a mailbox is strictly a <strong>cache</strong>; the master state stays on the server. The one exception is the state of the client's own cache, such as flag changes made offline, which stays on the client. Network connections are assumed to be expensive, so the client should avoid spurious traffic and idle time.</p><p>No single sync strategy suits every case, so the user must guide the tool through options or configuration, and it should almost certainly not stop to ask questions mid-sync. Because message numbers can change while offline, all operations should use <strong>UIDs</strong>.</p><p>The basic strategy has five steps. (a) Process pending actions that belong to no mailbox, such as sending composed messages with SMTP. (b) Fetch the list of \"interesting\" mailboxes. (c) Do <strong>client-to-server</strong> sync: replay each queued action, opening the mailbox and checking <code>UIDVALIDITY</code> first. (d) Do <strong>server-to-client</strong> sync for each mailbox: check <code>UIDVALIDITY</code>, fetch current descriptors to discover new messages and changes to old ones, then fetch the bodies of interesting messages. (e) Close open mailboxes or disconnect.</p><p>A <strong>descriptor</strong> is a set of FETCH data items. At a minimum it holds the UID and <code>FLAGS</code>; likely extras are <code>RFC822.SIZE</code>, <code>RFC822.HEADER</code>, <code>BODYSTRUCTURE</code> or <code>ENVELOPE</code>. Queued actions should be kept in order, and replaying them all first means the later steps are the same no matter where the server's changes came from.</p><p>The client MUST handle unexpected unsolicited responses such as <code>EXISTS</code> and <code>EXPUNGE</code> at any time. The <code>INBOX</code> SHOULD be in the default set of interesting mailboxes.</p>",
-      "plainLanguage": "<p>The copy on your device is like a photocopy of a notebook. The notebook at home is the real one, and the photocopier should hurry because every minute costs money. First you hand in the notes you wrote while away. Then you ask what changed at home while you were gone, and copy only the pages you care about.</p>"
+      "title": "The Rules That Shape the Design",
+      "content": "<p>All mailbox state or content stored on the disconnected client should be viewed strictly as a cache of the state of the server. The master state remains on the server, just as it would with an interactive IMAP4 client. The one exception is information about the state of the client's own cache, such as flag changes made while offline, which stays on the client: the server is not responsible for remembering the state of the disconnected client.</p><p>The client is assumed to want to minimise the time it spends connected to the server, often because it is on a dial-up connection, and sometimes because the person is simply in a hurry. The document puts it plainly: network connections are expensive. That means avoiding spurious traffic, and not leaving the connection idle while the client or server does local work.</p><p>Practical experience with disconnected mail systems shows there is no single synchronisation strategy suited to every case. Different people prefer different things, and the same person's preference changes with the circumstances and with how much they value the messages involved. The synchronisation program cannot guess what the user wants, so the user has to provide guidance, through options in the user interface or a configuration file. The program should almost certainly not pause for input in the middle of synchronising, and the user will probably want several configurations for different circumstances.</p><p>One more rule follows from the offline situation. Because a disconnected client cannot know what changed while it was away, message numbers are not useful to it, and all of its operations should use UIDs, so that it and the server are talking about the same messages throughout.</p>",
+      "plainLanguage": "<p>The local copy is only a copy; the server holds the real mail. The user has to say what they want fetched, through settings rather than questions asked mid-run, and everything must be addressed by UID rather than by message number, because message numbers shift.</p>"
     },
     {
       "id": "procedures",
-      "number": "4.1",
-      "title": "UID Validity and Replaying Local Changes",
-      "content": "<p>The <code>UIDVALIDITY</code> value of a mailbox changes when UIDs fail to persist between sessions. Whenever the client selects a mailbox, it compares the returned value with the cached one. If they differ, the client MUST empty the local cache for that mailbox and drop pending actions that refer to its UIDs. It MUST NOT cancel scheduled uploads (<code>APPEND</code>). The same applies when the value arrives in <code>COPYUID</code>, <code>APPENDUID</code> or <code>STATUS</code>.</p><p>Uploads use <code>APPEND</code>. With the UIDPLUS extension the server answers with <code>APPENDUID</code>, so the client learns the new UID directly. A same-server \"move\" is really <code>COPY</code> plus <code>STORE +FLAGS (\\Deleted)</code>. UIDPLUS gives <code>COPYUID</code>, which avoids deleting and re-fetching an identical copy. Without it the client can match <code>Message-ID</code> and <code>INTERNALDATE</code>, but it MUST NOT use the result if the search returns several UIDs.</p><p>Flag changes should be replayed with <code>+FLAGS.SILENT</code> or <code>-FLAGS.SILENT</code>. Plain <code>FLAGS</code> MUST NOT be used, because it could overwrite changes another client made. Extra client state should be stored as keywords if the server allows it.</p>",
-      "plainLanguage": "<p>Before trusting your old photocopy, check that the notebook was not swapped for a new one. Then say only what you changed, like \"I added a star\", not \"here is the whole page again\".</p>"
-    },
-    {
-      "id": "data-transfer",
-      "number": "4.2",
-      "title": "Uploading, Expunging and Closing Safely",
-      "content": "<p>To upload many messages, <strong>MULTIAPPEND</strong> opens the mailbox once, and with <strong>LITERAL+</strong> the whole upload can take one round-trip. The RFC warns that MULTIAPPEND is atomic: if one message fails, none are saved. LITERAL+ carries a risk that the server rejects an oversized message after the client has already sent it.</p><p>A plain <code>EXPUNGE</code> permanently erases every message flagged <code>\\Deleted</code>, even ones another client flagged while the user was offline. <code>UID EXPUNGE</code> from UIDPLUS erases only the listed UIDs. Without it, the RFC gives a five-step approximation that temporarily clears <code>\\Deleted</code> on messages that must stay.</p><p>For the same reason, the client should not use <code>CLOSE</code> on a mailbox opened with <code>SELECT</code>, because it does a silent expunge. Safe alternatives include <code>UNSELECT</code>, selecting another mailbox, <code>LOGOUT</code>, or re-opening the mailbox with <code>EXAMINE</code>.</p>",
-      "plainLanguage": "<p>If you tell the janitor to empty the whole recycling bin, he also throws away things someone else put there. Better to name exactly which items to toss.</p>"
+      "number": "3",
+      "title": "The Overall Synchronization Sequence",
+      "content": "<p>The overall strategy has five parts. First, process any actions pending on the client that were not tied to a mailbox, such as sending messages composed offline with SMTP. Second, fetch the current list of interesting mailboxes, a step the client should let the user skip entirely. Third, client-to-server synchronisation: for each pending IMAP action, open the mailbox if the action implies it, check the UID validity value returned in the UIDVALIDITY response code, and if it differs from the cached one, empty the local cache of that mailbox and treat any pending actions that refer to UIDs in it as failed. Then perform the action.</p><p>Fourth, server-to-client synchronisation for each mailbox that needs it: check the UID validity with SELECT, EXAMINE or STATUS and empty the cache if it differs; then fetch the current descriptors, first discovering new messages and then discovering changes to old messages; then fetch the bodies of the interesting messages the client does not already have. Fifth, close the mailboxes that are no longer needed, or disconnect.</p><p>The list of pending actions should be ordered, because the user expects the actions to happen in the order they made them. Processing all of them before synchronising means the steps taken to bring the client up to date are the same no matter where the changes to the server's state came from. The first two steps can be run in parallel, and the first can also be run after the last.</p><p>Within one mailbox, the client needs to know the UID of the last message it knows about, since UIDs are allocated in strictly ascending order. It can then issue two commands: a fetch of the descriptors of every UID above that point, and a fetch of the flags of every UID at or below it. The order matters. The first command is issued first so the server starts returning new message descriptors as fast as it can, which lets the client start further fetches while the server is still working; the second command supplies what is needed to find out which old messages changed or were expunged. The first command should only be issued if the cached UIDNEXT differs from the one the server returned. The client should ignore unsolicited EXPUNGE responses during the first fetch, because they carry message numbers that are useless without a message-number-to-UID translation table. After the second fetch, every message that did not get a matching response must be removed from the local cache.</p>",
+      "plainLanguage": "<p>Synchronisation runs in a fixed order: send up what the user did locally, then fetch what changed, then close up. For each mailbox the client asks for the new messages first, so the server can start working while the client is still waiting, and then asks about the old ones to find out which have changed or gone.</p>"
     },
     {
       "id": "operation",
-      "number": "4.3",
-      "title": "Fetching New Messages and Changes",
-      "content": "<p>Normal sync uses <code>lastseenuid</code>, the highest UID the client knows. It issues <code>UID FETCH lastseenuid+1:* descriptors</code> for new messages, and <code>UID FETCH 1:lastseenuid FLAGS</code> to refresh flags and to find expunged messages. Any cached message with no matching response MUST be removed from the cache. The first command should be sent only if the cached <code>UIDNEXT</code> differs from the server's.</p><p>Because the first fetch can return a lot of data, a smart client splits the range into groups, for example 100 messages, so the user can do other things in between. It SHOULD ignore unsolicited <code>EXPUNGE</code> responses during that fetch. The client then decides which messages are \"interesting\", for instance by size or age, and may fetch only some MIME parts of a big message.</p><p>The client should use the <code>.PEEK</code> variants of FETCH so that caching a message does not set <code>\\Seen</code>. Special cases cover descriptor-only sync, fast new-only sync (skip the old-message flag fetch) and blind FETCH. A blind fetch MUST still check message size unless told otherwise.</p>",
-      "plainLanguage": "<p>You remember the last page number you saw. Ask for everything after it, and just check the old pages for changes. Peek without turning the page so you do not mark it as read.</p>"
+      "number": "4.2",
+      "title": "Replaying Local Changes on the Server",
+      "content": "<p>Message upload is done with the APPEND command, and it is what a client uses when saving a draft or copying a message between remote mailboxes. A message scheduled for upload has no UID, because all UIDs are assigned by the server. The base protocol has no simple way to learn the UID of an appended message, so a client either removes the uploaded message from its cache and fetches information about it as if another client had uploaded it, or it tries to identify the message by searching on its headers. With UIDPLUS the server returns an APPENDUID response code whose second parameter is the UID of the appended message.</p><p>A move between two mailboxes on the same server is really a COPY followed by a STORE that sets the deleted flag. That leaves a simple client in the position of deleting its cached copy and then fetching an identical copy back over the network. UIDPLUS helps, because the COPYUID response code tells the client which UID each copied message was given. Without it, a client can include the Message-ID header and the internal date in the descriptor and check the descriptor of a new message against what it already has, though it may not be worth the cost, and because the algorithm can find the wrong message if Message-ID headers are malicious, implementers should provide a way to turn the optimisation off.</p><p>For flag changes the client uses STORE, and should use the SILENT forms that add or remove named flags. The FLAGS form must not be used, because it risks overwriting flags that another client changed on the server. Where the client keeps extra state such as a message priority and the server supports arbitrary keywords, the client must store that state as keywords.</p><p>Compressing a mailbox is where a naive client does real damage. The EXPUNGE command permanently erases every message with the deleted flag set, including messages another client deleted while the user was offline. UIDPLUS adds UID EXPUNGE, which takes a set of UIDs and erases only those, so messages marked deleted on the server by someone else survive. Without UIDPLUS, the client can approximate this by finding the deleted messages, removing the deleted flag from the ones that must not be erased, expunging, and then restoring the flag, with the risk that another client marks more messages deleted in between and those get expunged too. For the same reason a disconnected client should not use CLOSE, because CLOSE does a silent EXPUNGE; it is safe only if the mailbox was opened with EXAMINE. When the mailbox was opened with SELECT, the client can use UNSELECT, select another mailbox, log out, select a non-existent mailbox, or reselect the same mailbox with EXAMINE instead.</p>",
+      "plainLanguage": "<p>Two mistakes matter most here. Using the plain expunge command deletes mail that another user deleted while you were away, and using the plain flag form wipes out flag changes made by someone else. The UIDPLUS extension exists so the client can name the messages it wants removed and only add or remove the flags it changed itself.</p>"
     },
     {
-      "id": "implementation-notes",
-      "number": "5",
-      "title": "Pitfalls, Error Recovery and Optimizations",
-      "content": "<p>Messages waiting to be uploaded have no server UID, so a client may use <strong>fake UIDs</strong> internally. It MUST NOT under any circumstances send them to the server. A UID is a 32-bit unsigned integer excluding 0, yet some clients have sent negative numbers. Clients also should not assume they are the only client, should not use <code>\\Deleted</code> merely to hide messages, and should beware of reordering replay-log operations that depend on each other.</p><p>On a lost connection the client MUST remember its place in the replay log and, for a non-idempotent command, check whether it was executed before resuming. It MUST stop replaying once the connection is lost rather than show an error for each failure. Multi-command operations must be atomic: if the copy half of a move fails, the client MUST NOT set <code>\\Deleted</code>. A failed operation must fail its dependents.</p><p>Quality advice includes: do not lose information, ask all questions before sync starts, and minimize traffic and round-trips. The client MUST make use of UIDPLUS if available and MUST NOT use one connection per mailbox; two connections are usually enough. It MAY use <code>STATUS</code> to check <code>UIDVALIDITY</code> on a non-selected mailbox.</p>",
-      "plainLanguage": "<p>Keep your to-do list in order, never write made-up ticket numbers on real forms, and if the phone line drops, pick up where you stopped instead of starting over.</p>"
+      "id": "error-handling",
+      "number": "5.1",
+      "title": "What To Do When Something Goes Wrong",
+      "content": "<p>Error recovery during synchronisation is one of the trickier parts to get right. If the connection is lost, the client must remember its position in the replay log and replay from the interrupted operation, that is, the last command it issued but the server did not acknowledge. If the connection was lost while executing a command that is not idempotent, the client must work out on reconnecting whether the command was in fact executed, and restart from that command if it was not, or from the following one if it was. Care is needed to reapply logical operations that are represented by several IMAP commands, such as emulating UID EXPUNGE where the server does not support it. Once the client knows the connection is lost it must stop replaying its log, and it should not pop up an error dialog for every failing operation, which some clients do.</p><p>The document lists the errors it expects and the choices available. When copying or appending to a mailbox that does not exist, the user is advised of the situation and offered the choice of recreating the mailbox, copying or uploading to another mailbox, skipping the operation, or aborting the replay. When copying from a mailbox that does not exist, or renaming or changing access control on one that does not, the choices are to skip or to abort. Deleting mailboxes or expunging messages that no longer exist is not an error and should be ignored, as should changing the flags of a message that has been expunged.</p><p>Two rules apply to the replay as a whole. Where one logical operation maps to several IMAP commands, the client must guarantee the atomicity of that operation: when moving messages between two mailboxes on the same server, if the copy fails the client must not then set the deleted flag, let alone expunge. And many operations have data dependencies, so a failed operation must cause the dependent operations to fail as well: if an append failed, the client must not later try to copy the message that was never appended.</p><p>The document also warns about three implementation pitfalls. A client may invent fake UIDs for messages that have not been uploaded yet, so that it can refer to them in later operations, but it must never send those fake UIDs to the server; it must replace them with the values the server returned. A UID is a 32-bit unsigned integer excluding zero, so both 4294967295 and 2147483648 are valid, while 0 and -1 are not, and some clients have been known to send negative numbers. The client must not assume it is the only client the user has: using the deleted flag to mean hidden from the user is unsafe, because another client may expunge the mailbox at any time. And it must be careful about dependencies between operations when optimising the replay log: if the client performs a delete of a mailbox before the copy out of it, the copy fails and the copied message is lost.</p>",
+      "plainLanguage": "<p>When the connection drops, the client has to work out whether the command it was sending went through before it repeats anything. It also has to stop the whole chain of dependent steps when one step fails, and it must never send the temporary identifiers it made up locally to the server.</p>"
     },
     {
-      "id": "extensibility",
-      "number": "6",
-      "title": "Helpful Extensions, CONDSTORE and Security",
-      "content": "<p>The RFC points to extensions that save traffic or round-trips: UIDPLUS, MULTIAPPEND and LITERAL+, and CONDSTORE for quick flag resynchronization.</p><p>With <strong>CONDSTORE</strong> the client caches the <code>HIGHESTMODSEQ</code> value from mailbox opening. If <code>UIDVALIDITY</code> matches and the cached <code>HIGHESTMODSEQ</code> equals the server's, the client MUST NOT fetch flags for cached messages, since nothing changed. If the server value is higher, the client MAY use <code>SEARCH MODSEQ</code> or <code>FETCH 1:* (FLAGS) (CHANGEDSINCE value)</code> to get only the changed messages. If the server sends <code>NOMODSEQ</code>, the client MUST drop its cached value. The client still has to fetch new messages and work out which were expunged, for example with <code>UID SEARCH 1:lastseenuid</code>.</p><p>The RFC believes it raises no new security concerns beyond those of the base IMAP4 protocol. Further considerations may be found in the extensions it mentions: UIDPLUS, LITERAL+, CONDSTORE, MULTIAPPEND and UNSELECT. Implementers are also reminded of the importance of thorough testing.</p>",
-      "plainLanguage": "<p>Instead of rereading every page for changes, you compare a single version number. If it is the same as last time, nothing changed. Nothing new to worry about for security beyond normal IMAP rules.</p>"
+      "id": "performance",
+      "number": "5.3",
+      "title": "Saving Traffic and Round-Trips",
+      "content": "<p>The document's quality of implementation advice is short: do not lose information, do not do work unless it was explicitly asked for, ask all the questions before starting, minimise traffic, and minimise the number of round-trips, which kill performance especially on links with high latency. The client must not issue a command if it already has the information, and it must make use of UIDPLUS where the server supports it.</p><p>Several optimisations follow. The initial OK or PREAUTH response may carry the CAPABILITY response code, which gives the same information as the CAPABILITY command, so a client that notices this can save a round-trip. An advanced client may remove redundant operations from the replay log, such as an EXPUNGE followed by another EXPUNGE or a CLOSE, changing flags on a message that is about to be expunged, or opening and closing the same mailbox, while being careful about dependencies between commands. Some synchronisation steps do not depend on each other and can be run in parallel, which needs more than one connection to the server; the client must not use one connection per mailbox, and in most cases two connections are enough, and it should avoid selecting the same mailbox on more than one connection. Any mailbox synchronisation must start by checking UIDVALIDITY, and the STATUS command can check the UID validity of a mailbox that is not selected, which is preferable to opening many connections.</p><p>The extensions the document recommends are UIDPLUS, which reports the UIDs of appended and copied messages and adds UID EXPUNGE; MULTIAPPEND, which opens the mailbox once for a batch of uploads rather than once per message, and appends them atomically, so that a failure on the last message loses the whole batch; LITERAL+, which lets the client send the message data in the same command and saves a round-trip, at the risk that the server rejects the message for its size after the data has already been sent; and CONDSTORE, which gives each message a modification sequence number so that the client can ask only for what changed. With CONDSTORE, the client caches the HIGHESTMODSEQ value from the mailbox opening response and updates it whenever the server sends MODSEQ fetch data items. If the cached value matches the server's, the client need not fetch flags for cached messages at all; if the server's value is higher, the client may use a search on the modification sequence, or a fetch with a changed-since clause that combines searching and fetching.</p><p>On security, the document states that it does not raise any new concerns beyond those already present in IMAP4, points to the extensions for further considerations, and reminds implementers of the importance of thorough testing.</p>",
+      "plainLanguage": "<p>Most of the time saved comes from not asking the server things it already told the client, and from fetching only what changed. The CONDSTORE extension adds a counter to each message so the client can ask for everything modified since it was last online.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "operation",
+      "anchor": "procedures",
       "position": "after",
-      "caption": "FLOW OF A NORMAL SYNC (SIMPLIFIED, ILLUSTRATIVE)",
+      "caption": "THE SERVER-TO-CLIENT PART OF A SYNCHRONIZATION",
       "data": {
         "lanes": [
           {
             "key": "client",
-            "label": "Client"
+            "label": "Disconnected client"
           },
           {
             "key": "server",
-            "label": "Server"
+            "label": "IMAP4 server"
           }
         ],
         "messages": [
           {
             "from": "client",
             "to": "server",
-            "label": "SELECT mailbox",
+            "label": "SELECT / EXAMINE / STATUS",
             "color": "blue",
-            "note": "Compare UIDVALIDITY with the cached value."
-          },
-          {
-            "from": "client",
-            "to": "server",
-            "label": "UID FETCH lastseenuid+1:* descriptors",
-            "color": "blue",
-            "note": "Descriptors of new messages."
-          },
-          {
-            "from": "client",
-            "to": "server",
-            "label": "UID FETCH 1:lastseenuid FLAGS",
-            "color": "blue",
-            "note": "Flag changes and expunged messages."
+            "note": "Check the UIDVALIDITY of the mailbox."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "FETCH responses",
-            "color": "green"
+            "label": "UIDVALIDITY",
+            "color": "green",
+            "note": "If it differs from the cached value, empty the local cache."
           },
           {
             "from": "client",
             "to": "server",
-            "label": "UID FETCH wanted BODY.PEEK[]",
+            "label": "UID FETCH for the new messages",
             "color": "blue",
-            "note": "Bodies of interesting messages only."
+            "note": "Descriptors of the new messages, issued first so the server can start work."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Descriptors",
+            "color": "green",
+            "note": "UID and flags at minimum, often also body structure and size."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "UID FETCH flags for the known UIDs",
+            "color": "blue",
+            "note": "Finds which old messages changed or were expunged."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "FLAGS",
+            "color": "green",
+            "note": "Messages with no reply have been expunged."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "UID FETCH bodies of the interesting messages",
+            "color": "blue",
+            "note": "Bodies of the interesting messages the client does not have."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE IMAP COMMANDS THE RECOMMENDATIONS TURN ON",
+      "data": {
+        "items": [
+          {
+            "code": "APPEND",
+            "label": "Upload a message",
+            "desc": "Uploads a message to a mailbox. A scheduled upload has no UID; the server assigns one.",
+            "highlight": true
+          },
+          {
+            "code": "UID COPY",
+            "label": "Copy a message",
+            "desc": "Copies a message. With UIDPLUS the server reports the UID it gave the copy."
+          },
+          {
+            "code": "+FLAGS.SILENT",
+            "label": "Add or remove named flags",
+            "desc": "Changes only the flags named, without disturbing flags another client set."
+          },
+          {
+            "code": "UID EXPUNGE",
+            "label": "Expunge named messages",
+            "desc": "From UIDPLUS. Erases only the messages listed, so messages another client deleted survive."
+          },
+          {
+            "code": "EXPUNGE",
+            "label": "Expunge every deleted message",
+            "desc": "Erases all messages with the deleted flag set, including ones another client deleted while the user was offline."
+          },
+          {
+            "code": "CLOSE",
+            "label": "Close a mailbox",
+            "desc": "Does a silent EXPUNGE, so a disconnected client should avoid it unless the mailbox was opened with EXAMINE."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "THE SERVER EXTENSIONS THAT SAVE TRAFFIC",
+      "data": {
+        "items": [
+          {
+            "title": "UIDPLUS",
+            "text": "Reports the UID of an appended or copied message, and adds UID EXPUNGE so only named messages are erased."
+          },
+          {
+            "title": "MULTIAPPEND",
+            "text": "Opens the mailbox once for a batch of uploads instead of once per message. The batch is appended atomically, so a failure on the last message loses the whole batch."
+          },
+          {
+            "title": "LITERAL+",
+            "text": "Lets the client send the message data in the same command, saving a round-trip, at the risk that the server rejects the message for its size after the data has been sent."
+          },
+          {
+            "title": "CONDSTORE",
+            "text": "Gives each message a modification sequence number, so the client can ask only for what changed since it was last online."
+          },
+          {
+            "title": "UNSELECT",
+            "text": "Closes a mailbox without the silent EXPUNGE that CLOSE performs."
           }
         ]
       }
@@ -155,32 +252,32 @@
   ],
   "references": [
     {
-      "number": "[IMAP4]",
+      "number": "[RFC3501]",
       "text": "Crispin, M., \"INTERNET MESSAGE ACCESS PROTOCOL - VERSION 4rev1\", RFC 3501, March 2003.",
       "rfc": 3501
     },
     {
-      "number": "[UIDPLUS]",
+      "number": "[RFC4315]",
       "text": "Crispin, M., \"Internet Message Access Protocol (IMAP) - UIDPLUS extension\", RFC 4315, December 2005.",
       "rfc": 4315
     },
     {
-      "number": "[LITERAL+]",
+      "number": "[RFC2088]",
       "text": "Myers, J., \"IMAP4 non-synchronizing literals\", RFC 2088, January 1997.",
       "rfc": 2088
     },
     {
-      "number": "[CONDSTORE]",
+      "number": "[RFC4551]",
       "text": "Melnikov, A. and S. Hole, \"IMAP Extension for Conditional STORE Operation or Quick Flag Changes Resynchronization\", RFC 4551, June 2006.",
       "rfc": 4551
     },
     {
-      "number": "[MULTIAPPEND]",
+      "number": "[RFC3502]",
       "text": "Crispin, M., \"Internet Message Access Protocol (IMAP) - MULTIAPPEND Extension\", RFC 3502, March 2003.",
       "rfc": 3502
     },
     {
-      "number": "[UNSELECT]",
+      "number": "[RFC3691]",
       "text": "Melnikov, A., \"Internet Message Access Protocol (IMAP) UNSELECT command\", RFC 3691, February 2004.",
       "rfc": 3691
     },
@@ -190,18 +287,28 @@
       "rfc": 2683
     },
     {
-      "number": "[IMAP-MODEL]",
+      "number": "[RFC4314]",
+      "text": "Melnikov, A., \"IMAP4 Access Control List (ACL) Extension\", RFC 4314, December 2005.",
+      "rfc": 4314
+    },
+    {
+      "number": "[RFC1733]",
       "text": "Crispin, M., \"Distributed Electronic Mail Models in IMAP4\", RFC 1733, December 1994.",
       "rfc": 1733
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

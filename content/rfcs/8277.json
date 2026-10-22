@@ -5,14 +5,15 @@
   "categoryReviewed": false,
   "summary": "<p>This document specifies how BGP can advertise that a router has bound an MPLS label, or a sequence of labels, to an address prefix. The information is carried in a BGP UPDATE message, which lets labeled paths be set up across networks using BGP.</p>",
   "plainLanguage": {
-    "summary": "<p>BGP usually tells routers where to go. This also lets it tell them what sticker to put on the packet to get there.</p>"
+    "summary": "<p>To send traffic over an MPLS network, each router needs to know which label it has given to a destination prefix, so that the next router along the path knows what to look for. This RFC describes how that pairing of a prefix and a label travels in BGP, alongside the ordinary route information, and how two routers agree in advance whether a single label or a stack of them may be carried.</p>"
   },
   "questions": [
     "how does bgp distribute mpls labels",
     "what is bgp labeled unicast",
     "how does bgp carry mpls labels",
     "what is the multiple labels capability",
-    "what replaced rfc 3107"
+    "what replaced rfc 3107",
+    "how do you withdraw an mpls label binding"
   ],
   "tags": [
     "Routing",
@@ -21,9 +22,9 @@
   ],
   "subtitle": "How BGP can announce not just a route to a prefix, but the MPLS label or labels bound to it.",
   "tldr": {
-    "problem": "RFC 3107 let BGP carry MPLS labels with prefixes, but it left label sequences, withdrawals and the interaction with ordinary routes unclear, and implementations disagreed.",
-    "mechanism": "A BGP UPDATE with an MP_REACH_NLRI attribute carries the prefix and its label(s) in the NLRI, with the next hop naming the node that bound them. A new Multiple Labels Capability must be exchanged before more than one label may be sent.",
-    "outcome": "RFC 8277 obsoletes RFC 3107, removes an unimplemented feature, and fixes the encodings and withdrawal rules while staying interoperable with deployed RFC 3107 code.",
+    "problem": "An MPLS network needs to know which label each router has bound to a prefix, and RFC 3107, which carried that information in BGP, was ambiguous about labels, unclear about withdrawals, and silent on how labeled and unlabeled routes to the same prefix interact.",
+    "mechanism": "The label or labels and the prefix are carried in the reachability attribute of a BGP UPDATE, and a new BGP capability tells the two ends of a session whether more than one label may be bound, which fixes the ambiguity.",
+    "outcome": "The document replaces RFC 3107, defines the capability that lets a session carry several labels, and gives explicit rules for withdrawing a binding, changing a binding, propagating one, and handling a peer that does not conform.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -32,149 +33,213 @@
       "value": "8"
     },
     {
-      "label": "Label field",
+      "label": "Label field width",
       "value": "20 bits"
     },
     {
-      "label": "SAFI for labeled prefixes",
-      "value": "4 (128 for VPN)"
+      "label": "Rsrv field width",
+      "value": "3 bits"
     },
     {
-      "label": "Capability triple size",
-      "value": "4 octets (AFI, SAFI, Count)"
+      "label": "S bit",
+      "value": "1 bit, set in the last label"
     },
     {
-      "label": "Minimum labels if capability sent",
-      "value": "2"
+      "label": "SAFI for labeled unicast",
+      "value": "4, and 128 for VPN"
     },
     {
-      "label": "Withdrawal Compatibility value",
-      "value": "0x800000"
+      "label": "AFI for IPv4 and IPv6",
+      "value": "1 and 2"
     }
   ],
-  "today": "<p>RFC 8277 is a Proposed Standard from October 2017 and obsoletes <a href='/rfc3107'>RFC 3107</a>. The metadata lists no later RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 8277 is a Proposed Standard and obsoletes RFC 3107, so it is the current document for advertising MPLS label bindings in BGP.</p><p>Beyond the redefinition, it registers the Multiple Labels Capability as code 8, marks the old multiple routes capability, code 4, as deprecated, and points the SAFI 4 registry entry at itself. It also states that the label and prefix encodings interwork with deployed implementations of RFC 3107, which it believes will continue to interoperate correctly with implementations conforming to the new document.</p>",
   "glossary": [
     "bgp",
     "mpls",
     "label-stack",
     "nlri",
     "next-hop",
-    "prefix"
+    "prefix",
+    "bgp-capability",
+    "safi",
+    "label-switched-path",
+    "vpn"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why RFC 3107 Needed Replacing",
-      "content": "<p>RFC 3107 defined how a router can use BGP to say it has bound an MPLS label, or a sequence of labels forming part of a label stack, to an address prefix. The UPDATE message carries the prefix and the label(s) in its Network Layer Reachability Information (NLRI) field, and its Next Hop field names the node where the prefix is bound to those labels. Each such UPDATE also advertises a path to the prefix.</p><p>RFC 8277 lists the problems that got in the way of interoperability. RFC 3107 did not define what a sequence of labels means, and many implementations assumed only one label. Its withdrawal rules were unclear, and its optional \"Advertising Multiple Routes to a Destination\" feature was never implemented as specified. It was silent on how an UPDATE with labels interacts with one without, and it never mentioned VPN-IPv4 and VPN-IPv6.</p><p>This document replaces RFC 3107. It adds a new BGP Capability for label sequences, drops the unimplemented feature in favor of the procedures of <a href='/rfc7911'>RFC 7911</a>, and declares most label and no-label interactions to be local policy for backwards compatibility.</p>",
-      "plainLanguage": "<p>The old rulebook was fuzzy, so different routers played by different rules and sometimes could not understand each other. This new rulebook cleans that up without breaking the old games.</p>"
+      "title": "Introduction",
+      "content": "<p>RFC 3107 specifies encodings and procedures for using BGP to indicate that a particular router has bound either a single MPLS label or a sequence of MPLS labels to a particular address prefix. A sequence of labels would be organised as a contiguous part of an MPLS label stack. This is done by sending a BGP UPDATE message whose Network Layer Reachability Information field contains both the prefix and the MPLS labels, and whose Next Hop field identifies the node at which the prefix is bound to those labels. Each such UPDATE also advertises a path to the prefix via the specified next hop.</p><p>Although there are many implementations and deployments of RFC 3107, it has a number of issues that have impeded interoperability. It specifies an encoding that allows a sequence of labels but does not specify the semantics of binding a sequence of labels to a prefix. Many implementations assume that only one label will be bound to a prefix and cannot properly process an UPDATE that binds a sequence of labels, so an implementation trying to provide the feature is likely to meet interoperability problems. The procedures for withdrawing a binding of a label or a sequence of labels are not specified clearly and correctly. The optional feature called \"Advertising Multiple Routes to a Destination\" has, to the author's knowledge, never been implemented as specified; the functionality it was intended to provide can and has been implemented a different way using the procedures of RFC 7911, which were not available when RFC 3107 was written, and the capability code that controlled it has never been implemented and is now deprecated. A BGP speaker may also receive two UPDATEs advertising paths to the same prefix, one binding labels and one not, and RFC 3107 is silent on how that affects the decision process, which has led different implementations to handle the situation in different ways. Much of RFC 3107 applies to the VPN-IPv4 and VPN-IPv6 address families without mentioning them.</p><p>RFC 8277 replaces and obsoletes RFC 3107. It defines a new BGP Capability to be used when binding a sequence of labels to a prefix, which avoids the interoperability problems listed above. It removes the unimplemented \"Advertising Multiple Routes to a Destination\" feature while specifying how to use RFC 7911 to provide the same functionality, and it addresses how UPDATEs that bind labels to a prefix interact with UPDATEs that advertise paths to that prefix without binding labels. For backwards compatibility, it declares most of those interactions to be matters of local policy. The document believes that implementations conforming to it will interoperate correctly with existing deployed implementations of RFC 3107.</p>",
+      "plainLanguage": "<p>The earlier document that did this job had a gap: it allowed several labels to be listed but never said what that meant, and implementations filled the gap in different ways. The fix is a capability that both ends of a BGP session exchange, so that both know which encoding to use before any route is sent.</p>"
     },
     {
-      "id": "overview",
+      "id": "design",
       "number": "2",
-      "title": "Binding a Prefix to Labels in BGP",
-      "content": "<p>To advertise a binding, node N sends a Multiprotocol BGP UPDATE with an <code>MP_REACH_NLRI</code> attribute, as in <a href='/rfc4760'>RFC 4760</a>. The Network Address of Next Hop field holds an IP address of N, and the labels and prefix are encoded in the NLRI.</p><p>The address family fields say what kind of prefix it is. For an IPv4 or VPN-IPv4 prefix the AFI is 1, and for an IPv6 or VPN-IPv6 prefix the AFI is 2. For a plain IPv4 or IPv6 prefix the SAFI is 4, and for a VPN-IPv4 or VPN-IPv6 prefix the SAFI is 128. Other AFI values with SAFI 4 or 128 are out of scope.</p><p>The document calls a message with SAFI x a \"SAFI-x UPDATE\". It also says this is not the only way to use BGP to advertise label bindings, citing other mechanisms in other RFCs, and it does not discuss which to use when.</p>",
-      "plainLanguage": "<p>A router sends a note that says \"for this address, use sticker number so-and-so, and send it to me.\" Small codes in the note say which kind of address it is.</p>"
+      "title": "Binding an Address Prefix to MPLS Labels",
+      "content": "<p>BGP may be used to advertise that a particular node has bound a particular MPLS label, or a particular sequence of MPLS labels organised as a contiguous part of a label stack, to a particular address prefix. This is done by sending a Multiprotocol BGP UPDATE message, that is, an UPDATE with an MP_REACH_NLRI attribute as specified in RFC 4760. The Network Address of Next Hop field of that attribute contains an IP address of the node that made the binding, and the labels and the prefix are encoded in the Network Layer Reachability Information field of the MP_REACH_NLRI attribute.</p><p>If the prefix is an IPv4 address prefix or a VPN-IPv4 prefix, the Address Family Identifier of the MP_REACH_NLRI attribute is set to 1. If the prefix is an IPv6 address prefix or a VPN-IPv6 prefix, the AFI is set to 2. For an IPv4 or IPv6 prefix the Subsequent Address Family Identifier is set to 4, and for a VPN-IPv4 or VPN-IPv6 prefix the SAFI is set to 128. Use of SAFI 4 or SAFI 128 with an AFI other than 1 or 2 is outside the scope of the document.</p><p>The document does not specify the format of the Network Address of Next Hop field, because it depends on several factors and is covered by other RFCs. It also notes that there are other methods of using BGP to advertise MPLS label bindings, and that which method to use for which application is outside its scope. For the rest of the document, a SAFI-x UPDATE means a BGP UPDATE containing an MP_REACH_NLRI or MP_UNREACH_NLRI attribute whose SAFI field holds the value x.</p>",
+      "plainLanguage": "<p>A labeled route is sent as an ordinary BGP UPDATE, but in a form that carries more than just a prefix. The labels go in the part of the message that lists the reachable prefixes, and the address of the router that made the binding goes in the next hop field. Two numbers identify the kind of route: the address family, 1 for IPv4 and 2 for IPv6, and the sub-address family, 4 for a plain labeled prefix and 128 for one inside a VPN.</p>"
     },
     {
       "id": "negotiation",
       "number": "2.1",
       "title": "The Multiple Labels Capability",
-      "content": "<p>Sending more than one label per prefix is gated by a new BGP capability. IANA assigned Capability Code <code>8</code> to the <strong>Multiple Labels Capability</strong>, which is carried in the BGP OPEN message. Its value is one or more four-octet triples: a two-octet AFI, a one-octet SAFI and a one-octet Count. The Count is the maximum number of labels the sender can process in a received UPDATE of that AFI/SAFI, and 255 means no limit.</p><p>Unless both speakers on a session send the capability, every SAFI-4 or SAFI-128 UPDATE must bind a prefix to a single label and use the single-label encoding. An implementation that sends the capability MUST be able to support at least two labels in the NLRI. Triples with a Count of 0 or 1 MUST NOT be sent and are ignored if received, and if a capability contains several triples for the same AFI/SAFI, all but the first are ignored. A capability whose length is not a multiple of four is malformed.</p><p>A speaker SHOULD NOT send more labels than its peer announced. If it receives more than it announced, it must apply the \"treat-as-withdraw\" strategy of <a href='/rfc7606'>RFC 7606</a>. There is also a space limit: the NLRI length is limited to 255 bits including the prefix, so only so many labels fit.</p><p>The document also covers graceful restart. If the capability was exchanged before a restart but not after, or the Count was reduced, prefixes advertised with too many labels MUST be explicitly withdrawn.</p>",
-      "plainLanguage": "<p>Before anyone puts two stickers on a package, both sides have to say \"I can read that.\" If they do not both say it, everyone sticks to one sticker.</p>"
+      "content": "<p>The document defines a BGP Optional Capabilities parameter, the Multiple Labels Capability. RFC 5492 defines the Capabilities Optional Parameter as a triple of a one-octet Capability Code, a one-octet Capability length and a variable-length Capability Value. IANA has assigned value 8 to the Multiple Labels Capability code, and that code is new to this document.</p><p>Unless the capability is sent on a given BGP session by both of that session's BGP speakers, a SAFI-4 or SAFI-128 UPDATE sent on that session from either speaker must bind a prefix to only a single label and must use the encoding of Section 2.2. If the capability is sent by both speakers, an UPDATE on that session must use the encoding of Section 2.3 and may bind a prefix to a sequence of more than one label. A speaker that has not sent the capability, or has not received it from its peer on that session, must not send on that session any UPDATE that binds more than one MPLS label to a prefix, and when advertising a single label binding it must use the encoding of Section 2.2.</p><p>The value field of the capability consists of one or more triples of four octets. The first two octets of a triple give an AFI, the third gives a SAFI, and the fourth gives a Count, which is the maximum number of labels the speaker that sent the capability can process in a received UPDATE of that AFI and SAFI. A Count of 255 means that no limit has been placed on the number of labels. Any implementation that sends the capability must be able to support at least two labels in the NLRI, though some deployments may need more. If the capability contains more than one triple with a given AFI and SAFI, all but the first must be ignored. A triple of the form AFI, SAFI and a Count of 0 or 1 must not be sent, and must be ignored if received, and a capability whose length is not a multiple of four is malformed.</p><p>The document also covers what happens when a session restarts. If the capability for a given AFI and SAFI was exchanged on the failed session but not on the restarted one, any prefixes advertised in that AFI and SAFI with multiple labels must be explicitly withdrawn, and the same applies if the maximum label count has been reduced. The accelerated graceful restart procedures must not be applied in those cases, and the complete set of routes for that AFI and SAFI must be exchanged instead. If a BGP OPEN message contains several copies of the capability, only the first copy is significant.</p><p>A speaker should not send an UPDATE that binds more labels to a prefix than its peer is prepared to receive, as stated in the peer's capability. If one arrives anyway, the speaker must apply the treat-as-withdraw strategy of RFC 7606 to it. Independently of the number of labels a speaker has claimed it can receive, its peer must not attempt to send more labels than can be properly encoded in the NLRI field of the MP_REACH_NLRI attribute, because that field is limited to 255 bits, not 255 octets, including the bits of the prefix, and in a SAFI-128 UPDATE the prefix is at least 64 bits long and may be as long as 192 bits.</p>",
+      "plainLanguage": "<p>Before the session carries any routes, the two ends swap a small capability message. It lists, for each kind of route, how many labels the sender is able to handle. If both ends send it, the newer encoding is used and a route may carry several labels; if only one end sends it, the older, one-label encoding is used.</p>"
     },
     {
-      "id": "message-format",
+      "id": "packet-format",
       "number": "2.2",
-      "title": "NLRI Encodings and Withdrawals",
-      "content": "<p>Without the capability, the NLRI holds a one-octet <code>Length</code> (in bits), a 20-bit <code>Label</code>, a 3-bit <code>Rsrv</code> field and a 1-bit <code>S</code> field, then the prefix. Rsrv SHOULD be zero on transmission and is ignored on reception. S MUST be one on transmission and is ignored on reception. Length is 20 plus 3 plus 1 plus the prefix length in bits.</p><p>With the capability exchanged, the NLRI carries a run of labels, each 24 bits wide, followed by the prefix. The S bit MUST be 0 in every label except the last, where it MUST be 1. Failing to set S in the last label makes the NLRI impossible to parse. If the procedures of <a href='/rfc7911'>RFC 7911</a> are in use, a four-octet path identifier comes before the Length field.</p><p>To withdraw a binding, a speaker sends an <code>MP_UNREACH_NLRI</code> attribute. Its NLRI is a Length, a three-octet <strong>Compatibility</strong> field and the prefix. The Compatibility field SHOULD be set to <code>0x800000</code> on transmission, but its value MUST be ignored on reception, because some implementations send <code>0x000000</code>. The withdrawal works whether or not the capability was used. It removes both the label binding and the path to the prefix that was advertised in that SAFI.</p>",
-      "plainLanguage": "<p>Each sticker is a little numbered tag, and the last one is marked \"this is the final one\" so the reader knows where the address starts. To cancel a message, you send a short note naming the same address.</p>"
+      "title": "The NLRI Encoding",
+      "content": "<p>Without the Multiple Labels Capability on the session, the NLRI field of the UPDATE is encoded with a one-octet Length field giving the length in bits of the remainder of the NLRI, a 20-bit Label field holding an MPLS label value, a 3-bit Rsrv field that should be set to zero on transmission and must be ignored on reception, a 1-bit S field that must be set to one on transmission and must be ignored on reception, and then the prefix. The length is always the sum of 20 bits for the Label field, 3 for the Rsrv field, 1 for the S field, and the length in bits of the prefix. The prefix length is 32 bits or less for AFI and SAFI 1 and 4, 128 bits or less for 2 and 4, 96 bits or less for SAFI 128 with AFI 1, and 192 bits or less for SAFI 128 with AFI 2. The actual length of the NLRI field is the number of bits given in the Length field, rounded up to the nearest whole number of octets.</p><p>When the capability has been both sent and received, the encoding has a one-octet Length field, then one or more 24-bit label entries, each of which is a 20-bit Label field, a 3-bit Rsrv field and a 1-bit S bit, and then the prefix. In all labels except the last, that is, in all but the one immediately preceding the prefix, the S bit must be 0; in the last label the S bit must be 1, because failing to set it makes it impossible to parse the NLRI correctly. The length grows by 24 bits for each label.</p><p>The UPDATE message does not only advertise the binding between the prefix and the labels; it also advertises a path to the prefix via the node identified in the Next Hop field. RFC 3107 required the S bit to be set when only a single label was bound, and treated an unset S bit as meaning that additional labels would follow. Some implementations assume the NLRI holds only a single label and never check the bit. The procedures here interwork with those implementations: as long as the capability has not been sent and received by both speakers, only one label may be specified in the NLRI, the S bit must be set on transmission and must be ignored on reception. Once both speakers have sent the capability, the Section 2.3 encoding must be used, even if only one label is being bound. When the procedures of RFC 7911 are in use, a four-octet path identifier is part of the NLRI and precedes the Length field.</p>",
+      "plainLanguage": "<p>Each label takes 24 bits in the message: 20 bits for the label number itself, 3 spare bits, and one bit that says whether this is the last label in the list. That last bit is what lets a receiver know where the labels stop and the prefix begins.</p>"
     },
     {
-      "id": "procedures",
+      "id": "error-handling",
+      "number": "2.4",
+      "title": "Withdrawing and Changing a Label Binding",
+      "content": "<p>A speaker that has announced a binding and now wants to withdraw it may send a BGP UPDATE with an MP_UNREACH_NLRI attribute. The NLRI field of that attribute holds a one-octet Length field, a 24-bit Compatibility field and the prefix. On transmission the Compatibility field should be set to 0x800000, and on reception its value must be ignored. The encoding is used whether or not the capability has been exchanged on the session, and bindings that were not advertised on that session cannot be withdrawn this way, although they can be if they were advertised on a previous session with the same peer and the current session is the result of a graceful restart of that one.</p><p>When an MP_UNREACH_NLRI attribute withdraws a route whose NLRI was previously given in an MP_REACH_NLRI attribute, the lengths and values of the respective prefixes must match and the respective AFI and SAFIs must match, and the path identifier fields must match as well if RFC 7911 is in use. The prefix length is not the same as the NLRI length: to determine the prefix length in an MP_UNREACH_NLRI, the length of the Compatibility field must be subtracted from the length of the NLRI.</p><p>An explicit withdrawal in a SAFI-x UPDATE on a session withdraws not only the binding between the prefix and the labels but also the path to that prefix that was previously advertised in a SAFI-x UPDATE on that session. RFC 3107 made it possible to put a particular label value in the Compatibility field, but the functionality that required it was never implemented and is not present here, so there is never a reason for the field to contain a label value or a sequence of label values. RFC 3107 also allowed a withdrawal without naming the label by setting the field to 0x800000, and some implementations set it to 0x000000, so this document recommends 0x800000 on transmission and requires that the field be ignored on reception.</p><p>To change the label bound to a prefix, consider a speaker that has received an UPDATE binding label L1 to prefix P with next hop N1 and then receives a second UPDATE of the same AFI and SAFI binding label L2 to prefix P with the same next hop. The second UPDATE must be interpreted as meaning that L2 is now bound to P at N1 and that L1 is no longer, so the first UPDATE is implicitly withdrawn. If RFC 7911 is in use and the two UPDATEs carry different path identifiers, the second UPDATE must mean that L2 is now bound to P at N1, but must not mean that L1 is no longer bound, and the speaker may then load-balance between the two paths, sending traffic on one with the labels from the first UPDATE and on the other with the labels from the second. If the two UPDATEs arrive on different BGP sessions, the speaker should treat this as an indication that N1 has at least two paths to P, and may use that to load-balance.</p>",
+      "plainLanguage": "<p>Withdrawing a binding is done with the same kind of message that withdraws a route, and it takes the binding and the path away together. Changing a binding needs no special message: a second UPDATE for the same prefix and the same next hop replaces the first, unless the two carry different path identifiers, in which case both stay valid and traffic may be split between them.</p>"
+    },
+    {
+      "id": "operation",
       "number": "3",
-      "title": "Changing, Comparing and Propagating Routes",
-      "content": "<p>If a speaker receives a new UPDATE for the same prefix and next hop on the same session with different labels, and <a href='/rfc7911'>RFC 7911</a> is not in use, the new UPDATE implicitly withdraws the old one. With RFC 7911, the same path identifier means replacement, while a different identifier means both bindings stay, and the speaker may load-balance between them using the labels from each. Hearing the same prefix and next hop with a different label on a different session suggests at least two paths, and the speaker MAY load-balance.</p><p>Two SAFI-4 routes for the same prefix, received on different sessions or with different path identifiers, MUST be considered comparable even if their labels differ. The BGP best-path selection of <a href='/rfc4271'>RFC 4271</a> then applies, and without RFC 7911 only the best path is propagated. The same holds for SAFI-128.</p><p>When propagating, if the next hop is unchanged the labels MUST be unchanged. If the next hop is changed, the labels MUST be those bound at the new next hop, and local policy may replace one label by one, one by many, many by one or many by many. A route MUST NOT be sent to a peer that did not negotiate multiple labels, or that announced a smaller limit, and any earlier version with fewer labels MUST be withdrawn from that peer.</p>",
-      "plainLanguage": "<p>If two messages give different stickers for the same address, the router keeps the newer one, or in special cases keeps both and takes turns. When it passes a message along, it makes sure the next router can read the stickers.</p>"
+      "title": "Installing and Propagating SAFI-4 Routes",
+      "content": "<p>Two SAFI-4 UPDATEs for the same prefix, received on different BGP sessions or on the same session with add-paths and different path identifiers, must be considered comparable even if they specify different labels, so the BGP best-path selection procedures apply and one of them is selected. The same applies to SAFI-128 routes.</p><p>The document also records that different implementations treat a SAFI-1 route and a SAFI-4 route for the same prefix differently. Some treat the two SAFIs as completely independent, with best-path selection done separately for each, so there is a best SAFI-1 route and a best SAFI-4 route, and which packets are forwarded by which is a matter of local policy. Others treat them as comparable, so the best route is either the SAFI-1 route or the SAFI-4 route but not both, and load-balancing among equal cost routes may then mix the two kinds. Some allow a single session to carry both SAFIs and others do not, and some treat the receipt of a SAFI-1 route on a session as an implicit withdrawal of a previous SAFI-4 route for that prefix, and the reverse. A speaker may also receive a SAFI-4 route over one session while other sessions have SAFI-4 disabled, in which case it may convert the route to a SAFI-1 route and propagate the result over those sessions. All of these are matters of local policy, and the differences may result in unexpected behaviour or a lack of interoperability.</p><p>When a SAFI-4 or SAFI-128 route is propagated and the Network Address of Next Hop field is left unchanged, the Label fields must also be left unchanged. A route must not be propagated to a peer if its NLRI has multiple labels and the capability was not negotiated with that peer, nor if its NLRI has more labels than the peer has announced it can handle. In either case, if a previous route with the same AFI, SAFI and prefix but with fewer labels has already been propagated to that peer, that route must be withdrawn using the procedure of Section 2.4.</p><p>If the Next Hop field is changed before the route is propagated, the Label fields of the propagated route must contain the labels that are bound to the prefix at the new next hop. Depending on local policy, a single label may be replaced by a single label of the same or a different value, a sequence of multiple labels may be replaced by a single label, a single label may be replaced by a sequence of multiple labels, and a sequence of multiple labels may be replaced by a sequence of multiple labels whose length may or may not be the same. If the local policy would encode more labels than a peer can handle, the speaker may propagate the route with fewer labels, in which case how the labels are chosen is also a matter of local policy, or it may not propagate the route at all, in which case any earlier route with the same AFI, SAFI and prefix but fewer labels must be withdrawn from that peer.</p>",
+      "plainLanguage": "<p>When a router passes a labeled route on to another router, the labels normally travel with it unchanged, because the binding is between the prefix and the router named in the next hop. If the router puts its own address in the next hop, it has to put in the labels that are bound at its own address instead, and that substitution is a local decision. The document also says plainly that several of the choices here are left to the operator, which is where the interoperability differences between implementations come from.</p>"
     },
     {
       "id": "data-transfer",
       "number": "4",
-      "title": "Data Plane and SAFI-1 Relationship",
-      "content": "<p>The data plane section explains what a router does with packets. A speaker S1 that received label L1 from next hop N1, and advertised label L2 with itself as next hop, swaps L2 for L1 and <strong>tunnels</strong> the packet to N1. Tunnels might be an LSP, a Layer 2 adjacency, or IP, GRE or UDP tunnels. If S1 received a sequence of k labels and advertised one, it pops L2 and pushes the whole sequence so the first label ends up on top. S1 may also advertise several labels, for example when it uses context labels, which are known only to S1.</p><p>The RFC warns that replacing labels with sequences must be done carefully, because the next hop can receive an unexpected combined label stack. TTL and Traffic Class values for pushed labels are left to local policy, as are the rules for whether SAFI-4 routes may forward IP packets.</p><p>A speaker may also hold both a SAFI-1 and a SAFI-4 route for the same prefix. Implementations differ: some keep them independent, some treat them as comparable, some allow both on one session, and a speaker MAY convert a SAFI-4 route to SAFI-1 when propagating to a session without SAFI-4. All of these are local policy, and the RFC says they may cause unexpected behavior or lack of interoperability.</p>",
-      "plainLanguage": "<p>When a package arrives with a sticker, the router swaps it for the right one and sends it on through a tunnel. Different routers handle plain and sticker-labeled addresses in their own ways, so results can differ.</p>"
+      "title": "The Data Plane",
+      "content": "<p>The document uses the phrase \"node S tunnels packet P to node N\" to mean that node S encapsulates the MPLS packet P and causes it to be delivered to node N in such a way that P's label stack before encapsulation is seen unchanged by N but is not seen by the nodes between S and N. If the tunnel is a Label Switched Path, encapsulation may be as simple as pushing another MPLS label. If node N is a Layer 2 adjacency of node S, a Layer 2 encapsulation may be all that is needed, and other sorts of tunnel, such as IP, GRE or UDP tunnels, may be used depending on the deployment.</p><p>Suppose a speaker S1 receives a SAFI-4 UPDATE binding label L1 to prefix P with next hop N1, installs it as one of its best paths towards P, and then propagates it after changing the next hop to itself and the label to L2. When S1 later forwards an MPLS data packet and sees label L2 rise to the top of the packet's label stack, it must replace L2 with L1 as the top entry in the stack and then tunnel the packet to N1. If the route that was received specified not a single label but a sequence of k labels, L11 through L1k, and S1 propagated a single label L2 instead, then on seeing L2 at the top, S1 removes L2 from the stack and pushes L1k down to L11 onto it so that L11 is at the top, and then tunnels the packet to N1. L1k will not be at the bottom of the stack, and so will not have the bottom of stack bit set, unless L2 had previously been at the bottom.</p><p>It is also possible, as local policy decides, for a speaker to specify multiple labels when it propagates a route after setting the next hop to itself. The document works through an example with context labels, where S1 replaces a received label stack with a pair of labels that only S1 interprets, and shows that the node at the far end ends up with a label stack that mixes the two sets of labels, which may be useful in some scenarios and may provide unintended results in others. Procedures for choosing, setting up, maintaining or determining the liveness of a particular tunnel or type of tunnel are outside the scope of the document.</p><p>When labels are pushed onto a packet's label stack, the Time to Live and Traffic Class fields of each stack entry must be set, but the document specifies no rules for setting them, which is a matter of local policy, and it specifies no new rules for processing the label stack of an incoming data packet. Whether SAFI-4 routes may be used as the basis for forwarding IP packets, or only for forwarding MPLS packets, is also a matter of local policy. When they are used to forward IP packets, the speaker must create a label stack from the route's labels, push the sequence of labels on it, and tunnel the packet to the next hop.</p>",
+      "plainLanguage": "<p>Once the routes are in the table, the forwarding side is simple: when a packet arrives with a label the router put there itself, the router swaps that label for the one the original binding named and sends the packet on. The document spells out the case where several labels were involved, and the case where the router chose to use a different set of labels of its own.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "5",
-      "title": "IANA and Security Considerations",
-      "content": "<p>IANA assigned value 8 for the Multiple Labels Capability in the BGP \"Capability Codes\" registry. It also marked value 4 (\"Multiple routes to a destination capability\") as deprecated, and updated the references for SAFI 4 and SAFI 128 to this document.</p><p>The security considerations of BGP in <a href='/rfc4271'>RFC 4271</a> apply. A non-conforming implementation that sends multiple labels without exchanging the capability will likely cause a conforming one to reset the session. The tunneled packets need encapsulation, and the RFC does not choose one. If the encapsulation lacks integrity and authentication, including the MPLS encapsulation most commonly used, a label stack could be altered in flight, causing misdelivery.</p><p>Label bindings may be learned by routers that were not meant to know them if BGP sessions do not provide privacy. The RFC also suggests that a speaker distinguish internal from external interfaces and avoid advertising the same labels on both, so packets with spoofed labels from untrusted sources can be discarded.</p>",
-      "plainLanguage": "<p>If the sticker on a package can be changed on the way, it might go to the wrong house. So routers should only trust stickers that came from the right side of the building.</p>"
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The security considerations of BGP as specified in RFC 4271 apply. If a BGP implementation that is not conformant with this document encodes multiple labels in the NLRI but has not sent and received the Multiple Labels Capability, a conformant implementation will most likely reset the BGP session.</p><p>The document specifies that certain data packets be tunnelled from one BGP speaker to another, which requires the packets to be encapsulated while in flight. It does not specify the encapsulation to be used, so the security considerations of whatever encapsulation is chosen apply. If a particular encapsulation does not provide integrity and authentication, a data packet's label stack can be modified, through error or malfeasance, while the packet is in flight, which can result in misdelivery of the packet. The tunnel encapsulation most commonly used in deployments of this specification, MPLS, does not provide integrity or authentication, and neither do the other tunnel encapsulations the document mentions.</p><p>There are techniques for constraining the distribution of BGP UPDATE messages, and they can be used to control which BGP speakers are intended to learn of a binding, but if the BGP sessions do not provide privacy, other routers may learn of the binding anyway.</p><p>When a BGP speaker processes a received MPLS data packet whose top label it advertised, there is no guarantee that the label was put on the packet by a router that was intended to know about that binding. It may therefore be useful for a speaker to distinguish its internal interfaces from its external ones, and to avoid advertising the same labels to BGP speakers reached over internal interfaces as to those reached over external ones. A data packet can then be discarded if its top label was not advertised over the kind of interface from which the packet arrived, which reduces the likelihood of forwarding packets whose labels have been spoofed by untrusted sources.</p>",
+      "plainLanguage": "<p>The labels ride on the packet without any protection of their own, so a router on the path can change them and the packet will end up in the wrong place. The document's advice is practical: keep the labels used on links inside the network separate from the ones used on links facing outsiders, and drop a packet whose label was never advertised on the kind of link it arrived on.</p>"
     }
   ],
   "viz": [
     {
       "type": "packet",
-      "anchor": "message-format",
+      "anchor": "packet-format",
       "position": "after",
       "caption": "NLRI WITH ONE LABEL (RFC 8277, FIGURE 2)",
       "data": {
-        "title": "SAFI-4 NLRI, single label",
+        "title": "NLRI with one label",
+        "bytes": 4,
         "width": 32,
         "fields": [
           {
             "key": "length",
             "name": "Length",
             "bits": 8,
-            "desc": "Length in bits of the rest of the NLRI: 20 + 3 + 1 plus the prefix length."
+            "desc": "Length in bits of the remainder of the NLRI field, which is rounded up to a whole number of octets."
           },
           {
             "key": "label",
             "name": "Label",
             "bits": 20,
-            "desc": "MPLS label value."
+            "desc": "The MPLS label value."
           },
           {
             "key": "rsrv",
             "name": "Rsrv",
             "bits": 3,
-            "desc": "SHOULD be zero on transmission; ignored on reception."
+            "desc": "Set to zero on transmission and ignored on reception."
           },
           {
             "key": "s",
             "name": "S",
             "bits": 1,
-            "desc": "MUST be one on transmission; ignored on reception."
+            "desc": "Set to one on transmission and ignored on reception. The prefix follows this field."
           }
         ]
       }
     },
     {
-      "type": "compare-table",
+      "type": "packet",
       "anchor": "negotiation",
       "position": "after",
-      "caption": "WITH AND WITHOUT THE MULTIPLE LABELS CAPABILITY",
+      "caption": "MULTIPLE LABELS CAPABILITY VALUE FIELD (RFC 8277, FIGURE 1)",
       "data": {
-        "columns": [
-          "Case",
-          "Labels per prefix",
-          "NLRI encoding"
-        ],
-        "rows": [
+        "title": "One triple of the Multiple Labels Capability",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
           {
-            "cells": [
-              "Capability not sent and received by both",
-              "One only",
-              "Section 2.2, S bit set on transmission"
-            ]
+            "key": "afi",
+            "name": "AFI",
+            "bits": 16,
+            "desc": "The address family the triple applies to."
           },
           {
-            "cells": [
-              "Capability sent and received by both for the AFI/SAFI",
-              "One or more",
-              "Section 2.3, S bit 0 except in the last label"
-            ],
-            "self": true
+            "key": "safi",
+            "name": "SAFI",
+            "bits": 8,
+            "desc": "The subsequent address family the triple applies to."
+          },
+          {
+            "key": "count",
+            "name": "Count",
+            "bits": 8,
+            "desc": "Maximum number of labels the speaker can process; 255 means no limit."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "NLRI FOR WITHDRAWAL (RFC 8277, FIGURE 4)",
+      "data": {
+        "title": "NLRI for withdrawing a label binding",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 8,
+            "desc": "Length in bits of the remainder of the NLRI field."
+          },
+          {
+            "key": "compatibility",
+            "name": "Compatibility",
+            "bits": 24,
+            "desc": "Set to 0x800000 on transmission and ignored on reception. The prefix follows this field."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "WHAT THE DOCUMENT SAYS ABOUT SECURITY (RFC 8277)",
+      "data": {
+        "items": [
+          {
+            "title": "Non-conformant peers",
+            "text": "A peer that encodes several labels without the capability will most likely have its BGP session reset by a conformant implementation."
+          },
+          {
+            "title": "No integrity in the tunnel",
+            "text": "The MPLS encapsulation most commonly used does not provide integrity or authentication, so a label stack can be changed in flight and the packet misdelivered."
+          },
+          {
+            "title": "Sessions may not be private",
+            "text": "Techniques that restrict who sees UPDATE messages do not help if the BGP sessions themselves carry the information in the clear."
+          },
+          {
+            "title": "Spoofed labels",
+            "text": "A router cannot tell which router put an advertised label on a packet, so separating internal and external interfaces and dropping unknown labels reduces the risk."
           }
         ]
       }
@@ -187,13 +252,18 @@
       "rfc": 3107
     },
     {
+      "number": "[RFC3031]",
+      "text": "Rosen, E., Viswanathan, A. and R. Callon, \"Multiprotocol Label Switching Architecture\", RFC 3031, January 2001.",
+      "rfc": 3031
+    },
+    {
       "number": "[RFC3032]",
-      "text": "Rosen, E., et al., \"MPLS Label Stack Encoding\", RFC 3032, January 2001.",
+      "text": "Rosen, E., Tappan, D., Fedorkow, G., Rekhter, Y., Farinacci, D., Li, T. and A. Conta, \"MPLS Label Stack Encoding\", RFC 3032, January 2001.",
       "rfc": 3032
     },
     {
       "number": "[RFC4271]",
-      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "text": "Rekhter, Y., Ed., Li, T., Ed. and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
       "rfc": 4271
     },
     {
@@ -203,7 +273,7 @@
     },
     {
       "number": "[RFC4760]",
-      "text": "Bates, T., et al., \"Multiprotocol Extensions for BGP-4\", RFC 4760, January 2007.",
+      "text": "Bates, T., Chandra, R., Katz, D. and Y. Rekhter, \"Multiprotocol Extensions for BGP-4\", RFC 4760, January 2007.",
       "rfc": 4760
     },
     {
@@ -213,22 +283,22 @@
     },
     {
       "number": "[RFC7606]",
-      "text": "Chen, E., Ed., et al., \"Revised Error Handling for BGP UPDATE Messages\", RFC 7606, August 2015.",
+      "text": "Chen, E., Ed., Scudder, J., Ed., Mohapatra, P. and D. Patel, \"Revised Error Handling for BGP UPDATE Messages\", RFC 7606, August 2015.",
       "rfc": 7606
     },
     {
       "number": "[RFC7911]",
-      "text": "Walton, D., et al., \"Advertisement of Multiple Paths in BGP\", RFC 7911, July 2016.",
+      "text": "Walton, D., Retana, A., Chen, E. and J. Scudder, \"Advertisement of Multiple Paths in BGP\", RFC 7911, July 2016.",
       "rfc": 7911
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

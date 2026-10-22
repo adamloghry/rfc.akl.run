@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This standards-track RFC defines Alternative Services for HTTP. They let an origin's resources be authoritatively available at a different network location, possibly reached with a different protocol configuration.</p>",
   "plainLanguage": {
-    "summary": "<p>A shop telling you it has another door, maybe a faster one, that still leads to the same store.</p>"
+    "summary": "<p>RFC 7838 lets a web server name a second address for itself, for example a different port or a newer protocol, and tell browsers to use it. The name of the site does not change, so pages and links keep working, but the client connects somewhere else. The RFC also insists that the new address prove it is entitled to serve the site, so that a hijacker cannot redirect traffic to themselves.</p>"
   },
   "questions": [
     "what is alt-svc",
@@ -19,36 +19,40 @@
     "HTTP",
     "Web"
   ],
-  "subtitle": "How a web server can say 'you can also reach me over there', with a different host, port or protocol.",
+  "subtitle": "How an origin server can tell clients to reach the same resources somewhere else, on a different host, port or protocol.",
   "tldr": {
-    "problem": "HTTP URIs both name and locate a resource, so a server cannot easily point clients to another network location or protocol for the same origin without changing the identifier.",
-    "mechanism": "An origin advertises alternative services (a protocol, host and port) using the Alt-Svc header field or the HTTP/2 ALTSVC frame, with a freshness lifetime. Clients that can verify the alternative is valid for the origin may use it.",
-    "outcome": "Clients keep the same URI, Host and security context while connecting elsewhere. They can signal this with Alt-Used, and a 421 response tells them to drop an alternative that is not authoritative.",
+    "problem": "HTTP uses one URI both to name a resource and to find where to reach it, so a server that wants to move load or offer a newer protocol has no standard way to redirect clients without changing the URI.",
+    "mechanism": "The RFC defines an alternative service, named by an ALPN protocol name, a host and a port, and two ways to advertise it: an Alt-Svc header field and an ALTSVC HTTP/2 frame. A client caches it for a freshness lifetime and connects to the alternative while still presenting the origin's name.",
+    "outcome": "Clients can reach the same origin at another location or with another protocol without any change to the application above HTTP, but the RFC requires the alternative to prove it is authorised for the origin to stop traffic being hijacked.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Default freshness",
-      "value": "24 hours"
-    },
-    {
-      "label": "ALTSVC frame type",
+      "label": "ALTSVC HTTP/2 frame type",
       "value": "0xa (decimal 10)"
     },
     {
-      "label": "Parameters defined",
+      "label": "Default freshness lifetime",
+      "value": "24 hours"
+    },
+    {
+      "label": "Alt-Svc parameters defined",
       "value": "ma and persist"
     },
     {
-      "label": "Misdirected status code",
+      "label": "Only value defined for persist",
+      "value": "1"
+    },
+    {
+      "label": "Misdirected request status code",
       "value": "421"
     },
     {
-      "label": "New request header",
-      "value": "Alt-Used"
+      "label": "Registered header fields",
+      "value": "Alt-Svc and Alt-Used"
     }
   ],
-  "today": "<p>RFC 7838 is a Proposed Standard published in April 2016. No later RFC obsoletes or updates it according to the unit metadata.</p>",
+  "today": "<p>RFC 7838 is a Proposed Standard and has not been obsoleted. It registers the Alt-Svc and Alt-Used header fields, the ALTSVC HTTP/2 frame type and the HTTP Alt-Svc Parameter Registry, which holds the 'ma' and 'persist' parameters.</p>",
   "glossary": [
     "alt-svc",
     "alpn",
@@ -56,121 +60,178 @@
     "origin-server",
     "http-2",
     "http-status-code",
-    "tls"
+    "tls",
+    "cache-control"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Separating Name from Location",
-      "content": "<p>HTTP conflates identifying a resource with locating it: <code>http://</code> and <code>https://</code> URIs both name and find things. Sometimes it is useful to keep the identifier but interact at a different network location.</p><p>The RFC lists examples. An origin server might redirect clients to a different server when it is under load or a more local one exists. It might offer a new protocol such as HTTP/2, or one with improved security such as TLS. Or it might segment clients by capability, such as support for Server Name Indication (SNI).</p><p>The RFC introduces <strong>Alternative Services</strong> as a general framework, two ways to advertise them (the <code>Alt-Svc</code> header field and the HTTP/2 <code>ALTSVC</code> frame), the <code>Alt-Used</code> request header, and an endorsement of status code 421 (Misdirected Request).</p>",
-      "plainLanguage": "<p>A web address says what you want, not exactly where to get it. This RFC lets a site say, 'same thing, other door.'</p>"
+      "title": "Separating Identity from Location",
+      "content": "<p>HTTP as defined in <a href='/rfc7230'>RFC 7230</a> conflates the identification of resources with their location: an 'http://' or 'https://' URI is used both to name a thing and to find it on the network. In some cases it is desirable to separate the two, keeping the same identifier for a resource while interacting with it at a different place on the network.</p><p>The RFC gives three examples of when that matters. An origin server might want to redirect a client to a different server when it is under load, or when it has found a server closer to the client. It might want to offer access using a new protocol such as HTTP/2, or one with improved security such as TLS. It might also want to segment its clients into groups by capability, such as those supporting Server Name Indication, for operational reasons.</p><p>The RFC defines the concept of an <strong>alternative service</strong>, a framework for it, two mechanisms for advertising one, a way to say that an alternative was used, and the 421 status code that an origin or its alternatives can return when the wrong location is used.</p>",
+      "plainLanguage": "<p>A web address usually does two jobs at once: it names the resource and it says where to fetch it. This RFC lets a server do those jobs separately. The resource keeps its name, while the client is told to fetch it from another host, port or protocol. Servers use that for load spreading, for offering a newer protocol, or for separating clients by capability.</p>"
     },
     {
       "id": "concepts",
       "number": "2",
-      "title": "Alternative Service Concepts",
-      "content": "<p>An origin that can be reached through a different protocol, host and port combination has an <strong>alternative service</strong>. For example, the origin <code>(\"http\", \"www.example.com\", \"80\")</code> might declare <code>(\"h2\", \"new.example.com\", \"81\")</code>. An alternative service is identified by an ALPN protocol name, a host and a port, and each one MUST have a freshness lifetime in seconds. Alternatives apply to a whole origin, not to selected resources.</p><p>Alternatives are like extra routing information, comparable to DNS CNAME or SRV records. Clients MUST NOT let the change leak to the application: the URI, scheme, host and port stay the same, and the <code>Host</code> header is still derived from the origin. When TLS is used, the alternative must present a certificate for the origin's host name, not its own. Debugging tools MAY show the change.</p><div class='callout callout-info'><p>Using alternatives is optional for clients. If one is fresh and its security is at least as desirable as the existing connection, a client SHOULD use it for all requests to that origin.</p></div>",
-      "plainLanguage": "<p>You still walk into the same shop and ask for things by the same name. Only the street door you used is different.</p>"
+      "title": "What an Alternative Service Is",
+      "content": "<p>An alternative service is a way of interacting with the resources of an origin at a separate location on the network, possibly with a different protocol configuration. It is identified by the combination of an <strong>ALPN protocol name</strong>, as defined in <a href='/rfc7301'>RFC 7301</a>, a host and a port. The ALPN name identifies the application protocol or suite of protocols in use; for this specification an ALPN name implicitly includes TLS unless its own definition says otherwise, so 'http/1.1' means HTTP/1.1 over TLS.</p><p>The RFC's example is an origin at ('http', 'www.example.com', '80') that declares the same resources are also available at the alternative service ('h2', 'new.example.com', '81'). Alternative services are authoritative for the origin's resources, but they do not replace or change the origin, and they cannot be applied selectively to resources inside an origin.</p><p>An alternative service is best understood as alternative routing information, in the same way that a DNS CNAME or SRV record defines routing information at the name resolution level. Each origin maps to a set of such routes: the default route comes from the origin itself, and the others are introduced by alternative service information. The first member of the tuple is more specific than a URI scheme, because it identifies not only the major version of the protocol but potentially the communication options for it.</p><p>Clients using an alternative service may change the host, port and protocol they use, but those changes must not be propagated to the application above HTTP. The URI and everything derived from it, including the scheme, host and port, stay the same. That includes the security context: when TLS is used to authenticate, the alternative service must present a certificate for the origin's host name, not for the alternative, and the Host header field is still derived from the origin.</p>",
+      "plainLanguage": "<p>An alternative service is three things together: a protocol name, a host and a port. It counts as the real server for the site's resources, but it does not rename the site. Everything the application above HTTP sees, including the host name in the address and the certificate used to secure the connection, still refers to the original origin.</p>"
     },
     {
       "id": "authentication",
       "number": "2.1",
-      "title": "Trust, Caching and Use",
-      "content": "<p>Clients MUST have reasonable assurances that the alternative is under control of and valid for the whole origin. A TLS-based protocol with the certificate checks from RFC 2818 meets that bar. So an <code>h2</code> alternative whose certificate is valid for the origin's host can be used, but an <code>h2c</code> alternative cannot, because that protocol has no way to establish the relationship. A client MUST NOT use a TLS-based alternative unless it supports SNI, and the SNI value is that of the origin.</p><p>Caching is governed by the freshness lifetime. Existing connections may continue after it expires; it limits only new connections. When a client detects a network change, it SHOULD drop cached alternatives that lack the <code>persist</code> flag with the value <code>1</code>.</p><p>A client configured to use a proxy SHOULD NOT connect directly to an alternative but route through the proxy. If the connection fails, the client MAY fall back to the origin or another alternative, though this could be a downgrade attack. If the expected protocol is not negotiated, the connection MUST be considered failed.</p>",
-      "plainLanguage": "<p>Before using the second door, you check that the shop really owns it. If the door turns out to be wrong, you go back to the main entrance.</p>"
+      "title": "Proving the Alternative Serves the Origin",
+      "content": "<p>Clients must have reasonable assurances that the alternative service is under the control of, and valid for, the whole origin. For this document, reasonable assurances can be established by using a TLS-based protocol with the certificate checks defined in <a href='/rfc2818'>RFC 2818</a>. Clients may impose additional criteria.</p><p>The RFC's example: if the origin's host is 'www.example.com' and an alternative is offered on 'other.example.com' with the 'h2' protocol, and the certificate offered is valid for 'www.example.com', the client can use the alternative. If either is offered with the 'h2c' protocol, the client cannot use it, because that protocol has no mechanism for establishing the relationship between the origin and the alternative.</p>",
+      "plainLanguage": "<p>Before a client uses an alternative, it must check that the alternative is entitled to serve the original site. A certificate that names the original site's host does that. A protocol with no way to carry the original name, such as cleartext h2c, cannot do it, so the client must refuse that alternative.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2.4",
+      "title": "Using an Alternative Service",
+      "content": "<p>Alternative services are optional: clients do not have to use them. But clients that support the specification should use an alternative service for all requests to the associated origin as soon as it is available, provided the information is fresh and the security properties of the alternative protocol are at least as good as those of the existing connection. A viable alternative is then treated in every way as the origin, including the ability to advertise alternative services itself.</p><p>A client must not use a TLS-based alternative service unless it supports TLS Server Name Indication, which supports the conservation of IP addresses on the alternative host. The SNI information the client sends is that of the origin, not of the alternative, and so is the Host header field.</p><p>When a client knows about several alternatives it chooses the most suitable by its own criteria, keeping security properties in mind. An origin may advertise several to tell clients about support for several versions of HTTP. A client configured to use a proxy for a request should route it through that proxy rather than connect directly to an alternative.</p><p>When a client uses an alternative it can say so with the <strong>Alt-Used header field</strong>, which names the alternative in the same way the Host header field names the origin. Clients should include it in all requests, so that alternatives can detect loops, split traffic for load balancing and identify the intended destination.</p><p>The client does not have to block requests on the existing connection while the alternative connection is set up, although it may want to when the existing connection is weak, for example cleartext HTTP/1.1, to avoid leaking information. If the connection to the alternative fails or is unresponsive, the client may fall back to the origin or to another alternative, which could be the basis of a downgrade attack. If the connection does not negotiate the expected protocol, for example ALPN fails to negotiate h2 or an Upgrade request to h2c is not accepted, the connection to the alternative must be considered to have failed.</p>",
+      "plainLanguage": "<p>Using an alternative is optional for the client, but a client that supports the specification should switch over as soon as it learns of one, unless the alternative is weaker than what it already has. The client keeps sending the original host name, tells the server which alternative it used with the Alt-Used header field, and treats a failure to negotiate the expected protocol as a failed connection.</p>"
     },
     {
       "id": "message-format",
       "number": "3",
       "title": "The Alt-Svc Header Field",
-      "content": "<p>An origin server can add an <code>Alt-Svc</code> header field to any response, regardless of status code. The value is either the keyword <code>clear</code>, which invalidates all cached alternatives for that origin, or a list of alternatives. Each alternative is a protocol-id (the percent-encoded ALPN name), an equals sign and a quoted <code>alt-authority</code> of the form <code>[host]:port</code>. Examples: <code>Alt-Svc: h2=\":8000\"</code> (same host, port 8000) and <code>Alt-Svc: h2=\"new.example.org:80\"</code> (different host). When several are listed, the order shows the server's preference.</p><p>Parameters follow after semicolons. Two are defined, and unknown parameters MUST be ignored. <code>ma</code> is the max age in seconds; without it an alternative is fresh for 24 hours. <code>persist=1</code> hints that it remains useful after a network change; other values MUST be ignored. For example: <code>Alt-Svc: h2=\":443\"; ma=2592000; persist=1</code>.</p><p>A received <code>Alt-Svc</code> value invalidates and replaces all cached alternatives for that origin. The HTTP cache lifetime does not affect it. Servers using HTTP/2 SHOULD send an ALTSVC frame instead, although the header remains valid there.</p>",
-      "plainLanguage": "<p>The server writes a short note on its reply: 'also try door h2 at this address, and remember it for this long.' A newer note replaces the old one.</p>"
+      "content": "<p>An HTTP(S) origin server advertises alternative services by adding an <strong>Alt-Svc header field</strong> to its responses. The field value is either a list of alternative services or the keyword 'clear'. The syntax is:</p><pre>Alt-Svc       = clear / 1#alt-value\nclear         = %s\"clear\"; \"clear\", case-sensitive\nalt-value     = alternative *( OWS \";\" OWS parameter )\nalternative   = protocol-id \"=\" alt-authority\nprotocol-id   = token ; percent-encoded ALPN protocol name\nalt-authority = quoted-string ; containing [ uri-host ] \":\" port\nparameter     = token \"=\" ( token / quoted-string )</pre><p>The protocol identifier is the ALPN protocol name, percent-encoded where needed. Octets that are valid token characters other than the percent sign must not be percent-encoded, and uppercase hex digits must be used when encoding, so that recipients can match protocol identifiers by simple string comparison. The authority part is an optional host, a colon and a port number, written as a quoted string because the colon is not allowed in a token.</p><p>The field value may hold several alternatives, in which case the order reflects the server's preference, the first being the most preferred. A value of 'clear' asks the client to invalidate all alternatives for that origin, including any in the same response. The header field may appear in any response regardless of status code, and recipients are allowed to ignore it.</p><p>Each alternative may carry semicolon-separated parameters. This specification defines two: <strong>'ma'</strong>, the maximum age, which sets how many seconds the alternative is fresh for, and <strong>'persist'</strong>, which takes the single value '1' and hints that the alternative may still be useful after a network change. Unknown parameters must be ignored. When an alternative is advertised with Alt-Svc it is considered fresh for 24 hours from the generation of the message, unless the 'ma' parameter says otherwise. Receiving an Alt-Svc header from an origin invalidates and replaces all cached alternatives for that origin, and cached alternatives are cleared by default when the client detects a network change.</p>",
+      "plainLanguage": "<p>The Alt-Svc header lists one or more alternatives, most preferred first, or the word clear to drop the ones the client already has. Each entry gives a protocol name and a host with a port. Two extra parameters control caching: 'ma' gives how long the entry stays fresh, and 'persist' marks an entry as worth keeping after the client moves to a different network. Anything the client does not understand is ignored.</p>"
     },
     {
-      "id": "extensibility",
+      "id": "packet-format",
       "number": "4",
-      "title": "ALTSVC Frame, Alt-Used and 421",
-      "content": "<p>The <strong>ALTSVC</strong> frame (type <code>0xa</code>, decimal 10) advertises an alternative to an HTTP/2 client. It is a non-critical extension, so endpoints that do not know it ignore it. The payload holds a 16-bit Origin-Len, an optional Origin and the Alt-Svc field value. On a stream other than 0 it applies to that stream's origin, and Origin MUST be empty. On stream 0 the Origin field MUST be present and anything the client does not consider authoritative MUST be ignored. A server MUST ignore the frame, and an intermediary MUST NOT forward it. It acts like receiving an Alt-Svc header, replacing cached alternatives.</p><p>Clients using an alternative SHOULD send an <code>Alt-Used</code> header in all requests, such as <code>Alt-Used: alternate.example.net</code>. It lets alternatives detect loops and balance load.</p><p>Status code <code>421</code> (Misdirected Request) from an alternative means it is not authoritative. The client MUST remove that origin's cache entry and MAY retry at another alternative or the origin. An Alt-Svc header in a 421 response MUST be ignored.</p>",
-      "plainLanguage": "<p>Some servers can also shout the news through a special loudspeaker message. Clients show which door they used, and a 'wrong door' answer means they should forget that door.</p>"
+      "title": "The ALTSVC HTTP/2 Frame",
+      "content": "<p>The <strong>ALTSVC HTTP/2 frame</strong> advertises an alternative service to an HTTP/2 client. It is a non-critical extension, so endpoints that do not support it ignore it. The frame type is 0xa, decimal 10.</p><p>An ALTSVC frame sent on a stream other than stream 0 means the alternative service applies to the origin of that stream. A frame sent on stream 0 means it applies to the origin named in the Origin field of the frame; an association with an origin the client does not treat as authoritative for the current connection must be ignored. A frame on stream 0 with empty Origin information is invalid and must be ignored, and so is a frame on another stream carrying non-empty Origin information.</p><p>The payload holds an Origin-Len field, an unsigned 16-bit integer giving the length in octets of the Origin field; an optional Origin field holding the ASCII serialisation of the origin; and an Alt-Svc-Field-Value holding a value identical to the Alt-Svc header field value. The frame defines no flags. It is intended for receipt by clients, and a device acting as a server must ignore it.</p><p>The frame is processed hop by hop: an intermediary must not forward ALTSVC frames, though it may use the information in them to form new frames for its own clients. Receiving an ALTSVC frame is semantically equivalent to receiving an Alt-Svc header field, so it replaces the alternatives cached for that origin. The RFC notes that it would be unwise to mix the two mechanisms, because the order in which they arrive would be hard to predict.</p>",
+      "plainLanguage": "<p>On HTTP/2 the same information travels in a frame instead of a header, so it can be sent once per connection rather than with every response. The frame names the origin it applies to, carries the same alternative service value, and is not forwarded by intermediaries. A client that gets one treats it exactly as if it had received an Alt-Svc header.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "6",
+      "title": "The 421 Misdirected Request Status Code",
+      "content": "<p>The <strong>421 (Misdirected Request)</strong> status code, defined in Section 9.1.2 of <a href='/rfc7540'>RFC 7540</a>, indicates that the current server instance is not authoritative for the requested resource. An alternative service can use it to say that it is not authoritative for that origin.</p><p>A client that receives 421 from an alternative service must remove the corresponding entry from its alternative service cache for that origin. Regardless of the idempotency of the request method, it may then retry the request, either at another alternative server or at the origin. An Alt-Svc header field in a 421 response must be ignored.</p>",
+      "plainLanguage": "<p>When a client reaches the wrong alternative, the server can reply with status code 421 to say 'I am not the server for that site'. The client must then forget that alternative and may try another one or the origin itself. Any Alt-Svc header in that reply is ignored.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "5",
-      "title": "Security Considerations",
-      "content": "<p>Changing ports is risky: an attacker who can inject Alt-Svc and listen on the advertised port can hijack an origin, for instance on shared servers where users control pages. Changing hosts lets an attacker masquerade as the origin, and a large freshness lifetime could persist a man-in-the-middle attack. The host authentication in section 2.1 mitigates these, and certificate-pinning checks MUST be applied to alternatives as for direct connections.</p><p>Changing protocols may weaken security, so clients cannot use alternatives blindly. Unique alternative host names could be used to track clients, especially with <code>persist</code>, and user agents MUST remove alternative service information when origin data such as cookies is cleared. Servers should not infer security from port 443; they should use the scheme the protocol carries, or avoid advertising alternatives for insecure schemes.</p>",
-      "plainLanguage": "<p>A fake door could trick you into giving secrets to the wrong place, so you check IDs, forget doors when asked, and do not assume a door is safe just because of its number.</p>"
+      "number": "9",
+      "title": "Security and Privacy of Alternatives",
+      "content": "<p>Using an alternative service means reaching an origin's resources on at least a different port, so an attacker who can inject alternatives and listen on the advertised port can hijack the origin. On shared servers, where users control some pages on a shared port, an attacker able to add response headers can redirect traffic for a whole origin to a different port on the same host and masquerade as the server. The requirement for host authentication mitigates this, and servers can reduce it further by restricting who may advertise alternatives and who may open a listening port.</p><p>Changing the host gives an attacker the same opportunity: convincing a user agent to send all traffic for 'innocent.example.org' to 'evil.example.com' lets the attacker masquerade as that origin, either locally or remotely through a man-in-the-middle intermediary. This is why clients need reasonable assurances that the alternative is under the control of the whole origin. That assurance is only as strong as the authentication method used, and certificate-based authentication has known exploits. An alternative service can also be used to make an attack persist, by giving a malicious alternative a long freshness lifetime so the client keeps using it even after the intermediary is gone. Implementations must perform any certificate-pinning validation on alternatives just as they would on direct connections to the origin.</p><p>Changing the protocol also matters, because the protocol identifier implies security properties. Advertising a protocol for an 'https://' URI that does not use end-to-end encryption violates what the scheme implies, so clients cannot use alternatives blindly and must evaluate what is offered.</p><p>Two further points apply. Choosing an alternative means connecting to a new, server-supplied host name, and servers could use unique names to track clients across networks, particularly when the 'persist' flag is used; clients that do not want requests correlated can decline to use alternatives for requests that would not otherwise be correlated, and a user agent must remove alternative service information when origin-specific data such as cookies is cleared. Finally, some server-side applications guess the security of a request from the connection context, equating port 443 with an 'https://' URI, so a client that is moved to a different protocol or port can receive data meant for a secure context. Servers can reduce this risk by using the scheme carried in the protocol, such as ':scheme' in HTTP/2, instead of other connection properties, or by assuming every request is insecure when the protocol does not carry the scheme.</p>",
+      "plainLanguage": "<p>Pointing clients at another address is a risk, because an attacker who can inject an alternative and answer on that address can take over the site's traffic. The RFC's answer is the certificate check on the original host name, plus the rule that certificate pinning must be applied to alternatives as well. It also notes that the protocol named in an alternative can weaken the security the client expects, that alternative host names can be used to track users, and that servers that guess security from the port number can be misled when a client is moved.</p>"
     }
   ],
   "viz": [
     {
-      "type": "code",
-      "anchor": "message-format",
+      "type": "compare-table",
+      "anchor": "concepts",
       "position": "after",
-      "caption": "ALT-SVC EXAMPLES FROM THE RFC",
+      "caption": "The origin and its alternative service, using the RFC's example",
       "data": {
-        "title": "Alt-Svc header field values",
-        "lang": "text",
-        "code": "Alt-Svc: h2=\":8000\"\nAlt-Svc: h2=\"new.example.org:80\"\nAlt-Svc: h2=\"alt.example.com:8000\", h2=\":443\"\nAlt-Svc: h2=\":443\"; ma=2592000; persist=1"
+        "columns": [
+          "Aspect",
+          "Origin",
+          "Alternative service"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Protocol identifier",
+              "http",
+              "h2"
+            ]
+          },
+          {
+            "cells": [
+              "Host",
+              "www.example.com",
+              "new.example.com"
+            ]
+          },
+          {
+            "cells": [
+              "Port",
+              "80",
+              "81"
+            ]
+          },
+          {
+            "cells": [
+              "Certificate presented",
+              "For the origin host name",
+              "Also for the origin host name"
+            ]
+          },
+          {
+            "cells": [
+              "Host header field sent",
+              "Derived from the origin",
+              "Still derived from the origin"
+            ]
+          }
+        ]
       }
     },
     {
-      "type": "sequence",
-      "anchor": "extensibility",
+      "type": "code",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "ILLUSTRATIVE, NOT FROM THE RFC: ADVERTISE, USE, REJECT",
+      "caption": "Alt-Svc header field examples from the RFC",
       "data": {
-        "lanes": [
-          {
-            "key": "client",
-            "label": "Client"
-          },
-          {
-            "key": "origin",
-            "label": "Origin"
-          },
-          {
-            "key": "alt",
-            "label": "Alternative"
-          }
+        "title": "Alt-Svc header field",
+        "lang": "text",
+        "code": "Alt-Svc: h2=\":8000\"\nAlt-Svc: h2=\"new.example.org:80\"\nAlt-Svc: h2=\":443\"; ma=3600\nAlt-Svc: h2=\":443\"; ma=2592000; persist=1"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "How ALPN protocol names are escaped in the protocol-id",
+      "data": {
+        "columns": [
+          "ALPN protocol name",
+          "protocol-id",
+          "Note"
         ],
-        "messages": [
+        "rows": [
           {
-            "from": "origin",
-            "to": "client",
-            "label": "Alt-Svc: h2=\":443\"",
-            "color": "blue",
-            "note": "Advertises an alternative."
+            "cells": [
+              "h2",
+              "h2",
+              "No escaping needed"
+            ]
           },
           {
-            "from": "client",
-            "to": "alt",
-            "label": "Request + Alt-Used",
-            "color": "green",
-            "note": "Uses it after checking the origin certificate."
+            "cells": [
+              "w=x:y#z",
+              "w%3Dx%3Ay#z",
+              "= and : escaped"
+            ]
           },
           {
-            "from": "alt",
-            "to": "client",
-            "label": "421 Misdirected Request",
-            "color": "neutral",
-            "note": "Not authoritative; client drops the entry."
+            "cells": [
+              "x%y",
+              "x%25y",
+              "% needs escaping"
+            ]
           }
         ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "packet-format",
+      "position": "after",
+      "caption": "The ALTSVC frame payload as drawn in the RFC",
+      "data": {
+        "title": "ALTSVC Frame Payload",
+        "lang": "text",
+        "code": "+-------------------------------+-------------------------------+\n|         Origin-Len (16)       | Origin? (*)                 ...\n+-------------------------------+-------------------------------+\n|                   Alt-Svc-Field-Value (*)                   ...\n+---------------------------------------------------------------+"
       }
     }
   ],
   "references": [
-    {
-      "number": "[RFC2818]",
-      "text": "Rescorla, E., \"HTTP Over TLS\", RFC 2818, May 2000.",
-      "rfc": 2818
-    },
-    {
-      "number": "[RFC6454]",
-      "text": "Barth, A., \"The Web Origin Concept\", RFC 6454, December 2011.",
-      "rfc": 6454
-    },
     {
       "number": "[RFC7230]",
       "text": "Fielding, R., Ed. and J. Reschke, Ed., \"Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing\", RFC 7230, June 2014.",
@@ -188,17 +249,32 @@
     },
     {
       "number": "[RFC7540]",
-      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol version 2\", RFC 7540, May 2015.",
+      "text": "Belshe, M., Peon, R., and M. Thomson, Ed., \"Hypertext Transfer Protocol Version 2 (HTTP/2)\", RFC 7540, June 2015.",
       "rfc": 7540
+    },
+    {
+      "number": "[RFC6454]",
+      "text": "Barth, A., \"The Web Origin Concept\", RFC 6454, December 2011.",
+      "rfc": 6454
+    },
+    {
+      "number": "[RFC2818]",
+      "text": "Rescorla, E., \"HTTP Over TLS\", RFC 2818, May 2000.",
+      "rfc": 2818
+    },
+    {
+      "number": "[RFC6066]",
+      "text": "Eastlake, D., \"Transport Layer Security (TLS) Extensions: Extension Definitions\", RFC 6066, January 2011.",
+      "rfc": 6066
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

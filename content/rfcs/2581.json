@@ -16,7 +16,7 @@
   "obsoletes": "RFC 2001",
   "summary": "<p>Defines TCP's four intertwined congestion control algorithms: slow start, congestion avoidance, fast retransmit and fast recovery. It also covers how TCP should start sending after a long idle period and discusses acknowledgment generation. It obsoletes RFC 2001 and was replaced by RFC 5681.</p>",
   "plainLanguage": {
-    "summary": "<p>When too many cars enter a road, traffic jams. These rules tell computers to start sending slowly, speed up carefully and slow down when messages get lost.</p>"
+    "summary": "<p>TCP keeps a window: the most it is allowed to have in flight before it must wait for an acknowledgement. This RFC says exactly how that window grows, how it shrinks when something is lost, and how it recovers.</p><p>The rules are deliberately conservative. TCP never sends more than the rules allow, even if it could.</p>"
   },
   "questions": [
     "tcp congestion control",
@@ -28,124 +28,197 @@
   ],
   "tags": [
     "TCP",
-    "Congestion",
+    "Congestion Control",
     "Transport"
   ],
-  "subtitle": "The four rules that tell TCP to start slowly, speed up carefully and back off when packets go missing.",
+  "subtitle": "The four rules TCP uses to slow itself down when the network gets crowded, and to speed up again when it clears.",
   "tldr": {
-    "problem": "A TCP sender that pushes data into a network of unknown capacity can flood it, so senders need a way to probe for capacity and to slow down when the network is overloaded.",
-    "mechanism": "TCP keeps a congestion window (cwnd) and a slow start threshold (ssthresh). It grows the window with slow start and congestion avoidance, and reacts to loss with fast retransmit and fast recovery.",
-    "outcome": "RFC 2581 obsoletes RFC 2001 and was itself obsoleted by RFC 5681, so it is no longer the current definition of these algorithms.",
+    "problem": "TCP has no idea how much room a network has. It has to find out by watching for loss and for the receiver falling behind, and then adjust how much it sends.",
+    "mechanism": "The RFC defines slow start, congestion avoidance, fast retransmit and fast recovery, and gives exact rules for the window size, the threshold and the number of duplicate acknowledgements that trigger each change.",
+    "outcome": "RFC 2581 was a Proposed Standard that obsoleted RFC 2001, and it has itself been obsoleted by RFC 5681.",
     "outcomeLabel": "Status today"
   },
   "facts": [
     {
-      "label": "Initial window",
-      "value": "At most 2*SMSS bytes and no more than 2 segments"
-    },
-    {
-      "label": "Fast retransmit trigger",
-      "value": "3 duplicate ACKs"
+      "label": "Initial congestion window",
+      "value": "At most 2 segments"
     },
     {
       "label": "Loss window",
       "value": "1 full-sized segment"
     },
     {
-      "label": "Default receiver MSS",
-      "value": "536 bytes"
+      "label": "Fast retransmit trigger",
+      "value": "3 duplicate ACKs"
     },
     {
-      "label": "Maximum ACK delay",
+      "label": "New ssthresh on timeout",
+      "value": "max(FlightSize / 2, 2*SMSS)"
+    },
+    {
+      "label": "Acknowledgement deadline",
       "value": "500 ms"
+    },
+    {
+      "label": "Acknowledgement frequency",
+      "value": "At least every second full-sized segment"
     }
   ],
-  "today": "<p>RFC 2581 is a Proposed Standard that obsoletes <a href='/rfc2001'>RFC 2001</a>. It has been obsoleted by <a href='/rfc5681'>RFC 5681</a> and updated by <a href='/rfc3390'>RFC 3390</a>, so readers should use the newer RFC for the current rules.</p>",
+  "today": "<p>RFC 2581 was a Proposed Standard and it obsoleted <a href='/rfc2001'>RFC 2001</a>. It has itself been obsoleted by <a href='/rfc5681'>RFC 5681</a>, which is the current TCP congestion control specification, and was updated by <a href='/rfc3390'>RFC 3390</a>.</p>",
   "glossary": [
     "congestion-control",
     "tcp",
     "retransmission",
     "mss",
     "receive-window",
-    "tcp-segment"
+    "tcp-segment",
+    "congestion-window",
+    "slow-start",
+    "slow-start-threshold",
+    "fast-retransmit",
+    "fast-recovery",
+    "round-trip-time"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction and Scope",
-      "content": "<p>RFC 2581 specifies four <strong>TCP congestion control</strong> algorithms: slow start, congestion avoidance, fast retransmit and fast recovery. The text says they were devised in two works by Jacobson, and that their use with TCP is standardized in the host requirements RFC (<a href='/rfc1122'>RFC 1122</a>).</p><p>It is an update of <a href='/rfc2001'>RFC 2001</a>. Beyond the four algorithms, it says what a TCP connection should do after a relatively long idle period and it clarifies some points about how acknowledgments (ACKs) are generated.</p>",
-      "plainLanguage": "<p>Imagine a rulebook for sharing a busy road. This one is written for computers sending data, so they do not cause a traffic jam.</p>"
+      "title": "What the Document Covers",
+      "content": "<p>The document specifies four TCP congestion control algorithms: slow start, congestion avoidance, fast retransmit and fast recovery, devised by Van Jacobson. Their use with TCP is standardised in <a href='/rfc1122'>RFC 1122</a>.</p><p>The algorithms control how much data a TCP sender may have outstanding in the network. It is an update of an earlier version of this specification, and in addition to the algorithms it specifies what TCP connections should do after a relatively long idle period and clarifies some of the issues around TCP acknowledgement generation.</p><p>One rule governs everything that follows. In some situations it may benefit a TCP sender to be more conservative than the algorithms allow, but a TCP must not be more aggressive than they allow. That is, it must not send data when the value of the congestion window computed by these algorithms would not permit the data to be sent.</p><p>The document is organised as follows. Section 2 gives the definitions used throughout, Section 3 specifies the congestion control algorithms, Section 4 outlines concerns related to them, and Section 5 covers security considerations.</p>",
+      "plainLanguage": "<p>Four named algorithms, and a set of exact numbers attached to each of them.</p><p>The RFC is careful about one thing above all: a sender may be cautious, but it may never be greedy.</p>"
     },
     {
       "id": "terminology",
       "number": "2",
-      "title": "Definitions and Window Variables",
-      "content": "<p>The RFC defines a handful of terms used throughout. The <strong>sender maximum segment size</strong> (SMSS) is the largest segment the sender can transmit, and the <strong>receiver maximum segment size</strong> (RMSS) is the largest one the receiver will accept. Without an MSS option, the receiver value is 536 bytes. Neither counts the TCP/IP headers and options.</p><p>Two windows limit sending. The <strong>receiver window</strong> (rwnd) is the most recently advertised receiver window. The <strong>congestion window</strong> (cwnd) is a sender-side limit. A TCP MUST NOT send data with a sequence number higher than the highest acknowledged sequence number plus the minimum of cwnd and rwnd.</p><p>Other defined terms are the initial window (IW), the loss window (LW), the restart window (RW) and the flight size, which is the amount of data sent but not yet acknowledged.</p>",
-      "plainLanguage": "<p>There are two speed limits. One is set by the receiver who says how much it can hold, and one is set by the sender who guesses how much the road can take. You obey the smaller one.</p>"
+      "title": "The Terms the Algorithms Use",
+      "content": "<p>A <strong>segment</strong> is any TCP/IP data or acknowledgment packet, or both.</p><p>The <strong>sender maximum segment size</strong> (SMSS) is the size of the largest segment the sender can transmit, based on the maximum transmission unit of the network, the path MTU discovery algorithm, the receiver maximum segment size, or other factors. It does not include the TCP and IP headers and options. The <strong>receiver maximum segment size</strong> (RMSS) is the largest segment the receiver is willing to accept, the value of the MSS option sent by the receiver during connection startup, or 536 bytes if the option is not used. It too excludes the headers and options. A <strong>full-sized segment</strong> contains the maximum number of data bytes permitted, that is, SMSS bytes of data.</p><p>The <strong>receiver window</strong> (rwnd) is the most recently advertised receiver window. The <strong>congestion window</strong> (cwnd) is a TCP state variable that limits the amount of data a TCP can send. At any given time, a TCP must not send data with a sequence number higher than the sum of the highest acknowledged sequence number and the minimum of cwnd and rwnd. The <strong>initial window</strong> (IW) is the size of the sender's congestion window after the three-way handshake is completed.</p><p>Three more windows describe particular situations. The <strong>loss window</strong> (LW) is the size of the congestion window after a sender detects loss using its retransmission timer. The <strong>restart window</strong> (RW) is the size of the congestion window after a TCP restarts transmission after an idle period, if the slow start algorithm is used. The <strong>flight size</strong> is the amount of data that has been sent but not yet acknowledged.</p>",
+      "plainLanguage": "<p>Two limits act at once: how much the network will take (the congestion window) and how much the receiver can handle (the receiver's window). The smaller one wins.</p>"
     },
     {
-      "id": "algorithms",
+      "id": "operation",
       "number": "3.1",
       "title": "Slow Start and Congestion Avoidance",
-      "content": "<p>A sender MUST use slow start and congestion avoidance to control how much unacknowledged data it injects. A third variable, the <strong>slow start threshold</strong> (ssthresh), decides which one applies: slow start when <code>cwnd &lt; ssthresh</code>, congestion avoidance when <code>cwnd &gt; ssthresh</code>. When they are equal either may be used.</p><p>The initial window IW MUST be less than or equal to 2*SMSS bytes and MUST NOT be more than 2 segments. A larger initial window from an experimental extension is mentioned only as a guideline for people experimenting, and is not allowed by this standard. The initial ssthresh MAY be arbitrarily high.</p><p>In slow start, cwnd grows by at most SMSS bytes for each ACK that acknowledges new data. In congestion avoidance it grows by 1 full-sized segment per round-trip time, commonly done with <code>cwnd += SMSS*SMSS/cwnd</code> on each non-duplicate ACK.</p><p>When the retransmission timer detects loss, ssthresh MUST be set to no more than <code>max (FlightSize / 2, 2*SMSS)</code>, and cwnd MUST be set to no more than the loss window, which is 1 full-sized segment. The sender then uses slow start up to the new ssthresh.</p><div class='callout callout-note'><p>Using cwnd instead of FlightSize in the ssthresh formula is called out as an easy mistake.</p></div>",
-      "plainLanguage": "<p>You start by sending just a little, then double up quickly while things go well. Once you get near the point where trouble started, you speed up slowly. If a message vanishes, you cut your speed way down and begin again.</p>"
+      "content": "<p>The slow start and congestion avoidance algorithms must be used by a TCP sender to control the amount of outstanding data injected into the network. The congestion window is a sender-side limit on the data the sender may transmit before receiving an acknowledgement, and the receiver's advertised window is a receiver-side limit on outstanding data. The minimum of the two governs transmission.</p><p>A third variable, the slow start threshold (ssthresh), decides which of the two algorithms is in use. Beginning transmission into a network of unknown conditions requires TCP to probe slowly to find the available capacity, so as not to congest the network with an inappropriately large burst. Slow start is used for that purpose at the beginning of a transfer, or after repairing loss detected by the retransmission timer.</p><p>The initial value of the congestion window must be no more than two full-sized segments. The RFC notes a non-standard experimental extension that allows a larger initial window, of the form <code>IW = min(4*SMSS, max(2*SMSS, 4380 bytes))</code>, giving a three or four segment window whose combined size does not exceed 4380 bytes. The RFC explicitly does not allow that change as part of the standard it defines, and discusses it only as a guideline for those experimenting with it.</p><p>The initial value of ssthresh may be arbitrarily high, for example the size of the advertised window, but it may be reduced in response to congestion. Slow start is used when cwnd is below ssthresh, and congestion avoidance when cwnd is above it. When the two are equal, the sender may use either.</p><p>During slow start, a TCP increments cwnd by at most SMSS bytes for each acknowledgement received that acknowledges new data. Slow start ends when cwnd exceeds ssthresh, or optionally when it reaches it, or when congestion is observed.</p><p>During congestion avoidance, cwnd is incremented by one full-sized segment per round-trip time, and the RFC gives a commonly used approximation, <code>cwnd += SMSS*SMSS/cwnd</code>, executed on every incoming non-duplicate acknowledgement. Because implementations usually use integer arithmetic, that formula can fail to increase cwnd when the window is very large, larger than SMSS*SMSS, and if the result is zero it should be rounded up to one byte. The RFC also notes that older implementations added a constant on the right-hand side of the formula, which is incorrect and can lead to diminished performance. An acceptable alternative is to count the bytes acknowledged by acknowledgements for new data and increase cwnd by up to SMSS once the count reaches cwnd, though that needs an extra state variable. During congestion avoidance, cwnd must not be increased by more than the larger of one full-sized segment per round-trip time or the value computed by the formula.</p><p>When a sender detects loss using the retransmission timer, ssthresh must be set to no more than <code>max(FlightSize / 2, 2*SMSS)</code>. The RFC warns that an easy mistake is to use cwnd rather than the flight size, which in some implementations may incidentally increase well beyond the receiver window. On a timeout, cwnd must be set to no more than the loss window, which equals one full-sized segment regardless of the initial window. After retransmitting the dropped segment, the sender uses slow start to grow the window from one full-sized segment to the new value of ssthresh, at which point congestion avoidance takes over again.</p>",
+      "plainLanguage": "<p>At the start of a connection TCP sends a small amount, and grows that amount for every acknowledgement it gets, until it notices the network is struggling.</p><p>When a packet really is lost, TCP does not go back to the beginning. It halves what was in flight, and carries on from there.</p>"
     },
     {
       "id": "error-handling",
       "number": "3.2",
       "title": "Fast Retransmit and Fast Recovery",
-      "content": "<p>A receiver SHOULD send an immediate duplicate ACK when an out-of-order segment arrives. Duplicate ACKs can come from dropped segments, from network re-ordering or from replication of segments.</p><p>The sender SHOULD use <strong>fast retransmit</strong>: after 3 duplicate ACKs (4 identical ACKs with nothing in between), it retransmits the apparently missing segment without waiting for the retransmission timer. <strong>Fast recovery</strong> then governs sending of new data until a non-duplicate ACK arrives, because duplicate ACKs show that segments are still leaving the network.</p><ol><li>On the third duplicate ACK, set ssthresh to no more than <code>max (FlightSize / 2, 2*SMSS)</code>.</li><li>Retransmit the lost segment and set cwnd to ssthresh plus 3*SMSS.</li><li>For each additional duplicate ACK, increase cwnd by SMSS.</li><li>Transmit a segment if the new cwnd and the receiver's window allow.</li><li>When an ACK for new data arrives, set cwnd to ssthresh.</li></ol><p>The RFC notes that this algorithm is known not to recover very efficiently from multiple losses in a single flight of packets.</p>",
-      "plainLanguage": "<p>If the receiver keeps saying 'I am still waiting for number 5' three times, you resend number 5 right away instead of waiting for a timer. You only slow down a little, since the other messages are still getting through.</p>"
+      "content": "<p>A TCP receiver should send an immediate duplicate acknowledgement when an out-of-order segment arrives, to tell the sender that a segment came out of order and which sequence number is expected. From the sender's point of view duplicate acknowledgements can be caused by several network problems: dropped segments, in which case every segment after the dropped one triggers a duplicate; reordering of data segments by the network, which is not a rare event along some paths; and replication of acknowledgement or data segments by the network. A receiver should also send an immediate acknowledgement when the incoming segment fills in all or part of a gap in the sequence space, which gives more timely information to a sender recovering from a loss.</p><p>The sender should use fast retransmit to detect and repair loss, based on incoming duplicate acknowledgements. The algorithm uses the arrival of three duplicate acknowledgements, meaning four identical acknowledgements with no other intervening packets, as an indication that a segment has been lost. After the third, TCP retransmits what appears to be the missing segment without waiting for the retransmission timer.</p><p>After the retransmission, fast recovery governs the transmission of new data until a non-duplicate acknowledgement arrives. The reason for not performing slow start is that the duplicate acknowledgements indicate not only that a segment has been lost but that segments are most likely leaving the network, although massive duplication by the network could invalidate that conclusion. Since the receiver can only generate a duplicate acknowledgement when a segment has arrived, that segment has left the network and is in the receiver's buffer, so it is no longer consuming network resources. And because the acknowledgement clock is preserved, the sender can continue to transmit new segments, though with a reduced congestion window.</p><p>The two algorithms are usually implemented together in five steps. When the third duplicate acknowledgement is received, ssthresh is set to no more than the value in the equation above. The lost segment is retransmitted and cwnd is set to ssthresh plus three times SMSS, artificially inflating the window by the number of segments that have left the network and been buffered by the receiver. For each additional duplicate acknowledgement, cwnd is incremented by SMSS, again reflecting a further segment that has left the network. A segment is then transmitted, if the new cwnd and the receiver's advertised window allow it. When the next acknowledgement arrives that acknowledges new data, cwnd is set back to ssthresh, which is called deflating the window. That acknowledgement should be the one elicited by the retransmission, one round-trip time later, and should acknowledge all the intermediate segments sent between the lost segment and the third duplicate acknowledgement, if none of those were lost.</p><p>The RFC notes that this algorithm generally does not recover very efficiently from multiple losses in a single flight of packets, and points to a proposed set of modifications for that problem.</p>",
+      "plainLanguage": "<p>When three acknowledgements arrive for the same piece of data, TCP assumes a packet was lost and sends it again straight away, rather than waiting for a timer.</p><p>It also keeps the window fairly large while it does so, because the duplicate acknowledgements are themselves evidence that other packets got through.</p>"
     },
     {
-      "id": "operation",
+      "id": "performance",
       "number": "4",
-      "title": "Idle Connections, ACKs and Loss Recovery",
-      "content": "<p>After a long idle period the ACK clock has drained, so TCP could blast a cwnd-sized burst. A TCP SHOULD therefore set cwnd to no more than the restart window RW before sending if it has not sent data for longer than the retransmission timeout. For this standard RW = IW.</p><p>Receivers SHOULD use the delayed ACK algorithm, but an ACK SHOULD be generated for at least every second full-sized segment, and MUST be generated within 500 ms of the first unacknowledged packet. Out-of-order segments SHOULD be acked immediately, and a receiver MUST NOT generate more than one ACK for each incoming segment, except to update the offered window.</p><p>Better loss recovery algorithms, such as ones using selective acknowledgments or the NewReno approach (<a href='/rfc2582'>RFC 2582</a>), are not standardized here but are allowed if they follow the principles of the four algorithms. Loss in two successive windows, or loss of a retransmission, counts as two congestion indications, so cwnd and ssthresh MUST be lowered twice.</p>",
-      "plainLanguage": "<p>If you have been quiet for a while, you do not shout at full volume. You start soft again. Receivers should also answer often enough, at least every second message, so the sender is never left guessing.</p>"
+      "title": "Idle Connections and Acknowledgements",
+      "content": "<p>Two further topics are covered.</p><p>The first is restarting an idle connection. The congestion control algorithms allow a potentially inappropriate burst of traffic after TCP has been idle for a relatively long period, because after an idle period TCP cannot use the acknowledgement clock to strobe new segments into the network, as all the acknowledgements have drained away, and can therefore send a congestion-window-size line-rate burst. Slow start is recommended to restart transmission after a relatively long idle period, because it restarts the acknowledgement clock just as it does at the beginning of a transfer. The mechanism has been widely deployed by reducing cwnd to the restart window when TCP has not received a segment for more than one retransmission timeout. For the purposes of this standard, the restart window is defined as the initial window.</p><p>Using the last time a segment was received to decide whether the connection is idle fails in the common case of persistent HTTP connections, where a web server receives a request before transmitting data, so the test for idleness fails and TCP may begin with an inappropriately large congestion window. Therefore, a TCP should set cwnd to no more than the restart window before beginning transmission if it has not sent data in an interval exceeding the retransmission timeout.</p><p>The second topic is generating acknowledgements. The delayed acknowledgement algorithm should be used by a TCP receiver, and when used, a receiver must not excessively delay acknowledgements. An acknowledgement should be generated for at least every second full-sized segment, and must be generated within 500 milliseconds of the arrival of the first unacknowledged packet. The RFC states this unambiguously as a SHOULD, and notes that an implementor should only deviate after careful consideration, because generating acknowledgements less frequently can cause performance problems.</p><p>Sender and receiver may disagree on what counts as a full-sized segment. An implementation is deemed to comply if it sends at least one acknowledgement every time it receives twice the receiver maximum segment size of new data, where that size is the one specified by the receiver or the default of 536 bytes if no MSS option is sent. The sender may be forced to use a smaller segment size because of the maximum transmission unit or path MTU discovery. If the receiver announces a size of X but the sender uses Y, where Y is smaller than X, then waiting for 2*X bytes before acknowledging would take more than two segments, so receivers are encouraged to acknowledge at least every second segment regardless of size.</p><p>Out-of-order data segments should be acknowledged immediately, to accelerate loss recovery. A receiver should send an immediate duplicate acknowledgement when it receives a data segment above a gap in the sequence space, to trigger fast retransmit, and an immediate acknowledgement when it receives a data segment that fills in all or part of a gap, to give feedback to a sender recovering from a loss. A receiver must not generate more than one acknowledgement for every incoming segment, other than to update the offered window as the receiving application consumes new data.</p>",
+      "plainLanguage": "<p>After a long pause, TCP could suddenly blast a full window of data into the network, because nobody had told it how much room there was. The fix is to start again slowly.</p><p>The RFC also fixes how often a receiver must acknowledge, so that a sender never waits too long for permission to continue.</p>"
     },
     {
       "id": "security-considerations",
       "number": "5",
       "title": "Security Considerations",
-      "content": "<p>Because the algorithms make TCP slow down on timeouts and duplicate ACKs, an attacker can hurt a connection by causing data packets or ACKs to be lost, or by forging excessive duplicate ACKs. Two congestion events in a row will often cut ssthresh to its minimum of 2*SMSS.</p><p>The attack can go the other way too. Forging excessive duplicate ACKs or excessive ACKs for new data could make endpoints more aggressive, and the RFC says this could conceivably drive part of the network into congestion collapse.</p>",
-      "plainLanguage": "<p>A trickster could shout fake messages to make senders slow to a crawl, or to make them rush and clog the road.</p>"
+      "content": "<p>The document requires a TCP to diminish its sending rate in the presence of retransmission timeouts and the arrival of duplicate acknowledgements. An attacker can therefore impair the performance of a TCP connection either by causing data packets or their acknowledgements to be lost, or by forging excessive duplicate acknowledgements. Causing two congestion control events back to back will often cut ssthresh to its minimum value of two full-sized segments, which puts the connection straight into the slower-performing congestion avoidance phase.</p><p>The Internet relies to a considerable degree on the correct implementation of these algorithms in order to preserve network stability and avoid congestion collapse. An attacker could cause TCP endpoints to respond more aggressively in the face of congestion by forging excessive duplicate acknowledgements or excessive acknowledgements for new data, and such an attack could conceivably drive a portion of the network into congestion collapse.</p>",
+      "plainLanguage": "<p>The rules that keep the network stable can be turned against it. An attacker who can forge or drop acknowledgements can make a connection crawl, and a large-scale version of that could congest the network deliberately.</p>"
     }
   ],
   "viz": [
     {
-      "type": "opcodes",
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE TWO WINDOW-GROWING ALGORITHMS",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Slow start",
+          "Congestion avoidance"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "When it is used",
+              "cwnd is below ssthresh",
+              "cwnd is above ssthresh"
+            ]
+          },
+          {
+            "cells": [
+              "How fast the window grows",
+              "Up to SMSS bytes for every acknowledgement of new data",
+              "One full-sized segment per round-trip time"
+            ]
+          },
+          {
+            "cells": [
+              "Typical formula",
+              "cwnd = cwnd + SMSS",
+              "cwnd += SMSS*SMSS/cwnd"
+            ]
+          },
+          {
+            "cells": [
+              "When it ends",
+              "cwnd passes ssthresh, or congestion is seen",
+              "When congestion is detected"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
       "anchor": "error-handling",
       "position": "after",
-      "caption": "FAST RECOVERY STEPS (RFC 2581 SECTION 3.2)",
+      "caption": "THE FIVE STEPS OF FAST RETRANSMIT AND FAST RECOVERY",
       "data": {
         "items": [
           {
-            "code": "1",
-            "label": "Third duplicate ACK",
-            "desc": "Set ssthresh to no more than max (FlightSize / 2, 2*SMSS)."
+            "title": "1. Third duplicate ACK",
+            "text": "Set ssthresh to no more than max(FlightSize / 2, 2*SMSS)."
           },
           {
-            "code": "2",
-            "label": "Retransmit",
-            "desc": "Resend the lost segment and set cwnd to ssthresh plus 3*SMSS.",
-            "highlight": true
+            "title": "2. Retransmit",
+            "text": "Send the missing segment and set cwnd to ssthresh plus 3*SMSS."
           },
           {
-            "code": "3",
-            "label": "More duplicate ACKs",
-            "desc": "Increase cwnd by SMSS for each one."
+            "title": "3. Further duplicate ACKs",
+            "text": "Each one increments cwnd by SMSS."
           },
           {
-            "code": "4",
-            "label": "Send new data",
-            "desc": "Transmit a segment if cwnd and the receiver window allow."
+            "title": "4. Transmit",
+            "text": "Send a segment if the new cwnd and the receiver window allow it."
           },
           {
-            "code": "5",
-            "label": "ACK for new data",
-            "desc": "Set cwnd to ssthresh (deflate the window)."
+            "title": "5. New-data ACK",
+            "text": "Set cwnd back to ssthresh, which is called deflating the window."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "performance",
+      "position": "after",
+      "caption": "THE RULES FOR IDLE CONNECTIONS AND ACKNOWLEDGEMENTS",
+      "data": {
+        "items": [
+          {
+            "title": "Restart window",
+            "text": "Defined as the initial window, and used when a connection has been idle."
+          },
+          {
+            "title": "Idle test",
+            "text": "Set cwnd to no more than the restart window if no data has been sent for longer than the retransmission timeout."
+          },
+          {
+            "title": "Acknowledgement rate",
+            "text": "An ACK should be generated for at least every second full-sized segment."
+          },
+          {
+            "title": "Acknowledgement deadline",
+            "text": "An ACK must be generated within 500 ms of the first unacknowledged packet."
           }
         ]
       }
@@ -153,48 +226,38 @@
   ],
   "references": [
     {
-      "number": "[Bra89]",
+      "number": "[RFC1122]",
       "text": "Braden, R., \"Requirements for Internet Hosts -- Communication Layers\", STD 3, RFC 1122, October 1989.",
       "rfc": 1122
     },
     {
-      "number": "[Bra97]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
-    {
-      "number": "[FH98]",
-      "text": "Floyd, S. and T. Henderson, \"The NewReno Modification to TCP's Fast Recovery Algorithm\", RFC 2582, April 1999.",
-      "rfc": 2582
-    },
-    {
-      "number": "[MMFR96]",
-      "text": "Mathis, M., Mahdavi, J., Floyd, S. and A. Romanow, \"TCP Selective Acknowledgement Options\", RFC 2018, October 1996.",
-      "rfc": 2018
-    },
-    {
-      "number": "[PAD+98]",
-      "text": "Paxson, V., Allman, M., Dawson, S., Fenner, W., Griner, J., Heavens, I., Lahey, K., Semke, J. and B. Volz, \"Known TCP Implementation Problems\", RFC 2525, March 1999.",
-      "rfc": 2525
-    },
-    {
-      "number": "[Pos81]",
-      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
-      "rfc": 793
-    },
-    {
-      "number": "[Ste97]",
-      "text": "Stevens, W., \"TCP Slow Start, Congestion Avoidance, Fast Retransmit, and Fast Recovery Algorithms\", RFC 2001, January 1997.",
+      "number": "[RFC2001]",
+      "text": "Stevens, W., \"TCP Congestion Control\", RFC 2001, January 1997.",
       "rfc": 2001
+    },
+    {
+      "number": "[RFC5681]",
+      "text": "Allman, M., Paxson, V., and Blumenthal, C., \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[RFC2414]",
+      "text": "Allman, M., Floyd, S., and Partridge, C., \"Increasing TCP's Initial Window Size\", RFC 2414, September 1998.",
+      "rfc": 2414
+    },
+    {
+      "number": "[RFC813]",
+      "text": "Clark, D., \"Window and Acknowledgment Strategy in TCP\", RFC 813, July 1982.",
+      "rfc": 813
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

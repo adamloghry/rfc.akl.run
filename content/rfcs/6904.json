@@ -5,13 +5,14 @@
   "categoryReviewed": false,
   "summary": "<p>Extends SRTP to allow selective encryption of RTP header extensions. SRTP authenticates RTP headers but does not encrypt them, yet header extensions can hold sensitive data that participants want kept confidential.</p>",
   "plainLanguage": {
-    "summary": "<p>A letter's envelope can be seen by everyone, but some notes written on it are private. This lets certain notes on the envelope be put in code.</p>"
+    "summary": "<p>SRTP normally protects the media in a call but leaves the headers readable. This adds a way to encrypt selected parts of those headers, for example a sound level reading, while leaving other header fields clear.</p>"
   },
   "questions": [
     "how to encrypt rtp header extensions",
     "does srtp encrypt headers",
     "what is the srtp encryption mask",
-    "how are encrypted header extensions signaled in sdp"
+    "how are encrypted header extensions signaled in sdp",
+    "which keys are used for srtp header extension encryption"
   ],
   "tags": [
     "Security",
@@ -20,9 +21,9 @@
   ],
   "subtitle": "A way to encrypt chosen RTP header extensions inside SRTP, using the same cipher as the media payload.",
   "tldr": {
-    "problem": "SRTP authenticates RTP headers but does not encrypt them, yet header extensions can carry sensitive data such as per-packet sound levels.",
-    "mechanism": "Selected extension elements are XORed with a header keystream derived from new keys (labels 0x06 and 0x07) and masked so only chosen element payloads change. The chosen elements are signaled in SDP with an encrypt URI.",
-    "outcome": "Participants can keep specific extension values confidential while leaving others readable. The RFC also updates RFC 3711 so future SRTP transforms must say how header extensions are encrypted.",
+    "problem": "SRTP authenticates RTP headers but does not encrypt them, and header extensions can carry sensitive data such as per-packet sound levels.",
+    "mechanism": "Selected extension elements are combined with a per-packet keystream made from separate header keys, and a mask marks exactly which bytes are encrypted while the element headers and padding stay readable.",
+    "outcome": "Participants can keep specific extension values confidential while leaving others readable. The document also updates RFC 3711 so that future SRTP transforms must say how header extensions are encrypted.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -39,86 +40,193 @@
       "value": "urn:ietf:params:rtp-hdrext:encrypt"
     },
     {
+      "label": "Header extension test vector length",
+      "value": "24 bytes"
+    },
+    {
       "label": "Updates",
       "value": "RFC 3711"
     }
   ],
-  "today": "<p>RFC 6904 is a Proposed Standard published in April 2013. It updates <a href='/rfc3711'>RFC 3711</a>, and no later RFC obsoletes or updates it.</p>",
+  "today": "<p>RFC 6904 is a Proposed Standard published in April 2013. It updates <a href='/rfc3711'>RFC 3711</a>, and the unit metadata lists no later RFC that obsoletes or updates it.</p>",
   "glossary": [
     "srtp",
     "rtp",
     "sdp",
     "aes-counter-mode",
     "key-derivation",
-    "replay-protection"
+    "replay-protection",
+    "rtp-header-extension",
+    "authentication-tag",
+    "keystream"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
       "title": "Why Encrypt Header Extensions",
-      "content": "<p>SRTP (<a href='/rfc3711'>RFC 3711</a>) gives confidentiality, message authentication and replay protection for RTP payloads. To preserve RTP header compression efficiency, it gives only authentication and replay protection for the headers. For the standard header fields that is fine, since they reveal little beyond what an attacker could infer from packet size and timing.</p><p>Header extensions (<a href='/rfc5285'>RFC 5285</a>) are different. Two specifications, <a href='/rfc6464'>RFC 6464</a> and <a href='/rfc6465'>RFC 6465</a>, carry per-packet sound levels and say that exposing them to an eavesdropper is unacceptable in many circumstances. RFC 6904 therefore defines how to encrypt header extensions carried over SRTP, and lets a sender encrypt only a subset so that, for example, a network monitor can still read transmission time offsets.</p>",
-      "plainLanguage": "<p>Most of what is written on the outside of a parcel is fine for everybody to see. But a few notes on it are secret, so this gives a way to scramble just those.</p>"
+      "content": "<p>RFC 6904 defines a mechanism for encrypting RTP header extensions carried in SRTP. SRTP (<a href='/rfc3711'>RFC 3711</a>) provides confidentiality, message authentication, and replay protection for multimedia payloads sent with RTP (<a href='/rfc3550'>RFC 3550</a>), but in order to preserve RTP header compression efficiency it provides only authentication and replay protection for the headers of RTP packets, not confidentiality.</p><p>For the standard portions of an RTP header this is normally not a problem, because the information carried in an RTP header does not reveal much beyond what an attacker could infer from the size and timing of the packets. Header extensions are different. A number of proposals built on the general RTP header extension mechanism (<a href='/rfc5285'>RFC 5285</a>) carry information for which confidentiality could be desired or essential. Two of them, <a href='/rfc6464'>RFC 6464</a> and <a href='/rfc6465'>RFC 6465</a>, carry information about per-packet sound levels and state that exposing it to an eavesdropper is unacceptable in many circumstances.</p><p>The mechanism defined here encrypts the header extensions using the same cryptographic algorithms and parameters as are used to encrypt the RTP payload. It can be applied selectively, so a sender may leave some extension information in the clear, for example when it is useful for a network monitoring device to know about RTP transmission time offsets (<a href='/rfc5450'>RFC 5450</a>).</p>",
+      "plainLanguage": "<p>SRTP normally protects the media in a call but leaves the headers readable. This adds a way to encrypt selected parts of those headers, for example a sound level reading, while leaving other header fields clear.</p>"
     },
     {
       "id": "concepts",
-      "number": "2",
-      "title": "Same Cipher, Separate Keys",
-      "content": "<p>The mechanism encrypts header extensions with the same cryptographic algorithms and parameters as the packet's RTP payload. Encrypted elements are carried like unencrypted ones. The one- or two-byte element header and any padding stay unencrypted, each element keeps its own identifier, and encrypted and unencrypted elements have separate identifiers.</p><p>To encrypt or decrypt, a participant uses the SRTP key derivation algorithm from Section 4.3.1 of RFC 3711 to make two new keys, with the same pseudorandom function, master key, master salt, index and key derivation rate as the payload.</p><ul><li><code>k_he</code>, the header encryption key: label <code>0x06</code>, length <code>n_e</code>.</li><li><code>k_hs</code>, the header salting key: label <code>0x07</code>, length <code>n_s</code>.</li></ul><p>No new authentication key is needed, because SRTP already authenticates the RTP headers, including extensions.</p>",
-      "plainLanguage": "<p>The sender uses the same kind of lock as for the main message, but cuts a new pair of keys just for the envelope notes.</p>"
+      "number": "3",
+      "title": "Keys for Header Extension Encryption",
+      "content": "<p>Encrypted header extension elements are carried in the same manner as non-encrypted ones, as defined in <a href='/rfc5285'>RFC 5285</a>. The one- or two-byte header of an extension element is not encrypted, nor is any of the header extension padding. Encrypted elements carry separate element identifier values from non-encrypted ones, and several encrypted elements carry separate identifiers from each other, just as they would if they were not encrypted. Encrypted header extension elements are carried only in packets encrypted using SRTP.</p><p>To encrypt or decrypt them, an SRTP participant first uses the SRTP key derivation algorithm specified in Section 4.3.1 of <a href='/rfc3711'>RFC 3711</a> to generate header encryption and header salting keys, using the same pseudorandom function family as the key derivation for the SRTP session. The header encryption key k_he uses label 0x06 and the header salting key k_hs uses label 0x07. The same encryption key and salting key sizes are used as for the SRTP payload, and the same master key, master salt, index, and key_derivation_rate apply. Since RTP headers, including header extensions, are already authenticated in SRTP, no new authentication key is needed for header extensions.</p>",
+      "plainLanguage": "<p>The header gets its own pair of keys, worked out from the session key with a different label than the media payload uses. The extension element headers and the padding stay readable, so a receiver can still tell which elements are present.</p>"
     },
     {
       "id": "algorithms",
-      "number": "3",
-      "title": "The Encryption Mask and Keystream",
-      "content": "<p>A header extension keystream is generated for each packet with encrypted elements. The participant then builds an <strong>encryption mask</strong> with all-ones octets (<code>0xff</code>) over the payload of each encrypted element, and all-zero octets over unencrypted elements, element headers and padding. The mask is computed per packet, and a receiver can always work it out from the unencrypted parts and the signaled list.</p><p>The mask is ANDed with the keystream, and the result is XORed with the header extension. Encryption starts at the first RFC 5285 ID and length, not at the \"defined by profile\" or \"length\" fields. Equivalently: <code>EncryptedHeader = (Encrypt(Key, Plaintext) AND MASK) OR (Plaintext AND (NOT MASK))</code>, which suits implementations whose encryption module cannot be changed easily.</p><p>The SRTP authentication tag is computed over the encrypted extension, so encryption MUST happen before the tag is computed and validation MUST be done on the encrypted data. Receivers SHOULD decrypt only after validating the tag, and MUST NOT take security-relevant action on decrypted headers before then.</p>",
-      "plainLanguage": "<p>A stencil has holes over the secret words only. Scrambling is applied through the holes, so the rest of the note stays readable.</p>"
+      "number": "3.1",
+      "title": "The Encryption Mask and the Ciphertext",
+      "content": "<p>A header extension keystream is generated for each packet that contains encrypted header extension elements. Once the keystream exists, the participant computes an <strong>encryption mask</strong> that identifies the portions of the header extension that are, or are to be, encrypted. The mask corresponds to the entire payload of each header extension element that is encrypted. It does not include any non-encrypted extension elements, any extension element headers, or any padding octets. Octets to be encrypted are set to all-bits-1, that is hexadecimal 0xff, and octets not to be encrypted are set to all-bits-0. The set of extension elements to be encrypted is communicated between the sender and the receiver through the signaling described later.</p><p>The mask is computed separately for every packet that carries a header extension. Because it is based on the non-encrypted portions of the headers and on the agreed list of encrypted extension elements, a receiver can always work out the correct mask. The participant bitwise-ANDs the encryption mask with the keystream to produce a masked keystream, then bitwise exclusive-ORs the header extension with that masked keystream to produce the ciphertext version of the header extension. Octets marked all-bits-1 in the mask are therefore encrypted, and the rest are unchanged.</p><p>The process does not cover the 'defined by profile' or 'length' fields of the header extension, only the header extension proper, which starts with the first element ID and length. Both the mask and the keystream begin at that point. The RFC also gives an equivalent formulation, which may suit implementations whose encryption is done by a separate module: <code>EncryptedHeader = (Encrypt(Key, Plaintext) AND MASK) OR (Plaintext AND (NOT MASK))</code>.</p><p>The SRTP authentication tag is computed across the encrypted header extension, that is, across the data actually transmitted on the wire. Header extension encryption MUST be done before the authentication tag is computed, and authentication tag validation MUST be done on the encrypted header extensions. A receiver SHOULD decrypt only after it has validated the message authentication tag, and it MUST NOT take any action based on decrypted headers before that validation that could affect the security or proper functioning of the system.</p>",
+      "plainLanguage": "<p>Each packet gets a mask that marks which bytes are secret. The mask is applied to a keystream, and the result is combined with the header extension by exclusive-OR, which is the standard way of applying a keystream cipher. The authentication tag is then computed over the encrypted bytes, so it protects them as well.</p>"
     },
     {
-      "id": "examples",
-      "number": "4",
-      "title": "Existing and Future Transforms",
-      "content": "<p>For AES-CM and AES-f8 (RFC 3711), SEED-CTR (<a href='/rfc5669'>RFC 5669</a>), and AES_192_CM and AES_256_CM (<a href='/rfc6188'>RFC 6188</a>), the keystream is generated with the same transform and IV as the payload, but with <code>k_he</code> and <code>k_hs</code> in place of the payload keys. For SEED-CCM and SEED-GCM it uses the SEED-CTR algorithm, since their AEAD covers the header in its associated authenticated data and counter mode is believed to be of equivalent strength. For the NULL transform the keystream is all zero.</p><p>This document updates RFC 3711: the Standards Track RFC defining any new SRTP encryption transform MUST specify how it is used with header extension encryption. Following the approach above is RECOMMENDED where applicable and cryptographically adequate.</p><p>The RFC illustrates the mask with a header extension holding an encrypted SMPTE timecode (ID 1), a plaintext transmission time offset (ID 2), an encrypted audio level (ID 3) and an encrypted NTP timestamp (ID 4). Only the payload octets of IDs 1, 3 and 4 are masked with ones.</p>",
-      "plainLanguage": "<p>The scrambling recipe stays the same for each kind of lock already in use. Anyone who invents a new lock must write down how it works for envelope notes.</p>"
+      "id": "parameters",
+      "number": "3.2",
+      "title": "Keystream Generation for Each Encryption Transform",
+      "content": "<p>For the AES-CM and AES-f8 transforms (<a href='/rfc3711'>RFC 3711</a>), the SEED-CTR transform (<a href='/rfc5669'>RFC 5669</a>), and the AES_192_CM and AES_256_CM transforms (<a href='/rfc6188'>RFC 6188</a>), the header extension keystream SHALL be generated for each packet containing encrypted header extension elements using the same encryption transform and Initialization Vector as are used for that packet's SRTP payload, except that the payload's encryption and salting keys k_e and k_s are replaced by the header encryption and header salting keys k_he and k_hs.</p><p>For the SEED-CCM and SEED-GCM transforms (<a href='/rfc5669'>RFC 5669</a>), the header extension keystream SHALL be generated using the algorithm specified for SEED-CTR. The reason given is that the authenticated encryption with associated data used on the payload in these algorithms includes the RTP header, including the RTP header extension, in its associated authenticated data, and counter-mode encryption for the header extension is believed to be of equivalent cryptographic strength to the CCM and GCM transforms. For the NULL encryption transform (<a href='/rfc3711'>RFC 3711</a>), the header extension keystream SHALL be all-zero.</p><p>For transforms defined after this document, the Standards Track RFC that defines the new transform MUST specify how the encryption transform is to be used with header extension encryption, in addition to the rules in Section 6 of <a href='/rfc3711'>RFC 3711</a>. It is RECOMMENDED that new transformations follow the same mechanisms as Section 3.2 of this document, where those are applicable and are believed to be cryptographically adequate for the transform in question.</p>",
+      "plainLanguage": "<p>Each cipher that SRTP supports has a defined way of producing the header keystream. Most reuse the payload's counter mode with the header keys instead. Any cipher defined in future has to state how it works here.</p>"
     },
     {
       "id": "negotiation",
-      "number": "5",
+      "number": "4",
       "title": "Signaling Encrypted Extensions in SDP",
-      "content": "<p>Encrypted elements are signaled in the SDP <code>extmap</code> attribute (from RFC 5285) using the URI <code>urn:ietf:params:rtp-hdrext:encrypt</code> followed by the URI of the extension to encrypt and any attributes it normally takes. The RFC gives ABNF for this extension and an SDP example where an SMPTE timecode is encrypted while the transmission time offset is not.</p><p>If the extmap is a media attribute, it MUST be used only for media with SRTP-based RTP profiles. As a session attribute, at least one media in the session must use such a profile, and it MUST be ignored for other media. The encrypt URI MUST NOT be applied recursively to itself.</p><p>For backward compatibility, an endpoint that does not understand the URI ignores it. An endpoint MAY offer the same element both encrypted and unencrypted, but only when lack of confidentiality would be acceptable. An answerer that understands encryption SHOULD choose the encrypted form and mark the other <code>inactive</code>. Both forms MUST NOT be negotiated or sent. Users must beware of bid-down attacks, for example by integrity-protecting signaling.</p>",
-      "plainLanguage": "<p>Before the call, each side tells the other which notes will be scrambled. A side that does not understand just ignores that part.</p>"
+      "content": "<p>Encrypted header extension elements are signaled in the Session Description Protocol (SDP) <code>extmap</code> attribute, using the URI <code>urn:ietf:params:rtp-hdrext:encrypt</code> followed by the URI of the header extension element being encrypted, together with any extension attributes that element normally takes. The RFC gives an Augmented Backus-Naur Form grammar for this extension, extending the grammar defined in <a href='/rfc5285'>RFC 5285</a>.</p><p>The extmap attribute is either a session attribute or a media attribute. If the extmap for an encrypted header extension is specified as a media attribute, it MUST be specified only for media that use SRTP-based RTP profiles. If it is specified as a session attribute, there MUST be at least one media in the SDP session that uses an SRTP-based RTP profile; the session-level extmap applies to all the SRTP-based media in the session and MUST be ignored for all other media. The <code>urn:ietf:params:rtp-hdrext:encrypt</code> extension MUST NOT be recursively applied to itself.</p>",
+      "plainLanguage": "<p>The sender says which extension elements are secret in the session description, using a new URI in the extmap attribute. The receiver reads the same list and uses it to work out which bytes to decrypt.</p>"
+    },
+    {
+      "id": "compatibility",
+      "number": "4.1",
+      "title": "Backward Compatibility",
+      "content": "<p>Following the procedures in <a href='/rfc5285'>RFC 5285</a>, an SDP endpoint that does not understand the <code>urn:ietf:params:rtp-hdrext:encrypt</code> extension URI will ignore the extension and, for SDP offer/answer, will negotiate not to use it.</p><p>For backward compatibility with endpoints that do not implement this specification, best-effort encryption of a header extension element is possible in a negotiated session: an endpoint MAY offer the same header extension element both encrypted and unencrypted. An offerer MUST offer only best-effort negotiation when lack of confidentiality would be acceptable in the backward-compatible case. Answerers, or equivalent peers in a negotiation, that understand header extension encryption SHOULD choose the encrypted form of the offered header extension element and mark the unencrypted form inactive, unless they have an explicit reason to prefer the unencrypted form. In all cases, answerers MUST NOT negotiate the use of, and senders MUST NOT send, both the encrypted and the unencrypted form of the same header extension.</p><p>The RFC notes that users of best-effort encryption MUST be cautious of bid-down attacks, where a man-in-the-middle attacker removes a higher-security option and forces the endpoints to negotiate a lower-security one. The appropriate countermeasures depend on the signaling protocol in use, and can include ensuring that the signaling is integrity-protected.</p>",
+      "plainLanguage": "<p>An old endpoint that does not understand the new option simply ignores it. To work with such endpoints, a sender can offer the same extension twice, once secret and once not. The RFC warns that this can be attacked by removing the safer option during negotiation.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
-      "title": "Limits and Security Considerations",
-      "content": "<p>Header extension elements get security equivalent to SRTP payloads. The mechanism hides the content of elements, not which elements are present. With two-byte headers, zero-length elements and the appbits field are not protected, and extensions that do not use RFC 5285 cannot be protected. The RFC does not say when to use encryption; documents defining specific elements should give that guidance.</p><p>Middleboxes without the SRTP authentication keys cannot verify unencrypted extensions and MUST treat them as untrusted. Extensions cannot use different algorithms or keys than the payload, so it is not possible to encrypt an extension while leaving the payload in cleartext. Strong authentication is REQUIRED if an attacker setting easily guessed plaintext bits could meaningfully affect the system. The technique only works with keystream-based ciphers such as CTR or f8, not ECB or CBC.</p><p>IANA registered the extension URI <code>urn:ietf:params:rtp-hdrext:encrypt</code> in the RTP Compact Header Extensions subregistry. The appendix has test vectors for key derivation and for header encryption with AES-CM.</p>",
-      "plainLanguage": "<p>Hiding the notes does not hide that notes exist, and the secret notes are only as safe as the main message's lock.</p>"
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>The security properties of header extension elements protected by this mechanism are equivalent to those for SRTP payloads.</p><p>Several limits are stated. The mechanism does not provide confidentiality about which header extension elements are used for a given SRTP packet, only for the content of those elements. That appears to be in the spirit of SRTP itself, which does not encrypt RTP headers. For the two-byte-header form of header extension elements, the mechanism gives no protection to zero-length elements, for which their presence or absence is the only information they carry, and none to the appbits, which are field 256, the lowest four bits of the 'defined by profile' field. Neither feature is present in the one-byte-header form, so these limitations do not apply there. The mechanism cannot protect RTP header extensions that do not use the mechanism defined in <a href='/rfc5285'>RFC 5285</a>, and this document does not specify the circumstances in which extension encryption should be used; documents defining specific header extension elements should provide that guidance.</p><p>If a middlebox does not have access to the SRTP authentication keys, it has no way to verify the authenticity of unencrypted RTP header extension elements, or of the unencrypted RTP header, even though it can monitor them. Such middleboxes MUST treat those headers as untrusted and potentially generated by an attacker, in the same way they treat unauthenticated traffic. There is no mechanism to protect header extensions with different algorithms or encryption keys than those used for the RTP payloads, so it is not possible to provide confidentiality for a header extension while leaving the payload in cleartext.</p><p>The dangers of using weak or NULL authentication with SRTP, described in Section 9.5 of <a href='/rfc3711'>RFC 3711</a>, apply to encrypted header extensions as well. Since some header extension elements will have easily guessed plaintext bits, strong authentication is REQUIRED if an attacker setting such bits could have a meaningful effect on the behavior of the system. The technique can be applied only to encryption transforms that work by generating a pseudorandom keystream and bitwise exclusive-ORing it with the plaintext, such as CTR or f8. It will not work with ECB, CBC, or any other encryption method that does not use a keystream.</p>",
+      "plainLanguage": "<p>The protection is as strong as SRTP's own, but it hides the contents of the selected elements, not the fact that they are there. It cannot protect a zero-length element or the appbits, and it needs the same strong authentication SRTP already needs.</p>"
     }
   ],
   "viz": [
     {
-      "type": "key-grid",
+      "type": "opcodes",
       "anchor": "concepts",
       "position": "after",
-      "caption": "WHAT THE MECHANISM REUSES AND ADDS",
+      "caption": "KEY DERIVATION LABELS FOR HEADER EXTENSIONS (RFC 6904, SECTION 3)",
       "data": {
         "items": [
           {
-            "title": "Same cipher",
-            "text": "Header extensions use the same algorithm and parameters as the payload."
+            "code": "0x06",
+            "label": "k_he",
+            "desc": "Label for the SRTP header encryption key."
           },
           {
-            "title": "Header encryption key",
-            "text": "k_he is derived with label 0x06."
+            "code": "0x07",
+            "label": "k_hs",
+            "desc": "Label for the SRTP header salting key.",
+            "highlight": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "HEADER KEY DERIVATION TEST VECTOR (RFC 6904, APPENDIX A.1)",
+      "data": {
+        "title": "AES-128 in Counter Mode",
+        "lang": "text",
+        "code": "master key:      E1F97A0D3E018BE0D64FA32C06DE4139\nmaster salt:     0EC675AD498AFEEBB6960B3AABE6\nhdr. cipher key: 549752054D6FB708622C4A2E596A1B93\nhdr. cipher salt: AB01818174C40D39A3781F7C2D27"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "THE FOUR PARTS OF THE ENCRYPTION STEP",
+      "data": {
+        "items": [
+          {
+            "title": "Keystream",
+            "text": "Generated for each packet from the header encryption and header salting keys."
           },
           {
-            "title": "Header salting key",
-            "text": "k_hs is derived with label 0x07."
+            "title": "Mask",
+            "text": "One bit per byte: one means encrypt that byte, zero means leave it in the clear."
           },
           {
-            "title": "Per-packet mask",
-            "text": "0xff over encrypted element payloads, 0x00 elsewhere."
+            "title": "Exclusive-OR",
+            "text": "The masked keystream is combined with the header extension to produce the ciphertext."
+          },
+          {
+            "title": "Authentication",
+            "text": "The SRTP tag is computed over the encrypted extension, so decryption waits for tag validation."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "EQUIVALENT FORM OF THE ENCRYPTION (RFC 6904, SECTION 3)",
+      "data": {
+        "title": "Header extension encryption",
+        "lang": "text",
+        "code": "EncryptedHeader = (Encrypt(Key, Plaintext) AND MASK) OR\n                  (Plaintext AND (NOT MASK))"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "WHAT THE MECHANISM DOES AND DOES NOT HIDE (RFC 6904, SECTION 5)",
+      "data": {
+        "columns": [
+          "Part of the header extension",
+          "Confidential"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Payload of an encrypted extension element",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "Payload of a non-encrypted extension element",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Extension element ID and length header",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Header extension padding octets",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Which extension elements a packet carries",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Zero-length elements and appbits in the two-byte form",
+              "No"
+            ]
           }
         ]
       }
@@ -126,14 +234,19 @@
   ],
   "references": [
     {
-      "number": "[RFC3711]",
-      "text": "Baugher, M., et al., \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
-      "rfc": 3711
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     },
     {
       "number": "[RFC3550]",
-      "text": "Schulzrinne, H., et al., \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
+      "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
       "rfc": 3550
+    },
+    {
+      "number": "[RFC3711]",
+      "text": "Baugher, M., McGrew, D., Naslund, M., Carrara, E., and K. Norrman, \"The Secure Real-time Transport Protocol (SRTP)\", RFC 3711, March 2004.",
+      "rfc": 3711
     },
     {
       "number": "[RFC5285]",
@@ -142,22 +255,27 @@
     },
     {
       "number": "[RFC5669]",
-      "text": "Yoon, S., et al., \"The SEED Cipher Algorithm and Its Use with the Secure Real-Time Transport Protocol (SRTP)\", RFC 5669, August 2010.",
+      "text": "Yoon, S., Kim, J., Park, H., Jeong, H., and Y. Won, \"The SEED Cipher Algorithm and Its Use with the Secure Real-Time Transport Protocol (SRTP)\", RFC 5669, August 2010.",
       "rfc": 5669
     },
     {
       "number": "[RFC6188]",
       "text": "McGrew, D., \"The Use of AES-192 and AES-256 in Secure RTP\", RFC 6188, March 2011.",
       "rfc": 6188
+    },
+    {
+      "number": "[RFC6464]",
+      "text": "Lennox, J., Ivov, E., and E. Marocco, \"A Real-time Transport Protocol (RTP) Header Extension for Client-to-Mixer Audio Level Indication\", RFC 6464, December 2011.",
+      "rfc": 6464
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

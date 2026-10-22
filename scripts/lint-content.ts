@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { validateViz } from '../src/components/viz/validate';
+import { checkRetiredFraming, retiredFramingMessage } from '../src/lib/plain-language';
 import { loadIndex } from '../src/lib/rfc-index';
 import { walkStrings } from '../src/lib/sanitize-check';
 import { type GlossaryDoc, glossarySchema, type JourneyDoc, journeySchema, type RfcDoc, rfcSchema } from '../src/lib/schemas';
@@ -31,6 +32,11 @@ const RESERVED_SLUGS = new Set([
 const KINDS = ['rfcs', 'journeys', 'glossary'] as const;
 type Kind = (typeof KINDS)[number];
 const SCHEMAS = { rfcs: rfcSchema, journeys: journeySchema, glossary: glossarySchema } as const;
+
+/** A citation quotes the RFC's own bibliography, so it may name the old framing without the site adopting it. */
+const CITATION_POINTER = /^\/references\/\d+\/text$/;
+/** The reader-facing texts: only these may talk about who the text is written for. */
+const AUDIENCE_POINTER = /^\/(?:plainLanguage(?:\/summary)?|sections\/\d+\/plainLanguage)$/;
 
 type Normalized = { issued: Set<number>; notIssued: Set<number>; max: number };
 export type IndexLike = { entries?: Map<number, unknown>; issued?: number[]; notIssued?: Iterable<number>; max: number };
@@ -75,6 +81,10 @@ function lintContent(label: string, data: unknown, ctx: { max: number; errors: s
       const n = /^\/rfc(\d+)(?:[#?].*)?$/.exec(href);
       if (n && (Number(n[1]) < 1 || Number(n[1]) > max)) errors.push(`${label}: ${ptr} internal link ${href} is outside 1..${max}`);
     }
+    // The retired ELI5 framing (AGENTS.md): these explainers are ISO Plain Language for an adult reader.
+    if (CITATION_POINTER.test(ptr)) return; // a citation quotes the RFC's own bibliography
+    for (const found of checkRetiredFraming(s, AUDIENCE_POINTER.test(ptr)))
+      errors.push(`${label}: ${ptr} ${retiredFramingMessage(found, found)}`);
   });
 }
 

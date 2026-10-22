@@ -321,3 +321,20 @@ test('zero-padded filename is rejected', () => {
   fs.renameSync(rfcPath(dir, 903), path.join(dir, 'rfcs', '0903.json'));
   assert.ok(has(lint(dir, index, {}).errors, /0903\.json: zero-padded filename; use the plain number/));
 });
+
+test('the retired ELI5 framing is rejected in content', () => {
+  const dir = baseline();
+  edit(dir, 903, (j: Doc) => {
+    j.plainLanguage.summary = '<p>ELI5: a computer shouts its name tag number.</p>';
+  });
+  assert.ok(has(lint(dir, index, {}).errors, /retired ELI5 framing/));
+  edit(dir, 903, (j: Doc) => {
+    j.plainLanguage.summary = '<p>A computer shouts its name tag number.</p>';
+    j.sections[0].plainLanguage = '<p>Written for a 10-year-old: a computer shouts its name tag.</p>';
+  });
+  assert.ok(has(lint(dir, index, {}).errors, /retired 10-year-old framing/));
+  edit(dir, 903, (j: Doc) => {
+    j.sections[0].plainLanguage = '<p>A computer shouts its name tag number.</p>';
+  });
+  assert.deepEqual(lint(dir, index, {}).errors, []);
+});

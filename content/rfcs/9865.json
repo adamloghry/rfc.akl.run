@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document updates RFC 7643 and RFC 7644 with new SCIM query parameters and result attributes for cursor-based pagination. It helps SCIM services built on systems that already page through results with cursors rather than numeric offsets.</p>",
   "plainLanguage": {
-    "summary": "<p>When reading a long book, a bookmark is better than counting pages. This lets SCIM servers hand out bookmarks to continue through a long list of users.</p>"
+    "summary": "<p>When a client asks for a long list of users, the server sends it back a page at a time. This document adds a second way of doing that, based on bookmarks rather than page numbers. The server returns an opaque token with the page, and the client sends that token back to get the next page. It suits systems whose storage already works that way, and it removes the work of translating between the two styles.</p>"
   },
   "questions": [
     "scim cursor pagination",
@@ -22,88 +22,100 @@
   ],
   "subtitle": "Bookmark-style paging for SCIM, so servers built on cursors need not translate to page numbers.",
   "tldr": {
-    "problem": "SCIM only offered index-based pagination, so a service provider built on a cursor-based system had to iterate the whole cursor, store the results and serve indexed pages from them.",
-    "mechanism": "RFC 9865 adds a cursor query parameter and nextCursor and previousCursor response attributes, new error types, and a pagination block in ServiceProviderConfig so clients can discover what is supported.",
-    "outcome": "SCIM servers can reuse their existing cursors directly, and clients walk through results by passing back the opaque cursor each response gives them.",
+    "problem": "SCIM defines index-based pagination, where a client asks for the results starting at a numbered position. Most identity systems store their data with a cursor instead, so a SCIM service provider has to walk the whole cursor, hold the results in memory and then serve numbered pages from that copy.",
+    "mechanism": "RFC 9865 adds a cursor parameter and a count parameter, plus nextCursor and previousCursor attributes in the response. A cursor is an opaque, URL-safe string that the client sends back unchanged, so the service provider can resume where it left off without translating anything.",
+    "outcome": "The document updates RFC 7643 and RFC 7644 with the new parameters and attributes, defines three new pagination error types, and adds a pagination object to the Service Provider Configuration so a client can discover which methods are supported. It requires that a cursor never widens the access its holder already had.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "New query parameter",
-      "value": "cursor"
+      "label": "Query parameters added",
+      "value": "cursor and count"
     },
     {
-      "label": "New response attributes",
-      "value": "nextCursor, previousCursor"
+      "label": "Response attributes added",
+      "value": "nextCursor and previousCursor"
     },
     {
-      "label": "New error types",
+      "label": "Pagination error types",
       "value": "invalidCursor, expiredCursor, invalidCount"
     },
     {
-      "label": "Config attribute",
-      "value": "pagination in /ServiceProviderConfig"
+      "label": "Page sizes in the example",
+      "value": "defaultPageSize 100, maxPageSize 250"
     }
   ],
-  "today": "<p>RFC 9865 is a Proposed Standard published in October 2025. It updates <a href='/rfc7643'>RFC 7643</a> and <a href='/rfc7644'>RFC 7644</a>, and the metadata lists no RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 9865 is a Proposed Standard published in October 2025, and it has not been obsoleted. It updates RFC 7643 and RFC 7644, and IANA has added references to this document in the SCIM Schema URIs registries for the ListResponse, the SearchRequest and the ServiceProviderConfig schemas.</p>",
   "glossary": [
     "cursor-pagination",
     "json",
     "rate-limiting",
     "uri",
     "proposed-standard",
-    "standards-track"
+    "standards-track",
+    "scim",
+    "resource",
+    "http",
+    "url",
+    "bearer-token"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why Cursors for SCIM",
-      "content": "<p>The two common patterns for paging through results are index-based and cursor-based. The RFC does not compare them. It observes that SCIM service providers usually sit on top of existing codebases, databases or APIs that already have an established pagination pattern.</p><p>Translating an underlying cursor into the index-based pagination of <a href='/rfc7644'>RFC 7644</a> requires the provider to fully iterate the cursor, store the results, and then serve indexed pages from them. This <strong>pagination translation</strong> adds complexity and memory requirements, and may impede SCIM adoption.</p><p>The RFC adds a simple extension that lets providers reuse cursors. It updates <a href='/rfc7643'>RFC 7643</a> and RFC 7644 because it adds attributes to their existing structures; the changes apply when the <code>cursor</code> parameter is used in GET or POST search requests.</p>",
-      "plainLanguage": "<p>Counting to page 57 means flipping through every page before it. A bookmark lets you open the book right where you stopped.</p>"
+      "title": "Introduction",
+      "content": "<p>The two common patterns for result pagination are index-based pagination and cursor-based pagination. Rather than compare the advantages and disadvantages of competing pagination patterns, this document recognizes that SCIM service providers are commonly implemented as an interoperability layer on top of already existing application codebases, databases or APIs that already have a well established pagination pattern.</p><p>Translating from an underlying cursor-based pagination pattern to the index-based pagination defined in Section 3.4.2.4 of <a href='/rfc7644'>RFC 7644</a> ultimately requires the SCIM service provider to fully iterate the underlying cursor, store the results, and then serve indexed pages from the stored results. This task of pagination translation increases the complexity and memory requirements for implementing a SCIM service provider, and may be an impediment to SCIM adoption for some applications and identity systems.</p><p>This document defines a simple addition to the SCIM protocol that allows SCIM service providers to reuse underlying cursors without expensive translation. Support for cursor-based pagination in SCIM encourages broader cross-application identity management interoperability by encouraging implementations for applications and identity systems where cursor-based pagination is already well established.</p><p>The document updates RFC 7643 and RFC 7644 because it adds attributes to existing structures from those documents. These changes are invoked when using the <code>cursor</code> parameter when making SCIM search requests using the GET or POST methods.</p>",
+      "plainLanguage": "<p>Identity systems rarely all page the same way. SCIM settled on page numbers, but many databases and services hand out bookmarks instead. A SCIM server sitting on top of one of those has to read the whole bookmark list, keep the results in memory, and then hand out numbered slices of that copy. This document lets such a server pass its own bookmark straight through to the client, so no translation is needed.</p>"
     },
     {
-      "id": "operation",
+      "id": "parameters",
       "number": "2",
-      "title": "Cursor Parameters and Responses",
-      "content": "<p>A client sends two query parameters. <code>cursor</code> is the <code>nextCursor</code> value from a previous page; it MUST be empty or omitted on the first request and may only contain unreserved characters from <a href='/rfc3986'>RFC 3986</a>. <code>count</code> is the desired maximum number of results per page; a negative value is read as 0, and 0 means return no resources except <code>totalResults</code>. The provider MUST NOT return more than <code>count</code>, though it MAY return fewer.</p><p>Responses carry <code>nextCursor</code>, which providers MUST include in every paged response except the last page, and an optional <code>previousCursor</code>, which MUST NOT appear on the first page. Cursors are URL-safe strings that are opaque to the client. To fetch another page, the client repeats the query with every parameter identical except the cursor, which SHOULD be a value the provider returned earlier.</p><p>Providers that cannot estimate <code>totalResults</code> MAY omit it. If sorting is implemented, cursor-paged results should be sorted.</p>",
-      "plainLanguage": "<p>The server gives you a ticket after each page. You hand the ticket back to get the next page, and you never need to read what is on the ticket.</p>"
+      "title": "Query Parameters and Response Attributes",
+      "content": "<p>Two URL query parameters request cursor-based pagination. The <code>cursor</code> parameter takes the string value of the nextCursor attribute from a previous result page. The cursor value must be empty or omitted for the first request of a cursor-paginated query, and it may only contain characters from the unreserved character set of <a href='/rfc3986'>RFC 3986</a>. The <code>count</code> parameter specifies the desired maximum number of query results per page, for example 10. A negative value must be interpreted as 0, and a value of 0 indicates that no resource results are to be returned except for totalResults. When specified, the service provider must not return more results than that, although it may return fewer. If the count is unspecified, the maximum number returned is set by the service provider.</p><p>Two attributes come back in a paged query response. The <code>nextCursor</code> is a cursor value string that may be used in a subsequent request to obtain the next page of results. A service provider supporting cursor-based pagination must include nextCursor in all paged query responses except when returning the last page; nextCursor must be omitted from a response only to indicate that there are no more result pages. The <code>previousCursor</code> is a cursor value string that may be used to obtain the previous page of results. Returning it is optional, and it must not be returned with the first page.</p><p>Cursor values are URL-safe strings that are opaque to the client. To retrieve another result page, the client must query the same service provider endpoint with all query parameters and values identical to the initial query, with the exception of the cursor value, which should be set to a nextCursor or previousCursor value returned by the service provider in a previous response.</p><p>As described in Section 3.4.1 of RFC 7644, service providers should return an accurate value for totalResults, which is the total number of resources across all pages. A service provider that cannot estimate totalResults may omit the attribute.</p>",
+      "plainLanguage": "<p>The client sends two things: a cursor, which is empty on the first request, and a count, which is the most results it wants per page. The server answers with a nextCursor holding the position of the next page, and optionally a previousCursor for going back. The cursor is an opaque string: the client must send back exactly what it was given, and must repeat every other part of the query unchanged.</p>"
     },
     {
       "id": "error-handling",
-      "number": "3",
+      "number": "2.1",
       "title": "Pagination Errors",
-      "content": "<p>For invalid cursor or count values and other error conditions, a provider SHOULD return the appropriate HTTP status code and a JSON error as defined in <a href='/rfc7644'>RFC 7644</a>. For status 400 (Bad Request), three new <code>scimType</code> values are added: <code>invalidCursor</code>, <code>expiredCursor</code> and <code>invalidCount</code>.</p><p>An expired cursor means the client waited longer than the provider's <code>cursorTimeout</code>. An invalid count must be between 0 and the provider's <code>maxPageSize</code> and must equal the count of the initial query.</p>",
-      "plainLanguage": "<p>If you lose your ticket, or wait so long that it stops working, the server tells you which of those went wrong.</p>"
+      "content": "<p>If a service provider encounters invalid pagination query parameters, such as an invalid cursor value or count value, or other error conditions, it should return the appropriate HTTP response status code and detailed JSON error response as defined in Section 3.12 of RFC 7644.</p><p>For HTTP status code 400 (Bad Request) responses, three detail error types are defined, extending the list in Table 9 of Section 3.12 of RFC 7644. <code>invalidCursor</code> means the cursor value is invalid; the cursor value should be empty to request the first page and set to the nextCursor or previousCursor value for subsequent queries. <code>expiredCursor</code> means the cursor has expired and the client should not wait longer than the service provider's cursorTimeout before requesting additional pages. <code>invalidCount</code> means the count value is invalid: it must be between 0 and the service provider's maxPageSize, and must be equal to the count value of the initial query.</p>",
+      "plainLanguage": "<p>Three error messages tell a client what went wrong with a paged request: the cursor was not valid, the cursor had expired, or the count was not acceptable. The client is told to repeat the first request with an empty cursor, and to give up if the cursor has expired rather than wait.</p>"
     },
     {
-      "id": "negotiation",
-      "number": "4",
-      "title": "Choosing Cursor, Index or Both",
-      "content": "<p>A provider MAY require cursors for all results by including a <code>nextCursor</code> even when the query had no <code>cursor</code> parameter. In the RFC's example, a plain <code>GET /Users</code> returns a page of <code>defaultPageSize</code> results (100 of 5000 total) and a <code>nextCursor</code>.</p><p>A provider supporting both methods lets clients pick with <code>startIndex</code> or <code>cursor</code>, and MUST choose a default method for requests that specify neither. Providers that previously supported only index pagination should keep index as the default, to avoid breaking clients that expect it.</p><p>Queries can also be sent with HTTP POST to <code>/.search</code>, passing <code>cursor</code> and <code>count</code> in the request body.</p>",
-      "plainLanguage": "<p>A library that adds bookmarks should still let old visitors count pages, so nothing breaks for them.</p>"
+      "id": "operation",
+      "number": "2.3",
+      "title": "Choosing a Pagination Method",
+      "content": "<p>If sorting is implemented as described in Section 3.4.2.3 of RFC 7644, then cursor-paged results should be sorted.</p><p>A service provider may require cursor-based pagination to retrieve all results for a query, by including a nextCursor value in the response even when the query does not include the cursor parameter. A query with no pagination parameter at all may then be answered with a page holding the default page size of results and a nextCursor value.</p><p>When a service provider supports both index-based and cursor-based pagination, clients can use the <code>startIndex</code> or <code>cursor</code> query parameter to request a specific method. A provider supporting both must also choose a default pagination method to use when responding to requests that have not specified a pagination query parameter. Implementers of providers that previously supported only index-based pagination and are now adding cursor-based pagination should use index as the default, to avoid incompatibility with clients that expect index-based behaviour when no pagination query parameters are specified. Clients can query the Service Provider Configuration endpoint to determine whether index-based, cursor-based or both types of pagination are supported and which is the default.</p>",
+      "plainLanguage": "<p>A provider may offer one way of paging or both. When it offers both, the client picks by sending startIndex for page numbers or cursor for bookmarks, and the provider has to nominate one as the default for requests that ask for neither. A provider that used to offer only page numbers should keep that as its default, so existing clients do not change behaviour.</p>"
+    },
+    {
+      "id": "examples",
+      "number": "3",
+      "title": "Querying Resources Using HTTP POST",
+      "content": "<p>Section 3.4.3 of RFC 7644 defines how clients may execute queries without passing parameters on the URL, by using the POST verb with the <code>/.search</code> path extension. When posting to <code>/.search</code>, the client passes the parameters defined in Section 2 in the body of the POST request, in a SearchRequest document that carries the schemas, attributes, filter, cursor and count values.</p><p>The response to such a request is the same ListResponse as for a GET query, with the nextCursor value that the client may use in a subsequent call to obtain the next page of resources.</p>",
+      "plainLanguage": "<p>The same two parameters can also travel in the body of a POST request instead of in the URL. A client posts a search document to the /.search path, with the cursor and count alongside the filter and the attributes it wants, and gets back a page and a cursor for the next one.</p>"
     },
     {
       "id": "management",
-      "number": "5",
-      "title": "Discovering Support",
-      "content": "<p>A provider implementing cursors SHOULD add an optional <code>pagination</code> complex attribute to its <code>/ServiceProviderConfig</code> document. Its sub-attributes are <code>cursor</code> and <code>index</code> (REQUIRED Booleans), and the OPTIONAL <code>defaultPaginationMethod</code> (<code>cursor</code> or <code>index</code>), <code>defaultPageSize</code>, <code>maxPageSize</code> and <code>cursorTimeout</code> (the minimum number of seconds a cursor stays valid between page requests).</p><p>A client MAY fetch this document before using cursors. Clients MUST NOT treat missing values as meaning there are no defaults, limits or cursor lifetimes; a provider may leave them out because, for example, different resource types have different values, or because page size depends on the size of each resource.</p>",
-      "plainLanguage": "<p>Before borrowing a bookmark, you can ask the library desk what rules it uses, though it may not tell you every rule.</p>"
+      "number": "4",
+      "title": "Service Provider Configuration",
+      "content": "<p>The <code>/ServiceProviderConfig</code> resource defined in Section 4 of RFC 7644 facilitates discovery of SCIM service provider features. A provider implementing cursor-based pagination should include an additional attribute in the JSON document returned by that endpoint.</p><p>The <code>pagination</code> attribute is a complex type that indicates pagination configuration options, and is optional. Its sub-attributes are <code>cursor</code>, a Boolean value specifying support of cursor-based pagination, which is required; <code>index</code>, a Boolean value specifying support of index-based pagination, which is required; <code>defaultPaginationMethod</code>, a string value specifying the type of pagination the provider defaults to when the client has not said which method it wants, with the possible values <code>cursor</code> and <code>index</code>, which is optional; <code>defaultPageSize</code>, a positive integer giving the default number of results in a page when no count is specified, which is optional; <code>maxPageSize</code>, a positive integer giving the maximum number of results in a page regardless of the count, which is optional and may be further restricted by other criteria; and <code>cursorTimeout</code>, a positive integer giving the minimum number of seconds a cursor stays valid between page requests, which is optional. A client that waits too long between requests may receive an invalid cursor error response. No value being specified may mean that there is no cursor timeout, or that the timeout is not a fixed duration.</p><p>Providers may choose not to advertise the default pagination method, the page size or the cursor validity. Clients must not interpret the absence of published values as meaning that no defaults or limits exist, or that there is no default pagination method. Providers may leave values out for many reasons: a provider holding several resource types may have different values for each, and the default and maximum page size may depend on factors besides the number of resources, such as the size of each resource on the page. A client may fetch the Service Provider Configuration document before using cursor-based pagination, and verify that cursor-based pagination is supported.</p>",
+      "plainLanguage": "<p>The provider can publish a pagination section in its configuration endpoint, saying whether it supports bookmarks, page numbers or both, which one it defaults to, how many results a page holds, the largest page it will serve, and how long a cursor stays valid. A client can read that before it starts paging. A missing value means unknown, not unlimited, so a client must not assume there is no cap.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
+      "number": "5",
       "title": "Security Considerations",
-      "content": "<p>The RFC names two threats: malicious actors, authenticated or not, who try to read or change data through cursor queries or to exhaust resources, and benign authenticated users who accidentally overload the provider.</p><p>For confidentiality, paging MUST stay confined to what the current identity may access, even if the actor holds a cursor made by someone else. Authorization checks MUST continue as the actor moves through results, and holding a cursor must never grant extra access. Providers SHOULD invalidate an actor's cursors after a permission change when possible, should obfuscate cursors so they cannot be forged, and MUST NOT leak sensitive data in error messages.</p><p>For availability, storing much state per cursor could let many initial queries exhaust resources. Recommended defenses include requiring authentication for large result sets (anonymous queries may get a 400 with <code>tooMany</code>), rate limiting as in <a href='/rfc6585'>RFC 6585</a>, administrator limits on cursors or <code>maxPageSize</code>, and resource-efficient cursor invalidation.</p>",
-      "plainLanguage": "<p>A bookmark must not let you read pages you are not allowed to see, and the library must not run out of bookmarks if someone grabs thousands.</p>"
+      "content": "<p>The document is under the same security and privacy considerations as RFC 7644, and the implementers must consider the following further aspects to guard against deliberate attacks and inadvertent misuse.</p><p>The threat landscape has two kinds of actor. Unauthenticated and authenticated malicious actors want unauthorized access to data, alteration or deletion through cursor-enabled queries, and may try to deplete the provider's resources on purpose to cause a denial of service. Authenticated benign users are legitimate users who, through confusion or lack of understanding, consume provider resources excessively and cause an unintended denial of service.</p><p>On confidentiality, implementers must ensure that pagination through result sets is strictly confined to the data that the actor's current identity is authorized to access, even when the actor holds a cursor that was generated by a different actor. Authorization checks must be applied continuously as an actor navigates the result set, and possession of a cursor must never be read as granting any additional access. Where possible, providers should invalidate all cursors belonging to an actor immediately after a change in permissions, so that queries made with old cursors are denied; alternatively they may keep the cursors but must ensure that metadata tied to the result set, such as record counts, reflects the new permissions. Because cursor values are URL-safe strings that are opaque to clients, providers should obfuscate them so that clients cannot interpret them or forge new ones, and should be able to detect forged values and return an invalidCursor error immediately. Providers must handle error scenarios without exposing sensitive data: a request for a page outside the actor's authorized scope and a request for a page that does not exist should produce identical error messages, so that neither the data nor the nature of the authorization failure is disclosed. It is acceptable to log different messages where only administrators can read them.</p><p>On availability, the concern is denial of service. If the provider retains substantial data or metadata for each cursor, many initial queries that allocate cursors could exhaust its resources, whether deliberately or accidentally through client testing or bugs. The recommended mitigations are that clients authenticate to retrieve large result sets, since anonymous queries yielding many results may return an HTTP 400 with the error type tooMany; that rate limiting is implemented to control the volume and cadence of cursor requests; that the administrator can set a ceiling on the number of cursors permissible at any time, or specify a maxPageSize, with guidance documented in the administrator guide; and that cursor invalidation mechanisms, including those triggered by permission changes, are designed to be resource-efficient so that they cannot themselves be exploited.</p>",
+      "plainLanguage": "<p>A cursor must never be treated as a key that opens more than the holder is entitled to. The provider has to check the requester's permissions on every page, not only on the first, and it should throw away the cursors it issued to someone whose permissions have just changed. Cursors should also be hard to guess, so that they cannot be forged, and the error for a page outside the requester's scope should look exactly like the error for a page that does not exist. On the availability side, the provider should limit how many cursors it hands out and how often they are used, so that a flood of requests cannot exhaust its memory.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "operation",
+      "anchor": "parameters",
       "position": "after",
-      "caption": "CURSOR PAGING EXCHANGE (BASED ON THE RFC'S EXAMPLE)",
+      "caption": "A cursor-paged SCIM query (RFC 9865, Section 2)",
       "data": {
         "lanes": [
           {
@@ -112,37 +124,73 @@
           },
           {
             "key": "provider",
-            "label": "Service provider"
+            "label": "SCIM service provider"
           }
         ],
         "messages": [
           {
             "from": "client",
             "to": "provider",
-            "label": "GET /Users?...&cursor&count=10",
+            "label": "GET /Users?cursor&count=10",
             "color": "blue",
-            "note": "Empty cursor requests the first page."
+            "note": "The first request: the cursor is empty and the count is 10."
           },
           {
             "from": "provider",
             "to": "client",
-            "label": "200 OK with nextCursor",
+            "label": "LIST RESPONSE",
             "color": "green",
-            "note": "Page of up to 10 resources plus a cursor for the next page."
+            "note": "Ten resources and a nextCursor of VZUTiyhEQJ94IR."
           },
           {
             "from": "client",
             "to": "provider",
-            "label": "GET ... cursor=(nextCursor)&count=10",
+            "label": "GET /Users?cursor=VZUTiyhEQJ94IR",
             "color": "blue",
-            "note": "Same parameters; only the cursor changes."
+            "note": "The same query, with only the cursor value replaced."
           },
           {
             "from": "provider",
             "to": "client",
-            "label": "200 OK with previousCursor and nextCursor",
+            "label": "LIST RESPONSE",
             "color": "green",
-            "note": "nextCursor is omitted on the last page."
+            "note": "The next ten resources, with a previousCursor and a new nextCursor."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "The two pagination patterns",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Index-based pagination",
+          "Cursor-based pagination"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "What the client sends",
+              "A starting position, startIndex",
+              "An opaque cursor value returned by the provider"
+            ]
+          },
+          {
+            "cells": [
+              "What the provider must do",
+              "Serve results by number from its own store",
+              "Resume from the position the cursor names"
+            ]
+          },
+          {
+            "cells": [
+              "Cost for a provider built on cursors",
+              "Walk the whole cursor, store the results, then serve numbered pages",
+              "Pass the cursor through unchanged"
+            ]
           }
         ]
       }
@@ -151,48 +199,71 @@
       "type": "opcodes",
       "anchor": "error-handling",
       "position": "after",
-      "caption": "NEW SCIMTYPE ERROR VALUES (HTTP 400)",
+      "caption": "The three pagination error types",
       "data": {
         "items": [
           {
             "code": "invalidCursor",
-            "label": "Invalid cursor",
-            "desc": "Cursor should be empty for page one, then a nextCursor or previousCursor value."
+            "label": "HTTP 400",
+            "desc": "The cursor value is invalid; use an empty cursor for the first page."
           },
           {
             "code": "expiredCursor",
-            "label": "Expired cursor",
-            "desc": "The client waited longer than the provider's cursorTimeout."
+            "label": "HTTP 400",
+            "desc": "The cursor has expired; do not wait longer than the cursorTimeout."
           },
           {
             "code": "invalidCount",
-            "label": "Invalid count",
-            "desc": "Must be between 0 and maxPageSize and equal the initial query's count."
+            "label": "HTTP 400",
+            "desc": "The count is outside 0 to maxPageSize, or differs from the initial query."
           }
         ]
       }
     },
     {
-      "type": "code",
+      "type": "key-grid",
       "anchor": "management",
       "position": "after",
-      "caption": "PAGINATION BLOCK OF /SERVICEPROVIDERCONFIG (RFC EXAMPLE)",
+      "caption": "The pagination object in the Service Provider Configuration",
       "data": {
-        "title": "pagination attribute",
-        "lang": "json",
-        "code": "\"pagination\": {\n  \"cursor\": true,\n  \"index\": true,\n  \"defaultPaginationMethod\": \"cursor\",\n  \"defaultPageSize\": 100,\n  \"maxPageSize\": 250,\n  \"cursorTimeout\": 3600\n}"
+        "items": [
+          {
+            "title": "cursor",
+            "text": "A Boolean value saying whether cursor-based pagination is supported."
+          },
+          {
+            "title": "index",
+            "text": "A Boolean value saying whether index-based pagination is supported."
+          },
+          {
+            "title": "defaultPaginationMethod",
+            "text": "The method used when the client asks for neither, either cursor or index."
+          },
+          {
+            "title": "defaultPageSize",
+            "text": "The number of results in a page when no count is given."
+          },
+          {
+            "title": "maxPageSize",
+            "text": "The largest number of results the provider will return in a page."
+          },
+          {
+            "title": "cursorTimeout",
+            "text": "The minimum number of seconds a cursor stays valid between requests."
+          }
+        ]
       }
     }
   ],
   "references": [
     {
       "number": "[RFC7643]",
-      "text": "Hunt, P., Ed., Grizzle, K., Wahlstroem, E., and C. Mortimore, \"System for Cross-domain Identity Management: Core Schema\", RFC 7643, September 2015.",
+      "text": "Shorr, H. and N. Zawirski, \"System for Cross-domain Identity Management (SCIM) Core Schema\", RFC 7643, September 2015.",
       "rfc": 7643
     },
     {
       "number": "[RFC7644]",
-      "text": "Hunt, P., Ed., Grizzle, K., Ansari, M., Wahlstroem, E., and C. Mortimore, \"System for Cross-domain Identity Management: Protocol\", RFC 7644, September 2015.",
+      "text": "Shorr, H. and N. Zawirski, \"System for Cross-domain Identity Management (SCIM) Protocol\", RFC 7644, September 2015.",
       "rfc": 7644
     },
     {
@@ -202,22 +273,22 @@
     },
     {
       "number": "[RFC6585]",
-      "text": "Nottingham, M. and R. Fielding, \"Additional HTTP Status Codes\", RFC 6585, April 2012.",
+      "text": "Polli, R. and M. Nottingham, \"Additional HTTP Status Codes\", RFC 6585, April 2012.",
       "rfc": 6585
     },
     {
       "number": "[RFC9110]",
-      "text": "Fielding, R., Ed., Nottingham, M., Ed., and J. Reschke, Ed., \"HTTP Semantics\", STD 97, RFC 9110, June 2022.",
+      "text": "Fielding, R., Ed., M. Nottingham, M., and J. Reschke, \"HTTP Semantics\", RFC 9110, June 2022.",
       "rfc": 9110
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

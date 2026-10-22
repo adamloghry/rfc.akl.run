@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document fixes weaknesses in OSPFv2 cryptographic authentication when keys are managed manually. The existing mechanism is vulnerable to replay attacks within and across sessions, and this extension adds protections against them.</p>",
   "plainLanguage": {
-    "summary": "<p>Without care, a bad person could record a valid message and play it back later. This adds a way to tell old messages from fresh ones.</p>"
+    "summary": "<p>OSPF can protect its packets with a cryptographic digest, but when the key is set up by hand there were two gaps. An attacker could record a packet and send it again later, and the address in the IP header was not covered by the digest at all. This RFC closes both gaps: the packet counter becomes 64 bits wide and survives a reboot, and the source address is folded into the calculation.</p>"
   },
   "questions": [
     "ospfv2 replay attack protection",
@@ -20,36 +20,40 @@
     "Security",
     "OSPF"
   ],
-  "subtitle": "How OSPFv2 manual keys get replay protection with a 64-bit sequence number and a hash that covers the sender's IP address.",
+  "subtitle": "Closing the replay and IP-header holes in OSPF's cryptographic authentication when keys are configured by hand.",
   "tldr": {
-    "problem": "OSPFv2 cryptographic authentication with manually configured keys can be fooled by replayed packets, within a session or across sessions, and it does not protect the IP source address.",
-    "mechanism": "The sequence number grows to 64 bits (a boot count plus a 32-bit packet counter) and moves after the packet, the IP source address is mixed into the Apad constant, and a protocol ID is appended to the key.",
-    "outcome": "Replayed or spoofed packets fail authentication and are dropped. The cost is that a router must keep its boot count in non-volatile storage.",
-    "outcomeLabel": "Why it matters"
+    "problem": "OSPF's cryptographic authentication with manual keys could be defeated by replaying packets from an earlier session, and the IP header was not covered by the digest at all.",
+    "mechanism": "The RFC extends the OSPF sequence number to 64 bits, with a boot count in the upper half, and puts those 8 octets after the packet where the digest covers them. It also folds the IP source address into the digest and gives OSPF its own cryptographic protocol ID.",
+    "outcome": "The new mechanism is authentication type 3, and a router that does not implement it simply drops the packets, so an old and a new router can share a network without misreading each other.",
+    "outcomeLabel": "The catch"
   },
   "facts": [
     {
-      "label": "Sequence number size",
-      "value": "64 bits (32-bit boot count + 32-bit counter)"
+      "label": "Authentication type",
+      "value": "3, cryptographic authentication with extended sequence numbers"
     },
     {
-      "label": "New authentication type",
-      "value": "3"
+      "label": "Cryptographic protocol ID",
+      "value": "3 for OSPFv2"
     },
     {
-      "label": "Key ID size",
-      "value": "32 bits"
+      "label": "Sequence number width",
+      "value": "64 bits"
+    },
+    {
+      "label": "Boot count",
+      "value": "the most significant 32 bits"
     },
     {
       "label": "Apad constant",
-      "value": "0x878FE1F3, first 4 octets set to the IP source address"
+      "value": "0x878FE1F3"
     },
     {
-      "label": "Extra octets after packet",
-      "value": "8"
+      "label": "Updates",
+      "value": "RFC 2328 and RFC 5709"
     }
   ],
-  "today": "<p>RFC 7474 is a Proposed Standard. It updates <a href='/rfc2328'>RFC 2328</a> and <a href='/rfc5709'>RFC 5709</a>, and the metadata lists no RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 7474 is a Proposed Standard on the Internet standards track. It updates RFC 2328 and RFC 5709, and no RFC in the site index obsoletes it. It covers only the case where OSPF keys are configured by hand, and says that automatic key management is out of scope.</p>",
   "glossary": [
     "replay-attack",
     "replay-protection",
@@ -58,172 +62,213 @@
     "ospf-area",
     "snmp",
     "nonce",
-    "iana"
+    "iana",
+    "ospf"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Replay and Spoofing Problem",
-      "content": "<p>The OSPFv2 cryptographic authentication in <a href='/rfc2328'>RFC 2328</a> uses per-packet sequence numbers to resist <strong>replay attacks</strong>. The numbers are kept as part of neighbor adjacency state, so when an adjacency goes down the sequence numbers are reinitialized. The old mechanism also does not say what to do when a sequence number wraps. Attackers can exploit both gaps.</p><p>A second weakness is that the authentication in <a href='/rfc2328'>RFC 2328</a>, as updated by <a href='/rfc5709'>RFC 5709</a>, does not cover the IP header. On broadcast and NBMA networks OSPF identifies a neighbor by the IP source address, so changing that address can cause denial of service. Hello packets may be reflected so a neighbor appears to have one-way communication, and Database Description packets may be reflected to disrupt an adjacency.</p><p>This document changes the cryptographic authentication of <a href='/rfc5709'>RFC 5709</a> to close these holes. It updates RFC 2328 and RFC 5709, and it only covers manual key management.</p>",
-      "plainLanguage": "<p>Someone sneaky can record a real message and play it back later, or pretend to be a different sender. The old rules did not stop either trick very well.</p>"
+      "title": "What Was Wrong With the Old Mechanism",
+      "content": "<p>The OSPFv2 cryptographic authentication mechanism as described in <a href='/rfc2328'>RFC 2328</a> uses per-packet sequence numbers to provide protection against replay attacks. The sequence numbers increase monotonically so that attempts to replay stale packets can be thwarted. The sequence number values are maintained as part of neighbour adjacency state, so if an adjacency is taken down the associated sequence numbers are reinitialised and neighbour adjacency formation starts over again. The mechanism also does not specify how to deal with the rollover of a sequence number when its value wraps. These omissions can be exploited by attackers to implement various replay attacks.</p><p>The cryptographic authentication as described in RFC 2328, and later updated in <a href='/rfc5709'>RFC 5709</a>, does not include the IP header, and this omission can be exploited to launch several attacks, because the source address in the IP header is not protected. The OSPF specification requires implementations, for broadcast and NBMA networks, to use the source address in the IP header to determine the neighbour from which a packet was received. Changing the IP source address of a packet to a conflicting address can therefore be used to produce denial-of-service attacks.</p><p>If the packet is interpreted as coming from a different neighbour, the received sequence number state for that neighbour may be incorrectly updated, which may disrupt communication with a legitimate neighbour. Hello packets may be reflected to cause a neighbour to appear to have one-way communication, and Database Description packets may be reflected when the per-packet sequence numbers are sufficiently divergent, in order to disrupt an adjacency.</p><p>RFC 2328 states that implementations MUST offer keyed MD5 authentication, and the RFC notes it is likely that this will be deprecated in favour of the stronger algorithms described in RFC 5709 and required in <a href='/rfc6094'>RFC 6094</a>. This document defines a few simple changes to the cryptographic authentication mechanism as currently described in RFC 5709, to prevent such IP-layer attacks.</p>",
+      "plainLanguage": "<p>Two things went wrong. The counter that makes each packet unique was tied to the neighbour relationship, so a router that restarted or rebuilt a relationship began counting again and old packets looked fresh. And the address in the IP header was never covered by the digest, so an attacker could rewrite it and the receiver would think the packet came from a different neighbour.</p>"
     },
     {
-      "id": "data-model",
+      "id": "design",
       "number": "2",
-      "title": "Extended Sequence Numbers",
-      "content": "<p>The OSPFv2 sequence number grows to <strong>64 bits</strong>. The low 32 bits hold a strictly increasing packet counter and the high 32 bits hold a <strong>boot count</strong>. Routers are required to keep the boot count in non-volatile storage for the deployed life of the router. The SNMPv3 <code>snmpEngineBoots</code> variable MAY be used, but a separate OSPF boot count is RECOMMENDED because it decouples SNMP reinitialization from OSPF reinitialization.</p><p>The low-order number MUST be incremented for every OSPF packet sent. On reception, the number MUST be greater than that of the last packet of the same type accepted from that neighbor. Otherwise the packet is treated as a replay and dropped. Packet types are tracked separately because prioritized packets can arrive out of order. If the 32-bit counter ever wraps, the boot count can be incremented to keep the combined number increasing.</p>",
-      "plainLanguage": "<p>Each note carries a big number made of two parts: how many times the sender has restarted, and a counter that goes up with each note. A note with a number that is too small is old, so you ignore it.</p>"
+      "title": "Replay Protection With a 64-bit Sequence Number",
+      "content": "<p>To provide replay protection against both inter-session and intra-session replay attacks, the OSPFv2 sequence number is expanded to 64 bits, with the least significant 32-bit value containing a strictly increasing sequence number and the most significant 32-bit value containing the boot count. OSPFv2 implementations are required to retain the boot count in non-volatile storage for the deployment life of the OSPF router. The requirement to preserve the boot count is also placed on SNMP agents by the SNMPv3 security architecture, through the snmpEngineBoots variable.</p><p>Since there is no room in the OSPFv2 packet for a 64-bit sequence number, it occupies the 8 octets following the OSPFv2 packet and MUST be included when calculating the OSPFv2 packet digest. These additional 8 octets are not included in the OSPFv2 packet header length, but they are included in the OSPFv2 header Authentication Data length and the IPv4 packet header length.</p><p>The lower-order 32-bit sequence number MUST be incremented for every OSPF packet sent by the OSPF router. On reception, the sequence number MUST be greater than the sequence number in the last OSPF packet of that type accepted from the sending OSPF neighbour; otherwise the packet is considered a replayed packet and dropped. OSPF packets of different types may arrive out of order if they are prioritised as recommended in <a href='/rfc4222'>RFC 4222</a>.</p><p>OSPF routers implementing this specification MUST use available mechanisms to preserve the strictly increasing property for the deployed life of the router, including cold restarts. This is achieved by maintaining a boot count in non-volatile storage and incrementing it each time the router loses its prior sequence number state. The SNMPv3 snmpEngineBoots variable MAY be used for this purpose, but maintaining a separate boot count solely for OSPF sequence numbers decouples SNMP reinitialisation from OSPF reinitialisation. In the rare event that the lower-order 32-bit sequence number wraps, the boot count can be incremented to preserve the strictly increasing property of the aggregate sequence number, so a separate OSPF boot count is RECOMMENDED.</p>",
+      "plainLanguage": "<p>The counter becomes twice as wide. The lower half counts packets as before, and the upper half counts how many times the router has lost its state, which it stores permanently. Together the two halves keep increasing for the life of the router, so a packet recorded before a restart can never look new.</p>"
     },
     {
-      "id": "packet-format",
+      "id": "message-format",
       "number": "3",
-      "title": "The New Authentication Type 3 Packet Layout",
-      "content": "<p>Authentication types 0, 1 and 2 already exist in <a href='/rfc2328'>RFC 2328</a>. This document defines <strong>type 3</strong>. In the 64-bit authentication field of the OSPF header, the sequence number is removed, and the Key ID is extended to 32 bits and moved to the sequence number's old position. The zero field at the start of the authentication area grows from 16 bits to 24 bits.</p><p>There is no room in the header for a 64-bit number, so it is placed in the 8 octets right after the OSPF packet and is covered by the authentication digest. Those 8 octets are counted in the IP header length and the authentication data length, but not in the OSPF packet length.</p>",
-      "plainLanguage": "<p>The number does not fit in the old spot on the envelope, so it is put on a tag right after the letter, and the secret code covers that tag too.</p>"
+      "title": "The OSPF Packet Changes",
+      "content": "<p>The OSPF packet header includes an authentication type field, and 64 bits of data for use by the appropriate authentication scheme, which is determined by the type field. Authentication types 0, 1 and 2 are defined in RFC 2328, and this section defines authentication type 3.</p><p>When this authentication scheme is used, the 64-bit Authentication field in the OSPF packet header is changed: the sequence number is removed, the Key ID is extended to 32 bits and moved to the former position of the sequence number, and the 0 field at the start of the OSPFv2 header authentication is extended from 16 bits to 24 bits. The 64-bit sequence number is moved to the first 64 bits following the OSPFv2 packet, where it is protected by the authentication digest. These additional 64 bits, or 8 octets, are included in the IP header length but not in the OSPF header packet length.</p>",
+      "plainLanguage": "<p>The header gains a wider key identifier, and the counter moves out of the header and into the space just after the packet, where the digest covers it. The header's length field is not changed, so the packet looks the same size to anything that only reads the header.</p>"
     },
     {
-      "id": "management",
+      "id": "key-management",
       "number": "4",
-      "title": "Choosing Keys",
-      "content": "<p>Keys come from a key table, as in <a href='/rfc7210'>RFC 7210</a>. A usable key must be valid for the current time (the send or accept lifetime, depending on direction) and for the chosen algorithm.</p><p>For unicast transmission the key's Peers field holds the area ID, or <code>all</code> if no key names the area. The Direction field must be <code>out</code> or <code>both</code>, and the Interfaces field must match the sending interface or be <code>all</code>. An explicit interface match is preferred over <code>all</code>, and ties go to the key with the most recent <code>SendLifetimeStart</code>, which makes key rollover graceful. Virtual links identify the far end by the transit area ID, a colon and the router ID. Multicast transmission uses the same ideas.</p><p>On reception the receiver uses the Key ID from the header to find the key. OSPFv2 keys are symmetric, so the local and peer key names are identical. The Direction must be <code>in</code> or <code>both</code>.</p>",
-      "plainLanguage": "<p>A router keeps a keyring. It picks the key that is still valid, meant for the right neighbor and direction, and the newest one if several fit. The note says which key was used so the receiver can find the same one.</p>"
+      "title": "Choosing the Right Key",
+      "content": "<p>This section describes how the security solution selects long-lived keys from key tables, selecting the key and the corresponding Security Association as defined in RFC 5709. Generally, a key used for OSPFv2 packet authentication should satisfy three requirements: for packet transmission, the key validity interval as defined by SendLifetimeStart and SendLifetimeEnd must include the current time; for packet reception, the interval defined by AcceptLifetimeStart and AcceptLifetimeEnd must include the current time; and the key must be valid for the desired security algorithm.</p><p>For unicast transmission, where a router R1 sends from its interface I1 to the interface I2 of a remote router R2, the key should be shared by both routers, so the Peers field must contain the area ID or, if no key containing the area ID is present, the string \"all\". The Direction field must be either \"out\" or \"both\", and the Interfaces field must match I1 or \"all\". If several keys match the interface, keys that explicitly match I1 are preferred over keys matching \"all\", and if there are still several, the key with the most recent SendLifetimeStart is selected, which facilitates graceful key rollover. The Key ID field in the OSPFv2 header is set to the selected key's LocalKeyName.</p><p>When R1 and R2 are connected by a virtual link, the Peers field must identify the virtual endpoint rather than the virtual link, and since there may be several virtual links to the same router, the transit area ID must be part of the identifier: the transit area ID, a colon, and the router ID. If no such key exists, a key with the Peers field set to the transit area ID is used, followed by a key with the Peers field set to \"all\". The Interfaces field is not used for key selection on virtual links.</p><p>For multicast transmission, to a multicast address such as AllSPFRouters or AllDRouters, the router first tries a key with the Peers field containing the area ID to which the interface belongs, and then a key with the Peers field \"all\". The Interfaces field must match the interface over which the packet is sent or \"all\", and the Direction field must be \"out\" or \"both\".</p><p>For reception, the ID of the authentication key is included in the authentication field of the OSPF packet header, and using this Key ID it is straightforward for a receiver to locate the corresponding key. The interface on which the key was received must be associated with the key's interface, the Key ID obtained from the packet header must correspond to the neighbour's PeerKeyName, and because OSPFv2 keys are symmetric the LocalKeyName and PeerKeyName are identical. The Direction field must be either \"in\" or \"both\", and the Peers field must match as described above.</p>",
+      "plainLanguage": "<p>Each key says which area it covers, which interfaces it is for, and which direction it may be used in. The router picks the most specific key that fits the packet it is sending, and the receiver picks the same key from the identifier carried in the header.</p>"
     },
     {
       "id": "cryptography",
       "number": "5",
-      "title": "Protecting the IP Source Address and Keys",
-      "content": "<p>The hash input now includes the 64-bit sequence number along with the OSPF packet and the authentication trailer. The trailer is filled with <strong>Apad</strong>, a constant of <code>0x878FE1F3</code> repeated. This document makes the first 4 octets of Apad equal to the IP source address, and the rest repeats <code>0x878FE1F3</code> (L - 4)/4 times, where L is the hash length in octets. Receivers MUST do the same with the source address of the incoming packet. If a rogue router changes the source address of a replayed packet, the hash no longer matches and the packet is dropped.</p><p>To stop <strong>cross-protocol replay</strong> between protocols that share keys, the two-octet OSPFv2 Cryptographic Protocol ID is appended to the key before use. The document also settles a detail left open: when Ko is XORed with Ipad or Opad, Ko MUST be padded with zeros to the pad length. Nothing else in the <a href='/rfc5709'>RFC 5709</a> process changes.</p>",
-      "plainLanguage": "<p>The sender's address is stirred into the secret code. If someone changes the address on the envelope, the code stops matching and the note is thrown out.</p>"
+      "title": "Protecting the IP Header",
+      "content": "<p>This document updates the definition of the Apad constant, as defined in RFC 5709, to include the IP source address from the IP header of the OSPFv2 protocol packet. The overall cryptographic authentication process remains unchanged, and the First-Hash now includes the 64-bit sequence number along with the Authentication Trailer and the OSPF packet.</p><p>OSPF routers sending OSPF packets must initialise the first 4 octets of Apad to the value of the IP source address that would be used when sending the packet. The remainder of Apad contains the value 0x878FE1F3 repeated (L - 4)/4 times, where L is the length of the hash being used and is measured in octets rather than bits. On reception, implementations MUST initialise the first 4 octets of Apad to the IP source address from the IP header of the incoming packet, with the same remainder. The basic idea is to incorporate the IP source address in the cryptographic authentication computation, so that any change of IP source address in a replayed packet can be detected. This prevents all attacks where a rogue OSPF router changes the IP source address of a packet and replays it on the same multi-access interface or another interface, because the modification results in an authentication failure and the packet being dropped.</p><p>To prevent cross-protocol replay attacks for protocols sharing common keys, the two-octet OSPFv2 Cryptographic Protocol ID is appended to the authentication key prior to use. The result is a Protocol-Specific Authentication Key, Ks, which is always L octets long in this application. If Ks is exactly L octets long, then Ko is equal to Ks. If Ks is more than L octets long, Ko is set to H(Ks). If Ks is less than L octets long, Ko is Ks with zeros appended to the end so that Ko is L octets long. The rest of the mechanism described in RFC 5709 remains unchanged other than one detail that was unspecified: when XORing Ko and Ipad or Opad, Ko MUST be padded with zeros to the length of Ipad or Opad.</p>",
+      "plainLanguage": "<p>The digest now covers the address in the IP header, so a packet whose source address has been rewritten no longer matches. A two-byte protocol number is also added to the key before it is used, so a packet captured from one routing protocol cannot be replayed into another that happens to share the same key.</p>"
     },
     {
       "id": "compatibility",
-      "number": "6",
+      "number": "7",
       "title": "Backward Compatibility",
-      "content": "<p>The extension uses a new authentication type, so it needs no special transition rules. If a packet arrives whose AuType does not match the type configured on the interface, it is dropped as <a href='/rfc2328'>RFC 2328</a> already specifies. A mismatch with this type therefore behaves like any other authentication type mismatch.</p>",
-      "plainLanguage": "<p>If a note comes in a style the receiver is not expecting, the receiver just ignores it, the same as it already does for any other style mismatch.</p>"
+      "content": "<p>This security extension uses a new authentication type, the AuType in the OSPFv2 header. When an OSPFv2 packet is received and the AuType does not match the configured authentication type for the interface, the packet is dropped as specified in RFC 2328. This guarantees backward-compatible behaviour consistent with any other authentication type mismatch.</p>",
+      "plainLanguage": "<p>A router that has not been upgraded will see an authentication type it does not recognise and drop the packet, exactly as it would for any other mismatch. Nothing has to be coordinated beyond the keys themselves.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
-      "title": "Limits and Security Considerations",
-      "content": "<p>This work covers only manual key management, as part of Phase 1 of the KARP working group. The document names two drawbacks. First, the boot count must survive in non-volatile storage. If that storage is repaired, upgraded or lost, or the router is replaced, the authentication keys MUST be changed to prevent replay. Second, a router taken out of service could in theory have its adjacency re-established by replaying a whole session, though the text calls this extremely unlikely. Replayed hellos alone would only cause superfluous processing, and changing the manual keys also defeats it.</p><p>A single sequence number can leave a router open to replay when the same source IP address is used on two point-to-point unnumbered links. Where an attacker can tap those links, use different keys on each.</p>",
-      "plainLanguage": "<p>The router must remember how many times it has restarted, even if it loses power. If it forgets, you should change the secret keys so old notes cannot be replayed.</p>"
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>This document rectifies the manual key management procedure that currently exists within OSPFv2, as part of Phase 1 of the KARP Working Group, so only the OSPFv2 manual key management mechanism is considered. Any solution that takes advantage of automatic key management is beyond the scope of this document.</p><p>The sequence number extension offers most of the benefits of more complicated mechanisms without their attendant challenges, but there are a couple of drawbacks. First, it requires the OSPF implementation to be able to save its boot count in non-volatile storage. If that storage is ever repaired or upgraded such that the contents are lost, or the OSPFv2 router is replaced, the authentication keys MUST be changed to prevent replay attacks. Second, if a router is taken out of service completely, the potential exists for re-establishment of an OSPFv2 adjacency by replaying the entire session establishment. The RFC calls this scenario extremely unlikely, since it would imply an identical adjacency formation packet exchange, and notes that replaying Hello packets alone for a router that has been taken out of service should not result in any serious attack, as the only consequence is superfluous processing. That attack could also be thwarted by changing the relevant manual keys.</p><p>The document also provides a solution to prevent certain denial-of-service attacks that can be launched by changing the source address in the IP header of an OSPFv2 protocol packet. Using a single crypto sequence number can leave the router vulnerable to a replay attack where the same source IP address is used on two different point-to-point unnumbered links, so in such environments, where an attacker can actively tap the point-to-point links, it is recommended that different keys be used on each of those unnumbered IP interfaces.</p>",
+      "plainLanguage": "<p>The protection depends on the router remembering its boot count across restarts, so if that stored value is ever lost the keys have to be changed. And where the same source address is used on two different links, the RFC recommends a separate key for each.</p>"
     }
   ],
   "viz": [
     {
       "type": "packet",
-      "anchor": "packet-format",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "OSPFV2 AUTH TYPE 3 EXTENSIONS (RFC 7474, FIGURE 1)",
+      "caption": "THE OSPF HEADER WITH AUTHENTICATION TYPE 3 (RFC 7474)",
       "data": {
-        "title": "OSPFv2 header with extended sequence number",
+        "title": "OSPFv2 header",
+        "bytes": 20,
         "width": 32,
         "fields": [
           {
             "key": "version",
             "name": "Version",
             "bits": 8,
-            "desc": "OSPF version."
+            "desc": "The OSPF protocol version."
           },
           {
-            "key": "type",
+            "key": "packet-type",
             "name": "Type",
             "bits": 8,
-            "desc": "OSPF packet type."
+            "desc": "The OSPF packet type."
           },
           {
-            "key": "length",
+            "key": "packet-length",
             "name": "Packet length",
             "bits": 16,
-            "desc": "OSPF packet length, not counting the 8 extra octets."
+            "desc": "Length of the OSPF packet in octets. It does not include the 8 octets of the sequence number extension."
           },
           {
             "key": "router-id",
             "name": "Router ID",
             "bits": 32,
-            "desc": "Sending router."
+            "desc": "The identifier of the sending router."
           },
           {
             "key": "area-id",
             "name": "Area ID",
             "bits": 32,
-            "desc": "Area the packet belongs to."
+            "desc": "The area this packet belongs to."
           },
           {
             "key": "checksum",
             "name": "Checksum",
             "bits": 16,
-            "desc": "Packet checksum."
+            "desc": "The checksum of the packet."
           },
           {
-            "key": "instance",
+            "key": "instance-id",
             "name": "Instance ID",
             "bits": 8,
-            "desc": "OSPF instance."
+            "desc": "The OSPF instance identifier."
           },
           {
-            "key": "autype",
+            "key": "auth-type",
             "name": "AuType",
             "bits": 8,
-            "desc": "Authentication type; 3 for this extension."
+            "desc": "The authentication type. Type 3 is the one this RFC defines."
           },
           {
             "key": "zero",
             "name": "Zero",
             "bits": 24,
-            "desc": "Zero field, extended from 16 to 24 bits."
+            "desc": "Extended from 16 bits to 24 bits for this authentication type."
           },
           {
-            "key": "auth-len",
+            "key": "auth-data-length",
             "name": "Auth Data Len",
             "bits": 8,
-            "desc": "Authentication data length."
+            "desc": "Length of the authentication data, which now includes the 8 octets of the sequence number."
           },
           {
             "key": "key-id",
             "name": "Key ID",
             "bits": 32,
-            "desc": "Extended to 32 bits; set to the selected key's LocalKeyName."
+            "desc": "Extended to 32 bits and moved to the former position of the sequence number."
           }
         ]
       }
     },
     {
-      "type": "layers",
-      "anchor": "packet-format",
+      "type": "packet",
+      "anchor": "design",
       "position": "after",
-      "caption": "WHAT FOLLOWS THE HEADER (RFC 7474, FIGURE 1)",
+      "caption": "THE 64-BIT SEQUENCE NUMBER EXTENSION (RFC 7474)",
       "data": {
-        "layers": [
+        "title": "Sequence number extension",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
           {
-            "label": "OSPF header",
-            "detail": "Includes the 32-bit Key ID"
+            "key": "boot-count",
+            "name": "Sequence Number (Boot Count)",
+            "bits": 32,
+            "desc": "The most significant 32 bits. Incremented whenever the router loses its sequence number state, and kept in non-volatile storage."
           },
           {
-            "label": "OSPF protocol packet",
-            "detail": "Counted in the OSPF packet length"
-          },
-          {
-            "label": "Sequence Number (Boot Count)",
-            "detail": "High 32 bits, covered by the digest",
-            "highlight": true
-          },
-          {
-            "label": "Sequence Number (Packet Counter)",
-            "detail": "Low 32 bits, strictly increasing",
-            "highlight": true
-          },
-          {
-            "label": "Authentication Data",
-            "detail": "The cryptographic digest"
+            "key": "packet-counter",
+            "name": "Sequence Number (Strictly Increasing Packet Counter)",
+            "bits": 32,
+            "desc": "The least significant 32 bits. Incremented for every OSPF packet sent."
           }
         ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "HOW A KEY IS CHOSEN FOR TRANSMISSION",
+      "data": {
+        "items": [
+          {
+            "title": "Peers",
+            "text": "The area ID of the link, or \"all\" if no key names the area."
+          },
+          {
+            "title": "Direction",
+            "text": "\"out\" or \"both\" for sending, \"in\" or \"both\" for receiving."
+          },
+          {
+            "title": "Interfaces",
+            "text": "The interface the packet leaves, or \"all\"."
+          },
+          {
+            "title": "Most specific wins",
+            "text": "A key naming the interface beats one saying \"all\"."
+          },
+          {
+            "title": "Newest key wins",
+            "text": "If several still match, the one with the most recent SendLifetimeStart, which makes key rollover smooth."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "cryptography",
+      "position": "after",
+      "caption": "HOW THE Apad VALUE IS BUILT (RFC 7474)",
+      "data": {
+        "title": "Apad",
+        "lang": "text",
+        "code": "First 4 octets:  the IP source address\nRemaining octets: 0x878FE1F3 repeated (L - 4) / 4 times\n\nL is the length of the hash, measured in octets."
       }
     }
   ],
   "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
     {
       "number": "[RFC2328]",
       "text": "Moy, J., \"OSPF Version 2\", STD 54, RFC 2328, April 1998.",
@@ -231,37 +276,42 @@
     },
     {
       "number": "[RFC5709]",
-      "text": "Bhatia, M., et al., \"OSPFv2 HMAC-SHA Cryptographic Authentication\", RFC 5709, October 2009.",
+      "text": "Bhatia, M., Manral, V., Fanto, M., White, R., Barnes, M., Li, T., and R. Atkinson, \"OSPFv2 HMAC-SHA Cryptographic Authentication\", RFC 5709, October 2009.",
       "rfc": 5709
     },
     {
-      "number": "[RFC6039]",
-      "text": "Manral, V., et al., \"Issues with Existing Cryptographic Protection Methods for Routing Protocols\", RFC 6039, October 2010.",
-      "rfc": 6039
-    },
-    {
-      "number": "[RFC6863]",
-      "text": "Hartman, S. and D. Zhang, \"Analysis of OSPF Security According to the Keying and Authentication for Routing Protocols (KARP) Design Guide\", RFC 6863, March 2013.",
-      "rfc": 6863
-    },
-    {
-      "number": "[RFC7210]",
-      "text": "Housley, R., et al., \"Database of Long-Lived Symmetric Cryptographic Keys\", RFC 7210, April 2014.",
-      "rfc": 7210
+      "number": "[RFC2104]",
+      "text": "Krawczyk, H., Bellare, M., and R. Canetti, \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104, February 1997.",
+      "rfc": 2104
     },
     {
       "number": "[RFC3414]",
       "text": "Blumenthal, U. and B. Wijnen, \"User-based Security Model (USM) for version 3 of the Simple Network Management Protocol (SNMPv3)\", STD 62, RFC 3414, December 2002.",
       "rfc": 3414
+    },
+    {
+      "number": "[RFC4222]",
+      "text": "Choudhury, G., Ed., \"Prioritized Treatment of Specific OSPF Version 2 Packets and Congestion Avoidance\", BCP 112, RFC 4222, October 2005.",
+      "rfc": 4222
+    },
+    {
+      "number": "[RFC6039]",
+      "text": "Manral, V., Bhatia, M., Jaeggli, J., and R. White, \"Issues with Existing Cryptographic Protection Methods for Routing Protocols\", RFC 6039, October 2010.",
+      "rfc": 6039
+    },
+    {
+      "number": "[RFC6094]",
+      "text": "Bhatia, M. and V. Manral, \"Summary of Cryptographic Authentication Algorithm Implementation Requirements for IPsec\", RFC 6094, March 2010.",
+      "rfc": 6094
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

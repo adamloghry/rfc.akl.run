@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes how to spread flows across equal-cost multipath routes in a softwire mesh. The payloads in a softwire often contain separate identifiable flows, and balancing them can use available links better.</p>",
   "plainLanguage": {
-    "summary": "<p>If many cars travel in one convoy tunnel, it is better to split them over several roads. This explains how to do that.</p>"
+    "summary": "<p>When a whole network is carried inside a tunnel, every packet in it looks the same from the outside, so the routers underneath send all of it down one path. This RFC reserves part of the tunnel's session number for the network operator and leaves the rest for the sending router to fill in per flow, so the traffic below spreads out.</p>"
   },
   "questions": [
     "softwire mesh load balancing",
@@ -16,15 +16,15 @@
     "what is the gre key used for in load balancing"
   ],
   "tags": [
-    "BGP",
-    "Tunneling",
+    "Routing",
+    "Tunnelling",
     "Load Balancing"
   ],
-  "subtitle": "A small BGP extension that lets core routers spread tunneled traffic over equal-cost paths.",
+  "subtitle": "Spreading the flows of a tunnelled network over several equal-cost paths.",
   "tldr": {
-    "problem": "Packets inside a softwire tunnel look identical to core routers, because only the outer header is visible. Many separate flows therefore get pinned to a single equal-cost path.",
-    "mechanism": "A new Load-Balancing Block sub-TLV tells ingress routers how many leading bits of the tunnel's load-balancing field (L2TPv3 Session ID or GRE Key) are fixed. The ingress fills the remaining bits with a per-flow value, so core routers see more variety.",
-    "outcome": "Softwire mesh traffic can be balanced across equal-cost paths about as well as it would be without encapsulation. The RFC is a Proposed Standard and is updated by RFC 9012.",
+    "problem": "A tunnelled network has to be carried over an IP network, and the core routers of that network spread traffic over several equal-cost paths by looking at the outer header. Because every flow in the tunnel shares the same outer header, they all take the same path.",
+    "mechanism": "The RFC adds a sub-TLV to the BGP tunnel encapsulation attribute that reserves the top bits of the tunnel's load-balancing field, leaving the remaining bits free for the ingress router to fill in per flow, using the addresses and ports of the inner packet.",
+    "outcome": "The core sees many distinct flows instead of one, and the block size gives the operator a dial between better spreading and the number of distinct tunnels the system can support.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -37,109 +37,202 @@
       "value": "2 octets"
     },
     {
-      "label": "Value",
-      "value": "Block length in bits"
+      "label": "Block size in the example",
+      "value": "24 bits"
     },
     {
-      "label": "Tunnel types covered",
-      "value": "1 (L2TPv3 over IP) and 2 (GRE)"
+      "label": "Example Session ID",
+      "value": "0x1234ABCD"
     },
     {
-      "label": "Example block size",
-      "value": "24 (Session ID 0x1234ABCD)"
+      "label": "Tunnel type for L2TPv3 over IP",
+      "value": "1"
+    },
+    {
+      "label": "Tunnel type for GRE",
+      "value": "2"
     }
   ],
-  "today": "<p>RFC 5640 is a Proposed Standard from August 2009 and is updated by <a href='/rfc9012'>RFC 9012</a>. It has not been obsoleted.</p>",
+  "today": "<p>RFC 5640 is a Proposed Standard and was later updated by <a href='/rfc9012'>RFC 9012</a>, which revises the BGP Tunnel Encapsulation Attribute. The Load-Balancing Block sub-TLV, type 5, remains the mechanism by which a mesh softwire can spread its flows over the equal-cost paths of the core.</p>",
   "glossary": [
     "load-balancing",
     "bgp",
-    "next-hop"
+    "next-hop",
+    "softwire",
+    "ecmp",
+    "sub-tlv",
+    "gre",
+    "l2tp",
+    "tunnel",
+    "encapsulation"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem: Hidden Flows in a Tunnel",
-      "content": "<p>A <strong>Softwire mesh</strong> service carries payloads between routers using tunnels. The RFC's abstract points out that these payloads often carry a number of identifiable, distinct flows, and that it can be desirable to spread those flows over the equal cost multiple paths (ECMPs) in the network.</p><p>The catch is that only the ingress and egress routers can interpret the payload. A core router choosing among equal-cost paths looks only at the encapsulating header, which offers much less entropy than the payload or the inner header would.</p><p>The RFC's setup is a router R1 that encapsulates a packet P into a softwire bound for R3, with R2 on the shortest path between them. R2 has equal-cost paths to R3, and the goal is for R2 to choose among them using the full entropy of packet P.</p>",
-      "plainLanguage": "<p>Everything in the tunnel wears one outer label, so the road-sorting routers cannot tell the cars apart and send them all the same way.</p>"
+      "title": "Introduction",
+      "content": "<p>Consider the case of a router R1 that encapsulates a packet P into a softwire bound to router R3. R2 is a router on the shortest path from R1 to R3, and R2's shortest path to R3 involves equal cost multiple paths. The goal is for R2 to be able to choose which path to use on the basis of the full entropy of packet P.</p><p>This is achieved by carrying in the encapsulation header a signature of the inner header, hence enhancing the entropy of the flows as seen by the core routers. The signature is carried as part of one of the fields of the encapsulation header. To aid with better description in the document, the generic term load-balancing field is used to mean such a value that is specific to an encapsulation type. For example, for L2TPv3-over-IP encapsulation the load-balancing field is the Session Identifier, and for GRE encapsulation the Key field, if present, represents the load-balancing field.</p><p>This mechanism assumes that core routers base their load-balancing decisions on a flow definition that includes the load-balancing field. That is an obvious and generic functionality, as, for example, for L2TPv3-over-IP tunnels the Session ID is at the same well-known constant offset as the TCP and UDP ports in the encapsulating header.</p><p>The Encapsulation SAFI is extended such that a contiguous block of the load-balancing field is bound to the softwire advertised by a BGP next-hop. On a per-inner-flow basis, the ingress provider edge selects one value of the load-balancing field from the block to preserve per-flow ordering and, at the same time, to enhance the entropy across flows.</p>",
+      "plainLanguage": "<p>Core routers spread traffic over several equal-cost paths by hashing the outer header. In a tunnel the outer header is the same for every packet, so every flow lands on the same path. Carrying a signature of the real packet inside the tunnel header gives the core something to hash on.</p>"
     },
     {
-      "id": "concepts",
+      "id": "design",
       "number": "2",
-      "title": "The Load-Balancing Field",
-      "content": "<p>The idea is to carry a signature of the inner header in the encapsulation header, so core routers see more entropy. The signature rides in one field of the encapsulation header, which the RFC calls the <strong>load-balancing field</strong>.</p><p>The field depends on the tunnel type. For L2TPv3 over IP (<a href='/rfc3931'>RFC 3931</a>) it is the Session Identifier (Session ID). For GRE (<a href='/rfc2784'>RFC 2784</a>) it is the Key field from <a href='/rfc2890'>RFC 2890</a>, if present.</p><p>The mechanism assumes core routers include the load-balancing field in their flow definition. The RFC calls this an obvious and generic capability: for L2TPv3-over-IP, the Session ID sits at the same well-known constant offset as the TCP/UDP ports in the encapsulating header.</p><p>The Encapsulation SAFI from <a href='/rfc5512'>RFC 5512</a> is extended so that a contiguous block of the load-balancing field is bound to the softwire advertised by a BGP next-hop. For each inner flow, the ingress Provider Edge (PE) selects one value from the block. That keeps packets of a flow in order and still adds entropy across flows.</p>",
-      "plainLanguage": "<p>The tunnel already has a number on its outside. Instead of using one number for everything, the sender picks from a small set of numbers, using a different one for each conversation.</p>"
+      "title": "The Load-Balancing Block sub-TLV",
+      "content": "<p>This document defines a new sub-TLV for use with the Tunnel Encapsulation Attribute. The new sub-TLV is referred to as the Load-Balancing Block sub-TLV and may be included in any Encapsulation SAFI UPDATE message where load-balancing is desired.</p><p>The sub-TLV type of the Load-Balancing Block sub-TLV is 5. The sub-TLV length is 2 octets. The value represents the length of the block in bits and must not exceed the size of the load-balancing field. The format is very similar to the variable-length subnet masking used in IP addresses, to allow arbitrary length prefixes, and the block is determined by extracting the initial sequence of block size bits from the load-balancing field.</p><p>If a load-balancing field is not signaled, for example if the encapsulation sub-TLV is not included in an advertisement as in the case of GRE without a Key, then the Load-Balancing Block sub-TLV must not be included.</p><p>If an egress router does not support the Load-Balancing Block sub-TLV, the softwire continues to operate with a single load-balancing field with which all ingress routers encapsulate.</p>",
+      "plainLanguage": "<p>The sub-TLV is a small extra field in the BGP advertisement. It holds one number, the number of bits at the top of the session identifier that are reserved for this softwire.</p>"
     },
     {
-      "id": "message-format",
-      "number": "3",
-      "title": "The Load-Balancing Block Sub-TLV",
-      "content": "<p>The RFC defines a new sub-TLV for the Tunnel Encapsulation Attribute of <a href='/rfc5512'>RFC 5512</a>. It is called the <strong>Load-Balancing Block sub-TLV</strong>, and it MAY be included in any Encapsulation SAFI UPDATE message where load-balancing is desired.</p><p>Its sub-TLV type is <code>5</code> and its length is 2 octets. The value is the length of the block in bits, and it MUST NOT exceed the size of the load-balancing field. The RFC compares this to variable-length subnet masking: the block is the initial sequence of that many bits taken from the load-balancing field.</p><p>If no load-balancing field is signaled, for example GRE without a Key, the sub-TLV MUST NOT be included.</p><p>There is a trade-off. A smaller value leaves more room for per-flow identification, which gives better entropy and less polarization when mapping flows to ECMP paths. But it consumes more Session IDs or GRE Keys, which can mean fewer supported services. A typical deployment has to arbitrate between the two.</p>",
-      "plainLanguage": "<p>The number says how much of the label is fixed and how much the sender may change. Changing more of it spreads cars better, but uses up more labels.</p>"
+      "id": "parameters",
+      "number": "2",
+      "title": "Choosing the Block Size",
+      "content": "<p>The smaller the value field of the Load-Balancing Block sub-TLV, the larger the space for per-flow identification, and hence the better entropy for potential load-balancing in the core, as well as the lower the polarization when mapping flows to ECMP paths. However, reducing the load-balancing block size consumes more L2TPv3 Session IDs or GRE Keys, resulting in potentially fewer supported services. A typical deployment would need to arbitrate between this trade-off.</p><p>As an example, assume that there is a softwire set up between R1 and R3 with L2TPv3-over-IP tunnel type, and that R3 encodes the Session ID with the value 0x1234ABCD in the encapsulation sub-TLV. It also includes the Load-Balancing Block sub-TLV and encodes the value 24. This is interpreted as follows. If an ingress router does not understand the Load-Balancing Block sub-TLV, it continues to use the Session ID 0x1234ABCD and encapsulates all packets with that Session ID. If an ingress router understands the sub-TLV, it picks the first 24 bits out of the Session ID, 0x1234AB, to be used as the block, and fills in the lower-order 8 bits with a per-flow identifier, for example one determined from the inner packet's source and destination addresses and its TCP or UDP ports. This selection preserves the per-flow ordering of packets.</p><p>The same requirement and solution applies equally to GRE, where the Key plays the same role as the Session ID in L2TPv3.</p>",
+      "plainLanguage": "<p>The size of the reserved block is a trade-off. Reserve fewer bits and more flows can be told apart, but each distinct value of the session number becomes a separate tunnel, so the operator supports fewer tunnels at once. In the example, 24 bits are reserved and the last 8 bits carry the flow.</p>"
     },
     {
-      "id": "examples",
-      "number": "4",
-      "title": "Worked Example: Session ID 0x1234ABCD",
-      "content": "<p>Suppose a softwire is set up between R1 and R3 using the L2TPv3-over-IP tunnel type. R3 advertises Session ID <code>0x1234ABCD</code> in the encapsulation sub-TLV and also includes the Load-Balancing Block sub-TLV with the value <code>24</code>.</p><ul><li>An ingress router that does not understand the sub-TLV keeps using Session ID <code>0x1234ABCD</code> for all packets.</li><li>An ingress router that does understand it takes the first 24 bits (<code>0x1234AB</code>) as the block and fills the lower-order 8 bits with a per-flow identifier. The RFC suggests deriving it from the inner packet's source and destination addresses and TCP/UDP ports. This preserves per-flow ordering.</li></ul><p>The same approach applies to GRE, where the Key plays the role of the Session ID. If an egress router does not support the sub-TLV, the softwire keeps working with a single load-balancing field that all ingress routers use.</p>",
-      "plainLanguage": "<p>If the label is 1234ABCD, the sender keeps the first part fixed and swaps the last bit of it for a different value for each conversation. Old equipment simply ignores all this and uses the plain label.</p>"
+      "id": "interoperability",
+      "number": "2.1",
+      "title": "Applicability to Tunnel Types",
+      "content": "<p>The Load-Balancing Block sub-TLV is applicable to tunnel types that define a load-balancing field. This document defines load-balancing fields for tunnel type 1, L2TPv3 over IP, and tunnel type 2, GRE.</p><p>For L2TPv3 over IP the load-balancing field is the Session ID, and special care needs to be taken to always create a non-zero Session ID. When an egress router includes a Load-Balancing Block sub-TLV, it must encode the Session ID field of the encapsulation sub-TLV in a way that ensures that the most significant bits of the Session ID, after extracting the block, are non-zero. For GRE the load-balancing field is the GRE Key.</p><p>This document does not define a load-balancing field for the IP-in-IP tunnel type, tunnel type 7. Future tunnel types that want to use the Load-Balancing Block sub-TLV must define a load-balancing field that is part of the encapsulating header.</p>",
+      "plainLanguage": "<p>Only tunnel types that carry something the core can hash over are eligible. That means the L2TPv3 session number and the GRE key. Plain IP-in-IP has nothing, so it is left out.</p>"
     },
     {
-      "id": "compatibility",
-      "number": "5",
-      "title": "Tunnel Types and Encapsulation",
-      "content": "<p>The sub-TLV applies to tunnel types that define a load-balancing field. The RFC defines one for tunnel type 1 (L2TPv3 over IP), where it is the Session ID, and for tunnel type 2 (GRE), where it is the GRE Key. It does not define one for the IP-in-IP tunnel type (tunnel type 7). Future tunnel types that want to use the sub-TLV MUST define a load-balancing field that is part of the encapsulating header.</p><p>For L2TPv3 there is an extra rule. An egress router that includes the sub-TLV MUST encode the Session ID so that its most significant bits, after extracting the block, are non-zero, so a non-zero Session ID is always created.</p><p>Other encapsulation fields are not affected. If an optional L2TPv3 cookie is in the encapsulation sub-TLV, it applies to all the Session ID values the ingress derives from the block.</p>",
-      "plainLanguage": "<p>Only tunnel types that have a suitable label field can play this game, and everything else about the tunnel stays as it was.</p>"
+      "id": "implementation-notes",
+      "number": "2.2",
+      "title": "Encapsulation Considerations",
+      "content": "<p>Fields included in the encapsulation header besides the load-balancing field are not affected by the Load-Balancing Block sub-TLV. All other encapsulation fields are shared between variations of the load-balancing field. For example, for the L2TPv3-over-IP tunnel type, if the optional cookie is included in the encapsulation sub-TLV by the egress router during softwire signalling, it applies to all the Session ID values derived at the ingress router after applying the load-balancing block.</p>",
+      "plainLanguage": "<p>Only the session number changes. Everything else in the tunnel header, such as an optional cookie, stays the same for all the variants the ingress router produces.</p>"
     },
     {
       "id": "iana-considerations",
-      "number": "6",
-      "title": "IANA Registration",
-      "content": "<p>IANA assigned the value <code>5</code> to the Load-Balancing Block sub-TLV in the BGP Tunnel Encapsulation Attribute Sub-TLVs registry, a number space created with the publication of <a href='/rfc5512'>RFC 5512</a>.</p>",
-      "plainLanguage": "<p>The official list of sub-label types got a new entry, number 5, for this feature.</p>"
+      "number": "3",
+      "title": "IANA Considerations",
+      "content": "<p>IANA has assigned the value 5 for the Load-Balancing Block sub-TLV in the BGP Tunnel Encapsulation Attribute sub-TLVs registry, the number space created as part of the publication of the Tunnel Encapsulation Attribute document.</p>",
+      "plainLanguage": "<p>IANA keeps a list of the extra fields that can appear in the tunnel encapsulation attribute, and this one is number 5.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
+      "number": "4",
       "title": "Security Considerations",
-      "content": "<p>The RFC adds only a new sub-TLV to the BGP Tunnel Encapsulation Attribute. Security considerations for the BGP Encapsulation SAFI and that attribute are covered in <a href='/rfc5512'>RFC 5512</a>, and the RFC states that there are no additional security risks introduced by this design.</p>",
-      "plainLanguage": "<p>This is a small add-on to an existing system, so the safety rules of that system already cover it.</p>"
+      "content": "<p>This document defines a new sub-TLV for the BGP Tunnel Encapsulation Attribute. Security considerations for the BGP Encapsulation SAFI and the BGP Tunnel Encapsulation Attribute are covered in the Tunnel Encapsulation Attribute document, and there are no additional security risks introduced by this design.</p>",
+      "plainLanguage": "<p>Nothing new is exposed. The security rules for the BGP extension that carries the tunnel information still apply unchanged.</p>"
     }
   ],
   "viz": [
     {
       "type": "compare-table",
-      "anchor": "compatibility",
+      "anchor": "design",
       "position": "after",
-      "caption": "LOAD-BALANCING FIELD BY TUNNEL TYPE",
+      "caption": "WHAT EACH ROUTER DOES WITH THE ADVERTISED BLOCK",
+      "data": {
+        "columns": [
+          "Router",
+          "What it does"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Ingress router that does not understand the sub-TLV",
+              "Keeps using the Session ID 0x1234ABCD and encapsulates every packet with it."
+            ]
+          },
+          {
+            "cells": [
+              "Ingress router that understands the sub-TLV",
+              "Takes the first 24 bits as the block and fills the lower 8 bits in per flow."
+            ]
+          },
+          {
+            "cells": [
+              "Egress router that does not support the sub-TLV",
+              "The softwire carries on with a single load-balancing field for all ingress routers."
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "THE SESSION ID IN THE RFC 5640 EXAMPLE",
+      "data": {
+        "title": "Session ID 0x1234ABCD with a 24-bit block",
+        "bytes": 4,
+        "width": 32,
+        "fields": [
+          {
+            "key": "block",
+            "name": "Load-balancing block",
+            "bits": 24,
+            "desc": "The first 24 bits of the Session ID. Advertised by the egress router and the same for every flow.",
+            "value": "0x1234AB"
+          },
+          {
+            "key": "flow-id",
+            "name": "Per-flow identifier",
+            "bits": 8,
+            "desc": "The lower-order 8 bits, filled in by the ingress router from the inner packet's addresses and ports."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "THE TRADE-OFF IN THE BLOCK SIZE",
+      "data": {
+        "items": [
+          {
+            "title": "A smaller block",
+            "text": "Leaves more room for per-flow identification, so the core has better entropy and the mapping of flows to paths is less polarised."
+          },
+          {
+            "title": "A larger block",
+            "text": "Consumes fewer Session IDs or GRE Keys, so the network can support more distinct services at once."
+          },
+          {
+            "title": "The operator decides",
+            "text": "A typical deployment has to arbitrate between the two, because both matter."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "interoperability",
+      "position": "after",
+      "caption": "TUNNEL TYPES AND THEIR LOAD-BALANCING FIELD",
       "data": {
         "columns": [
           "Tunnel type",
           "Encapsulation",
-          "Load-balancing field"
+          "Load-balancing field",
+          "Note"
         ],
         "rows": [
           {
             "cells": [
               "1",
               "L2TPv3 over IP",
-              "Session ID"
-            ],
-            "self": true
+              "Session ID",
+              "The most significant bits must be non-zero after the block is extracted."
+            ]
           },
           {
             "cells": [
               "2",
               "GRE",
-              "GRE Key"
-            ],
-            "self": true
+              "GRE Key",
+              "The Key plays the same role as the Session ID."
+            ]
           },
           {
             "cells": [
               "7",
               "IP-in-IP",
-              "None defined"
+              "None",
+              "No load-balancing field is defined for this tunnel type."
             ]
           }
         ]
@@ -147,11 +240,6 @@
     }
   ],
   "references": [
-    {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
     {
       "number": "[RFC2784]",
       "text": "Farinacci, D., Li, T., Hanks, S., Meyer, D., and P. Traina, \"Generic Routing Encapsulation (GRE)\", RFC 2784, March 2000.",
@@ -176,10 +264,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

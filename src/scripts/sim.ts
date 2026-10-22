@@ -1,5 +1,6 @@
 // Sequence simulator client script; self-initializes on all matching figures.
 import { disposer, listen, onReady, qs, qsa, storageGet, storageSet } from './dom';
+import { isPlainLanguageName } from './legacy';
 
 type Lens = 'plain-language' | 'std' | 'orig';
 type NodeKind = 'client' | 'host' | 'server' | 'router';
@@ -96,7 +97,7 @@ function setup(fig: HTMLElement, off: ReturnType<typeof disposer>): void {
   state.lens =
     stored === 'plain-language' || stored === 'std' || stored === 'orig'
       ? stored
-      : storageGet('rfc-level') === 'plain-language'
+      : isPlainLanguageName(stored) || isPlainLanguageName(storageGet('rfc-level'))
         ? 'plain-language'
         : 'std';
 

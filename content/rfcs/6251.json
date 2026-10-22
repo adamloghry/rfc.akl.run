@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This informational document specifies how to carry Kerberos V5 over TLS for extra security features. The Kerberos messages travel through a TLS connection. It is not a standard.</p>",
   "plainLanguage": {
-    "summary": "<p>Kerberos is a ticket system for proving who you are. This puts its messages inside a protected tunnel so others can't peek or tamper.</p>"
+    "summary": "<p>Kerberos tickets are encrypted, but the conversation that obtains them is not, so someone in the middle can talk a client into using weak encryption. This memo describes a way to run the whole Kerberos exchange inside a TLS connection, so that the negotiation itself cannot be tampered with.</p>"
   },
   "questions": [
     "kerberos over tls",
@@ -22,34 +22,38 @@
   ],
   "subtitle": "How a Kerberos client and its KDC can upgrade their TCP connection to TLS for privacy and extra authentication.",
   "tldr": {
-    "problem": "Parts of Kerberos V5 messages travel without integrity or privacy protection, so an active attacker can tamper with encryption type or pre-authentication choices, and observers can read names and ticket details.",
-    "mechanism": "The client sets the STARTTLS bit in the Kerberos V5 TCP extension mechanism, the server answers with 0x00000000, and a TLS handshake follows. The normal Kerberos exchange then runs inside the TLS channel.",
-    "outcome": "TLS guards against downgrade attacks and passive sniffing, and can add authentication of the KDC. Clients are not required to verify server certificates, which leaves room for man-in-the-middle attacks unless they do.",
-    "outcomeLabel": "The catch"
+    "problem": "Plain Kerberos V5 leaves parts of its messages unprotected, and an active attacker can use that to force a weak encryption type or a broken pre-authentication method.",
+    "mechanism": "The client asks for the STARTTLS extension in the Kerberos TCP extension bitmask, the server answers, and the client then runs a TLS handshake on the same connection before any Kerberos message is exchanged.",
+    "outcome": "The Kerberos exchange then runs inside the protected channel, which stops downgrade attacks and hides the names and lifetimes that plain Kerberos exposes, at the cost of a certificate check that the document leaves optional for constrained clients.",
+    "outcomeLabel": "The trade-off"
   },
   "facts": [
     {
       "label": "Extension bit",
-      "value": "Bit 0 in the Kerberos TCP extension bitmask"
+      "value": "Bit 0 of the Kerberos TCP extension bitmask"
     },
     {
-      "label": "Server acknowledgment",
-      "value": "4-octet value 0x00000000"
+      "label": "Support value sent by the server",
+      "value": "4 octets of 0x00000000"
     },
     {
-      "label": "Packet prefix",
-      "value": "4-octet length field"
-    },
-    {
-      "label": "DNS SRV service name",
+      "label": "DNS service name for the extension",
       "value": "kerberos-tls"
     },
     {
-      "label": "Server certificate check",
-      "value": "Not required, MUST if client is able"
+      "label": "Port in the SRV example",
+      "value": "88"
+    },
+    {
+      "label": "Field binding the certificate to a realm",
+      "value": "otherName SAN, type id-krb5starttls-san"
+    },
+    {
+      "label": "Certificate verification",
+      "value": "Required where the client is able to do it"
     }
   ],
-  "today": "<p>RFC 6251 is an Informational document, published in May 2011. The unit metadata shows no RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 6251 is an Informational document from May 2011, and the unit metadata records no RFC that obsoletes it and none that updates it. It describes an extension to the Kerberos TCP mechanism rather than a change to Kerberos itself, so a client and a server both have to support it before it can be used.</p>",
   "glossary": [
     "kerberos",
     "kdc",
@@ -57,58 +61,52 @@
     "starttls",
     "srv-record",
     "x509-certificate",
-    "man-in-the-middle"
+    "man-in-the-middle",
+    "dns"
   ],
   "sections": [
     {
-      "id": "motivation",
+      "id": "introduction",
       "number": "1",
-      "title": "Why Run Kerberos over TLS",
-      "content": "<p>This document describes how a Kerberos V5 implementation may upgrade communication between clients and Key Distribution Centers (KDCs) to use <strong>Transport Layer Security</strong> (TLS). TLS offers integrity- and privacy-protected exchanges that can be authenticated with X.509 certificates, OpenPGP keys, or usernames and passwords via SRP.</p><p>The RFC gives four reasons. It prevents downgrade attacks: the encryption type in <code>KDC-REQ</code> and the pre-auth list in <code>KDC_ERR_PREAUTH_REQUIRED</code> errors are sent unprotected in plain Kerberos V5, so an active attacker could swap in a weak type such as 56-bit DES. It makes exchanges private, hiding principal names, supported encryption types and ticket lifetimes. It adds authentication against the KDC, for example with smart cards or OpenPGP keys. And it gives the client explicit authentication of the KDC, where plain Kerberos only proves it as a side effect of the KDC knowing the user's key.</p>",
-      "plainLanguage": "<p>Normally some of the notes Kerberos passes around are written on the outside of the envelope. TLS puts the whole thing in a locked box, so no one can read or change them.</p>"
+      "title": "Why Put Kerberos Inside TLS",
+      "content": "<p>The document describes how a Kerberos V5 (<a href='/rfc4120'>RFC 4120</a>) implementation may upgrade communication between clients and Key Distribution Centers to use the Transport Layer Security protocol (<a href='/rfc5246'>RFC 5246</a>). TLS offers integrity- and privacy-protected exchanges that can be authenticated using X.509 certificates, OpenPGP keys (<a href='/rfc6091'>RFC 6091</a>), and usernames and passwords via Secure Remote Password (<a href='/rfc5054'>RFC 5054</a>).</p><p>There are several reasons to use Kerberos V5 over TLS. The first is that it prevents downgrade attacks affecting, for example, encryption types and pre-authentication data negotiation. The encryption type field in the KDC-REQ and the METHOD-DATA field with the requested pre-authentication types, sent by the server in KDC_ERR_PREAUTH_REQUIRED errors in the KDC-REP, are sent without integrity or privacy protection in Kerberos V5. That allows an active attacker to replace the encryption type with a compromised one, such as 56-bit DES, or to request that clients use a broken pre-authentication type. Since clients in general cannot know which encryption types other servers support, or which pre-authentication types servers prefer or require, it is difficult for the client to detect whether there was a man in the middle or whether the remote server simply did not support a stronger encryption type or preferred another pre-authentication type.</p><p>The second reason is that Kerberos exchanges are not wholly privacy protected. Parts of many Kerberos packets are transferred without encryption, and that part contains information such as the client principal name, the server principal name, the encryption types supported by the client and the lifetime of tickets. Revealing such information is, in some threat models, considered a problem.</p><p>The third reason is that it provides additional authentication against the KDC. In some situations users are equipped with smart cards holding an RSA authentication key, and in others they have an OpenPGP client on their desktop with a public key known to the server. The fourth is that it provides explicit server authentication of the KDC to the client: in traditional Kerberos V5, authentication of the KDC is proved as a side effect of the KDC knowing your encryption key, that is, your password.</p>",
+      "plainLanguage": "<p>Kerberos encrypts the tickets it hands out, but the first conversation, where the client and the server agree on how strong to be, is out in the open. Someone in the middle can rewrite that agreement and talk the client into using an encryption type that is no longer safe. Wrapping the conversation in TLS closes that gap, and it also hides who is asking for what.</p>"
     },
     {
-      "id": "negotiation",
+      "id": "operation",
       "number": "2",
       "title": "The STARTTLS Extension",
-      "content": "<p>The extension builds on the Kerberos V5 TCP extension mechanism from <a href='/rfc5021'>RFC 5021</a> and uses bit 0 of the extension bitmask. The client asks for it by setting the STARTTLS bit. When the server has sent the 4-octet value <code>0x00000000</code> to show it supports the extension, the stream is controlled by TLS and its framing, and the client starts the handshake.</p><p>If the handshake fails, the STARTTLS protocol fails too, the TLS error is the error indication, and no more messages can be exchanged on that TCP session. If it succeeds, the Kerberos exchange runs inside the TLS channel like a normal TCP Kerberos exchange, so every Kerberos packet is still prefixed by a 4-octet length field.</p><p>When no more Kerberos messages need to be sent, the TLS session MUST be shut down with the <code>close_notify</code> alert. The TCP connection then cannot be reused and MUST be closed.</p>",
-      "plainLanguage": "<p>The client knocks and asks, 'can we talk in a sealed tube?' If the server says yes, they set up the tube first and only then start the real conversation. When they are done they close the tube and hang up.</p>"
-    },
-    {
-      "id": "examples",
-      "number": "3",
-      "title": "A Complete Packet Flow",
-      "content": "<p>The RFC walks through a successful AS-REQ/AS-REP exchange. First the extension negotiation happens in the clear: the client sends <code>0x80000000</code> ORed with the STARTTLS bit and the server replies <code>0x00000000</code>.</p><p>Then the TLS handshake runs, from <code>ClientHello</code> to the <code>Finished</code> messages, with some messages (such as <code>Certificate</code> and <code>CertificateRequest</code>) marked as optional or situation-dependent. Only after that does the client send a length field and the Kerberos AS-REQ, and the server answer with a length field and the AS-REP, all inside TLS.</p>",
-      "plainLanguage": "<p>First they agree to use the tube. Then they set up the tube. Only then does the client ask for its ticket and get it back, safely inside.</p>"
+      "content": "<p>The STARTTLS extension uses the Kerberos V5 TCP extension mechanism (<a href='/rfc5021'>RFC 5021</a>), and uses bit 0 in the extension bitmask. The protocol is as follows. The client requests the extension by setting the STARTTLS bit in the TCP extension mechanism bitmask; how to deal with extension negotiation failures at this point is described in <a href='/rfc5021'>RFC 5021</a>. After the server has sent the 4-octet value 0x00000000 to indicate support of this extension, the stream is controlled by the TLS protocol and its framing. The TLS protocol is initiated by the client.</p><p>Typically the client initiates the TLS handshake protocol by sending a client hello, the server responds, and the handshake continues until it either succeeds or fails. If for any reason the handshake fails, the STARTTLS protocol also fails and the TLS error is used as the error indication. In that case no further messages can be exchanged over the same TCP session.</p><p>If the handshake succeeds, the Kerberos V5 authentication protocol is performed within the protected TLS channel, like a normal TCP Kerberos V5 exchange. In particular, every Kerberos V5 packet will be prefixed by a 4-octet length field that indicates the length of the Kerberos V5 packet. When no further Kerberos V5 messages need to be transferred in the TLS session, the TLS session MUST be shut down properly using the close_notify alert. When the TLS session is shut down, the TCP connection cannot be reused to send any further data and MUST be closed.</p>",
+      "plainLanguage": "<p>The upgrade happens on the same TCP connection the Kerberos exchange would have used. The client asks for it, the server confirms, and from then on the connection belongs to TLS. If the handshake fails the exchange is over, because the connection cannot be reused. Once it works, the Kerberos messages look exactly as they do over plain TCP, with a length prefix, but they are now inside the encrypted channel.</p>"
     },
     {
       "id": "resolution",
       "number": "4",
-      "title": "Finding a STARTTLS-Aware KDC",
-      "content": "<p>Kerberos V5 already uses DNS SRV records to find KDCs. This RFC defines a new service name, <code>kerberos-tls</code>, to show that a given KDC is meant to support the STARTTLS extension. The Proto (<code>tcp</code>), Realm, TTL, Class, SRV, Priority, Weight, Port and Target fields mean the same as in <a href='/rfc4120'>RFC 4120</a>.</p><p>The RFC's example publishes two records for <code>EXAMPLE.COM</code>, <code>_kerberos-tls._tcp.EXAMPLE.COM.</code>, pointing at <code>kdc1.example.com.</code> (priority 0) and <code>kdc2.example.com.</code> (priority 1), both on port 88.</p>",
-      "plainLanguage": "<p>It is a phone book entry that says which Kerberos servers can use the sealed tube, so clients know where to call.</p>"
+      "title": "Finding a KDC That Supports It",
+      "content": "<p>Section 7.2.3 of Kerberos V5 (<a href='/rfc4120'>RFC 4120</a>) describes how Domain Name System SRV records (<a href='/rfc2782'>RFC 2782</a>) can be used to find the address of a KDC. This document defines a new service of kerberos-tls to indicate that the particular KDC is intended to support the STARTTLS extension. The Proto, Realm, TTL, Class, SRV, Priority, Weight, Port and Target have the same meaning as in <a href='/rfc4120'>RFC 4120</a>.</p><p>The example given in the document is a pair of SRV records for the service name kerberos-tls over TCP in the realm EXAMPLE.COM, pointing at two different KDC hosts on port 88, with different priorities and weights.</p>",
+      "plainLanguage": "<p>A client that wants the extra protection has to find a server that offers it, and the existing way of finding Kerberos servers is DNS. So the memo adds a second service name, kerberos-tls, published in the same way, which says: these servers support the upgrade.</p>"
     },
     {
       "id": "authentication",
       "number": "5",
       "title": "Server Certificates",
-      "content": "<p>A stated goal is that this protocol should be as easy to implement and deploy on clients as UDP/TCP support. Many clients have no long-term storage secure enough to validate server certificates, so the extension <strong>does not require clients to verify server certificates</strong>. The RFC argues that TLS even without validation still protects against passive sniffing aimed at tracking a client's Kerberos service use, but it warns that active attacks such as man in the middle become possible.</p><p>When clients have the ability, they MUST validate the server certificate. If a KDC presents an X.509 certificate, it MUST contain an <code>otherName</code> Subject Alternative Name identified by <code>id-krb5starttls-san</code>, whose value is the Kerberos realm. Clients MAY instead use local configuration, such as a list mapping realms to server certificates, or MAY use certification path validation from <a href='/rfc5280'>RFC 5280</a>. Unless the client can otherwise verify that the certificate is bound to the target realm's KDC, it MUST check that the SAN is present and equals the intended realm.</p>",
-      "plainLanguage": "<p>Checking the server's ID card is the best idea, but some small devices cannot keep a list of trusted cards. So checking is only a must for clients that are able to do it.</p>"
+      "content": "<p>The TLS protocol may be used in a mode that provides server authentication using, for example, X.509 and OpenPGP. A goal for the protocol is that it should be as easy to implement and deploy on clients as support for UDP or TCP. Since many client environments do not have access to long-term storage, or to long-term storage that is sufficiently secure to enable validation of server certificates, the Kerberos V5 STARTTLS protocol does not require clients to verify server certificates. If server certification had been required, environments with constrained clients would be forced to disable TLS, which would arguably be worse than TLS without server certificate validation, since the use of TLS even without server certificate validation protects against some attacks that Kerberos V5 over UDP or TCP does not. For example, even without server certificate validation, TLS protects against passive network sniffing aimed at tracking Kerberos service usage by a given client.</p><p>The use of TLS without server certificate verification does, however, open up a range of active attacks such as man in the middle. When clients have the ability, they MUST validate the server certificate. For this reason, if a KDC presents an X.509 server certificate over TLS, it MUST contain an otherName Subject Alternative Name identified using a type id of id-krb5starttls-san. The intention is to bind the server certificate to the Kerberos realm for the purpose of using Kerberos V5 STARTTLS, and the value field of the otherName should contain the realm as the Realm ASN.1 type.</p><p>To validate a server certificate, the client MAY use local configuration, for example a list that maps the Kerberos realm to a copy of the server's certificate, and compare that with the authentication information provided by the server via TLS. The server certificate could be an X.509 certificate or an OpenPGP key, and in this mode the client needs no processing related to id-krb5starttls-san. When the server presents an X.509 server certificate, clients MAY use Certification Path Validation as described in <a href='/rfc5280'>RFC 5280</a> to validate it. In addition, unless the client can otherwise verify that the server certificate is bound to the KDC of the target realm, the client MUST verify that the certificate contains the id-krb5starttls-san alternative name and that the value is identical to the intended Kerberos realm.</p>",
+      "plainLanguage": "<p>The document makes certificate checking optional, because many clients have nowhere safe to keep a copy of the server's key. A client that cannot check the certificate gets protection against passive snooping but not against an active attacker. A client that can check it must, and the certificate has to name the realm in a dedicated field.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
-      "title": "Security Considerations and IANA",
-      "content": "<p>The security considerations of Kerberos V5, TLS and the Kerberos V5 TCP extension mechanism are inherited. TLS does not protect against man-in-the-middle attacks unless clients verify the KDC's credentials correctly. If server authentication is used, some information about the server, such as its name, is visible to passive attackers.</p><p>To protect against the downgrade attack inherent in the extension framework, implementations SHOULD offer a policy mode that requires the extension to be negotiated successfully for a particular realm or generally. That mode SHOULD be disabled by default for interoperability with implementations that lack the extension.</p><p>IANA allocated bit value 0 in the Kerberos TCP Extensions registry for this extension.</p>",
-      "plainLanguage": "<p>If you only ever say 'tube if possible', a trickster can talk you out of using it. So there should be a switch that insists on the tube, though it starts switched off so old servers still work.</p>"
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The security considerations in Kerberos V5, TLS and the Kerberos V5 TCP extension mechanism are inherited. TLS does not protect against man-in-the-middle attacks unless clients verify the KDC's credentials, such as an X.509 certificate or an OpenPGP key, correctly. Although certificate validation adds an extra layer of protection, that is not considered strictly necessary to improve the security profile of Kerberos V5 as outlined in this document.</p><p>If server authentication is used, some information about the server, such as its name, is visible to passive attackers. To protect against the inherent downgrade attack in the extension framework, implementations SHOULD offer a policy mode that requires this extension to always be successfully negotiated, for a particular realm or generally. For interoperability with implementations that do not support the extension, the policy mode SHOULD be disabled by default.</p>",
+      "plainLanguage": "<p>Two points to keep in mind. TLS only stops a man in the middle if the client checks who it is talking to. And because the extension itself is negotiated, an attacker could try to make the negotiation fail; a client that can be told to insist on the extension closes that door, though the memo leaves that setting off by default so that older servers still work.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "examples",
+      "anchor": "operation",
       "position": "after",
-      "caption": "SUCCESSFUL AS-REQ/AS-REP OVER STARTTLS (RFC 6251, abridged)",
+      "caption": "THE PACKET FLOW FROM SECTION 3",
       "data": {
         "lanes": [
           {
@@ -126,32 +124,32 @@
             "to": "server",
             "label": "0x80000000 | STARTTLS-bit",
             "color": "blue",
-            "note": "Request the extension."
+            "note": "The Kerberos TCP extension negotiation starts."
           },
           {
             "from": "server",
             "to": "client",
             "label": "0x00000000",
             "color": "green",
-            "note": "Extension supported."
+            "note": "The server confirms that it supports the extension."
           },
           {
             "from": "client",
             "to": "server",
             "label": "ClientHello",
-            "color": "neutral",
-            "note": "TLS negotiation starts."
+            "color": "blue",
+            "note": "The TLS handshake begins."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "ServerHello ... ServerHelloDone",
+            "label": "ServerHello, Certificate, ServerKeyExchange, CertificateRequest, ServerHelloDone",
             "color": "neutral"
           },
           {
             "from": "client",
             "to": "server",
-            "label": "ClientKeyExchange ... Finished",
+            "label": "Certificate, ClientKeyExchange, CertificateVerify, ChangeCipherSpec, Finished",
             "color": "neutral"
           },
           {
@@ -163,14 +161,52 @@
           {
             "from": "client",
             "to": "server",
-            "label": "Length + Kerberos AS-REQ",
-            "color": "blue"
+            "label": "4-octet length field and Kerberos V5 AS-REQ",
+            "color": "blue",
+            "note": "The Kerberos exchange now runs inside the protected channel."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "Length + Kerberos AS-REP",
+            "label": "4-octet length field and Kerberos V5 AS-REP",
             "color": "green"
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "resolution",
+      "position": "after",
+      "caption": "THE EXAMPLE SRV RECORDS FROM SECTION 4",
+      "data": {
+        "title": "DNS SRV records for the kerberos-tls service",
+        "lang": "text",
+        "code": "_kerberos-tls._tcp.EXAMPLE.COM. IN SRV 0 0 88 kdc1.example.com.\n_kerberos-tls._tcp.EXAMPLE.COM. IN SRV 1 0 88 kdc2.example.com."
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "THE FOUR REASONS GIVEN FOR USING KERBEROS OVER TLS",
+      "data": {
+        "items": [
+          {
+            "title": "No downgrade attacks",
+            "text": "The choice of encryption type and pre-authentication type can no longer be rewritten in transit."
+          },
+          {
+            "title": "Privacy for the negotiation",
+            "text": "Principal names, supported encryption types and ticket lifetimes are no longer visible on the wire."
+          },
+          {
+            "title": "Extra authentication of the client",
+            "text": "The KDC can also check a smart card key or an OpenPGP key."
+          },
+          {
+            "title": "Explicit authentication of the KDC",
+            "text": "The server proves who it is with a certificate, rather than only by knowing your password."
           }
         ]
       }
@@ -194,22 +230,37 @@
     },
     {
       "number": "[RFC5280]",
-      "text": "Cooper, D., et al., \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
+      "text": "Cooper, D., Santesson, S., Farrell, S., Boeyen, S., Housley, R., and W. Polk, \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 5280, May 2008.",
       "rfc": 5280
     },
     {
       "number": "[RFC2782]",
       "text": "Gulbrandsen, A., Vixie, P., and L. Esibov, \"A DNS RR for specifying the location of services (DNS SRV)\", RFC 2782, February 2000.",
       "rfc": 2782
+    },
+    {
+      "number": "[RFC5054]",
+      "text": "Taylor, D., Wu, T., Mavrogiannopoulos, N., and T. Perrin, \"Using the Secure Remote Password (SRP) Protocol for TLS Authentication\", RFC 5054, November 2007.",
+      "rfc": 5054
+    },
+    {
+      "number": "[RFC6091]",
+      "text": "Mavrogiannopoulos, N. and D. Gillmor, \"Using OpenPGP Keys for Transport Layer Security (TLS) Authentication\", RFC 6091, February 2011.",
+      "rfc": 6091
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

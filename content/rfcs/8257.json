@@ -5,13 +5,15 @@
   "categoryReviewed": false,
   "summary": "<p>DCTCP is a TCP congestion control scheme for data centers. It builds on ECN by estimating what fraction of traffic sees congestion, and then shrinks the sending window in proportion. This keeps queues short and delay low. This informational RFC documents it rather than making it a standard.</p>",
   "plainLanguage": {
-    "summary": "<p>Instead of slamming the brakes at the first sign of a traffic jam, it eases off in proportion to how crowded the road is.</p>"
+    "summary": "<p>DCTCP changes how a TCP sender reacts when a switch reports congestion. Instead of halving the sending window whenever anything is lost, it measures how much of the traffic was affected and reduces the window by that proportion.</p>"
   },
   "questions": [
     "what is dctcp",
     "tcp congestion control for data centers",
     "how does dctcp differ from standard tcp congestion control",
-    "when should i use dctcp"
+    "when should i use dctcp",
+    "how does dctcp measure congestion",
+    "what is dctcp alpha"
   ],
   "tags": [
     "Transport",
@@ -20,91 +22,103 @@
   ],
   "subtitle": "TCP congestion control that responds to congestion proportionally in data centers.",
   "tldr": {
-    "problem": "Standard TCP detects congestion only by packet loss, which causes late reactions and unfair competition with ECN-aware endpoints in data centers with shallow buffers and bursty traffic patterns.",
-    "mechanism": "DCTCP uses the Explicit Congestion Notification (ECN) mechanism to estimate what fraction of traffic encountered congestion, then reduces the congestion window proportionally to that fraction rather than drastically cutting it in half.",
-    "outcome": "This achieves higher throughput and lower latency with shallow-buffered switches in data centers. It is documented as an Informational RFC because it requires further standards work and must be deployed only in controlled intra-data-center environments.",
+    "problem": "Inside a data center, switches have to keep their queues short so that short messages stay fast, but long transfers need the queue to fill up. Standard TCP, which reacts to lost packets, overshoots and hurts both.",
+    "mechanism": "DCTCP uses the existing congestion notification signal, but measures the fraction of bytes that met congestion rather than just noticing that some congestion occurred, and shrinks the sending window in proportion.",
+    "outcome": "It is an Informational document that records an approach already implemented in several operating systems, and it warns that it must not be deployed over the public Internet without additional measures.",
     "outcomeLabel": "Status today"
   },
   "facts": [
     {
-      "label": "Estimation gain",
-      "value": "Typically 1/16 (0.0625)"
+      "label": "DCTCP.Alpha initial value",
+      "value": "1"
     },
     {
-      "label": "Congestion window reduction",
-      "value": "cwnd * (1 - DCTCP.Alpha / 2)"
+      "label": "Observation window",
+      "value": "Approximately the Round-Trip Time"
     },
     {
-      "label": "Deployment scope",
-      "value": "Intra-data-center only"
+      "label": "Estimation gain in some builds",
+      "value": "1/16"
     },
     {
-      "label": "Protocol number",
-      "value": "17 (same as TCP, uses TCP flags)"
+      "label": "Scaling factor in the worked example",
+      "value": "65536"
+    },
+    {
+      "label": "Delayed ACK frequency",
+      "value": "Typically 2"
     },
     {
       "label": "Status",
-      "value": "Informational (not Standards Track)"
-    },
-    {
-      "label": "Implementations",
-      "value": "Windows Server 2012, Linux, FreeBSD"
+      "value": "Informational"
     }
   ],
-  "today": "<p>RFC 8257 documents DCTCP as it is implemented in several major operating systems. It remains Informational because the IETF TCPM Working Group determined that a full standards specification would require additional work. DCTCP deployments continue in data center environments where the network is under single administrative control and both endpoints can be configured to use it.</p>",
+  "today": "<p>RFC 8257 is an Informational document with no obsoleting or updating RFC recorded against it, so it stands as a description of a deployed approach rather than a standard. It records DCTCP as implemented in Microsoft Windows Server 2012 and, in the authors' belief, followed in Linux and FreeBSD, and it states that DCTCP must not be deployed over the public Internet without additional measures.</p>",
   "glossary": [
     "tcp",
-    "congestion-control"
+    "congestion-control",
+    "ecn",
+    "congestion-window",
+    "slow-start",
+    "active-queue-management",
+    "round-trip-time",
+    "differentiated-services",
+    "random-early-detection",
+    "incast",
+    "selective-acknowledgment"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "Why Data Centers Need Different Congestion Control",
-      "content": "<p>Data center networks have unique challenges: they use low-cost switches with small buffers, carry a mix of short and long flows at the same time, and experience sudden bursts where many servers send to one server simultaneously (called <strong>incast</strong>). Standard TCP, which detects congestion only when packets are dropped, reacts too slowly to these patterns. By the time TCP realizes there is congestion, queue delays have already grown and bursty traffic has mostly been dropped.</p><p>ECN (Explicit Congestion Notification) allows switches to mark packets instead of dropping them, but traditional ECN processing treats any mark as a sign to halve the congestion window, which is too drastic for mild congestion and causes long flows to lose throughput unnecessarily.</p>",
-      "plainLanguage": "<p>Imagine a school bus and a bicycle trying to share one narrow road. When they meet, the bicycle swerves hard and loses speed even if there is still room. DCTCP would let both adjust smoothly so they both keep moving.</p>"
+      "title": "Why Data Centres Need Something Different",
+      "content": "<p>Large data centers need many network switches to interconnect their many servers, so they can greatly reduce capital expenditure by using low-cost switches. Such switches tend to have limited queue capacities, and are therefore more susceptible to packet loss due to congestion.</p><p>Traffic in a data center is often a mix of short and long flows, where short flows require low latencies and long flows require high throughputs. Data centers also experience incast bursts, where many servers send traffic to a single server at the same time. This pattern is a natural consequence of the MapReduce workload, where the worker nodes complete at approximately the same time and all reply to the master node concurrently.</p><p>These factors place conflicting demands on the queue occupancy of a switch. The queue must be short enough that it does not impose excessive latency on short flows. It must be long enough to buffer sufficient data for the long flows to saturate the path capacity. And it must be long enough to absorb incast bursts without excessive packet loss.</p><p>Standard TCP congestion control relies on packet loss to detect congestion, which does not meet these demands. Short flows will start to experience unacceptable latencies before packet loss occurs, and by the time TCP congestion control kicks in on the senders, most of the incast burst has already been dropped. Explicit Congestion Notification, which lets switches signal congestion, detects the presence of congestion but not its extent. In the presence of mild congestion the TCP congestion window is reduced too aggressively, which unnecessarily reduces the throughput of long flows.</p><p>DCTCP changes traditional ECN processing by estimating the fraction of bytes that encounter congestion rather than simply detecting that some congestion has occurred, and then scales the congestion window based on that estimate. The method achieves high burst tolerance, low latency and high throughput with shallow-buffered switches. It is a modification to the processing of ECN by a conventional TCP, and it requires that standard TCP congestion control be used for handling packet loss.</p><p>DCTCP should only be deployed in an intra-data-center environment where both endpoints and the switching fabric are under a single administrative domain, and it must not be deployed over the public Internet without additional measures. The objective of the document is to record DCTCP as an approach known to be widely implemented and deployed. The IETF transport working group reached consensus that a DCTCP standard would require further work, and a precise documentation of running code was expected to enable follow-up Experimental or Standards Track RFCs through the IETF stream. The document describes DCTCP as implemented in Microsoft Windows Server 2012, and notes that Linux and FreeBSD have also implemented support in a way believed to follow the document.</p>",
+      "plainLanguage": "<p>Cheap switches have small buffers. Small buffers are good for quick messages and bad for bulk transfers, and a pile-up of replies can overflow them. The document explains that DCTCP is meant only inside one data centre, where everything is run by the same organisation.</p>"
     },
     {
-      "id": "overview",
-      "number": "2",
-      "title": "The Three-Part DCTCP Algorithm",
-      "content": "<p>DCTCP changes how TCP uses ECN by involving three components working together. <strong>Layer 3 switches</strong> detect queue buildup and set the Congestion Encountered (CE) codepoint in the IP header when the queue exceeds a threshold. The <strong>receiver</strong> tracks the CE markings in arriving packets and echoes them back via the ECN-Echo (ECE) flag in TCP acknowledgments. The <strong>sender</strong> tracks what fraction of bytes it sent encountered congestion, then reduces its sending window not by a fixed amount but proportionally: if 10% of bytes saw congestion, it shrinks the window by a smaller amount than if 50% did.</p>",
-      "plainLanguage": "<p>A traffic light that changes from green to yellow tells drivers to slow down. DCTCP is like a dimmer: the brighter the light, the more drivers ease off the throttle, all at the same time.</p>"
-    },
-    {
-      "id": "algorithms",
+      "id": "design",
       "number": "3",
-      "title": "Estimating and Reacting to Congestion",
-      "content": "<p>DCTCP introduces a state variable, <strong>DCTCP.Alpha</strong>, that smooths the congestion estimate over time. Each round-trip time (RTT), the sender counts two things: how many bytes were acknowledged, and how many of those bytes carried the CE mark in ECN. The ratio <code>M = bytes marked / bytes acked</code> gives the current congestion level. DCTCP.Alpha is updated as <code>DCTCP.Alpha = DCTCP.Alpha * (1 - g) + g * M</code>, where <code>g</code> is the estimation gain (typically 1/16). The congestion window is then reduced by <code>cwnd = cwnd * (1 - DCTCP.Alpha / 2)</code>, so mild congestion (low M) causes gentle reduction while severe congestion causes larger cuts.</p><p>The receiver implementation must also be aware of CE marks: it uses a state variable DCTCP.CE to send immediate acknowledgments when the congestion state changes, allowing the sender to track the congestion signal accurately even with delayed ACKs.</p>",
-      "plainLanguage": "<p>Every few seconds, count how many bumps happened in the road versus how many smooth stretches. If 1 in 10 was bumpy, easing off a little bit helps. If 5 in 10 were bumpy, ease off more.</p>"
+      "title": "How DCTCP Works",
+      "content": "<p>Three components are involved. The switches, or other intermediate devices, detect congestion and set the Congestion Encountered codepoint in the IP header. The receiver echoes the congestion information back to the sender, using the ECN-Echo flag in the TCP header. The sender computes a congestion estimate and reacts by reducing the congestion window accordingly.</p><p><strong>Marking.</strong> The Layer 3 switches and routers in a data-centre fabric indicate congestion by setting the CE codepoint in the IP header. For example, the switches may be configured with a congestion threshold: when a packet arrives and its queue length is greater than the threshold, the switch sets the codepoint. One earlier DCTCP paper suggests threshold marking with a threshold of K greater than (RTT times C) divided by 7, where C is the link rate in packets per second. In typical deployments the marking threshold is set to a small value to maintain a short average queueing delay. The actual marking algorithm is an implementation detail of the switch and will generally not be known to the sender and receiver, so neither should assume that a particular algorithm is implemented by the switching fabric.</p><p><strong>Echoing.</strong> Standard ECN tells the receiver to set the ECE flag if any of the packets being acknowledged had the CE codepoint set, and to keep setting it until it receives a packet with the Congestion Window Reduced flag. DCTCP needs more detail, because the sender must determine the number of bytes sent that encountered congestion. One possible solution is to acknowledge every packet and set the ECE flag only if the CE codepoint was set in that packet, but that prevents the use of delayed acknowledgements, an important performance optimisation in data centres, where the delayed acknowledgement frequency is typically 2, though it can be affected by acknowledgement throttling or packet coalescing.</p><p>Instead, DCTCP introduces a Boolean TCP state variable, DCTCP.CE, initialised to false and stored in the Transmission Control Block. When sending an acknowledgement the ECE flag must be set if and only if DCTCP.CE is true. When receiving packets, the CE codepoint must be processed as follows: if the codepoint is set and DCTCP.CE is false, set DCTCP.CE to true and send an immediate acknowledgement; if the codepoint is not set and DCTCP.CE is true, set DCTCP.CE to false and send an immediate acknowledgement; otherwise ignore the codepoint. Since the immediate acknowledgement reflects the new state it may acknowledge previously unacknowledged packets in the old state, which can lead to an incorrect rate computation at the sender, so an implementation may choose to send two acknowledgements: one for the previously unacknowledged packets and another acknowledging the most recently received packet. Receiver handling of the CWR bit stays as in the ECN specification, so on receipt of a segment with both the CE and CWR bits set, CWR is processed first and then CE.</p><p><strong>Estimating.</strong> The sender stores its estimate in a new TCP state variable, DCTCP.Alpha, initialised to 1 and updated as DCTCP.Alpha = DCTCP.Alpha * (1 - g) + g * M. Here g is the estimation gain, a real number between 0 and 1 whose selection is left to the implementation, and M is the fraction of bytes sent that encountered congestion during the previous observation window, where the observation window is chosen to be approximately the round-trip time; in particular, a window ends when all bytes in flight at the beginning of the window have been acknowledged. Three further state variables are introduced: DCTCP.WindowEnd, the TCP sequence number threshold when one observation window ends and another begins, initialised to SND.UNA; DCTCP.BytesAcked, the number of sent bytes acknowledged during the current window, initialised to 0; and DCTCP.BytesMarked, the number of bytes sent during the current window that encountered congestion, also initialised to 0.</p><p>The congestion estimator must process acceptable acknowledgements as follows. Compute the bytes acknowledged, ignoring TCP Selective Acknowledgment options: BytesAcked = SEG.ACK - SND.UNA. Add them to DCTCP.BytesAcked. If the ECE flag is set, add them to DCTCP.BytesMarked. If the acknowledgement number is less than or equal to DCTCP.WindowEnd, stop processing; otherwise the end of the observation window has been reached. Compute the congestion level for the window as M = DCTCP.BytesMarked / DCTCP.BytesAcked, update the estimate with the formula above, set DCTCP.WindowEnd to SND.NXT and reset both byte counters to 0. And then, rather than always halving the congestion window, the sender should update it as cwnd = cwnd * (1 - DCTCP.Alpha / 2). As in the ECN specification, DCTCP does not react to congestion indications more than once for every window of data, and the setting of the CWR bit is unchanged, which is required for interoperation with classic ECN receivers due to potential misconfigurations.</p><p><strong>Growth and loss.</strong> A DCTCP sender grows its congestion window in the same way as conventional TCP, with slow start and congestion avoidance handled as specified in the TCP congestion control document. It must react to loss episodes in the same way as conventional TCP, including fast retransmit and fast recovery, and other state variables such as ssthresh must be changed in the same way a conventional TCP would have changed them. As with ECN, a DCTCP sender will only reduce the window once per window of data across all loss signals, and upon a timeout the window must be set to no more than the loss window, one full-sized segment, regardless of previous reductions. For SYN, SYN-ACK and RST packets on DCTCP connections, the sender should set the ECN-Capable Transport codepoint, since lack of it can result in a higher drop rate depending on the switching fabric configuration; a DCTCP receiver ignores CE codepoints set on any such packets.</p>",
+      "plainLanguage": "<p>The switch marks a packet as having met a congested queue. The receiver notices the mark and tells the sender, keeping track of whether the mark is currently set. The sender then works out what fraction of its bytes were marked and shrinks its window by that fraction, rather than by half every time.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "4",
+      "title": "Implementation Choices",
+      "content": "<p>An implementation needs to know when to use DCTCP. Data-centre servers may need to communicate with endpoints outside the data centre, where DCTCP is unsuitable or unsupported, so a global configuration setting will generally not suffice. DCTCP provides no mechanism for negotiating its use, and additional management and configuration functionality is needed to ensure that DCTCP is not used with non-DCTCP endpoints. Known solutions rely on either configuration or heuristics. Heuristics need to allow endpoints to enable DCTCP individually, so that a DCTCP sender is always paired with a DCTCP receiver. One approach is to enable DCTCP based on the IP address of the remote endpoint. Another is to detect connections that transmit within the bounds of a data centre, for example by supporting automatic selection of DCTCP if the estimated round-trip time is less than a threshold like 10 msec and ECN is successfully negotiated, on the assumption that a low round-trip time means the two endpoints are likely in the same data-centre network.</p><p>ECN forbids marking pure acknowledgement packets, because TCP cannot mitigate congestion on the acknowledgement path, and also forbids marking retransmissions, window probes and RSTs. However, dropping all these control packets rather than marking them has considerable performance disadvantages, so it is recommended that an implementation provide a configuration knob that causes the ECN-Capable Transport codepoint to be set on such control packets, usable in environments where the concerns do not apply. It is also useful to implement DCTCP as an additional action on top of an existing congestion control algorithm such as Reno, and the implementation may allow the value of DCTCP.Alpha to be reset as part of processing any loss episodes.</p><p>Choosing the estimation gain is left to the implementor. One earlier DCTCP paper gives a theoretical basis for selecting it, but it may be more practical to use experimentation for a particular network and workload. A fixed estimation gain of 1/16 is used in some implementations. Values of 0 or 1 result in problematic behaviour: g of 0 fixes DCTCP.Alpha to its initial value, and g of 1 sets it to M without any smoothing.</p><p>The computation involves fractions, and an efficient kernel implementation may scale the value for efficient computation using shift operations. If the implementation chooses g as 1/16, multiplications of DCTCP.Alpha by g become right-shifts by 4. A scaling implementation should ensure that DCTCP.Alpha can reach 0 once it falls below the smallest shifted value, 16 in that example. At the other extreme, a scaled update needs to ensure that DCTCP.Alpha does not exceed the scaling factor, which would be equivalent to greater than 100% congestion, so DCTCP.Alpha must be clamped after an update. With SCF as the chosen scaling factor, 65536 in the example, and SHF as the shift factor, 4 in the example, the computations that replace the estimate steps are: compute ScaledM = SCF * DCTCP.BytesMarked / DCTCP.BytesAcked; set DCTCP.Alpha to 0 if (DCTCP.Alpha >> SHF) is 0; add (ScaledM >> SHF) - (DCTCP.Alpha >> SHF) to DCTCP.Alpha; and set DCTCP.Alpha to SCF if it exceeds SCF.</p>",
+      "plainLanguage": "<p>Two practical choices are left to whoever implements this. First, how to decide a connection is inside the data centre, since the protocol offers no way to negotiate it. Second, how much to smooth the congestion estimate, since too little smoothing makes the sender twitchy and too much makes it slow to react.</p>"
     },
     {
       "id": "deployment",
-      "number": "4",
-      "title": "Deployment Challenges and Limitations",
-      "content": "<p>DCTCP must be deployed only within a data center under a single administrative domain. The RFC warns against deployment over the public Internet because DCTCP and standard TCP do not coexist well when both use the same congestion threshold: standard TCP will suffer packet loss and drastically cut its window, while DCTCP eases off gradually, causing DCTCP to seize a larger share of capacity. The entire network infrastructure must support ECN marking on switches and both endpoints must support DCTCP. Because DCTCP provides no negotiation mechanism, both sender and receiver must be configured out-of-band to use it together.</p><p>Implementations in Microsoft Windows Server 2012, Linux, and FreeBSD all follow this specification. Real-world deployments use DSCP (Differentiated Services Codepoint) to segregate DCTCP traffic from conventional TCP so they do not compete.</p>",
-      "plainLanguage": "<p>DCTCP only works when everybody in the network plays by the same rules. If a stranger with a different car joins the road, things break down.</p>"
+      "number": "5",
+      "title": "Deployment Issues",
+      "content": "<p>DCTCP and conventional TCP congestion control do not coexist well in the same network. In typical DCTCP deployments the marking threshold in the switching fabric is set to a very low value to reduce queueing delay, so a relatively small amount of congestion will exceed the threshold. During such periods conventional TCP will suffer packet loss and quickly and drastically reduce its window, while DCTCP uses the fraction of marked packets to reduce its window more gradually. The rate reduction in DCTCP is therefore much slower than that of conventional TCP, and DCTCP traffic gains a larger share of the capacity compared with conventional TCP traffic traversing the same path. If traffic in the data centre is a mix of the two, it is recommended that DCTCP traffic be segregated from conventional TCP traffic. One documented deployment uses the IP Differentiated Services Codepoint bits to segregate the network so that Active Queue Management is applied to DCTCP traffic while TCP traffic is managed with drop-tail queueing.</p><p>Deployments should take into account the segregation of non-TCP traffic as well. Today's commodity switches allow configuration of different marking and drop profiles for non-TCP and non-IP packets, and such packets should be able to pass through the switches unless they really run out of buffer space.</p><p>Since DCTCP relies on congestion marking by the switches, its potential can only be realised in data centres where the entire network infrastructure supports ECN. The switches may also support configuration of the congestion threshold used for marking, and the proposed parameterisation can be configured with switches that implement Random Early Detection. The earlier DCTCP paper provides a theoretical basis for selecting the congestion threshold, but as with the estimation gain it may be more practical to rely on experimentation or simply to use the default configuration of the device. DCTCP reverts to loss-based congestion control when packet loss is experienced, for example when transiting a congested drop-tail link or a link with an AQM drop behaviour.</p><p>DCTCP requires changes on both the sender and the receiver, so both endpoints must support it. Because it provides no mechanism for negotiating its use, both endpoints must be configured through some out-of-band mechanism. A variant of DCTCP that can be deployed unilaterally and only requires standard ECN behaviour has been described in other work, but it requires additional experimental evaluation.</p>",
+      "plainLanguage": "<p>Ordinary TCP and DCTCP do not mix well on the same link: DCTCP backs off gently and therefore takes a larger share of the capacity. The recommended answer is to keep the two kinds of traffic apart, and to make sure every switch in the data centre understands the congestion signal.</p>"
+    },
+    {
+      "id": "discussion",
+      "number": "6",
+      "title": "Known Issues",
+      "content": "<p>DCTCP relies on the sender's ability to reconstruct the stream of CE codepoints received by the remote endpoint. To accomplish this it avoids using a single acknowledgement packet to acknowledge segments received both with and without the CE codepoint set. However, if one or more acknowledgement packets are dropped, a subsequent acknowledgement may cumulatively acknowledge a mix of marked and unmarked segments, which results in a less accurate congestion estimate. There are some potential considerations: even with an inaccurate estimate, DCTCP may still perform better than the original ECN scheme; if the estimation gain is small relative to the packet loss rate, the estimate may not be too inaccurate; and if acknowledgement packet loss mostly occurs under heavy congestion, most drops will occur during an unbroken string of marked packets, leaving the estimate unaffected. However, the effect of packet drops on DCTCP under real-world conditions has not been analysed.</p><p>DCTCP provides no mechanism for negotiating its use. The effect of using DCTCP with a standard ECN endpoint has been analysed in other work, and it is possible that other implementations may also modify behaviour in the ECN style without negotiation, causing further interoperability issues.</p><p>Much like standard TCP, DCTCP is biased against flows with longer round-trip times. A method for improving the round-trip-time fairness of DCTCP has been proposed, but it requires additional experimental evaluation.</p>",
+      "plainLanguage": "<p>Three known weaknesses: dropped acknowledgements blur the measurement, there is no way for the two ends to agree to use the scheme, and flows with long round-trip times get a smaller share than short ones.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "5",
-      "title": "Security and Trade-offs",
-      "content": "<p>DCTCP inherits the security model of ECN: endpoints or the network can falsely report congestion to cause a sender to reduce its window, but this is no worse than simply dropping packets. The RFC notes one difference from ECN standards: setting the ECT (ECN-Capable Transport) codepoint on SYN and SYN-ACK packets poses security concerns on the open Internet but may be acceptable in controlled data centers, so DCTCP senders SHOULD set ECT on these control packets.</p><p>Known issues include inaccuracy when ACK packets are dropped, RTT unfairness (long-RTT flows are disadvantaged, as with all TCP), and lack of negotiation, which means misconfigured mixed deployments could behave unexpectedly. The RFC is Informational rather than Standards Track precisely because further experimental work is needed.</p>",
-      "plainLanguage": "<p>Someone could tell the road sensors there is congestion when there is not, but that is no worse than blocking the road. The real catch is that it only works when everyone agrees to use it.</p>"
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>DCTCP enhances ECN, so it inherits the general security considerations discussed in the ECN specification, although additional mitigation options exist because of the limited intra-data-centre deployment of DCTCP. The processing changes introduced by DCTCP do not exacerbate those considerations or introduce new ones. In particular, with either algorithm the network infrastructure or the remote endpoint can falsely report congestion and thus cause the sender to reduce its window, but this is no worse than what can be achieved by simply dropping packets.</p><p>The ECN specification requires that a compliant TCP must not set the ECN-Capable Transport codepoint on SYN or SYN-ACK packets, and another document proposes setting it on SYN-ACK packets while keeping the restriction on SYN packets. Both prohibit it on SYN packets because of security concerns regarding malicious SYN packets with the codepoint set. However, these documents are intended for general Internet use and do not directly apply to a controlled data-centre environment, so the security concerns they address might not apply there, and it might not be necessary to account for the presence of non-ECN servers. Beyond the security considerations related to virtual servers, additional security can be imposed in the physical servers to intercept and drop traffic resembling an attack.</p>",
+      "plainLanguage": "<p>The scheme adds nothing new in security terms: a switch that lies about congestion can already cause damage by dropping packets. Because the scheme stays inside one organisation's data centre, some of the Internet-wide protections can be turned off safely.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "algorithms",
+      "anchor": "design",
       "position": "after",
-      "caption": "DCTCP Congestion Signal Flow",
+      "caption": "The three components of the DCTCP algorithm",
       "data": {
         "lanes": [
-          {
-            "key": "sender",
-            "label": "Sender"
-          },
           {
             "key": "switch",
             "label": "Switch"
@@ -112,36 +126,98 @@
           {
             "key": "receiver",
             "label": "Receiver"
+          },
+          {
+            "key": "sender",
+            "label": "Sender"
           }
         ],
         "messages": [
           {
             "from": "sender",
             "to": "switch",
-            "label": "DATA (ECT marked)",
-            "color": "blue",
-            "note": "Sender marks packets as ECN-capable."
+            "label": "Packet",
+            "note": "The switch sets the CE codepoint in the IP header when the queue is longer than the congestion threshold."
           },
           {
             "from": "switch",
             "to": "receiver",
-            "label": "DATA (CE mark if queue > threshold)",
-            "color": "blue",
-            "note": "Switch marks packets if queued."
+            "label": "Packet marked CE"
           },
           {
             "from": "receiver",
             "to": "sender",
-            "label": "ACK (ECE flag if CE seen)",
-            "color": "green",
-            "note": "Receiver echoes congestion signal."
+            "label": "ACK with ECE flag",
+            "color": "blue",
+            "note": "The receiver echoes the congestion information back, setting ECE when DCTCP.CE is true."
           },
           {
             "from": "sender",
             "to": "sender",
-            "label": "Estimate congestion fraction M",
-            "color": "neutral",
-            "note": "Sender counts marked vs. total bytes."
+            "label": "Update window",
+            "color": "green",
+            "note": "The sender computes DCTCP.Alpha and applies cwnd = cwnd * (1 - DCTCP.Alpha / 2)."
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "design",
+      "position": "after",
+      "caption": "The ACK generation state machine from Figure 1",
+      "data": {
+        "states": [
+          {
+            "key": "ce-false",
+            "label": "DCTCP.CE = 0",
+            "initial": true
+          },
+          {
+            "key": "ce-true",
+            "label": "DCTCP.CE = 1"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "ce-false",
+            "to": "ce-true",
+            "label": "CE codepoint set: send immediate ACK with ECE=1"
+          },
+          {
+            "from": "ce-true",
+            "to": "ce-false",
+            "label": "CE codepoint not set: send immediate ACK with ECE=0"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "implementation-notes",
+      "position": "after",
+      "caption": "The TCP state variables DCTCP adds",
+      "data": {
+        "items": [
+          {
+            "title": "DCTCP.CE",
+            "text": "Boolean, initialised to false, stored in the Transmission Control Block. The ECE flag is set if and only if it is true."
+          },
+          {
+            "title": "DCTCP.Alpha",
+            "text": "The congestion estimate, initialised to 1, updated as Alpha = Alpha * (1 - g) + g * M."
+          },
+          {
+            "title": "DCTCP.WindowEnd",
+            "text": "The TCP sequence number threshold when one observation window ends and another begins, initialised to SND.UNA."
+          },
+          {
+            "title": "DCTCP.BytesAcked",
+            "text": "The number of sent bytes acknowledged during the current observation window, initialised to 0."
+          },
+          {
+            "title": "DCTCP.BytesMarked",
+            "text": "The number of bytes sent during the current observation window that encountered congestion, initialised to 0."
           }
         ]
       }
@@ -149,14 +225,29 @@
   ],
   "references": [
     {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2018]",
+      "text": "Mathis, M., et al., \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC2309]",
+      "text": "Braden, B., et al., \"Recommendations on Queue Management and Congestion Avoidance in the Internet\", RFC 2309, April 1998.",
+      "rfc": 2309
+    },
+    {
       "number": "[RFC3168]",
       "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
       "rfc": 3168
-    },
-    {
-      "number": "[RFC5681]",
-      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
-      "rfc": 5681
     },
     {
       "number": "[RFC5562]",
@@ -164,18 +255,28 @@
       "rfc": 5562
     },
     {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
+      "number": "[RFC5681]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[RFC7567]",
+      "text": "Baker, F. and G. Fairhurst, \"IETF Recommendations Regarding Active Queue Management\", RFC 7567, July 2015.",
+      "rfc": 7567
+    },
+    {
+      "number": "[RFC8174]",
+      "text": "Leiba, B., \"Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words\", BCP 14, RFC 8174, May 2017.",
+      "rfc": 8174
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

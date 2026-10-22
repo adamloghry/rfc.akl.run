@@ -5,182 +5,230 @@
   "categoryReviewed": false,
   "summary": "<p>In dense topologies, link-state flooding can slow down convergence. This experimental document discusses the problem and an architectural solution that shrinks the flooding topology, and specifies protocol changes for IS-IS, OSPFv2 and OSPFv3.</p>",
   "plainLanguage": {
-    "summary": "<p>When news spreads through a crowded room, everyone repeating it to everyone makes noise. This picks a few paths for the news to travel so it still reaches everybody with less shouting.</p>"
+    "summary": "<p>In a network where every router is connected to every other router, a routing update has to reach everyone, and the usual way of spreading it sends it many redundant copies. This RFC says to pick a smaller set of links that still reaches everybody, and to flood updates only along that set.</p>"
   },
   "questions": [
     "dynamic flooding in is-is and ospf",
     "how to reduce link-state flooding in dense networks",
     "what is a flooding topology",
     "how does dynamic flooding improve convergence",
-    "leaf-spine topology flooding problem"
+    "leaf-spine topology flooding problem",
+    "dynamic flooding on dense graphs"
   ],
   "tags": [
     "Routing",
-    "Flooding",
-    "Convergence"
+    "OSPF",
+    "IS-IS"
   ],
-  "subtitle": "Optimize link-state flooding in dense network topologies to improve convergence time.",
+  "subtitle": "Restricting link-state flooding to a smaller graph inside a dense network.",
   "tldr": {
-    "problem": "In dense network topologies such as leaf-spine data centers, standard link-state flooding redundantly sends updates through many paths, causing control plane overload and delayed convergence when topology changes occur.",
-    "mechanism": "Dynamic Flooding decouples the flooding topology from the physical topology by computing a reduced flooding topology that still connects all nodes but uses far fewer links, either centrally on an elected Area Leader or in a distributed manner on all participating nodes.",
-    "outcome": "Networks using dynamic flooding achieve significant improvements in convergence time and control plane stability, particularly in dense topologies, while remaining compatible with non-dynamic-flooding nodes.",
-    "outcomeLabel": "Performance improvement"
+    "problem": "In a dense topology such as a data centre spine-leaf fabric, link-state flooding sends the same update to every node many times, which overloads the control plane and slows convergence.",
+    "mechanism": "The routers agree on a much smaller graph, the flooding topology, that still reaches every node, and flood only along that graph; it is computed either centrally by an elected Area Leader or locally by every node using the same algorithm.",
+    "outcome": "The flooding topology covers all reachable nodes and can be a simple cycle, and the document gives concrete constructions for complete bipartite topologies along with the protocol encodings for IS-IS and OSPF.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "IS-IS Area Leader Sub-TLV type",
+      "label": "IS-IS Area Leader sub-TLV",
       "value": "27"
     },
     {
-      "label": "IS-IS Dynamic Flooding Sub-TLV type",
+      "label": "IS-IS Dynamic Flooding sub-TLV",
       "value": "28"
     },
     {
-      "label": "Centralized algorithm",
-      "value": "0"
+      "label": "IS-IS top-level TLVs",
+      "value": "17 Area Node IDs, 18 Flooding Path, 19 Flooding Request"
     },
     {
-      "label": "Standardized algorithms",
-      "value": "1-127"
+      "label": "IS-IS LEEF link attribute bit",
+      "value": "0x4"
     },
     {
-      "label": "Private algorithms",
-      "value": "128-254"
+      "label": "OSPF RI TLVs",
+      "value": "17 Area Leader, 18 Dynamic Flooding"
     },
     {
-      "label": "Status",
-      "value": "Experimental"
+      "label": "OSPFv3 LSA function code",
+      "value": "16"
     }
   ],
-  "today": "<p>RFC 9667 is an Experimental specification published in October 2024. It provides mechanisms for IS-IS, OSPFv2, and OSPFv3 to improve performance in dense network topologies through optimized flooding.</p>",
+  "today": "<p>RFC 9667 is an Experimental RFC and has not been obsoleted or updated. The document says the trade-offs between graph diameter, node degree, convergence time and topology computation time are for further study, and asks for the operational experience that would be needed before the approach advances.</p>",
   "glossary": [
     "interior-gateway-protocol",
     "link-state-routing",
     "convergence",
-    "area-leader"
+    "area-leader",
+    "ospf",
+    "is-is",
+    "link-state-advertisement",
+    "link-state-database",
+    "ospf-area",
+    "iana"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
       "title": "The Problem with Dense Topologies",
-      "content": "<p>Modern networks increasingly use dense topologies such as leaf-spine Clos fabrics in data centers and spine-leaf architectures in wide-area networks. In these topologies, a router may have many physical neighbors, creating a highly connected graph. However, standard <strong>link-state routing protocols</strong> like IS-IS and OSPF rely on a flooding algorithm that is inefficient in dense topologies.</p><p>When a router updates its link-state database and floods the update to its neighbors, each neighbor forwards it to all of its other neighbors. In a dense topology, this causes the same update to reach each node many times through different paths. While the protocol correctly handles duplicate updates by discarding them, the redundant copies consume valuable control plane bandwidth and CPU resources. When many updates arrive in rapid succession (as they do during topology changes), the control plane queue fills up, causing updates to be dropped and delaying network convergence.</p><p>The problem is not new: networks have used mechanisms like IS-IS mesh groups to reduce flooding, but these require careful manual configuration. RFC 9667 provides an automated solution: <strong>Dynamic Flooding</strong> computes a reduced flooding topology automatically.</p>",
-      "plainLanguage": "<p>When routers share link-state information, they send it along every path. This means the same message gets repeated many times. In crowded networks, this slows everything down.</p>"
+      "content": "<p>There has been increased focus on the dynamic routing of networks with a bipartite, also known as spine-leaf or leaf-spine, Clos or Fat-tree topology. Conventional Interior Gateway Protocols, that is IS-IS, OSPFv2 and OSPFv3, underperform in these networks, redundantly flooding information throughout the dense topology, which leads to overloaded control plane inputs and creates operational issues. For practical considerations, some network architects have resorted to applying BGP in the data centre. However, some feel that using an Exterior Gateway Protocol as an IGP is suboptimal, perhaps only because of the configuration overhead.</p><p>The primary issue is the poor reaction of the network to topology changes. Normal link-state routing protocols rely on a flooding algorithm for state distribution within an area. In a dense topology this flooding algorithm is highly redundant and results in unnecessary overhead. Each node receives each link state update multiple times. All the redundant copies are eventually discarded, but only after they have reached the control plane and been processed. This creates issues because significant Link State Database updates can become queued behind many redundant copies of another update, which delays convergence as the database does not stabilize promptly.</p><p>In a real implementation, the packet queues leading to the control plane are necessarily of finite size, so if the flooding rate exceeds the update processing rate for long enough, the control plane must drop incoming updates. If those lost updates matter, this further delays the stabilization of the database and the convergence of the network.</p><p>This is not a new problem. Historically, when routing protocols were deployed where the underlying topology was a complete graph, there were similar issues. This was more common when the link-layer fabric presented the network layer with a full mesh of virtual connections. It was addressed by reducing the flooding topology through IS-IS Mesh Groups, but that approach requires careful configuration.</p><p>The root problem is therefore not limited to massively scalable data centres; it exists with any dense topology at scale. Link-state routing protocols were conceived when links were very expensive and topologies were sparse. Technology has progressed to the point where links are cheap and common, which reverses the economic fundamentals of network engineering. The original designs are to be commended for continuing to provide correct operation, and optimizations for today's environment are to be expected.</p>",
+      "plainLanguage": "<p>In a network where every router is connected to every other router, a routing update has to reach everyone, and the usual way of spreading it sends it many redundant copies. This RFC says to pick a smaller set of links that still reaches everybody, and to flood updates only along that set.</p>"
     },
     {
-      "id": "background",
-      "number": "2",
-      "title": "Solution Approach and Requirements",
-      "content": "<p>Dynamic Flooding addresses the problem by decoupling the <strong>flooding topology</strong> (the set of links used to propagate updates) from the physical topology (the actual network). The flooding topology is computed such that it connects all nodes in the IGP area but uses significantly fewer links, thereby reducing redundant flooding.</p><p>A single node in the area is elected as the <strong>Area Leader</strong>, similar to how IS-IS elects a Designated Intermediate System (DIS) on a LAN. The Area Leader can operate in one of two modes:</p><p><strong>Centralized mode:</strong> The Area Leader computes the flooding topology and distributes it through the link-state database. Nodes receive the computed topology and use only the specified links for flooding.</p><p><strong>Distributed mode:</strong> The Area Leader advertises an algorithm identifier, and all participating nodes independently compute the same flooding topology using that algorithm.</p><p>The solution must provide dynamic routing (reachability after any topology change), improve convergence significantly, work on various dense topology types, have no single point of failure, distribute flooding load evenly, and operate smoothly in mixed networks where some routers support dynamic flooding and others do not.</p>",
-      "plainLanguage": "<p>Instead of sending messages along all paths, the network picks a smaller set of paths that still reach everyone. One router is in charge of deciding which paths to use.</p>"
-    },
-    {
-      "id": "overview",
+      "id": "requirements",
       "number": "3",
-      "title": "Computing the Flooding Topology",
-      "content": "<p>The flooding topology is computed before topology changes occur, so the computation time does not contribute to convergence delay. The topology must be connected and include all nodes, ensuring that no node becomes isolated.</p><p>For resilience, the flooding topology should contain at least a cycle covering all nodes (which guarantees no single link failure causes partition) and possibly additional links to reduce the flooding diameter and improve convergence time. The exact algorithm need not be standardized for centralized mode since it is not an interoperability issue, only the encoding of the result matters.</p><p>For <strong>complete bipartite graphs</strong> (like leaf-spine topologies), RFC 9667 describes several practical topologies. A <strong>minimal flooding topology</strong> ensures every node has at least degree two (no single failure isolates it) and can be computed in linear time. A <strong>Xia topology</strong> connects all spines through a cycle and distributes remaining leaves evenly, trading lower redundancy for slightly delayed convergence in some failures. Additional links can be added to reduce diameter at the cost of increased flooding.</p><p>If parallel links exist between two nodes, an update is flooded over only one of them. Multi-access LANs can be included in the flooding topology; when a LAN is included, all edges from the LAN are treated as part of the topology.</p>",
-      "plainLanguage": "<p>The network picks the minimum set of connections that keeps everyone connected, maybe with a few extras to make updates spread faster.</p>"
+      "title": "Solution Requirements",
+      "content": "<p>A solution to this problem must meet six requirements.</p><ul><li>It must provide a dynamic routing solution: reachability must be restored after any topology change.</li><li>It must provide a significant improvement in convergence.</li><li>It should address a variety of dense topologies. Addressing only a complete bipartite topology such as K5,8 is insufficient; multi-stage Clos topologies must also be addressed, as well as topologies that are slight variants. Addressing complete graphs is a good demonstration of generality.</li><li>There must be no single point of failure: the loss of any link or node should not unduly hinder convergence.</li><li>The workload for flooding should be evenly distributed. A hot spot, where one node has an extreme workload, would be a performance limitation and a vulnerability for resiliency.</li><li>Dense topologies are subgraphs of much larger topologies, and operational efficiency requires that the dense subgraph not operate in a radically different manner than the remainder of the topology. Any change to any node outside the dense subgraph is not acceptable, since a massively scaled data centre may be part of a larger wide-area network, and a second protocol operating only on the subgraph would add much more complexity at the edge where the two protocols would have to interoperate.</li></ul>",
+      "plainLanguage": "<p>The design has to keep working when links and routers fail, spread the flooding work evenly instead of overloading one router, work on many shapes of dense network, and be able to sit inside a bigger network without changing anything outside it.</p>"
     },
     {
       "id": "design",
       "number": "4",
-      "title": "Protocol Mechanisms and Encoding",
-      "content": "<p>Dynamic Flooding is implemented through extensions to both IS-IS and OSPF. In IS-IS, new sub-TLVs are added to the Router Capability TLV to advertise Area Leader preference and priority, the algorithms a node supports, and the flooding topology itself.</p><p>The <strong>IS-IS Area Leader Sub-TLV</strong> allows a node to indicate its eligibility and priority for becoming Area Leader, and which computation mode (centralized or distributed) and algorithm (by numeric ID) it prefers. The node with the highest priority becomes Area Leader; ties are broken by highest system ID.</p><p>The <strong>IS-ISIS Area Node IDs TLV</strong> (centralized mode only) lists the node identifiers (System ID plus pseudonode ID for LANs) in the area, with each assigned an index for compact encoding. The <strong>Flooding Path TLV</strong> encodes the flooding topology as a series of intersecting paths, where each path is a sequence of connected links. This compact representation avoids rigid encoding schemes.</p><p>OSPF uses similar mechanisms via opaque LSAs (for OSPFv2) and typed LSAs (for OSPFv3), with equivalent TLV structures. Nodes also advertise which local edges are enabled for flooding (LEEF), aiding in troubleshooting.</p><p>Transient conditions during topology changes are handled gracefully: nodes may flood on multiple flooding topologies during transients, and flooding loops during transients are handled by the standard duplicate detection mechanism.</p>",
-      "plainLanguage": "<p>Routers exchange messages saying 'I want to lead' or 'I support this algorithm', then they all compute or receive the same set of paths to use for flooding.</p>"
+      "title": "Dynamic Flooding",
+      "content": "<p>The combination of a dense topology and flooding on the physical topology is suboptimal for network scaling. However, if the flooding topology is decoupled from the physical topology and restricted to a greatly reduced portion of it, the result can be efficient flooding and the resilience of existing protocols. A node that supports flooding on the decoupled flooding topology is said to support dynamic flooding.</p><p>The flooding topology is computed within an IGP area with the dense topology, either centrally on an elected node, termed the Area Leader, or in a distributed manner on all nodes that support dynamic flooding. In the centralized mode, the flooding topology is encoded into and distributed as part of the normal Link State Database. In the distributed mode, it is computed locally. Nodes within such an area flood only on the flooding topology. On links outside the flooding topology, normal database synchronization mechanisms, that is OSPF database exchange and IS-IS Complete Sequence Number PDUs, apply, but flooding may not.</p><p>New link-state information arriving from outside the flooding topology suggests that the sender has no flooding topology information or is operating on old information about it, so it should be flooded on the flooding topology as well. The flooding topology covers the full set of nodes within the area but excludes some of the links that standard flooding would employ. Since it is computed before topology changes, the effort required to compute it does not factor into the convergence time and can be done when the topology is stable.</p><p>Graph theory defines the degree of a node as the number of edges attached to it. To keep the flooding workload scalable and distributed, there should be no nodes in the flooding topology with a much higher degree than others. A node that has no flooding topology information when it receives new link-state information should flood according to standard flooding rules, which occurs when the dense topology is first established but is unlikely to recur.</p><p>Link-state protocols are intentionally designed to be asynchronous with nodes acting independently. During flooding, different nodes have different information, producing transient conditions that can temporarily cause suboptimal forwarding. When centralized mode is used and multiple flooding topologies are advertised during a transient, nodes should flood link-state updates on all of them, each node first evaluating the election of the Area Leader locally and flooding on its flooding topology first. The rationale is that during a transient with a recent change of Area Leader, propagating topology information promptly along the most likely flooding topology should be the priority.</p><p>During transients, loops may form in the flooding topology. This is not problematic, as the standard flooding rules cause duplicate updates to be ignored. The flooding topology may also become disconnected, which is handled by the rules for topology events.</p><p>The flooding topology is encoded as a set of intersecting paths, where each path is a set of connected links. A simple list of nodes would suffice for a pure cycle but would need a different scheme as soon as one extra link was added. Advertisement of the flooding topology supports multi-access broadcast LANs: when a LAN is included, all edges between the LAN and the nodes connected to it are assumed to be part of the flooding topology, so explicit advertisement of these edges is optional. That can produce hidden or stealth nodes, which are part of the flooding topology but not explicitly mentioned in the advertisements; they can be found by examining the Link State Database.</p><p>Correct operation requires that all participating nodes choose local links for flooding that are part of the calculated flooding topology. To help diagnose problems, the document defines a means of advertising the Local Edges Enabled for Flooding.</p>",
+      "plainLanguage": "<p>The routers agree on a smaller graph that still reaches everybody, and flood updates only along that graph. It can be worked out by one elected router and published to everyone, or worked out independently by every router using an agreed algorithm. In both cases the result is the same set of links.</p>"
+    },
+    {
+      "id": "algorithms",
+      "number": "4.4",
+      "title": "Flooding Topologies on Complete Bipartite Graphs",
+      "content": "<p>There is a great deal of flexibility in how the flooding topology may be computed. For resiliency it needs at least to contain a cycle of all nodes in the dense subgraph, though additional links could be added to decrease the convergence time. The trade-off between density and convergence time is a matter for further study. The exact algorithm for the centralized case need not be standardized, as it is not an interoperability issue; only the encoding of the resultant topology needs to be documented. In the distributed case, all nodes in the area need to use the same algorithm, and private algorithms are allowed so long as all nodes agree.</p><p>While the flooding topology should be a covering cycle, it need not be a Hamiltonian cycle where each node appears only once. In many relevant topologies this will not be possible, for example K5,8. This is fortunate, because computing a Hamiltonian cycle is known to be NP-complete. A simple algorithm for a complete bipartite graph is to select unvisited nodes on each side until both sides are completely visited. If the numbers of nodes on each side are unequal, revisiting nodes on the less populated side is inevitable. This algorithm runs in O(N) time.</p><p>While a simple cycle is adequate for correctness and resiliency, it may not be optimal for convergence. At scale a cycle may have a diameter that is half the number of nodes in the graph, which could cause an undue delay in link-state update propagation. Introducing more links would reduce the diameter at the trade-off of possibly adding redundant messaging, so it may be useful to have a bound on the diameter. Similarly, if additional redundancy is added, specific nodes may end up with a very high degree, which could overload their control plane. It may therefore be preferable to have an upper bound on the degree of nodes in the flooding topology.</p><p>A <strong>minimal flooding topology</strong> on a complete bipartite graph is one in which the topology is connected and each node has at least degree two, which guarantees no single point of failure. In practice this means every leaf node has a degree of two. As there are usually more leaves than spines, the degree of the spines will be higher, but the load on individual spines can be evenly distributed. This type also scales well: for N spines and M leaves, if M is at least N(N/2-1), there is a flooding topology with a diameter of 4.</p><p>A <strong>Xia topology</strong> on a complete bipartite graph is one in which all spine nodes are biconnected through leaves with degree two, but the remaining leaves all have degree one and are evenly distributed across the spines. Constructively, one iterates through the spines, connecting each spine to the next by selecting any unused leaf. Because leaves are connected to all spines, any leaf can be chosen without loss of generality. Continuing across all spines and selecting a new leaf at each iteration results in a path connecting all spines, and adding one more leaf between the last and first spine produces a cycle of N spines and N leaves. The remaining M minus N leaves are distributed evenly across the remaining spines and connected by a single link.</p><p>Xia topologies trade increased risk and decreased performance for lower flooding amplification, and they have a larger diameter: for M spines the diameter is M plus 2. Some leaves are singly connected, which risks delaying convergence in some failures. A leaf that sees its single link on the flooding topology has failed can compensate by performing a database synchronization check with a different spine, and the same compensation applies if the leaf determines that its connected spine has failed. The benefit of this topology is that the flooding load is easily understood: each node in the spine cycle never receives an update more than twice, and for M leaves and N spines a spine never transmits more than M/N plus 1 updates.</p><p>One optimization applies to all of these: if two nodes are adjacent in the flooding topology and there is a set of parallel links between them, any given update MUST be flooded over only one of those links, with the choice of link left to the implementation.</p>",
+      "plainLanguage": "<p>Two shapes are worked out in detail. The minimal one gives every router at least two links in the flooding graph, so no single failure disconnects it. The Xia shape chains the spines through single leaves, so each spine is only lightly loaded, at the cost of a longer route across the graph.</p>"
     },
     {
       "id": "operation",
-      "number": "5",
-      "title": "Flooding Behavior and Topology Changes",
-      "content": "<p>Under normal operation, a node only floods link-state updates on edges that are part of the calculated flooding topology. On links outside the flooding topology, database synchronization occurs via standard mechanisms (CSNP in IS-IS, database exchange in OSPF), but flooding does not occur.</p><p>When a node receives link-state information from outside the flooding topology, it indicates the sender may not have flooding topology information or has stale information. In such cases, the update is flooded on the flooding topology as well as sent normally.</p><p>If dynamic flooding has no topology information (during initial deployment or after Area Leader loss), nodes fall back to standard flooding until the flooding topology is computed and distributed.</p><p>Topology events are handled systematically: when a link not on the flooding topology fails, no action is required. When a link on the flooding topology fails, temporarily affected nodes flood on any available path until convergence. When a node is added or fails, the Area Leader recomputes the flooding topology and distributes it. When the Area Leader itself fails, a new Area Leader is elected and computes a new flooding topology, overwriting the old one.</p><p>Recovery from multiple simultaneous failures may temporarily create disconnected flooding topology regions, which is handled by temporarily adding links back to the flooding topology until the topology stabilizes.</p>",
-      "plainLanguage": "<p>During normal times, updates flow along the chosen paths. If a chosen path breaks, routers use other paths temporarily until the leader figures out new routes.</p>"
+      "number": "6",
+      "title": "Behavioral Specification",
+      "content": "<p>The flooding topology MUST include all reachable nodes in the area. If a node's reachability changes, the flooding topology MUST be recalculated, and in centralized mode the Area Leader MUST advertise a new one. If a node becomes disconnected from the current flooding topology but is still reachable, a new flooding topology MUST be calculated. The flooding topology SHOULD be biconnected to provide network resiliency, but this does incur some redundant flooding; Xia topologies are an explicit decision to sacrifice resiliency to avoid redundancy.</p><p>Any capable node MAY advertise its eligibility to become the Area Leader. Nodes that are not reachable, or that do not advertise their eligibility, are not eligible. Amongst the eligible nodes, the node with the numerically highest priority is the Area Leader; if several share the highest priority, the node with the numerically highest system identifier in IS-IS, or Router ID in OSPFv2 and OSPFv3, is the Area Leader. This generalizes the Designated Router and Designated Intermediate-System election mechanisms. Not every node needs to be a candidate, since a single candidate suffices for correct operation, but for redundancy it is strongly RECOMMENDED that there be multiple candidates.</p><p>In centralized mode the Area Leader MUST advertise algorithm 0 in its Area Leader Sub-TLV, and for dynamic flooding to be enabled it must also compute and advertise a flooding topology. It may update the flooding topology at any time but should not destabilize the network with undue or overly frequent changes; when it advertises a new flooding topology it floods it on both the new and old flooding topologies. In distributed mode the Area Leader MUST advertise a nonzero algorithm, and all nodes in the area that support dynamic flooding and that algorithm MUST compute the flooding topology using it. Nodes that do not support the advertised algorithm continue to use standard flooding and are considered dynamic flooding incapable. Algorithm values in the range 128 to 254 are private, and it is the operator's responsibility to guarantee that all nodes in the area agree on the algorithm.</p><p>Nodes that support dynamic flooding MUST use the flooding topology for flooding when possible and MUST NOT revert to standard flooding when a valid flooding topology is available. Received link-state updates, whether received on a link in the flooding topology or not, MUST be flooded on all links in the flooding topology except for the link on which the update was received. A node that finds its current information inconsistent may wait for an implementation-specific time for more information to arrive. If a node determines that adjacencies are to be added to the flooding topology, it should add them and begin flooding on them immediately; if adjacencies are to be removed, it should wait an implementation-specific time before acting, so that new information is flooded promptly and completely.</p><p>The document then treats topology events in detail: temporary additions of links, local link additions, node additions, failures of links on and off the flooding topology, node deletions, local link additions and deletions on the flooding topology, treatment of disconnected adjacent nodes, failure of the Area Leader, recovery from multiple failures, and rate-limiting of temporary flooding.</p>",
+      "plainLanguage": "<p>One router in the area is elected, in much the same way OSPF elects a designated router, and it either works out the flooding graph and publishes it, or tells everyone which algorithm to use so they all work it out the same way. Nodes that fall behind, or that fail, fall back to ordinary flooding, so the network keeps converging.</p>"
     },
     {
-      "id": "status",
-      "number": "6",
-      "title": "Deployment and Future Considerations",
-      "content": "<p>Dynamic Flooding supports gradual deployment. Routers supporting dynamic flooding can coexist with legacy routers. Flooding initiated on a dynamic-flooding router stays within the flooding topology until it reaches a legacy node, where standard flooding resumes. For correct operation, networks should deploy dynamic flooding on a connected set of routers in the dense areas, with legacy routers providing connectivity between separate dynamic-flooding regions only if necessary.</p><p>The exact optimal trade-offs between flooding topology density, convergence time, graph diameter, and node degree are topics for further study. Different applications may favor different flooding topologies based on their specific requirements.</p><p>RFC 9667 addresses IS-IS, OSPFv2, and OSPFv3. Security considerations focus on standard routing protocol protections; no new security mechanisms are introduced. IANA registrations include new TLV types and registry entries for standardized and private distributed algorithms, allowing future extensions without further standardization.</p>",
-      "plainLanguage": "<p>This is experimental and may improve as operators test it. Old routers can still work alongside new ones. The gains are biggest in the dense areas where the problem is worst.</p>"
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The document introduces no new security issues. Security of routing within a domain is already addressed as part of the routing protocols themselves, and this document proposes no changes to those security architectures.</p><p>An attacker could become the Area Leader and introduce a flawed flooding algorithm into the network, compromising the operation of the protocol. The authentication methods described in RFC 5304 and RFC 5310 for IS-IS, RFC 2328 and RFC 7474 for OSPFv2, and RFC 5340 and RFC 4552 for OSPFv3 SHOULD be used to prevent such attacks.</p>",
+      "plainLanguage": "<p>The document changes nothing about how routing is authenticated. The one new risk is that an attacker could win the election and hand everyone a bad flooding graph, so the existing protocol authentication should be used.</p>"
     }
   ],
   "viz": [
     {
       "type": "key-grid",
-      "anchor": "introduction",
+      "anchor": "requirements",
       "position": "after",
-      "caption": "The Flooding Problem",
+      "caption": "THE SIX REQUIREMENTS A SOLUTION MUST MEET",
       "data": {
         "items": [
           {
-            "title": "Redundant updates",
-            "text": "Each update reaches a node multiple times through different paths."
+            "title": "Dynamic routing",
+            "text": "Reachability must be restored after any topology change."
           },
           {
-            "title": "Control plane overload",
-            "text": "Processing redundant copies consumes CPU and bandwidth."
+            "title": "Faster convergence",
+            "text": "The solution must significantly improve convergence."
           },
           {
-            "title": "Delayed convergence",
-            "text": "Update queues fill, causing legitimate updates to be dropped."
+            "title": "Many topologies",
+            "text": "Multi-stage Clos and slight variants, not just one shape."
+          },
+          {
+            "title": "No single point of failure",
+            "text": "Losing any link or node must not unduly hinder convergence."
+          },
+          {
+            "title": "Even workload",
+            "text": "No node should carry an extreme share of the flooding."
+          },
+          {
+            "title": "Fits inside a larger network",
+            "text": "Nothing outside the dense subgraph may have to change."
           }
         ]
       }
     },
     {
-      "type": "contrast",
-      "anchor": "overview",
+      "type": "compare-table",
+      "anchor": "design",
       "position": "after",
-      "caption": "Standard Flooding vs. Dynamic Flooding",
+      "caption": "CENTRALIZED AND DISTRIBUTED MODES",
       "data": {
-        "left": {
-          "title": "Standard flooding",
-          "from": "every neighbor",
-          "to": "every other neighbor",
-          "desc": "Updates flood along all available paths, causing redundancy."
-        },
-        "right": {
-          "title": "Dynamic flooding",
-          "from": "selected neighbors only",
-          "to": "selected neighbors only",
-          "desc": "Updates flow only along a computed topology that connects all nodes."
-        },
-        "joiner": "reduces redundancy in"
+        "columns": [
+          "Aspect",
+          "Centralized mode",
+          "Distributed mode"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Who computes the flooding topology",
+              "The elected Area Leader",
+              "Every node that supports dynamic flooding"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "How it is distributed",
+              "Encoded in the Link State Database",
+              "Not advertised; each node computes it locally"
+            ]
+          },
+          {
+            "cells": [
+              "Algorithm",
+              "Not standardised, not an interoperability issue",
+              "Must be the algorithm the Area Leader advertises"
+            ]
+          },
+          {
+            "cells": [
+              "Private algorithm range",
+              "Not applicable",
+              "128 to 254, the operator must ensure agreement"
+            ]
+          }
+        ]
       }
     },
     {
-      "type": "sequence",
-      "anchor": "design",
+      "type": "compare-table",
+      "anchor": "algorithms",
       "position": "after",
-      "caption": "Centralized Mode Operation (illustrative)",
+      "caption": "TWO FLOODING TOPOLOGIES FOR A COMPLETE BIPARTITE GRAPH",
       "data": {
-        "lanes": [
-          {
-            "key": "area-leader",
-            "label": "Area Leader"
-          },
-          {
-            "key": "node",
-            "label": "Other Nodes"
-          }
+        "columns": [
+          "Aspect",
+          "Minimal flooding topology",
+          "Xia topology"
         ],
-        "messages": [
+        "rows": [
           {
-            "from": "node",
-            "to": "area-leader",
-            "label": "Advertise capabilities",
-            "color": "blue"
+            "cells": [
+              "Shape",
+              "Connected, every node has degree two or more",
+              "Spines biconnected through degree-two leaves; remaining leaves have degree one"
+            ]
           },
           {
-            "from": "area-leader",
-            "to": "node",
-            "label": "Compute and distribute flooding topology",
-            "color": "green"
+            "cells": [
+              "Diameter",
+              "4 when M is at least N(N/2-1)",
+              "M plus 2, for M spines"
+            ],
+            "self": true
           },
           {
-            "from": "node",
-            "to": "node",
-            "label": "Flood updates on topology links only",
-            "color": "neutral"
+            "cells": [
+              "Resiliency",
+              "No single point of failure",
+              "Some leaves singly connected, so convergence may be delayed on failure"
+            ]
+          },
+          {
+            "cells": [
+              "Flooding load",
+              "Evenly distributed",
+              "A spine transmits at most M/N plus 1 updates; a spine cycle node receives an update at most twice"
+            ]
           }
         ]
       }
@@ -194,39 +242,47 @@
     },
     {
       "number": "[RFC5340]",
-      "text": "Coltun, R., Ferguson, D., Moy, J., and A. Lindem, \"OSPF for IPv6\", RFC 5340, July 2008.",
+      "text": "Rexford, J. et al., \"OSPF Version 3\", RFC 5340, July 2008.",
       "rfc": 5340
     },
     {
       "number": "[RFC2973]",
-      "text": "Shand, M. and L. Dukes, \"IS-IS Mesh Groups\", RFC 2973, October 2000.",
+      "text": "A. Atlas, \"IS-IS Mesh Group Control\", RFC 2973, October 1999.",
       "rfc": 2973
     },
     {
-      "number": "[RFC7981]",
-      "text": "Li, T., Ed., Psenak, P., Ed., Liu, X., and A. Lindem, Ed., \"IS-IS Routing Protocol Extensions for Advertising Router Information\", RFC 7981, October 2016.",
-      "rfc": 7981
+      "number": "[RFC5304]",
+      "text": "Li, T. and R. Atkinson, \"IS-IS Cryptographic Authentication\", RFC 5304, October 2008.",
+      "rfc": 5304
     },
     {
-      "number": "[ISO10589]",
-      "text": "ISO, \"Information technology - Telecommunications and information exchange between systems - Intermediate System to Intermediate System intra-domain routeing information exchange protocol\", ISO/IEC 10589:2002, November 2002."
+      "number": "[RFC5310]",
+      "text": "Bhatia, M., Manral, V., Li, T., Atkinson, R., White, R., and M. Fanto, \"IS-IS Generic Cryptographic Authentication\", RFC 5310, February 2009.",
+      "rfc": 5310
     },
     {
-      "number": "[Leiserson]",
-      "text": "Leiserson, C. E., \"Fat-trees: Universal networks for hardware-efficient supercomputing\", IEEE Transactions on Computers, 1985."
+      "number": "[RFC7474]",
+      "text": "Dutt, D. et al., \"Security Extension for OSPFv2 When Using Manual Key Management\", RFC 7474, February 2015.",
+      "rfc": 7474
     },
     {
-      "number": "[Clos]",
-      "text": "Clos, C., \"A study of non-blocking switching networks\", Bell System Technical Journal, vol. 32, 1953."
+      "number": "[RFC4552]",
+      "text": "Gupta, M. and N. Melam, \"Authentication/Confidentiality for OSPFv3\", RFC 4552, June 2006.",
+      "rfc": 4552
+    },
+    {
+      "number": "[RFC7938]",
+      "text": "Bhatia, M., et al., \"BGP in the Data Center (BGP-DCN)\", RFC 7938, March 2017.",
+      "rfc": 7938
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

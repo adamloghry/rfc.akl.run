@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>IGP Flexible Algorithms create constraint-based paths. This RFC defines a generic metric type and a set of bandwidth-related constraints that can be used in them, helping routing follow link capacity and delay.</p>",
   "plainLanguage": {
-    "summary": "<p>Routers pick routes by rules you choose. This adds rules based on how much room a link has.</p>"
+    "summary": "<p>Routing protocols choose a path by adding up the metrics of its links. This RFC lets operators advertise any metric they like per link, add two rules that remove links below a bandwidth limit or above a delay limit, and define a bandwidth metric that routers calculate on their own.</p>"
   },
   "questions": [
     "flexible algorithm bandwidth constraints",
@@ -22,200 +22,267 @@
   ],
   "subtitle": "New link metrics and pruning rules let IS-IS and OSPF Flex-Algorithm steer traffic by bandwidth and delay.",
   "tldr": {
-    "problem": "Operators want big flows to use only high-capacity links, but a metric tied to capacity does not guarantee low-bandwidth links are avoided, especially during failures.",
-    "mechanism": "RFC 9843 adds a Generic Metric sub-TLV with a Bandwidth Metric type, two Flex-Algorithm constraints that exclude links below a minimum bandwidth or above a maximum delay, and ways to derive metrics automatically from link bandwidth.",
-    "outcome": "Flex-Algorithm definitions can now prune low-bandwidth or high-delay links and compute bandwidth-based metrics centrally. The RFC updates RFC 9350 and is itself updated by RFC 9917.",
+    "problem": "Routing protocols pick paths by adding up link metrics, and the usual metric is set from link capacity, which does not stop traffic from landing on slow links when something fails. Operators need paths that avoid low-bandwidth and high-delay links outright.",
+    "mechanism": "The RFC adds a Generic Metric sub-TLV so that any administrator-defined metric can be advertised per link, two new Flex-Algorithm constraints that prune links below a minimum bandwidth or above a maximum delay, and a Bandwidth Metric that routers can derive automatically from link bandwidth.",
+    "outcome": "IS-IS and OSPF can now carry Flex-Algorithm paths that follow capacity and delay limits, and the limits are set centrally in the algorithm definition. The document updates RFC 9350 and has since been updated by RFC 9917.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "IS-IS Generic Metric type",
+      "label": "IS-IS sub-TLV type",
       "value": "17"
     },
     {
-      "label": "IS-IS metric range",
+      "label": "OSPF sub-TLV types",
+      "value": "25, 36 and 34"
+    },
+    {
+      "label": "IS-IS metric value range",
       "value": "0 to 16,777,215 (24 bits)"
     },
     {
-      "label": "OSPF metric range",
+      "label": "OSPF metric value range",
       "value": "0 to 4,294,967,295 (32 bits)"
     },
     {
-      "label": "Bandwidth Metric type",
-      "value": "3"
+      "label": "Standard metric-types",
+      "value": "0 to 127"
     },
     {
-      "label": "User-defined metric types",
+      "label": "User-defined metric-types",
       "value": "128 to 255"
-    },
-    {
-      "label": "Bandwidth units",
-      "value": "Bytes per second, 32-bit IEEE float"
     }
   ],
-  "today": "<p>RFC 9843 is a Proposed Standard published in September 2025. It updates <a href='/rfc9350'>RFC 9350</a> and has itself been updated by <a href='/rfc9917'>RFC 9917</a>. It has not been obsoleted.</p>",
+  "today": "<p>RFC 9843 is a Proposed Standard published in September 2025. It updates <a href='/rfc9350'>RFC 9350</a> and has since been updated by <a href='/rfc9917'>RFC 9917</a>. It defines the generic metric mechanism, two new Flex-Algorithm constraints and a bandwidth-based metric type.</p>",
   "glossary": [
     "shortest-path-first",
     "link-state-routing",
     "ieee-754",
     "iana",
     "flexible-algorithm",
-    "tlv"
+    "tlv",
+    "igp",
+    "is-is",
+    "ospf",
+    "link-metric",
+    "traffic-engineering",
+    "bandwidth-constraint",
+    "micro-loop"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
       "title": "Why Bandwidth and Delay Constraints",
-      "content": "<p>High-bandwidth traffic such as residential Internet traffic and machine-to-machine <strong>elephant flows</strong> benefits from high-capacity links. Many operators set a link's metric relative to its capacity, but that does not guarantee lower-bandwidth links are avoided, especially in failure scenarios.</p><p><strong>Flex-Algorithm</strong> (<a href='/rfc9350'>RFC 9350</a>) builds constrained paths from a Flexible Algorithm Definition (FAD): a calculation type, a metric type and a set of constraints. RFC 9843 extends the FAD in three ways: a generic metric that can carry many kinds of administrative metrics, constraints that exclude low-bandwidth or high-delay links, and a standard Bandwidth Metric with optional automatic calculation.</p><p>The procedures assign a metric from total link capacity. They do not react to actual traffic, so the RFC says they are not a replacement for a PCE (<a href='/rfc4655'>RFC 4655</a>) with its dynamic view of the network.</p>",
-      "plainLanguage": "<p>Some routes are wide highways and some are narrow lanes. Router operators want a way to keep giant trucks off the narrow lanes, even when a highway is closed.</p>"
+      "content": "<p>High bandwidth traffic, such as residential Internet traffic and machine-to-machine flows, benefits from using high capacity links. Many operators therefore define a link's metric relative to its capacity, to push traffic towards higher bandwidth links. That is not a guarantee that lower bandwidth links will be avoided, especially in failure scenarios.</p><p>Interior Gateway Protocols (<strong>IGPs</strong>) have traditionally computed paths by minimising the sum of the link metrics along the path from source to destination. The metric is administratively defined, but implementations have defaulted to one that is inversely proportional to link bandwidth, which drove traffic to higher bandwidth links at the cost of manual metric manipulation to get the loading an operator wanted.</p><p>Different traffic types need different metrics. Flex-Algorithm, defined in <a href='/rfc9350'>RFC 9350</a>, offers a mechanism for constrained paths by defining a set of parameters consisting of calculation type, metric type and a set of constraints, and it already supports the minimum link delay and administratively assigned traffic engineering metrics. This RFC extends that: it defines a family of generic metrics for administrator-assigned metric types, adds Flex-Algorithm constraints that exclude low bandwidth links and high delay links, and defines a bandwidth-based metric type that routers can derive automatically.</p>",
+      "plainLanguage": "<p>Routers normally pick the path with the lowest total metric. This RFC lets an operator say that certain traffic must stay on fast links, or must avoid slow ones, by adding rules to the path calculation and by letting routers work out a metric from link speed themselves.</p>"
     },
     {
-      "id": "data-model",
+      "id": "message-format",
       "number": "2",
-      "title": "The Generic Metric",
-      "content": "<p>Each Generic Metric advertisement is per link and per metric type, and holds a metric-type field and a value. Metric types 0 to 127 are standard types assigned by IANA, and 128 to 255 are a user-defined space an operator may assign for local use.</p><p>In IS-IS the sub-TLV has type 17, a 1-octet metric-type and a 24-bit value from 0 to 16,777,215 (0xFFFFFF). In OSPF it has a 16-bit type (25, 36 or 34 depending on where it is carried), a length of 8, a 1-octet metric-type, 3 reserved octets and a 32-bit value up to 4,294,967,295 (0xFFFFFFFF).</p><p>If a metric type already has a legacy advertisement (the IGP Metric, Min Unidirectional Link Delay or Traffic Engineering Default Metric), the legacy one <em>MUST</em> be used and a Generic Metric carrying it <em>MUST</em> be ignored. The maximum value marks a last-resort link, and it may be set on all links of a node during router maintenance. A link can be made unusable to a Flex-Algorithm by leaving out the metric of the type it uses.</p>",
-      "plainLanguage": "<p>A generic metric is a blank scorecard for a road. Each card has a label saying what the score means, such as width, and a number. Some labels are reserved and some are free for each network to invent.</p>"
+      "title": "The Generic Metric Sub-TLV",
+      "content": "<p>IS-IS (<a href='/rfc1195'>RFC 1195</a>) and OSPF (<a href='/rfc2328'>RFC 2328</a>) already advertise a metric for each link in their link state advertisements, and several metric types are supported: the Traffic Engineering Default Metric from <a href='/rfc5305'>RFC 5305</a> and <a href='/rfc3630'>RFC 3630</a>, and the Unidirectional Link Delay from <a href='/rfc8570'>RFC 8570</a> and <a href='/rfc7471'>RFC 7471</a>. Rather than enumerate every metric that might be useful, such as jitter, reliability or fiscal cost, this RFC specifies a generic mechanism for advertising metrics.</p><p>Each generic metric advertisement is per link and per metric type. It consists of a metric-type field and a value. The metric-type field comes from the 'IGP Metric-Type' registry, where types 0 to 127 are standard types assigned by IANA. This document defines a user-defined space of types 128 to 255, which an operator can assign for local use. Implementations MUST support sending and receiving a Generic Metric sub-TLV in Application-Specific Link Attributes (<strong>ASLA</strong>) encodings, and in TLV 22 and Extended Link Opaque Link State Advertisements and TE-LSAs.</p><p>The <strong>IS-IS Generic Metric sub-TLV</strong> has a 1-octet Type field with the value 17, a 1-octet Length field set to 4, a 1-octet Metric-Type field, and a 3-octet Value field holding a 24-bit unsigned integer from 0 to 16,777,215 (0xFFFFFF). The <strong>OSPF Generic Metric sub-TLV</strong>, of types 25, 36 and 34, has a 16-bit Type field, a 16-bit Length field set to 8, a 1-octet Metric-Type field, 3 reserved octets that the sender sets to zero and the receiver ignores, and a 4-octet Value field holding a 32-bit unsigned integer from 0 to 4,294,967,295 (0xFFFFFFFF).</p><p>A generic metric may be advertised more than once, but for a given metric type it MUST be advertised only once per link, and once per application per link when carried in ASLA. If several instances arrive for the same link and metric type, the one in the lowest-numbered fragment or LSA MUST be used and the rest ignored. Where a legacy metric type exists, such as the IGP Metric or the Traffic Engineering Default Metric, the legacy mechanism MUST be used and a Generic Metric that advertises it MUST be ignored.</p>",
+      "plainLanguage": "<p>Both routing protocols gain a small new field that carries one metric value and names which kind of metric it is. Each kind of metric can appear once per link, and metrics that already have their own field keep using it.</p>"
     },
     {
-      "id": "requirements",
+      "id": "parameters",
       "number": "3",
-      "title": "Exclude Constraints for Bandwidth and Delay",
-      "content": "<p>Two new FAD constraint sub-TLVs let an operator prune links. The <strong>Exclude Minimum Bandwidth</strong> constraint (FAEMB) removes a link from the Flex-Algorithm topology if its advertised maximum link bandwidth is below the FAD value. The <strong>Exclude Maximum Delay</strong> constraint (FAEMD) removes a link if its Min Unidirectional Link Delay is higher than the FAD value, given in microseconds.</p><p>Minimum bandwidth is encoded as a 32-bit IEEE floating point number in bytes per second. The delay is a 24-bit field. Each sub-TLV may appear at most once in a FAD, and a FAD with a duplicate <em>MUST</em> be ignored by the receiver.</p><p>The RFC explains why a direct constraint is useful. Where a Layer 3 link is a bundle of Layer 2 links, its bandwidth varies with the active members, and administrative groups would have to be varied to follow it. A single constraint in the FAD is one centralized point of control. If the relevant bandwidth or delay is not advertised for a link, the link is not excluded by that constraint (OSPF bandwidth: the link is included and later pruning rules still apply).</p>",
-      "plainLanguage": "<p>The map can say \"skip any road narrower than this\" and \"skip any road slower than this\". If a road has no sign saying how wide it is, the rule does not throw it out.</p>"
+      "title": "The Exclude Minimum Bandwidth and Exclude Maximum Delay Constraints",
+      "content": "<p>Large high throughput flows are called 'elephant flows'. Directing one down a low bandwidth link might congest that link and cause other critical traffic on it to drop, so it is useful to constrain the topology to links that can carry a minimum amount of bandwidth.</p><p>Where the capacity of a low bandwidth link is constant, administrative groups can already achieve this. The problem arises when a Layer 3 link is really a collection of Layer 2 links, a Link Aggregation Group or Layer 2 bundle, because the link bandwidth then varies with the set of active constituent links. Expressing the requirement as a direct constraint on the topology is simpler, and it gives a single centralised point of control when the minimum required bandwidth changes. This RFC therefore defines an <strong>Exclude Minimum Bandwidth</strong> constraint: when a Flex-Algorithm Definition (<strong>FAD</strong>) advertises it, a link is pruned from the Flex-Algorithm topology when the link's advertised maximum link bandwidth is below the minimum bandwidth the FAD advertises.</p><p>The RFC also defines an <strong>Exclude Maximum Link Delay</strong> constraint. Applications such as High-Frequency Trading are sensitive to link delays and may perform poorly in networks prone to delay variability, such as those with transparent Layer 2 link recovery mechanisms or satellite links. The maximum link delay is compared with the Min Unidirectional Link Delay, and the link is excluded when that value is higher than the advertised maximum.</p><p>Each constraint has its own sub-TLV inside the FAD. In IS-IS the Exclude Minimum Bandwidth sub-TLV has type 6 and length 4, and carries a 4-octet minimum bandwidth in IEEE floating point format with the units in bytes per second. The Exclude Maximum Delay sub-TLV has type 7 and length 3, and carries a 3-octet maximum link delay in microseconds. The OSPF sub-TLVs use the same type values 6 and 7, with 16-bit Type and Length fields, and the Exclude Maximum Delay sub-TLV has one reserved octet that the sender sets to zero.</p><p>Each constraint sub-TLV MUST appear only once in a FAD; if it appears more than once, the whole FAD MUST be ignored by the receiver. A link that does not have the Maximum Link Bandwidth or the Min Unidirectional Link Delay advertised MUST NOT be excluded on the basis of that constraint alone.</p>",
+      "plainLanguage": "<p>Two rules can now remove a link from the paths a Flex-Algorithm may use. One removes links slower than a stated bandwidth, the other removes links slower than a stated delay. A link that does not publish that figure is kept.</p>"
     },
     {
       "id": "algorithms",
       "number": "4",
-      "title": "Automatic Bandwidth Metric Calculation",
-      "content": "<p>The <strong>Bandwidth Metric</strong> (metric type 3) can be advertised per link in a Generic Metric. Alternatively the FAD can ask every node to calculate it from the link's maximum bandwidth. An explicit Bandwidth Metric on a link overrides the automatic one. If the FAD asks for automatic calculation and a link advertises no bandwidth, the link <em>MUST</em> be pruned.</p><p>There are two <strong>modes</strong>. In Simple Mode, a single Layer 3 link's maximum bandwidth is used. In Interface Group Mode, selected by the G-flag, a node adds up the bandwidth of all parallel adjacencies, derives the metric from that total, and applies it to each parallel link. If only some parallel links advertise a Bandwidth Metric, those advertisements are ignored and the automatic metric is used.</p><p>There are also two <strong>methods</strong>. The reference bandwidth method divides a reference bandwidth by the link bandwidth after truncating it to a granularity, using integer division. A result of zero becomes 1, and a result above the maximum is capped. The bandwidth thresholds method uses a staircase of thresholds, each with its own metric. A link below Threshold 1 gets the maximum metric. A FAD <em>MUST NOT</em> contain both methods, otherwise it is ignored.</p>",
-      "plainLanguage": "<p>Instead of writing a score on every road by hand, you can give one rule: \"score is a big number divided by the road's width\". Or you can say \"narrow roads score 100, medium 50, wide 10\".</p>"
+      "title": "The Bandwidth Metric",
+      "content": "<p>IGP implementations have long made default metric assignments based on link bandwidth. That has proved useful, but it has suffered from different defaults across implementations and from the rapid growth of link bandwidths. With Flex-Algorithm, the administrator can now define a function that produces a metric for each link and have every node compute that metric from its own bandwidth.</p><p>This RFC defines a standard metric type for the purpose, the <strong>Bandwidth Metric</strong>. It MAY be advertised in the Generic Metric sub-TLV with the metric-type set to Bandwidth Metric, and IS-IS and OSPF advertise this type of metric in their link advertisements. It is a link attribute and MUST follow Section 12 of <a href='/rfc9350'>RFC 9350</a> for its advertisement and processing during Flex-Algorithm calculation.</p><p>A Flex-Algorithm uses this metric type by naming it as the metric-type in a FAD TLV. The same FAD TLV may also ask for the bandwidth metric to be computed automatically from each link's advertised bandwidth. An explicit advertisement of a link's bandwidth metric overrides the automatic computation.</p><p>The automatic computation assigns a metric from the total link capacity. It is not intended to update a metric from actual traffic flow, so it does not replace what a Path Computation Element (<strong>PCE</strong>) does in <a href='/rfc4655'>RFC 4655</a>, which has a dynamic view of the network and provides real-time bandwidth management or a distributed bandwidth management protocol.</p>",
+      "plainLanguage": "<p>A new kind of metric is defined, called the Bandwidth Metric. A router can work it out from the link's capacity, or the operator can set it directly on each link. It is based on capacity only, not on how busy the link is right now.</p>"
     },
     {
       "id": "procedures",
+      "number": "4.1",
+      "title": "Automatic Metric Calculation: Modes and Methods",
+      "content": "<p>Automatic metric calculation is used when a FAD names the Bandwidth Metric and the link does not advertise one itself. Because a link's bandwidth can change, there is a possibility of micro-loops while routers learn about the change. This is no different from the IGP's susceptibility to micro-loops during any metric change, and the micro-loop avoidance procedures of the framework in <a href='/rfc5715'>RFC 5715</a> can be used.</p><p>Where two systems have parallel adjacencies, the bandwidth between them is the sum of the bandwidth of the parallel links, and there are two modes for computing it. In <strong>Simple Mode</strong>, the Maximum Link Bandwidth of a single Layer 3 link is used, which suits deployments without parallel Layer 3 links. If a Layer 3 link is made up of a Layer 2 bundle, the link bandwidth is the sum of the bandwidths of the working components and may vary with Layer 2 link failures. In <strong>Interface Group Mode</strong>, a node MUST compute the aggregate bandwidth of all parallel adjacencies, MUST derive the metric from that aggregate, and MUST apply the resulting metric to each of the parallel adjacencies. Every node MUST identify the set of parallel links between a pair of nodes from its IGP link advertisements and MUST take their cumulative bandwidth into account.</p><p>Two methods turn a bandwidth into a metric. The <strong>reference bandwidth method</strong> divides a reference bandwidth chosen by the administrator or the implementation by the advertised Maximum Link Bandwidth. Advertising the reference bandwidth in the FAD lets every node compute the metric for every link, and central control of the reference bandwidth simplifies management when it changes. A granularity value is useful here: the link bandwidth is truncated to that granularity before the metric is derived, so small bandwidth changes do not change the metric. The RFC's example gives a reference bandwidth of 1000G and a granularity of 20G, which produces a derived metric of 10 for link bandwidth in the range 100G to 119G.</p><p>The <strong>bandwidth thresholds method</strong> is a staircase mapping instead of a proportional one. The RFC's example assigns metric 100 to bandwidths from 10G to 30G, metric 50 to bandwidths from 30G to 70G, and metric 10 to bandwidths above 70G. The advertisement carries a set of threshold values and their associated metrics.</p>",
+      "plainLanguage": "<p>A router can work out the metric from the link's bandwidth in two ways. It can divide a fixed reference speed by the link speed, or it can use a table that maps ranges of speeds to fixed metric values. When several links run in parallel, the router can also add their speeds up first.</p>"
+    },
+    {
+      "id": "operation",
       "number": "5",
-      "title": "Path Calculation and Compatibility",
-      "content": "<p>RFC 9843 adds two rules to the link-pruning list in Section 13 of <a href='/rfc9350'>RFC 9350</a>: rule 6 checks the FAEMB constraint and rule 7 checks the FAEMD constraint. Appendix A lists all seven rules together. They cover exclude and include rules on administrative groups, exclude rules on SRLGs, and pruning of links that lack the required metric.</p><p>The Bandwidth Metric is only derived when the winning FAD for the Flex-Algorithm specifies that metric type. For IS-IS, link bandwidth is read from sub-sub-TLV 9 of the Flex-Algorithm-specific ASLA sub-TLV, or from sub-TLV 9 of the base TLVs when the L-flag is set.</p><p>The RFC says the extension brings no new backward-compatibility issues. Under RFC 9350, a node that does not understand sub-TLVs in a FAD stops participating in that Flex-Algorithm, so upgraded nodes can use the new features without affecting others.</p>",
-      "plainLanguage": "<p>When the router decides which roads are allowed, it now checks two more things: is the road wide enough, and is it fast enough. Old routers that do not understand just sit out that game.</p>"
+      "title": "Using the Metric and Pruning Links",
+      "content": "<p>The rules for deriving the Bandwidth Metric apply only when the winning FAD for the Flex-Algorithm names the metric-type as Bandwidth Metric. If the Generic Metric sub-TLV with the Bandwidth metric-type is advertised for the link, it MUST be used. If it is not advertised and the winning FAD does not ask for automatic calculation, the link is treated as if the Bandwidth Metric were not available for it. If it is not advertised and the winning FAD does ask for automatic calculation, the Bandwidth Metric MUST be computed by those procedures, and if the link bandwidth itself is not advertised, the link MUST be pruned from the Flex-Algorithm calculation.</p><p>In IS-IS, the link bandwidth is advertised as sub-sub-TLV 9 of the Flex-Algorithm-specific ASLA sub-TLV. It is also possible to advertise the link bandwidth in sub-TLV 9 of TLVs 22, 222, 23, 223 and 141 together with the L-flag set in the Flex-Algorithm-specific ASLA advertisement. Without either of these advertisements, the bandwidth of the link is not available for Flex-Algorithm purposes.</p><p>Two rules are added to the Flex-Algorithm calculation of <a href='/rfc9350'>RFC 9350</a>. The first checks whether an Exclude Minimum Bandwidth rule is part of the Flex-Algorithm definition and, if the link has Maximum Link Bandwidth advertised, whether the link bandwidth satisfies that rule. The second does the same for an Exclude Maximum Delay rule and the Min Unidirectional Link Delay. A link that does not satisfy the rule MUST be pruned from the Flex-Algorithm computation.</p>",
+      "plainLanguage": "<p>The metric a router uses comes from three places, in order: a value set on the link, an automatic calculation from the link's bandwidth, or nothing at all. Links that break the bandwidth or delay rule are removed from the set of paths the algorithm may choose.</p>"
     },
     {
-      "id": "operational-considerations",
-      "number": "6",
-      "title": "Operations and Security",
-      "content": "<p>The security section is one line: the document inherits the security considerations of <a href='/rfc9350'>RFC 9350</a>. The operational considerations of RFC 9350 also apply.</p><p>When user-defined metrics are used across areas or levels, all domains should give a particular metric type the same meaning. Before maintenance, a router can divert traffic by setting the overload bit or setting its link metrics to the maximum usable value. If no alternate path exists, traffic stays, because such links are not removed from the Flex-Algorithm calculation.</p><p>The RFC notes that a change in link bandwidth may cause micro-loops through delay in learning about it, no different from any IGP metric change, and points to loop-avoidance work and the framework in <a href='/rfc5715'>RFC 5715</a>.</p>",
-      "plainLanguage": "<p>The safety rules are the same as for the parent system. Everyone in the network should agree on what a custom score means, or trucks could get sent the wrong way.</p>"
-    },
-    {
-      "id": "iana-considerations",
+      "id": "compatibility",
       "number": "7",
-      "title": "IANA Registrations",
-      "content": "<p>The \"IGP Metric-Type\" registry gains a column saying whether a type is allowed in the Generic Metric sub-TLV. Type 3 is the Bandwidth Metric, and 128 to 255 is a user-defined range that does not require Standards Action.</p><p>New sub-sub-TLV types 6 to 9 are assigned for IS-IS FAD sub-TLVs and sub-TLV types 6 to 9 for OSPF: Exclude Minimum Bandwidth, Exclude Maximum Delay, Reference Bandwidth and Bandwidth Threshold. The Generic Metric itself gets IS-IS type 17, OSPFv2 Extended Link type 25, OSPF TE Link type 36 and OSPFv3 Extended-LSA type 34.</p>",
-      "plainLanguage": "<p>The official list of numbers gets new entries, so every router vendor uses the same number for the same new feature.</p>"
+      "title": "Backward Compatibility",
+      "content": "<p>The RFC states that this extension brings no new backward compatibility issues. As described in <a href='/rfc9350'>RFC 9350</a>, any node that does not understand the new sub-TLVs in a FAD TLV stops participation in the corresponding Flex-Algorithm. The new extensions can therefore be deployed among the nodes that are upgraded to understand them without affecting the nodes that are not upgraded.</p><p>The new metric advertisements work the same way. As per Section 13 of RFC 9350, when links do not advertise the metric type named by the selected FAD, the link is pruned from Flex-Algorithm calculations. The new metric types, and the Flex-Algorithms that use them, can be deployed without affecting an existing deployment.</p>",
+      "plainLanguage": "<p>A router that does not understand the new rules simply stops taking part in that Flex-Algorithm, so the new rules can be turned on one part of the network at a time.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security and Operational Considerations",
+      "content": "<p>The security considerations of <a href='/rfc9350'>RFC 9350</a> are inherited by this document, and it adds no new ones.</p><p>For operations, the operational considerations of RFC 9350 generally apply to these extensions as well. This document defines a metric-type range for user-defined metrics, and when those are used in an inter-area or inter-level network, all the domains should assign the same meaning to the particular metric-type. The YANG data models for the Flex-Algorithm extensions are defined in separate documents for OSPF and IS-IS.</p><p>Before a router goes into maintenance, traffic needs to be diverted away from it, which is done by setting the overload bit or by setting link metrics on the router to a high value. For a Generic Metric, the link metrics can be set to the maximum usable metric for OSPF and IS-IS, and traffic will be diverted to a shorter available path. If there are no alternate paths, traffic stays on the router, because links are not removed from the Flex-Algorithm calculation when they are set to a maximum metric.</p>",
+      "plainLanguage": "<p>The security rules come from the Flex-Algorithm document this one extends. For day-to-day running, the operator has to make sure every part of the network gives the same meaning to a user-defined metric, and a router under maintenance is kept in the path by raising its metrics rather than removing it.</p>"
     }
   ],
   "viz": [
     {
       "type": "packet",
-      "anchor": "data-model",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "IS-IS GENERIC METRIC SUB-TLV (RFC 9843, FIGURE 1)",
+      "caption": "IS-IS Generic Metric sub-TLV as drawn in RFC 9843",
       "data": {
         "title": "IS-IS Generic Metric sub-TLV",
+        "bytes": 6,
         "width": 32,
         "fields": [
           {
             "key": "type",
             "name": "Type",
             "bits": 8,
-            "desc": "Assigned by IANA (17).",
-            "value": "17"
+            "desc": "Always 17 for this sub-TLV."
           },
           {
             "key": "length",
             "name": "Length",
             "bits": 8,
-            "desc": "Length of the subsequent fields.",
-            "value": "4"
+            "desc": "Length of the fields that follow, in octets. Set to 4."
           },
           {
             "key": "metric-type",
             "name": "Metric-Type",
             "bits": 8,
-            "desc": "From the IGP Metric-Type registry."
+            "desc": "Which kind of metric this is, from the IGP Metric-Type registry."
           },
           {
             "key": "value",
             "name": "Value",
             "bits": 24,
-            "desc": "Metric value, 0 to 16,777,215."
-          }
-        ]
-      }
-    },
-    {
-      "type": "opcodes",
-      "anchor": "iana-considerations",
-      "position": "after",
-      "caption": "IGP METRIC-TYPE REGISTRY (RFC 9843, TABLE 1)",
-      "data": {
-        "items": [
-          {
-            "code": "0",
-            "label": "IGP Metric",
-            "desc": "Not allowed in Generic Metric."
-          },
-          {
-            "code": "1",
-            "label": "Min Unidirectional Link Delay",
-            "desc": "Not allowed in Generic Metric."
-          },
-          {
-            "code": "2",
-            "label": "Traffic Engineering Default Metric",
-            "desc": "Not allowed in Generic Metric."
-          },
-          {
-            "code": "3",
-            "label": "Bandwidth Metric",
-            "desc": "New in RFC 9843; allowed in Generic Metric.",
-            "highlight": true
-          },
-          {
-            "code": "128-255",
-            "label": "User-Defined Metric",
-            "desc": "Reserved for local use; allowed in Generic Metric."
+            "desc": "The metric value, from 0 to 16,777,215."
           }
         ]
       }
     },
     {
       "type": "compare-table",
-      "anchor": "algorithms",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "STAIRCASE EXAMPLE FROM THE RFC",
+      "caption": "The same metric carried in IS-IS and in OSPF",
       "data": {
         "columns": [
-          "Link bandwidth",
-          "Metric"
+          "Field",
+          "IS-IS sub-TLV",
+          "OSPF sub-TLV"
         ],
         "rows": [
           {
             "cells": [
-              "10G to 30G",
-              "100"
+              "Type",
+              "8 bits, value 17",
+              "16 bits, value 25, 36 or 34"
             ]
           },
           {
             "cells": [
-              "30G to 70G",
-              "50"
+              "Length",
+              "8 bits, value 4",
+              "16 bits, value 8"
             ]
           },
           {
             "cells": [
-              "Greater than 70G",
-              "10"
+              "Metric-Type",
+              "8 bits",
+              "8 bits"
             ]
+          },
+          {
+            "cells": [
+              "Reserved",
+              "None",
+              "3 octets, set to zero by the sender"
+            ]
+          },
+          {
+            "cells": [
+              "Value",
+              "24 bits, 0 to 16,777,215",
+              "32 bits, 0 to 4,294,967,295"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "The two new Flex-Algorithm constraints",
+      "data": {
+        "items": [
+          {
+            "title": "Exclude Minimum Bandwidth",
+            "text": "Prunes a link whose advertised maximum link bandwidth is below the value in the FAD."
+          },
+          {
+            "title": "Exclude Maximum Delay",
+            "text": "Prunes a link whose Min Unidirectional Link Delay is above the value in the FAD."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "Two ways to turn a link bandwidth into a metric",
+      "data": {
+        "items": [
+          {
+            "title": "Reference bandwidth",
+            "text": "Divide a reference bandwidth by the link bandwidth. With a reference of 1000G and granularity 20G, a 100G to 119G link gets metric 10."
+          },
+          {
+            "title": "Bandwidth thresholds",
+            "text": "A staircase of ranges, each with its own metric. In the RFC's example, 10G to 30G gets 100, 30G to 70G gets 50, and above 70G gets 10."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "The IGP Metric-Type registry after this RFC",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "IGP Metric",
+            "desc": "Not allowed in the Generic Metric sub-TLV."
+          },
+          {
+            "code": "1",
+            "label": "Min Unidirectional Link Delay",
+            "desc": "Not allowed in the Generic Metric sub-TLV."
+          },
+          {
+            "code": "2",
+            "label": "Traffic Engineering Default Metric",
+            "desc": "Not allowed in the Generic Metric sub-TLV."
+          },
+          {
+            "code": "3",
+            "label": "Bandwidth Metric",
+            "desc": "Allowed in the Generic Metric sub-TLV.",
+            "highlight": true
+          },
+          {
+            "code": "128-255",
+            "label": "Reserved for User-Defined Metric",
+            "desc": "Allowed in the Generic Metric sub-TLV and assignable by an operator for local use."
           }
         ]
       }
@@ -228,14 +295,19 @@
       "rfc": 9350
     },
     {
-      "number": "[RFC9479]",
-      "text": "Ginsberg, L., Psenak, P., Previdi, S., Henderickx, W., and J. Drake, \"IS-IS Application-Specific Link Attributes\", RFC 9479, October 2023.",
-      "rfc": 9479
+      "number": "[RFC1195]",
+      "text": "Callon, R., \"Use of OSI IS-IS for routing in TCP/IP and dual environments\", RFC 1195, December 1990.",
+      "rfc": 1195
     },
     {
-      "number": "[RFC9492]",
-      "text": "Psenak, P., Ed., Ginsberg, L., Henderickx, W., Tantsura, J., and J. Drake, \"OSPF Application-Specific Link Attributes\", RFC 9492, October 2023.",
-      "rfc": 9492
+      "number": "[RFC2328]",
+      "text": "Moy, J., \"OSPF Version 2\", STD 54, RFC 2328, April 1998.",
+      "rfc": 2328
+    },
+    {
+      "number": "[RFC3630]",
+      "text": "Katz, D., Kompella, K., and D. Yeung, \"Traffic Engineering (TE) Extensions to OSPF Version 2\", RFC 3630, September 2003.",
+      "rfc": 3630
     },
     {
       "number": "[RFC5305]",
@@ -248,23 +320,33 @@
       "rfc": 8570
     },
     {
-      "number": "[RFC7684]",
-      "text": "Psenak, P., Gredler, H., Shakir, R., Henderickx, W., Tantsura, J., and A. Lindem, \"OSPFv2 Prefix/Link Attribute Advertisement\", RFC 7684, November 2015.",
-      "rfc": 7684
+      "number": "[RFC9479]",
+      "text": "Ginsberg, L., Psenak, P., Previdi, S., Henderickx, W., and J. Drake, \"IS-IS Application-Specific Link Attributes\", RFC 9479, October 2023.",
+      "rfc": 9479
+    },
+    {
+      "number": "[RFC9492]",
+      "text": "Psenak, P., Ed., Ginsberg, L., Henderickx, W., Tantsura, J., and J. Drake, \"OSPF Application-Specific Link Attributes\", RFC 9492, October 2023.",
+      "rfc": 9492
     },
     {
       "number": "[RFC4655]",
       "text": "Farrel, A., Vasseur, J.-P., and J. Ash, \"A Path Computation Element (PCE)-Based Architecture\", RFC 4655, August 2006.",
       "rfc": 4655
+    },
+    {
+      "number": "[RFC5715]",
+      "text": "Shand, M. and S. Bryant, \"A Framework for Loop-Free Convergence\", RFC 5715, January 2010.",
+      "rfc": 5715
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

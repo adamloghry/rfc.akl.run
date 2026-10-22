@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This informational memo advises TCP implementers on sharing connection state, such as what is kept in a TCP Control Block, among similar concurrent or consecutive connections. The goal is to help new connections reach steady-state operation faster without breaking interoperability. It updates and replaces RFC 2140's description of this sharing.</p>",
   "plainLanguage": {
-    "summary": "<p>When you start a new game level, it helps to remember what you learned in the last one. This document tells computers how to reuse what an earlier connection learned so a new connection speeds up quicker.</p>"
+    "summary": "<p>When you start a new connection, the first few packets are sent slowly because the two ends have to learn how fast the network is. This memo describes how a computer can remember what it learned on an earlier or parallel connection to the same place, and start the new connection at that speed instead.</p>"
   },
   "questions": [
     "tcp control block interdependence",
@@ -37,64 +37,76 @@
     },
     {
       "label": "Standard initial window",
-      "value": "4 segments (10 experimentally)"
+      "value": "4 segments"
+    },
+    {
+      "label": "Experimental initial window",
+      "value": "10 segments"
     },
     {
       "label": "Ensemble sharing in implementations",
       "value": "Not yet implemented"
+    },
+    {
+      "label": "Shareable congestion window",
+      "value": "Not shared in the surveyed implementations"
     }
   ],
-  "today": "<p>RFC 9040 is an Informational RFC that obsoletes <a href='/rfc2140'>RFC 2140</a>, and it has not been obsoleted or updated. Its implementation survey describes the state of Windows, Apple, Linux 5.10.3 and FreeBSD 12 as of the dates given in the RFC.</p>",
+  "today": "<p>RFC 9040 is an Informational memo that obsoletes <a href='/rfc2140'>RFC 2140</a>, and no later RFC is recorded as replacing it. It updates the earlier description of TCP state sharing, adds sections on compatibility and implementation observations, and discusses adapting the initial window automatically.</p>",
   "glossary": [
     "tcp",
     "congestion-control",
     "mss",
     "path-mtu",
     "mtu",
-    "path-mtu-discovery"
+    "path-mtu-discovery",
+    "tcp-control-block",
+    "congestion-window",
+    "slow-start",
+    "initial-window"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction",
-      "content": "<p>Each TCP connection keeps state in a data structure usually called the <strong>TCP Control Block</strong> (TCB). As originally specified, most TCB information is kept per connection. Some implementations share certain TCB information across connections to the same host, as described in RFC 2140. The aim is better transient performance, especially for numerous short-lived and simultaneous connections such as those used on the Web.</p><p>This RFC is a complete replacement for <a href='/rfc2140'>RFC 2140</a>. It says sharing affects only TCB initialization, so it has no effect on TCP's long-term behavior once a connection is established or on interoperability. The core of the document describes behavior already permitted by TCP standards, so it is informative and uses no normative language outside quotations and Appendix C.</p>",
-      "plainLanguage": "<p>Instead of every new phone call starting by figuring out how noisy the line is, the phone remembers what it learned on earlier calls to the same person.</p>"
+      "title": "Introduction: Why Share TCP State",
+      "content": "<p>TCP is a connection-oriented reliable transport protocol layered over IP. Each TCP connection maintains state, usually in a data structure called the TCP Control Block, which contains information about the connection state, its associated local process, and feedback parameters about the connection's transmission properties. As originally specified and usually implemented, most of this information is maintained on a per-connection basis. Some implementations share certain information across connections to the same host, which is intended to lead to better overall transient performance, especially for the numerous short-lived and simultaneous connections used by the World Wide Web. The point of sharing is to help connections converge to long-term steady-state behaviour more quickly without affecting interoperability.</p><p>This document updates and replaces RFC 2140's discussion of state sharing. Because sharing affects only the initialization of a connection, it has no effect on the long-term behaviour of TCP once a connection is established, and none on interoperability. Sharing path information across SYN destination ports assumes that TCP segments between the same host pair experience the same path properties, that is, that traffic is not routed differently based on port numbers or other connection parameters.</p><p>The document notes that the observations about sharing apply similarly to any protocol with congestion state, including SCTP and DCCP, and to the individual subflows of Multipath TCP. Its core describes behaviour that is already permitted by the TCP standards, so the document gives informative guidance and uses normative language only in Appendix C, as examples of requirements for future consideration.</p>",
+      "plainLanguage": "<p>Every new TCP connection starts by feeling its way: it sends a little, measures, and speeds up. If the computer already knows how the path to that place behaved last time, the new connection can skip the slow part. That is all this memo is about.</p>"
     },
     {
       "id": "data-model",
-      "number": "2",
-      "title": "What Lives in a TCB",
-      "content": "<p>The TCB holds local process state (buffers and queues) and per-connection state. The per-connection state is split into <strong>macro-state</strong> (connection state, timers, flags, endpoint numbers and TCP option state) and <strong>micro-state</strong> (window state, the congestion window <code>sendcwnd</code>, <code>ssthresh</code>, <code>sendMSS</code>, <code>MMS_S</code>, <code>MMS_R</code>, <code>PMTU</code>, and round-trip time and its variation).</p><p>Some micro-state is clearly tied to the host pair: <code>sendMSS</code>, <code>MMS_R</code>, <code>MMS_S</code>, <code>PMTU</code> and RTT. Other values, such as congestion window information, are host-pair dependent in aggregate because they depend on the total capacity between the two endpoints. Not all state can be shared: some TCP options are negotiated only on request of the application or set connection-specific parameters. The receive window <code>rwnd</code> is excluded because it depends on the send window.</p>",
-      "plainLanguage": "<p>Some things a connection knows are about the two computers talking, like how long messages take. Those can be reused. Other things are only about one chat, and those cannot.</p>"
+      "number": "4",
+      "title": "The TCP Control Block and What May Be Shared",
+      "content": "<p>A TCP Control Block describes the data associated with each connection, that is, with each association of a pair of applications across the network. It contains at least the local process state, meaning pointers to the send and receive buffers, to the retransmission queue and current segment, and to the IP protocol control block, together with per-connection shared state. That per-connection state is shown as split into macro-state and micro-state. Macro-state describes the protocol for establishing the initial shared state about the connection, and includes the endpoint numbers and the components, such as timers and flags, required upon commencement. Micro-state describes the protocol after a connection has been established, maintaining the reliability and congestion control of the data transferred.</p><p>Two other classes of shared micro-state are associated more with host pairs than with application pairs. One class is clearly host-pair dependent, such as sendMSS, MMS_R, MMS_S and PMTU, because these are defined by the endpoint or endpoint pair or are already cached on that basis. The other is host-pair dependent in its aggregate, such as congestion window information and current window sizes, because they depend on the total capacity between the two endpoints.</p><p>Not all of the state is necessarily shareable. Some TCP options are negotiated only on request by the application layer, so their use may not be correlated across connections, and other options negotiate connection-specific parameters, which are similarly not shareable. The receive window is excluded from further discussion because its value should depend on the send window size, so it is already addressed by send window sharing.</p>",
+      "plainLanguage": "<p>The per-connection record holds two sorts of things. Some describe the application on this end, and cannot be shared. Others describe the path to the other end, and can be, because the path is the same however the connection is used.</p>"
     },
     {
       "id": "operation",
-      "number": "3",
-      "title": "Temporal and Ensemble Sharing",
-      "content": "<p>There are two cases. <strong>Temporal sharing</strong> uses the TCB of an earlier, now CLOSED connection to a host to initialize a new connection to the same host. <strong>Ensemble sharing</strong> uses a currently active connection to initialize another concurrent connection.</p><p>With temporal sharing, a new TCB can start from the cached <code>sendMSS</code>, <code>PMTU</code>, RTT, RTTVAR, <code>ssthresh</code> and <code>sendcwnd</code>. Most cached values are updated when a connection closes, using a <code>merge</code> function. The RFC does not specify it; examples are a windowed average or exponential decay. The exceptions are MMS_R, MMS_S, PMTU and <code>sendMSS</code>, which update when reported by IP or when an MSS option arrives.</p><p>With ensemble sharing, values like MSS and RTT can be copied, but the congestion window and <code>ssthresh</code> act in aggregate, so a new value is a function of the cumulative values and the number of connections. Information should be cached as early as possible, because otherwise concurrent connections may share nothing if none closes before the others open. TCP Fast Open cookie and failure state can also be shared, and client SYN options should not be added to shared values until the three-way handshake completes.</p>",
-      "plainLanguage": "<p>Temporal sharing is remembering what happened the last time you went to the same park. Ensemble sharing is asking the friend already on the swings how it is going before you join.</p>"
+      "number": "5",
+      "title": "Temporal Sharing and Ensemble Sharing",
+      "content": "<p>There are two cases of interdependence. Temporal sharing occurs when the TCB of an earlier, now closed, connection to a host is used to initialize some parameters of a new connection to that same host, that is, in sequence. Ensemble sharing occurs when a currently active connection to a host is used to initialize another, concurrent, connection to that host. The cache is read to initialize new TCBs and written when more current per-host state is available.</p><p>For temporal sharing, a new connection can be initialized with the cached maximum message sizes, the cached sendMSS, PMTU, RTT and its variation, the cached slow-start threshold and the cached send-side congestion window, while option-specific information such as the TCP Fast Open cookie and a record of a failed Fast Open attempt is copied as well. The cache is updated mostly when a connection closes: the round-trip time and its variation, the slow-start threshold and the congestion window are merged with the cached values, where the merge function may be a windowed average or an exponential decay of the form new equals (1 minus alpha) times old plus alpha times new. The maximum message sizes are reported by the local IP stack, so caching them is of little value; the PMTU is cached at the IP layer and updated after path MTU discovery; and sendMSS is updated when the MSS option is received in a SYN.</p><p>Ensemble sharing needs more care, because some shared state acts in aggregate. MSS and RTT values can be copied, but it is not appropriate to copy the congestion window or the slow-start threshold; instead, the new values are a function of the cumulative values and the number of connections. The cache should be updated as early as possible, sometimes before a connection is closed, otherwise opening several concurrent connections may produce no sharing at all. The document notes that current TCP implementations initialize the congestion window to 4 segments as standard and 10 segments experimentally, that an algorithm exists that adjusts the initial window depending on the window values of ongoing connections, and that sharing mechanisms over long timescales can adapt the initial window automatically.</p>",
+      "plainLanguage": "<p>There are two ways to share. You can use what an earlier connection learned, or what a connection running right now has learned. With several connections at once, the numbers that describe the shared capacity have to be divided between them rather than copied.</p>"
     },
     {
       "id": "compatibility",
-      "number": "4",
+      "number": "8",
       "title": "Problems with Sharing",
-      "content": "<p>Shared congestion values may not match the long-term behavior of a group of connections. For example, if one connection's window has converged to 40 segments, two newly joining connections start with initial windows of 10 segments and the first window does not shrink, so the three can interfere. Some studies suggest that sharing <code>ssthresh</code> between short flows can hurt individual connections.</p><p>Sharing assumes the same host pair means the same path. That may fail with multipath routing that depends on transport headers, such as ECMP and LAG, or with some tunnels and encrypted headers. Sharing by IP address can also be wrong if an address is reassigned to a new host, or when NAT or NAPT is in use. Connections that are in Fast Recovery may need special consideration.</p>",
-      "plainLanguage": "<p>If you assume the new road is as empty as the old one, you may all arrive at the same crossing at once and bump into each other.</p>"
+      "content": "<p>For the congestion and current window information, the initial values computed by sharing may not be consistent with the long-term aggregate behaviour of a set of concurrent connections between the same endpoints. If the congestion window of a single existing connection has converged to 40 segments, two newly joining connections will assume initial windows of 10 segments and the existing connection's window will not decrease to accommodate the additional load, so the three connections can mutually interfere. One example is seen on low-bandwidth, high-delay links, where concurrent connections supporting Web traffic can collide because their initial windows were too large, even when set at one segment. Some studies suggest that sharing the slow-start threshold between short flows can deteriorate the performance of individual connections, although this may benefit aggregate network performance.</p><p>TCP is sometimes used where packets of the same host pair do not always take the same path, for instance when connection-specific parameters are used for routing, or where multipath routing examines transport headers. Traversing the same path is not important for host-specific information or for information already cached per host, such as the path MTU. Where information is shared across different SYN destination ports, path-related information can be incorrect, but the impact may be small because sharing affects only the transient event of a connection start. In the case of temporal sharing, cached information can also become invalid over time, so the mechanisms that address idle TCP connections could also be applied to cache management.</p><p>It can be wrong to share information between connections on the same host as identified by IP address if an address is assigned to a new host, as with address spinning used by providers to inhibit running servers, or if NAT, NAPT or any other address-sharing mechanism is used, although such mechanisms are less likely with IPv6. Some of the information is about dominant path properties rather than the specific host, so addresses may differ while the relevant part of the path is the same.</p>",
+      "plainLanguage": "<p>Sharing is only safe when the two connections really do travel the same way. If a network sends different traffic over different paths, or if an address is handed to a different machine, the remembered numbers can be wrong.</p>"
     },
     {
       "id": "implementation-notes",
-      "number": "5",
-      "title": "Implications and Implementations",
-      "content": "<p>TCB interdependence can reduce the need for application-layer multiplexing such as HTTP/2 for performance, giving the same \"slow-start restart avoidance\" without a multiplexing mechanism. It moves part of TCP state toward the network layer, but RTT is still computed in the TCP layer. The same ideas could apply to protocols with congestion state, such as SCTP and DCCP, and to subflows of Multipath TCP.</p><p>The RFC reports the status of temporal sharing in Windows (as of December 2020), Apple operating systems (January 2021), Linux 5.10.3 and FreeBSD 12. RTT is cached and shared in all four, and <code>sendcwnd</code>, MMS_S and MMS_R are not shared. It states that ensemble sharing is not yet implemented. Appendix C proposes using sharing over long timescales to adapt TCP's initial window automatically.</p>",
-      "plainLanguage": "<p>It is a bit like many people keeping a shared note about the roads, instead of each one driving every road to find out.</p>"
+      "number": "10",
+      "title": "What Implementations Do Today",
+      "content": "<p>The observation that some TCB state is host-pair specific rather than application-pair dependent is not new, and is a common engineering decision in layered protocol implementations. Although now deprecated, T/TCP was the first to propose using caches in order to maintain TCB states, and at least one T/TCP implementation saved the MSS and aggregated the RTT parameters across multiple connections while omitting the congestion window information. Temporal sharing of cached TCB data was originally implemented in the Sun OS 4.1.3 T/TCP extensions and the FreeBSD port of the same.</p><p>The document's table describes the implementation status for temporal sharing in Windows as of December 2020, the Apple variants as of January 2021, Linux kernel version 5.10.3 and FreeBSD 12, and states that ensemble sharing is not yet implemented. The maximum message sizes are not shared anywhere. sendMSS is cached and shared in the Apple systems and in Linux. The PMTU is cached and shared in the Apple systems, in FreeBSD and in Windows. The round-trip time is cached and shared in the Apple systems, FreeBSD, Linux and Windows, and its variation in the Apple systems, FreeBSD and Windows. The TCP Fast Open information is cached and shared in the Apple systems, Linux and Windows, and a record of a Fast Open failure is cached in the Apple systems. The send-side congestion window is not shared, and the slow-start threshold is cached and shared in the Apple systems, in FreeBSD and in Linux, with a note that in FreeBSD the new value is the mean of the current and previous values, and in Linux the calculation depends on state and is the maximum of half the current window and the old threshold in most cases.</p><p>The document also records what changed since RFC 2140: it clarifies the previous description and terminology, extends the mechanism to its impact on new protocols and mechanisms including Multipath TCP, Fast Open, packetization-layer path MTU discovery, NAT and the TCP Authentication Option, and adds sections on compatibility issues and implementation observations. It also adds an appendix on using temporal sharing over long timescales to adapt TCP's initial window automatically, and expands the referenced literature.</p>",
+      "plainLanguage": "<p>Several operating systems already do part of this: they remember the round-trip time and the path MTU for a host and reuse them. Few share the congestion window, and the harder case of sharing between concurrent connections is not implemented at all.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
+      "number": "12",
       "title": "Security Considerations",
-      "content": "<p>Sharing adds no new risk for direct attacks on individual connections. However, polluting the cached information could allow denial-of-service attacks on other connections that use the cache. For example, a false small window size would degrade later connections until their window grows. PMTU, which is cached at the IP layer, is already open to this.</p><p>Options in client SYNs are easier to forge, so they should not be added to shared values until after the three-way handshake completes. The RFC says reuse could in principle allow fingerprinting of hosts, but mixing reduces that potential, there has been no evidence of it, and performance information has not been considered private.</p>",
-      "plainLanguage": "<p>If someone writes a wrong note in the shared notebook, later readers get misled, so only trust notes that were checked.</p>"
+      "content": "<p>The implementation methods presented do not have additional ramifications for direct attacks on individual connections, whether connection-aborting or information-injecting. Individual connections, whether using sharing or not, may still be susceptible to denial of service attacks that reduce performance or completely deny connections and transfers if they are not otherwise secured.</p><p>TCB sharing may create additional denial of service attacks that affect the performance of other connections by polluting the cached information. This can occur across any set of connections in which the TCB is shared, between connections in a single host, or between hosts if sharing is implemented within a subnet. Some shared parameters are used only to create new TCBs, while others are shared among the TCBs of ongoing connections, and new connections can join the ongoing set.</p>",
+      "plainLanguage": "<p>Sharing does not open a new way to attack a single connection. It does add one new risk: if someone can feed bad numbers into the cache, other connections on that machine start from those numbers too.</p>"
     }
   ],
   "viz": [
@@ -102,27 +114,107 @@
       "type": "compare-table",
       "anchor": "operation",
       "position": "after",
-      "caption": "TEMPORAL VERSUS ENSEMBLE SHARING",
+      "caption": "TWO WAYS OF SHARING TCP STATE",
       "data": {
         "columns": [
-          "Kind",
-          "Source of the cached state",
-          "Congestion window and ssthresh"
+          "Property",
+          "Temporal sharing",
+          "Ensemble sharing"
         ],
         "rows": [
           {
             "cells": [
-              "Temporal sharing",
-              "An earlier connection, now CLOSED",
-              "Reused, merged on close"
+              "Source",
+              "The TCB of an earlier, now closed, connection to the same host",
+              "The TCB of a currently active connection to the same host"
             ]
           },
           {
             "cells": [
-              "Ensemble sharing",
-              "Currently active concurrent connections",
-              "A function of the sums and the number of connections"
+              "Order of connections",
+              "One after another",
+              "At the same time"
             ]
+          },
+          {
+            "cells": [
+              "When the cache is updated",
+              "Mostly when a connection closes",
+              "As early as possible, sometimes before a connection closes"
+            ]
+          },
+          {
+            "cells": [
+              "Round-trip time",
+              "Merged with the old value when the connection closes",
+              "Updated with an update function such as a windowed average"
+            ]
+          },
+          {
+            "cells": [
+              "Congestion window and threshold",
+              "Copied from the cached value",
+              "A function of the sum across active connections and the number of connections"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "data-model",
+      "position": "after",
+      "caption": "THE KINDS OF STATE IN A TCP CONTROL BLOCK",
+      "data": {
+        "items": [
+          {
+            "title": "Local process state",
+            "text": "Pointers to the send and receive buffers, the retransmission queue and current segment, and the IP control block."
+          },
+          {
+            "title": "Macro-state",
+            "text": "Connection state, timers, flags, the local and remote host numbers and ports, and TCP option state."
+          },
+          {
+            "title": "Micro-state",
+            "text": "The send and receive window state, the congestion window and its threshold, the maximum window seen, the segment sizes and the path MTU."
+          },
+          {
+            "title": "Host-pair dependent state",
+            "text": "Values defined by the endpoint or the endpoint pair, such as sendMSS, the maximum message sizes and the round-trip time."
+          },
+          {
+            "title": "Aggregate state",
+            "text": "Values that depend on the total capacity between the two endpoints, such as the congestion window and the current window sizes."
+          },
+          {
+            "title": "Option state",
+            "text": "State tied to a TCP option. Some of it can be shared and some cannot, depending on how the option is negotiated."
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeline",
+      "anchor": "implementation-notes",
+      "position": "after",
+      "caption": "HOW THE IDEA OF SHARING TCP STATE ARRIVED",
+      "data": {
+        "events": [
+          {
+            "year": 1994,
+            "label": "T/TCP proposes using caches to maintain TCB information across connections"
+          },
+          {
+            "year": 1997,
+            "label": "RFC 2140 describes sharing TCP state among similar connections",
+            "rfc": 2140
+          },
+          {
+            "year": 2021,
+            "label": "This memo replaces RFC 2140 with a fuller description",
+            "rfc": 9040
           }
         ]
       }
@@ -146,22 +238,22 @@
     },
     {
       "number": "[RFC7413]",
-      "text": "Cheng, Y., et al., \"TCP Fast Open\", RFC 7413, December 2014.",
+      "text": "Cheng, Y., Chu, J., Radhakrishnan, S., and A. Jain, \"TCP Fast Open\", RFC 7413, December 2014.",
       "rfc": 7413
     },
     {
       "number": "[RFC6928]",
-      "text": "Chu, J., et al., \"Increasing TCP's Initial Window\", RFC 6928, April 2013.",
+      "text": "Chu, J., Dukkipati, N., Cheng, Y., and M. Mathis, \"Increasing TCP's Initial Window\", RFC 6928, April 2013.",
       "rfc": 6928
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

@@ -1,5 +1,6 @@
 /** Datasheet client behaviour: reading level, copy buttons, cite toggle, prose-code copy, TOC scrollspy. Progressive enhancement. */
 import { disposer, listen, ownerDoc, qs, qsa, storageSet } from './dom';
+import { canonicalPlainLanguageName, isPlainLanguageName } from './legacy';
 
 type Done = (ok: boolean) => void;
 
@@ -61,15 +62,16 @@ export function init(root: ParentNode = document): () => void {
   // Reading level
   const ctl = qs('.level-ctl', root);
   function setLevel(l: string, persist: boolean): void {
-    if (l === 'plain-language') html.setAttribute('data-level', 'plain-language');
+    const level = canonicalPlainLanguageName(l);
+    if (isPlainLanguageName(level)) html.setAttribute('data-level', 'plain-language');
     else html.removeAttribute('data-level');
-    for (const b of qsa('[data-set-level]', root)) b.setAttribute('aria-pressed', String(b.getAttribute('data-set-level') === l));
+    for (const b of qsa('[data-set-level]', root)) b.setAttribute('aria-pressed', String(b.getAttribute('data-set-level') === level));
     if (persist) {
-      storageSet('rfc-level', l);
+      storageSet('rfc-level', level);
       try {
         const u = new URL(location.href);
         if (u.searchParams.has('level')) {
-          u.searchParams.set('level', l);
+          u.searchParams.set('level', level);
           history.replaceState(null, '', u.toString());
         }
       } catch {

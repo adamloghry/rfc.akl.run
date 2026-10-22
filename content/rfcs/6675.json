@@ -19,45 +19,51 @@
   "obsoletes": null,
   "summary": "<p>This RFC presents a conservative loss recovery algorithm for TCP using the SACK option. It follows the congestion control rules in RFC 5681 while allowing senders to recover better when several segments are lost from one flight of data. It obsoletes RFC 3517.</p>",
   "plainLanguage": {
-    "summary": "<p>When several pieces of a message are lost, the receiver lists exactly which ones arrived. The sender can resend only the missing ones.</p>"
+    "summary": "<p>SACK lets a receiver say which pieces of a message it has, so a sender does not have to resend everything after a loss. This RFC gives senders a careful way to use that information: it works out which segments are really missing, keeps an estimate of how much data is still travelling, and resends only what it has reason to believe was lost.</p>"
   },
   "questions": [
     "how does tcp sack loss recovery work",
     "what replaced rfc 3517",
     "what is the sack scoreboard",
-    "what is a rescue retransmission in tcp"
+    "what is a rescue retransmission in tcp",
+    "how does tcp use sack blocks to recover lost data",
+    "what is the tcp scoreboard"
   ],
   "tags": [
     "TCP",
     "Loss Recovery",
     "SACK"
   ],
-  "subtitle": "A conservative way for TCP senders to use SACK information to recover several lost segments in one flight.",
+  "subtitle": "A conservative way for TCP senders to use the information in SACK blocks to recover several lost segments in one flight.",
   "tldr": {
-    "problem": "TCP senders often ignore the information in SACK blocks when deciding what to retransmit, and RFC 3517 left several situations unhandled.",
-    "mechanism": "The sender keeps a scoreboard of SACKed data, estimates the bytes still in the network (pipe), and uses NextSeg() to pick what to send while following RFC 5681 congestion control.",
-    "outcome": "RFC 6675 is a Proposed Standard that obsoletes RFC 3517, adding duplicate ACK counting from SACK data, a rescue retransmission and a refined loss test.",
-    "outcomeLabel": "Status today"
+    "problem": "With the selective acknowledgment option, a receiver tells the sender which parts of the data it has, but evidence suggests many hosts ignore that information when deciding what to retransmit and how much to slow down.",
+    "mechanism": "The sender keeps a scoreboard of what has been selectively acknowledged, tracks how many bytes it believes are in the network, and uses the SACK blocks to decide which segment to send next: first a segment it believes lost, then new data, then a less certain retransmission, and finally one rescue retransmission per recovery phase.",
+    "outcome": "RFC 6675 is a Standards Track document from August 2012 that obsoletes RFC 3517 and describes the changes from it. It adds the DupAcks and RescueRxt variables, tightens the test for a lost segment, and changes how a duplicate acknowledgment is defined.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
       "label": "DupThresh",
-      "value": "3 duplicate acknowledgments (per RFC 5681)"
+      "value": "3 duplicate acknowledgments"
     },
     {
-      "label": "State variables",
-      "value": "6"
+      "label": "Lost segment test",
+      "value": "More than (DupThresh - 1) * SMSS octets SACKed above it"
     },
     {
-      "label": "Rescue retransmission",
-      "value": "One per entry into loss recovery, up to 1 SMSS"
+      "label": "Window reduction on fast retransmit",
+      "value": "cwnd and ssthresh set to FlightSize / 2"
     },
     {
-      "label": "IsLost byte test",
-      "value": "More than (DupThresh - 1) * SMSS bytes SACKed above"
+      "label": "Rescue retransmission limit",
+      "value": "One segment of at most 1 SMSS per recovery"
+    },
+    {
+      "label": "Sending limit during recovery",
+      "value": "cwnd - pipe of at least 1 SMSS"
     }
   ],
-  "today": "<p>RFC 6675 is a Proposed Standard and obsoletes <a href='/rfc3517'>RFC 3517</a>. The metadata lists no later RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 6675 is a Standards Track document published in August 2012. It obsoletes <a href='/rfc3517'>RFC 3517</a>, and no later RFC is listed as obsoleting or updating it.</p>",
   "glossary": [
     "tcp",
     "retransmission",
@@ -66,90 +72,219 @@
     "receive-window",
     "standards-track",
     "selective-acknowledgment",
-    "scoreboard"
+    "scoreboard",
+    "pipe-algorithm",
+    "congestion-window",
+    "retransmission-timeout",
+    "fast-recovery",
+    "duplicate-acknowledgment"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
       "title": "Introduction",
-      "content": "<p>This RFC presents a loss recovery algorithm for TCP built on the <strong>selective acknowledgment</strong> (SACK) option from RFC 2018. The option was being steadily deployed, yet there was evidence that hosts did not use the SACK information when making retransmission and congestion control decisions. The goal is to outline one straightforward way to use it.</p><p>RFC 5681 allows advanced loss recovery as long as it follows the spirit of TCP's congestion control, and RFC 6582 describes one such method, NewReno. The algorithm here is heavily based on work by Fall and Floyd and is a conservative replacement of the fast recovery algorithm. Other SACK-based methods are allowed if they follow RFC 5681. The decisions about what to send are largely decoupled from congestion control, so they can be treated as separate issues.</p><p>It is a revision of RFC 3517 that addresses situations that document did not handle explicitly.</p>",
-      "plainLanguage": "<p>The receiver already tells the sender which pieces arrived. This RFC shows the sender how to actually use that list.</p>"
+      "content": "<p>This document presents a conservative loss recovery algorithm for TCP based on the use of the selective acknowledgment TCP option. While the SACK option of <a href='/rfc2018'>RFC 2018</a> is being steadily deployed in the Internet, there is evidence that hosts are not using the SACK information when making retransmission and congestion control decisions. The goal of the document is to outline one straightforward method for TCP implementations to use SACK information to increase performance.</p><p><a href='/rfc5681'>RFC 5681</a> allows advanced loss recovery algorithms to be used by TCP, provided that they follow the spirit of TCP's congestion control algorithms. RFC 6582 outlines one such algorithm, called NewReno. This document outlines a loss recovery algorithm that uses the SACK option to enhance TCP's loss recovery, and it is heavily based on the algorithm detailed in the simulation-based comparison of Tahoe, Reno and SACK TCP.</p><p>The algorithm is a conservative replacement of the fast recovery algorithm, and a straightforward SACK-based loss recovery strategy that follows the guidelines set in RFC 5681 and can safely be used in TCP implementations. Alternate SACK-based methods can be used as implementers see fit, as long as they follow the guidelines of RFC 5681. The SACK-based decisions in this document, such as what segments are sent at what time, are largely decoupled from the congestion control algorithms and can be treated as separate issues. The document is a revision of RFC 3517 to address several situations that are not handled explicitly there.</p>",
+      "plainLanguage": "<p>The option is there and it works, but many implementations were not using it. This RFC writes down one careful way to use it, in terms of steps a programmer can follow.</p>"
     },
     {
-      "id": "concepts",
+      "id": "terminology",
       "number": "2",
-      "title": "Definitions and the Scoreboard",
-      "content": "<p>The sender stores six variables. <code>HighACK</code> is the highest byte cumulatively acknowledged. <code>HighData</code> is the highest sequence number sent. <code>HighRxt</code> is the highest sequence number retransmitted in the current recovery. <code>RescueRxt</code> is the highest sequence number optimistically retransmitted to keep the ACK clock going when the loss is at the end of the window and no new data is available. <code>Pipe</code> estimates the bytes outstanding in the network. <code>DupAcks</code> counts duplicate acknowledgments since the last cumulative one.</p><p>Here a <strong>duplicate acknowledgment</strong> is a segment carrying a SACK block that identifies previously unacknowledged and un-SACKed octets between HighACK and HighData. This differs from RFC 5681: an ACK with new SACK data counts even if it carries new data, changes the window or moves the cumulative point. <code>DupThresh</code> is the number of duplicate ACKs needed to trigger a retransmission, 3 per RFC 5681.</p><p>The sender keeps a per-connection data structure called the <strong>scoreboard</strong>. Its details are out of scope, but it must be able to mark arbitrary sequence number ranges as selectively acknowledged. SACKed data MUST NOT leave the retransmission buffer until it is cumulatively acknowledged, because SACK information is advisory.</p>",
-      "plainLanguage": "<p>The sender keeps a checklist of what the receiver has confirmed, plus a few counters to track what is still on the way.</p>"
+      "title": "Definitions",
+      "content": "<p>The reader is expected to be familiar with the definitions in RFC 5681 and with selective acknowledgments as specified in RFC 2018. The document defines six variables that a TCP sender stores.</p><p><strong>HighACK</strong> is the sequence number of the highest byte of data that has been cumulatively acknowledged at a given point. <strong>HighData</strong> is the highest sequence number transmitted at a given point. <strong>HighRxt</strong> is the highest sequence number which has been retransmitted during the current loss recovery phase. <strong>RescueRxt</strong> is the highest sequence number which has been optimistically retransmitted to prevent stalling of the acknowledgment clock when there is loss at the end of the window and no new data is available for transmission. <strong>Pipe</strong> is the sender's estimate of the number of bytes outstanding in the network, used during recovery for limiting the sending rate; using this estimate allows TCP to use a fundamentally different congestion control from the algorithm specified in RFC 5681, and is often referred to as the pipe algorithm. <strong>DupAcks</strong> is the number of duplicate acknowledgments received since the last cumulative acknowledgment.</p><p>For the purposes of the specification, a duplicate acknowledgment is defined as a segment that arrives carrying a SACK block that identifies previously unacknowledged and un-SACKed octets between HighACK and HighData. An acknowledgment that carries new SACK data is counted as a duplicate acknowledgment under this definition even if it carries new data, changes the advertised window, or moves the cumulative acknowledgment point, which differs from the definition of duplicate acknowledgment in RFC 5681.</p><p>The variable <strong>DupThresh</strong> holds the number of duplicate acknowledgments required to trigger a retransmission. Per RFC 5681 this threshold is defined to be 3 duplicate acknowledgments, though implementers should consult any updates to RFC 5681 for the current value or method for determining it. Finally, a range of sequence numbers [A,B] is said to cover sequence number S if A is less than or equal to S and S is less than or equal to B.</p>",
+      "plainLanguage": "<p>Six numbers describe what the sender knows: the last byte acknowledged, the last byte sent, the last byte resent, the byte resent as a rescue, an estimate of the bytes still in flight, and a count of repeated acknowledgments. The definition of a duplicate acknowledgment here is wider than the usual one, because any acknowledgment that reports newly received data counts.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3",
+      "title": "Keeping Track of SACK Information",
+      "content": "<p>For a TCP sender to implement the algorithm, it must keep a data structure to store incoming selective acknowledgment information on a per-connection basis. Such a structure is commonly called the <strong>scoreboard</strong>. The specifics of the scoreboard data structure are out of scope, as long as the implementation can perform all the functions the specification requires.</p><p>The document refers to keeping account of, that is marking, individual octets of data transferred across the connection. A real-world implementation of the scoreboard would likely prefer to manage the data as sequence number ranges. The algorithms presented allow this, but require the ability to mark arbitrary sequence number ranges as having been selectively acknowledged. The algorithm also assumes a sender that does not keep track of segment boundaries after transmitting a segment. A more refined and precise algorithm may be available to a sender that keeps this extra state, but that is left as future work.</p>",
+      "plainLanguage": "<p>The sender needs a memory of what has arrived. The RFC describes it as marking each byte, but says an implementation may work with ranges of sequence numbers instead, as long as it can mark any range it needs to.</p>"
     },
     {
       "id": "algorithms",
       "number": "4",
       "title": "The Scoreboard Routines",
-      "content": "<p>The scoreboard SHOULD provide four functions. <code>Update()</code> marks cumulatively ACKed and SACKed octets. <code>IsLost(SeqNum)</code> returns true when DupThresh discontiguous SACKed sequences have arrived above SeqNum, or more than (DupThresh - 1) * SMSS bytes above it have been SACKed. <code>SetPipe()</code> walks from HighACK to HighData and counts octets that are not SACKed and not deemed lost, plus retransmitted octets up to HighRxt.</p><p><code>NextSeg()</code> picks what to send next, by these rules in order:</p><ol><li>The smallest un-SACKed sequence number above HighRxt, below the highest SACKed octet, and judged lost: send one segment of up to SMSS octets from there. This is a MUST.</li><li>Otherwise, new data from HighData+1 if there is any and the receiver's window allows. This is a MUST.</li><li>Otherwise, a segment from an un-SACKed number meeting the position tests but not the IsLost test. This is a SHOULD.</li><li>Otherwise, a single <strong>rescue retransmission</strong> per entry into loss recovery, covering the highest outstanding un-SACKed sequence number, if HighACK is greater than RescueRxt. This is also a SHOULD.</li><li>Otherwise, NextSeg() reports failure.</li></ol><p>Rules 3 and 4 are a last resort. They help sustain the ACK clock and may avoid retransmission timeouts, but they put two copies of the same data in the network, so the sender may underestimate pipe.</p>",
-      "plainLanguage": "<p>The sender first resends what is surely lost, then sends new pieces, and only as a last resort re-sends something it is merely suspicious about.</p>"
+      "content": "<p>The section describes a specific structure and control flow for implementing the behaviour, and this collection of functions is the strongly recommended means of implementing it, though other approaches are feasible.</p><p><strong>Update()</strong> takes the information provided in an acknowledgment and marks each octet that is cumulatively acknowledged or selectively acknowledged in the scoreboard, recording the total number of octets SACKed. SACK information is advisory, so SACKed data MUST NOT be removed from the TCP's retransmission buffer until the data is cumulatively acknowledged.</p><p><strong>IsLost(SeqNum)</strong> returns whether the given sequence number is considered lost. It returns true when either DupThresh discontiguous SACKed sequences have arrived above SeqNum, or more than (DupThresh - 1) * SMSS bytes with sequence numbers greater than SeqNum have been SACKed; otherwise it returns false.</p><p><strong>SetPipe()</strong> traverses the sequence space from HighACK to HighData and MUST set the pipe variable to an estimate of the number of octets currently in transit. After initializing pipe to zero, for each octet S1 in that space that has not been SACKed: if IsLost(S1) returns false, pipe is incremented by 1 octet, because the segment is still assumed to be in the network; and if S1 is less than or equal to HighRxt, pipe is incremented by 1 octet, because of the retransmission of that octet. Octets retransmitted without being considered lost are counted twice by this mechanism.</p><p><strong>NextSeg()</strong> uses the scoreboard to determine what to transmit. It MUST return the sequence number range of the next segment to be transmitted under these rules. First, if there exists a smallest unSACKed sequence number S2 that is greater than HighRxt, less than the highest octet covered by any received SACK, and for which IsLost(S2) returns true, it MUST return the sequence range of one segment of up to SMSS octets starting with S2. Second, if no such S2 exists but there is available unsent data and the receiver's advertised window allows, it MUST return one segment of up to SMSS octets of previously unsent data starting with HighData+1. Third, if the first two rules fail but an unSACKed sequence number S3 meets the criteria of steps 1.a and 1.b, excluding the IsLost test, one segment of up to SMSS octets starting with S3 SHOULD be returned. Fourth, if the first three fail but there is outstanding unSACKed data, the algorithm provides the opportunity for a single rescue retransmission per entry into loss recovery: if HighACK is greater than RescueRxt, or RescueRxt is undefined, then one segment of up to SMSS octets that MUST include the highest outstanding unSACKed sequence number SHOULD be returned, RescueRxt set to RecoveryPoint, and HighRxt MUST NOT be updated. Fifth, if none of the conditions are met, NextSeg() MUST indicate failure and no segment is returned.</p><p>Rules three and four are a sort of retransmission last resort. They allow retransmission of sequence numbers even when the sender has less certainty that a segment has been lost than under rule one. Retransmitting this way helps sustain the TCP acknowledgment clock and can therefore avoid retransmission timeouts, but the sender then has two copies of the same data considered to be in the network, so when an acknowledgment arrives covering the retransmitted segment the sender cannot be sure how much data left the network and may underestimate pipe.</p>",
+      "plainLanguage": "<p>The sender runs four helpers. One records what arrived, one decides whether a given segment was lost, one estimates how much data is still in flight, and one says what to send next. The last one has a clear order: a segment believed lost first, then new data, then a segment only probably lost, and finally one rescue segment per recovery.</p>"
     },
     {
-      "id": "procedures",
+      "id": "operation",
       "number": "5",
-      "title": "Entering, Running and Leaving Loss Recovery",
-      "content": "<p>On every ACK with SACK information the scoreboard MUST be updated, and a cumulative ACK resets DupAcks to zero. If the ACK is a duplicate by this RFC's definition and the sender is not in recovery, DupAcks is increased and the sender checks two triggers. Recovery starts if DupAcks has reached DupThresh, or if <code>IsLost(HighACK + 1)</code> is true, meaning enough segments have arrived above the cumulative point. Otherwise the sender MAY send new data under Limited Transmit, limited by pipe and cwnd.</p><p>To enter recovery the sender sets <code>RecoveryPoint = HighData</code>, sets ssthresh and cwnd to FlightSize / 2 as RFC 5681 requires, retransmits the first segment presumed dropped, sets HighRxt and RescueRxt to its highest sequence number, and runs SetPipe().</p><p>While in recovery, a cumulative ACK above RecoveryPoint ends it. For any other ACK the sender updates the scoreboard and recomputes pipe. If cwnd - pipe is at least 1 SMSS, it SHOULD query NextSeg() and send segments, updating HighRxt, HighData and pipe, and repeat while room remains. This can send a burst of back-to-back segments.</p>",
-      "plainLanguage": "<p>When enough gaps show up, the sender slows down a bit and starts patching holes. It stops when everything sent before the trouble has been confirmed.</p>"
-    },
-    {
-      "id": "operational-considerations",
-      "number": "5.1",
-      "title": "Timeouts and the RTO Timer",
-      "content": "<p>A receiver may discard data it has already SACKed, so RFC 2018 suggests a sender SHOULD expunge SACK information after a retransmission timeout (RTO). This RFC does not change that, but notes that some view it as too strong and that implementers should check for updates. A SACK sender SHOULD use all SACK information made available during recovery after an RTO.</p><p>If an RTO occurs during recovery, RecoveryPoint MUST be set to HighData, the algorithm MUST be terminated, and a new recovery MUST NOT start until HighACK reaches the new RecoveryPoint. NextSeg() is not appropriate after an RTO; filling in the reported gaps is a reasonable approach.</p><p>Because this algorithm can keep the ACK clock running through a long loss event, the standard RFC 6298 timer, which re-arms when the cumulative ACK advances, may expire prematurely. Implementers may instead re-arm the timer on each retransmission sent during recovery. This is more conservative and may prevent needless retransmissions and further reduction of the congestion window.</p>",
-      "plainLanguage": "<p>If the sender waits too long with no news, it starts over carefully. A slightly patient timer can stop it from resending things that are already on their way.</p>"
+      "title": "The Recovery Algorithm",
+      "content": "<p>Upon receipt of any acknowledgment containing SACK information, the scoreboard MUST be updated via Update(). If the incoming acknowledgment is a cumulative acknowledgment, the TCP MUST reset DupAcks to zero. If the incoming acknowledgment is a duplicate acknowledgment per the definition in Section 2, regardless of its status as a cumulative acknowledgment, and the TCP is not currently in loss recovery, the TCP MUST increase DupAcks by one and follow these steps.</p><p>First, if DupAcks is at least DupThresh, go to step four. This check covers the case where a TCP receives SACK information for multiple segments smaller than SMSS, which can potentially prevent IsLost() from declaring a segment as lost. Second, if DupAcks is below DupThresh but IsLost(HighACK + 1) returns true, indicating at least three segments have arrived above the current cumulative acknowledgment point, which is taken to indicate loss, go to step four. Third, the TCP MAY transmit previously unsent data segments as per Limited Transmit, except that the number of octets which may be sent is governed by pipe and cwnd: set HighRxt to HighACK, run SetPipe(), and if cwnd minus pipe is at least 1 SMSS, there exists previously unsent data, and the receiver's advertised window allows, transmit up to 1 SMSS of data starting with HighData+1, update HighData, and return to the SetPipe step. Otherwise terminate processing of this acknowledgment.</p><p>Fourth, invoke fast retransmit and enter loss recovery. The RecoveryPoint is set to HighData, and the loss recovery phase is terminated when the sender receives a cumulative acknowledgment for that data octet. The congestion window and slow start threshold are reduced to half of FlightSize per RFC 5681, noting that RFC 5681 requires that any segments sent as part of the Limited Transmit mechanism not be counted in FlightSize for that equation. The first data segment presumed dropped, the segment starting with HighACK + 1, is retransmitted, and both HighRxt and RescueRxt are set to the highest sequence number in the retransmitted segment, to prevent repeated retransmission of the same data or a premature rescue retransmission. SetPipe() is then run to set pipe to the number of outstanding octets currently in the pipe, meaning data that has been sent but for which no cumulative or selective acknowledgment has been received and that has not been determined to have been dropped, so it is assumed to still be traversing the network path. Finally, to take advantage of potential additional available cwnd, the sender proceeds to step C.</p><p>Once a TCP is in the loss recovery phase, the following procedure MUST be used for each arriving acknowledgment. An incoming cumulative acknowledgment for a sequence number greater than RecoveryPoint signals the end of loss recovery, and the phase MUST be terminated; information in the scoreboard for sequence numbers greater than the new value of HighACK SHOULD NOT be cleared on leaving. On receipt of an acknowledgment that does not cover RecoveryPoint, the new SACK information MUST be recorded with Update() and SetPipe() used to re-calculate the number of octets still in the network. If cwnd minus pipe is at least 1 SMSS, the sender SHOULD transmit one or more segments: the scoreboard MUST be queried via NextSeg() for the sequence number range of the next segment to transmit, and the given segment sent; if any octets sent are below HighData, HighRxt MUST be set to the highest sequence number of the retransmitted segment unless NextSeg() rule four was invoked; if any octets sent are above HighData, HighData must be updated to reflect the transmission of previously unsent data; the estimate of outstanding data MUST be incremented by the number of octets transmitted; and if cwnd minus pipe is still at least 1 SMSS, the query repeats. Steps A and C can potentially send a burst of back-to-back segments if the incoming cumulative acknowledgment is for more than SMSS octets of data, or if incoming SACK blocks indicate that more than SMSS octets of data have been lost in the second half of the window.</p><p>Section 5.1 of the RFC covers retransmission timeouts. In order to avoid memory deadlocks, the TCP receiver is allowed to discard data that has already been selectively acknowledged. As a result, RFC 2018 suggests that a TCP sender SHOULD expunge the SACK information gathered from a receiver upon a retransmission timeout, since the timeout might indicate that the data receiver has reneged. It also says a TCP sender MUST ignore prior SACK information in determining which data to retransmit. Since the publication of RFC 2018 this has come to be viewed by some as too strong. It has been suggested that, as long as robust tests for reneging are present, an implementation can retain and use SACK information across a timeout event, and the RFC notes that implementers should consult any updates to RFC 2018 on the subject. Further, a SACK TCP sender SHOULD utilize all SACK information made available during the loss recovery following a timeout.</p><p>If a timeout occurs during loss recovery, RecoveryPoint MUST be set to HighData, the new value of RecoveryPoint MUST be preserved, and the loss recovery algorithm outlined in the document MUST be terminated. A new recovery phase MUST NOT be initiated until HighACK is greater than or equal to the new value of RecoveryPoint. Update() SHOULD continue to be used appropriately upon receipt of acknowledgments, so the recovery period after a timeout can benefit from all the information the receiver provided, even if SACK information was expunged because of the timeout.</p><p>If segments are missing from the receiver's buffer following processing of the retransmitted segment, the corresponding acknowledgment will contain SACK information, and the sender SHOULD use it when determining what data should be sent in each segment following a timeout. The exact algorithm is not specified, and NextSeg() is inappropriate during loss recovery after a timeout; a relatively straightforward approach of filling in the sequence space reported as missing should be reasonable.</p><p>Section 6 of the RFC covers managing the retransmission timer. The standard TCP retransmission timer estimator is defined in <a href='/rfc6298'>RFC 6298</a>. Because the SACK algorithm can affect the behaviour of the estimator, implementers may wish to consider how the timer is managed. RFC 6298 calls for the timer to be re-armed each time an acknowledgment arrives that advances the cumulative acknowledgment point. Because the algorithm presented can keep the acknowledgment clock going through a fairly significant loss event, comparatively longer than the algorithm described in RFC 5681, on some networks the loss event could last longer than the retransmission timer. In that case the timer would expire prematurely and a segment that need not be retransmitted would be resent.</p><p>Implementers are therefore given the latitude to use the standard RFC 6298-style management or, optionally, a more careful variant that re-arms the timer on each retransmission sent during recovery. This provides a more conservative timer than RFC 6298 specifies, so it may not always be an attractive alternative, but in some cases it may prevent needless retransmissions, go-back-N transmission, and further reduction of the congestion window.</p>",
+      "plainLanguage": "<p>Three duplicate acknowledgments, or a gap that the SACK blocks make obvious, start the recovery. The window is then halved, the first missing segment is resent, and from then on each acknowledgment is used to work out what is still missing and what may be sent, with the amount sent limited by the space the window allows and the estimate of what is already in flight. A timeout stops the recovery rules, and the sender may also restart the timer on each resend so that it does not fire while the sender is still working.</p>"
     },
     {
       "id": "security-considerations",
       "number": "8",
       "title": "Security Considerations",
-      "content": "<p>The algorithm shares the security considerations of RFC 5681. A key difference is that SACK-based recovery is more robust against attackers who forge duplicate ACKs to force the sender to cut cwnd, since SACK gives the sender an additional check on whether an ACK is legitimate. The RFC says this is not fool-proof.</p><p>It also mitigates a blind attack sketched in a CPNI technical note, where an attacker spoofs out-of-window data so the endpoint sends duplicate cumulative ACKs. Requiring SACK information to trigger recovery helps because those duplicate ACKs will not show reception of previously un-SACKed in-window data.</p>",
-      "plainLanguage": "<p>A forged 'I missed something' message is easy to fake, but a precise list of which pieces arrived is much harder to fake.</p>"
+      "content": "<p>The algorithm presented shares security considerations with RFC 5681. A key difference is that an algorithm based on SACKs is more robust against attackers forging duplicate acknowledgments to force the TCP sender to reduce cwnd. With SACKs, TCP senders have an additional check on whether or not a particular acknowledgment is legitimate. While not fool-proof, SACK does provide some amount of protection in this area.</p><p>Similarly, a technical note sketches a variant of a blind attack by which an attacker can spoof out-of-window data to a TCP endpoint, causing it to respond to the legitimate peer with a duplicate cumulative acknowledgment. Adding a SACK-based requirement to trigger loss recovery effectively mitigates this attack, because the duplicate acknowledgments caused by out-of-window segments will not contain SACK information indicating reception of previously un-SACKed in-window data.</p>",
+      "plainLanguage": "<p>Using the SACK blocks as well as the cumulative number gives the sender another way to check that an acknowledgment is genuine, which makes two common kinds of spoofing attack harder.</p>"
     },
     {
       "id": "changes",
       "number": "9",
       "title": "Changes Relative to RFC 3517",
-      "content": "<p>RFC 6675 makes these changes to RFC 3517:</p><ul><li>The <code>DupAcks</code> variable is added, and its use specified.</li><li>The <code>IsLost()</code> test now needs more than (DupThresh - 1) * SMSS octets SACKed above a number, instead of at least DupThresh * SMSS. At least three segments after the number must still be SACKed, but loss detection improves when outstanding segments are smaller than SMSS.</li><li>The definition of a duplicate acknowledgment now uses SACK information, so loss recovery can be entered on SACK evidence of three segments above a gap. RFC 3517 used that idea only during recovery.</li><li>The <code>RescueRxt</code> variable is added, allowing one extra retransmission per entry into recovery, of no more than 1 SMSS.</li><li>NextSeg() rule 3 changes from MAY to SHOULD.</li></ul>",
-      "plainLanguage": "<p>This update fixes a few gaps in the older version: how to count missing pieces, one last-chance resend, and a firmer rule for when to try risky resends.</p>"
+      "content": "<p>The state variable DupAcks has been added to the list of variables maintained by the algorithm, and its usage specified.</p><p>The function IsLost() has been modified to require that more than (DupThresh - 1) * SMSS octets have been SACKed above a given sequence number as an indication that it is lost, which is changed from the minimum requirement of DupThresh * SMSS described in RFC 3517. This retains the requirement that at least three segments following the sequence number in question have been SACKed, while improving detection in the event that the sender has outstanding segments which are smaller than SMSS.</p><p>The definition of a duplicate acknowledgment has been modified to use the SACK information in detecting loss. Duplicate cumulative acknowledgments can be caused by either loss or reordering in the network. To disambiguate loss and reordering, TCP's fast retransmit algorithm waits until three duplicate acknowledgments arrive to trigger loss recovery, and that notion was the basis for the algorithm specified in RFC 3517. With SACK information there is no need to rely blindly on the cumulative acknowledgment field: the additional information in the SACK blocks shows that three segments lying above a gap in the sequence space have arrived at the receiver, and this can be used to trigger loss recovery. The notion was already used in RFC 3517 during loss recovery, and the change here is that it is also used to enter a loss recovery phase.</p><p>The state variable RescueRxt has been added to the list of variables maintained by the algorithm, and its usage specified. This variable allows one extra retransmission per entry into loss recovery, in order to keep the acknowledgment clock going under certain circumstances involving loss at the end of the window. This mechanism allows for no more than one segment of no larger than 1 SMSS to be optimistically retransmitted per loss recovery. Finally, rule three of NextSeg() has been changed from MAY to SHOULD, to reflect the opinion of the authors and working group that it should be left in rather than out unless an implementor has a compelling reason to do otherwise.</p>",
+      "plainLanguage": "<p>The new version loses data less often, because a gap can now be spotted from the SACK blocks alone, without waiting for three repeated acknowledgments. It also allows one speculative resend per recovery to keep the connection moving.</p>"
     }
   ],
   "viz": [
     {
       "type": "key-grid",
-      "anchor": "concepts",
+      "anchor": "terminology",
       "position": "after",
-      "caption": "SENDER STATE VARIABLES (RFC 6675, SECTION 2)",
+      "caption": "THE SIX NUMBERS THE SENDER KEEPS",
       "data": {
         "items": [
           {
             "title": "HighACK",
-            "text": "Highest byte cumulatively ACKed."
+            "text": "The highest byte of data that has been cumulatively acknowledged."
           },
           {
             "title": "HighData",
-            "text": "Highest sequence number sent."
+            "text": "The highest sequence number transmitted so far."
           },
           {
             "title": "HighRxt",
-            "text": "Highest sequence number retransmitted in this recovery."
+            "text": "The highest sequence number retransmitted in the current recovery phase."
           },
           {
             "title": "RescueRxt",
-            "text": "Highest optimistically retransmitted number, used to keep the ACK clock going."
+            "text": "The highest sequence number sent as an optimistic rescue retransmission."
           },
           {
             "title": "Pipe",
-            "text": "Estimate of bytes outstanding in the network."
+            "text": "An estimate of the number of bytes outstanding in the network, used to limit the sending rate."
           },
           {
             "title": "DupAcks",
-            "text": "Duplicate ACKs since the last cumulative ACK."
+            "text": "The number of duplicate acknowledgments since the last cumulative acknowledgment."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "THE ORDER IN WHICH NextSeg() CHOOSES WHAT TO SEND",
+      "data": {
+        "items": [
+          {
+            "code": "1",
+            "label": "A segment believed lost",
+            "desc": "MUST be sent: one segment of up to SMSS octets starting at the smallest unSACKed sequence number above HighRxt for which IsLost is true.",
+            "highlight": true
+          },
+          {
+            "code": "2",
+            "label": "New data",
+            "desc": "MUST be sent: up to SMSS octets of previously unsent data starting at HighData+1, if the receiver's window allows."
+          },
+          {
+            "code": "3",
+            "label": "A segment probably lost",
+            "desc": "SHOULD be sent: one segment of up to SMSS octets starting at an unSACKed sequence number that meets the first two criteria but not the loss test."
+          },
+          {
+            "code": "4",
+            "label": "A rescue retransmission",
+            "desc": "SHOULD be sent: one segment of up to SMSS octets including the highest outstanding unSACKed sequence number, once per entry into loss recovery."
+          },
+          {
+            "code": "5",
+            "label": "Nothing to send",
+            "desc": "NextSeg() reports failure and no segment is returned."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "changes",
+      "position": "after",
+      "caption": "WHAT CHANGED FROM RFC 3517",
+      "data": {
+        "columns": [
+          "Area",
+          "In RFC 3517",
+          "In this document"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Test for a lost segment",
+              "DupThresh * SMSS octets SACKed above it",
+              "More than (DupThresh - 1) * SMSS octets SACKed above it"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Definition of a duplicate acknowledgment",
+              "Based on the cumulative acknowledgment field",
+              "Any acknowledgment whose SACK block names previously un-SACKed octets between HighACK and HighData"
+            ]
+          },
+          {
+            "cells": [
+              "Entering loss recovery",
+              "Three duplicate acknowledgments",
+              "Three duplicate acknowledgments, or a gap that the SACK blocks reveal"
+            ]
+          },
+          {
+            "cells": [
+              "Extra retransmissions",
+              "Not defined",
+              "One rescue retransmission of at most 1 SMSS per entry into loss recovery"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "before",
+      "caption": "ILLUSTRATIVE: HOW A SACK RECEIVER'S INFORMATION DRIVES THE SENDER",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "TCP sender"
+          },
+          {
+            "key": "receiver",
+            "label": "TCP receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "A flight of data",
+            "color": "blue"
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "Acknowledgments with SACK blocks naming the data that arrived",
+            "color": "green"
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Retransmission of the segments the SACK blocks show are missing",
+            "color": "blue"
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "A cumulative acknowledgment past RecoveryPoint, ending the recovery",
+            "color": "green"
           }
         ]
       }
@@ -167,14 +302,19 @@
       "rfc": 2018
     },
     {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
       "number": "[RFC5681]",
       "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
       "rfc": 5681
     },
     {
-      "number": "[RFC3517]",
-      "text": "Blanton, E., Allman, M., Fall, K., and L. Wang, \"A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP\", RFC 3517, April 2003.",
-      "rfc": 3517
+      "number": "[RFC6582]",
+      "text": "Henderson, T., Floyd, S., Gurtov, A., and Y. Nishida, \"The NewReno Modification to TCP's Fast Recovery Algorithm\", RFC 6582, April 2012.",
+      "rfc": 6582
     },
     {
       "number": "[RFC6298]",
@@ -182,18 +322,27 @@
       "rfc": 6298
     },
     {
-      "number": "[RFC6582]",
-      "text": "Henderson, T., Floyd, S., Gurtov, A., and Y. Nishida, \"The NewReno Modification to TCP's Fast Recovery Algorithm\", RFC 6582, April 2012.",
-      "rfc": 6582
+      "number": "[RFC3517]",
+      "text": "Blanton, E., Allman, M., Fall, K., and L. Wang, \"A Conservative Selective Acknowledgment (SACK)-based Loss Recovery Algorithm for TCP\", RFC 3517, April 2003.",
+      "rfc": 3517
+    },
+    {
+      "number": "[RFC2914]",
+      "text": "Floyd, S., \"Congestion Control Principles\", BCP 41, RFC 2914, September 2000.",
+      "rfc": 2914
+    },
+    {
+      "number": "[FF96]",
+      "text": "Fall, K. and S. Floyd, \"Simulation-based Comparisons of Tahoe, Reno and SACK TCP\", Computer Communication Review, July 1996."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

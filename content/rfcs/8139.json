@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Clarifies how TRILL switches on a shared link choose which one handles traffic for each VLAN, the \"Appointed Forwarder\" mechanism. The goal is at most one switch handling native traffic per VLAN. It updates RFC 6325 and RFC 7177 and replaces RFC 6439.</p>",
   "plainLanguage": {
-    "summary": "<p>When several bus drivers share a stop, only one should pick up each group of passengers. This sets the rules for choosing which driver.</p>"
+    "summary": "<p>Several TRILL switches can sit on the same network link. Each VLAN on that link needs just one of them to handle the end stations' ordinary frames, so that frames cannot loop. This document explains how that switch is chosen, how the others are kept out of the way, and how they learn quickly that a port has gone down.</p>"
   },
   "questions": [
     "trill appointed forwarder",
@@ -18,183 +18,282 @@
   "tags": [
     "TRILL",
     "Layer 2",
-    "VLANs",
-    "Routing"
+    "VLANs"
   ],
-  "subtitle": "How TRILL switches sharing a LAN decide which one handles each VLAN's traffic, and how they avoid loops while it changes.",
+  "subtitle": "How TRILL switches on one link agree which of them handles the end stations' traffic in each VLAN.",
   "tldr": {
-    "problem": "When several TRILL switches attach to one multi-access link, exactly one of them should handle native traffic for each VLAN. The original design had to fit every appointment inside a TRILL Hello, and two forwarders for one VLAN can create a loop.",
-    "mechanism": "The Designated RBridge appoints Appointed Forwarders, preferably through link-scoped E-L1CS FS-LSPs and otherwise through Hellos. An inhibition mechanism with timers stops native frames while the situation settles, and optional Hello reduction and Port-Shutdown messages speed things up.",
-    "outcome": "RFC 8139 obsoletes RFC 6439 and updates RFC 6325 and RFC 7177, and it requires all TRILL switches to support E-L1CS.",
-    "outcomeLabel": "Status today"
+    "problem": "Several TRILL switches can be attached to the same network link. If more than one of them handles the ordinary frames of end stations on that link, frames can loop, so each VLAN needs a single switch in charge of it.",
+    "mechanism": "The link's Designated RBridge appoints one switch as the Appointed Forwarder for each VLAN and tells the others in link-scoped link-state advertisements or in Hellos. A switch that hears a competing claim for the same VLAN stops handling native frames for that VLAN until a timer expires.",
+    "outcome": "RFC 8139 replaces RFC 6439 and updates RFC 6325 and RFC 7177. It moves appointment data out of the small Hello message into link-scoped link-state advertisements and adds a fast Port-Shutdown notification.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
+    {
+      "label": "New APPsub-TLV types",
+      "value": "17, 18, 19 and 20"
+    },
     {
       "label": "Port-Shutdown channel protocol",
       "value": "0x006"
     },
     {
-      "label": "Port-Shutdown default copies",
-      "value": "2 (range 1-3)"
-    },
-    {
-      "label": "Port-Shutdown default delay",
-      "value": "20 milliseconds (range 0-1,000)"
-    },
-    {
-      "label": "Root bridge change inhibition default",
-      "value": "30 seconds"
-    },
-    {
-      "label": "Maximum E-L1CS PDU size",
+      "label": "Maximum E-L1CS PDU length",
       "value": "1,470 bytes"
     },
     {
-      "label": "New APPsub-TLV types",
-      "value": "17, 18, 19, 20"
+      "label": "Root bridge change timer default",
+      "value": "30 seconds"
+    },
+    {
+      "label": "VLAN inhibition timers",
+      "value": "Up to 4,094 per link, at least 2 required"
+    },
+    {
+      "label": "Port-Shutdown copies",
+      "value": "2 by default, 1 to 3 configurable"
     }
   ],
-  "today": "<p>RFC 8139 is a Proposed Standard that obsoletes <a href='/rfc6439'>RFC 6439</a> and updates <a href='/rfc6325'>RFC 6325</a> and <a href='/rfc7177'>RFC 7177</a>. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 8139 is a Proposed Standard and has not been obsoleted. It replaced <a href='/rfc6439'>RFC 6439</a> and updates <a href='/rfc6325'>RFC 6325</a> and <a href='/rfc7177'>RFC 7177</a>, so it is the current description of how TRILL switches on a link agree which one handles each VLAN.</p>",
   "glossary": [
     "appointed-forwarder",
     "rbridge",
     "designated-rbridge",
     "link-state-routing",
     "mac-address",
-    "ethernet"
+    "ethernet",
+    "trill",
+    "vlan",
+    "rbridge-channel",
+    "nickname"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction and Scope",
-      "content": "<p>TRILL switches, also called <strong>RBridges</strong>, can attach to multi-access LAN links that also carry end stations. When several TRILL switches attach to one link, native traffic is handled by a subset called <strong>Appointed Forwarders</strong>, with the intent that native traffic in each VLAN be handled by at most one switch. One switch can be Appointed Forwarder for many VLANs.</p><p>This document frees the mechanism from the limit imposed by the original requirement that all appointments fit within a TRILL Hello PDU. It does this by requiring support of link-scoped FS-LSPs and allowing appointments to be sent in them. It also adds optional features: detecting inconsistent VLAN-to-FGL mappings, faster notification of ports going down, and less need for inhibition.</p><p>It replaces <a href='/rfc6439'>RFC 6439</a>, and the optimizations are orthogonal and optional. The mechanism is irrelevant on point-to-point IS-IS links and on links where all TRILL switch ports are trunk ports, and it does not affect adjacency formation, DRB election, MTU matching or the forwarding of TRILL Data frames. Where this document conflicts with <a href='/rfc6325'>RFC 6325</a> or <a href='/rfc7177'>RFC 7177</a>, this document prevails.</p>",
-      "plainLanguage": "<p>Several grown-ups wait at the same door, but only one should let in the kids of each class. This document explains how they pick who does what and how to avoid two of them doing the same job.</p>"
-    },
-    {
-      "id": "operation",
-      "number": "2",
-      "title": "Appointing Forwarders",
-      "content": "<p>The Appointed Forwarder for VLAN-x is the TRILL switch that ingresses native frames from the link and egresses them to the link in that VLAN. By default the <strong>DRB</strong> (Designated RBridge) is in charge of native traffic for all VLANs on the link. It may act as forwarder itself and may appoint others. If it loses adjacency to a switch it appointed, it SHOULD immediately appoint another forwarder or take over.</p><p>Two forwarders for the same VLAN at the same time could form a loop where frames are not protected by a TRILL hop count. This is why appointment is paired with the inhibition mechanism.</p><p>The DRB has two ways to appoint. Mechanism A puts appointments in E-L1CS FS-LSPs, which legacy RBridges do not see. Mechanism B puts Appointed Forwarders sub-TLVs in a TRILL Hello sent on the Designated VLAN, and every appointment the DRB sends in Hellos must be in that Hello, since anything omitted is implicitly revoked. The E-L1CS method is RECOMMENDED; Hello appointments are needed only to appoint legacy RBridges.</p><p>Each RBridge keeps an E-L1CS LSDB and a Hello appointment database, and counts itself forwarder for a VLAN if either says so. A receiver only accepts Hello appointments from the port that won the DRB election, and only for VLANs enabled on the port where the Hello arrived. A DRB change makes non-DRB switches drop their Hello appointments, and a new DRB ignores earlier appointment information.</p>",
-      "plainLanguage": "<p>One boss (the DRB) hands out jobs. The boss can write the list in a big notebook that everyone can read, or squeeze a short list onto a small sticky note. The notebook is better.</p>"
+      "title": "One Switch in Charge of Each VLAN",
+      "content": "<p>TRILL (Transparent Interconnection of Lots of Links) is a link-state routing protocol for Layer 2 networks. Devices that implement it are called TRILL switches or RBridges (Routing Bridges). TRILL carries traffic between end stations inside a TRILL Data packet that carries a hop count, which keeps forwarding safe even while temporary loops exist.</p><p>TRILL supports multi-access links, where several end stations and several RBridges are attached to the same link. On such a link the native frames, the ordinary Ethernet frames that come from and go to end stations, must be handled by one RBridge for each VLAN. That RBridge is the Appointed Forwarder. Two Appointed Forwarders for the same VLAN on one link could form a loop in which part of the loop has no TRILL hop count to stop it.</p><p>This document updates the mechanism originally given in <a href='/rfc6325'>RFC 6325</a> and frees it from the size limit of the TRILL Hello message. It also adds optional ways to detect inconsistent VLAN to label mappings on a link, to report a port shutdown quickly, and to shorten the period during which a switch is inhibited.</p>",
+      "plainLanguage": "<p>Several TRILL switches can sit on the same network link. Each VLAN on that link needs one of them to handle the end stations' ordinary frames, so that frames cannot loop. This document explains how that switch is chosen and how the others are kept out of the way.</p>"
     },
     {
       "id": "design",
-      "number": "2.1",
-      "title": "Limits, Overload and VLAN Mapping",
-      "content": "<p>If appointments must go in Hellos because legacy RBridges are present, space is limited. Assuming no more than 1,000 bytes are available, the RFC estimates that appointments for 83 RBridges would fit, so the limit only bites on links with 84 or more RBridges. The RFC expects such links to be rare. For Hello appointments, it is RECOMMENDED that the DRB resend its appointments on the Designated VLAN at least once per its Holding Time.</p><p>Disabling VLAN-x on a port cancels that switch's forwarder status for it unless the VLAN is enabled on another of its ports on the same link. Merely enabling a VLAN does not make a switch a forwarder; it only allows it to become one.</p><p>The DRB SHOULD NOT appoint an RBridge in link-state overload, and SHOULD reassign VLANs away from one that becomes overloaded, if another switch is available.</p><p>If the DRB sees a Hello sent on VLAN-y arrive on VLAN-x, VLAN mapping is occurring inside the link. It MUST then arrange that the same TRILL switch is Appointed Forwarder for both VLANs, otherwise a multi-destination frame could loop forever.</p>",
-      "plainLanguage": "<p>A small sticky note only holds so many names, so a very crowded door needs the notebook. A grown-up who is already overloaded should not get extra jobs, and two classes that get mixed together need the same grown-up.</p>"
+      "number": "2",
+      "title": "How Appointments Are Made",
+      "content": "<p>The Appointed Forwarder on a link for VLAN-x is the RBridge that ingresses native frames from that link and egresses native frames to it in VLAN-x. By default the DRB (Designated RBridge), the RBridge elected on the link to handle link-wide decisions, is in charge of native traffic for every VLAN on the link. The DRB may appoint other RBridges that have ports on the link.</p><p>The DRB can appoint through two mechanisms. Method A puts Appointed Forwarders sub-TLVs, in the form of AppointmentBitmap or AppointmentList APPsub-TLVs, into E-L1CS FS-LSPs, which are link-scoped IS-IS link-state advertisements. Method B puts Appointed Forwarders sub-TLVs into a TRILL Hello sent on the Designated VLAN. When the DRB sends appointments in a Hello it must send all of them in that one Hello, and any appointment left out is revoked.</p><p>Each RBridge keeps two databases: an E-L1CS LSDB, which is semi-permanent and shows what each RBridge on the link would appoint if it were the DRB, and a Hello appointment database, which is reset by each Hello from the DRB that carries appointments. An RBridge is the Appointed Forwarder for a VLAN if either database says so. Because the E-L1CS method is RECOMMENDED and the Hello method is only needed for RBridges that do not support E-L1CS, the limit of about 1,000 bytes available for appointments in a Hello does not usually apply.</p>",
+      "plainLanguage": "<p>The switch elected to look after a link, called the Designated RBridge, names which switch handles each VLAN. It can send that information in link-state advertisements or in the short Hello messages. Each switch remembers both, and steps in only when one of them names it.</p>"
     },
     {
-      "id": "state-machine",
+      "id": "operation",
       "number": "3",
       "title": "The Inhibition Mechanism",
-      "content": "<p>For every link where it can offer end-station service, a TRILL switch keeps a <strong>DRB inhibition timer</strong>, a <strong>root bridge change inhibition timer</strong> and up to 4,094 <strong>VLAN inhibition timers</strong>, one per legal VLAN ID. The DRB and root bridge change timers MUST be implemented. VLAN timers SHOULD be kept per VLAN, and at least two MUST be implemented if resources are tight, but two VLANs must not be merged if the switch is forwarder for only one.</p><p>An Appointed Forwarder is <strong>inhibited</strong> for VLAN-x if any one of three timers is unexpired: the DRB timer, the root bridge change timer or the VLAN-x timer. Timers are set in situations such as:</p><ul><li>becoming DRB (set to the Holding Time of the winning port);</li><li>receiving a Hello that says the sender is forwarder for VLAN-x (VLAN timer set to the longer of its current value and the Hello's Holding Time);</li><li>enabling a VLAN on a link where it was not enabled before;</li><li>seeing a change of the common spanning tree root bridge (default 30 seconds, configurable from 30 down to 0 seconds).</li></ul><p>While inhibited, a switch still handles TRILL Data and IS-IS packets. It does not output decapsulated native frames to that link, and it ignores native frames in VLAN-x from the link except for address learning. It must still say in Hellos whether it is forwarder.</p><p>Three optional optimizations shorten root-bridge-change inhibition: a change to a lower-priority root is safe, a change of priority only (same MAC address) can be ignored, and inhibition can end once Hellos arrive from all RBridges that can see the old or new root.</p>",
-      "plainLanguage": "<p>If the grown-ups are not sure who is in charge, they all freeze for a short time and wait. Only the kids' pick-up pauses; the other work continues.</p>"
+      "content": "<p>Inhibition is the safety net that stops an RBridge from handling native frames on a link when it might conflict with another RBridge. Each RBridge keeps a DRB inhibition timer, a root bridge change inhibition timer, and up to 4,094 VLAN inhibition timers, one for each legal VLAN ID. The first two timers MUST be implemented, and at least two VLAN inhibition timers MUST be implemented, so that a switch which is the Appointed Forwarder for one VLAN can be timed separately from the rest.</p><p>An Appointed Forwarder is inhibited for VLAN-x when its DRB inhibition timer, its root bridge change inhibition timer, or its VLAN-x inhibition timer has not expired. While inhibited it ignores native frames arriving in VLAN-x, apart from learning their addresses, and it does not send decapsulated frames out to that link in VLAN-x. Inhibition has no effect on TRILL Data or TRILL IS-IS frames.</p><p>The root bridge change timer is set when the common spanning tree root bridge seen on a port changes. It defaults to 30 seconds and can be configured from 30 down to 0 seconds. Three optional optimizations let a switch end that inhibition early: when the root bridge changes to a lower priority, when only the priority part of the root Bridge ID changed, or when Hellos have been received from every RBridge that could see the old or the new root.</p>",
+      "plainLanguage": "<p>Inhibition is how a switch temporarily steps aside. It watches for signs that another switch on the link is handling the same VLAN, and stops moving end-station frames in that VLAN until its timers run out. The timers are per link and per VLAN, so one VLAN can be blocked without blocking the others.</p>"
     },
     {
-      "id": "negotiation",
-      "number": "4",
-      "title": "Hello Reduction and Multiple Ports",
-      "content": "<p>If a network manager knows the bridge and port configuration within an Ethernet link, Hellos can be sent in fewer VLANs. An RBridge MUST still always attempt to send Hellos in the Designated VLAN. Because VLAN timers normally only update from Hellos in that VLAN, two extra mechanisms keep them safe. First, an RBridge MAY include in any Hello an Appointed Forwarders sub-TLV that appoints itself. Second, it MAY use the VLANs Appointed sub-TLV, which lists the VLANs it forwards for. Support is advertised by a capability bit in the PORT-TRILL-VER sub-TLV.</p><p>If these mechanisms are used, each RBridge MUST announce so that no VLAN inhibition timer improperly expires unless three or more Hellos are lost. The RFC's example is announcing all VLANs three times per Holding Time on the Designated VLAN.</p><p>A switch may have several ports on the same link. Suspended ports never ingress or egress native frames. A forwarder with several active ports may load-share however it likes, as long as a frame sent out of one port can never be ingressed on another of its own ports.</p>",
-      "plainLanguage": "<p>To save talking, helpers can announce what they do less often, as long as they still check in often enough that nobody forgets who is responsible.</p>"
-    },
-    {
-      "id": "error-handling",
-      "number": "5",
-      "title": "Port-Shutdown Messages",
-      "content": "<p>Other switches normally notice a failed port only after missing a number of Hellos, which can take many seconds. A TRILL switch SHOULD therefore send a <strong>Port-Shutdown message</strong>. It is an RBridge Channel message using RBridge Channel Protocol number <code>0x006</code>, and its payload is a list of the Port IDs that failed or are going down. A switch planning a shutdown SHOULD also reduce its Holding Time on the port.</p><p>For robustness, it sends a configurable number of copies a configurable interval apart. The default is two copies, which can be set to one or three, spaced 20 milliseconds apart by default. The message SHOULD use priority 7 and SHOULD NOT be marked drop eligible. If the shutdown is planned within 1 second, the switch stops sending Hellos and either sends the message to capable ports on the link or broadcasts it.</p><p>On receipt, a switch drops adjacencies to the listed ports. If it is the DRB and that removes all adjacencies to that switch, it either becomes forwarder itself or appoints a new one. No special message is needed when a port returns; sending Hellos again is enough. The messages SHOULD be secured using the RBridge Channel Header Extension, because otherwise they are a potential denial-of-service vector.</p>",
-      "plainLanguage": "<p>Instead of waiting for a bus driver to be late, the driver shouts, \"I am leaving now!\", so someone else can step in quickly.</p>"
-    },
-    {
-      "id": "data-model",
+      "id": "message-format",
       "number": "6",
-      "title": "VLAN and Label Mapping Checks and New Encodings",
-      "content": "<p>TRILL maps a VLAN ID in native traffic to a 24-bit Fine-Grained Label (FGL) in TRILL Data packets. Because the forwarder can change, all switches on a link that map VLANs to FGLs SHOULD use the same mapping, or traffic could jump from one FGL to another. Switches SHOULD advertise their mappings and SHOULD alert the operator when two disagree. The alert is delayed until the problem persists for a time that defaults to the switch's Holding Time and can be set between 0 and 2**16 - 1 seconds, where the largest value disables alerts.</p><p>The document defines four new APPsub-TLVs carried in a TRILL GENINFO TLV in E-L1CS FS-LSPs:</p><ul><li><code>AppointmentBitmap</code> (type 17) for appointing a switch for compact VLAN ranges;</li><li><code>AppointmentList</code> (type 18) for scattered VLANs over a large range;</li><li><code>FGL-VLAN-Bitmap</code> (type 19) and <code>FGL-VLAN-Pairs</code> (type 20) for advertising FGL-VLAN mappings.</li></ul><p>All switches MUST support E-L1CS. E-L1CS PDUs MUST NOT exceed 1,470 bytes but longer received ones are processed normally.</p>",
-      "plainLanguage": "<p>If two helpers use different name tags for the same class, kids get confused when the helper changes. So helpers compare lists and warn the teacher if the lists disagree.</p>"
+      "title": "Port-Shutdown Messages",
+      "content": "<p>A TRILL switch normally learns that a neighbouring port has failed only after it misses a number of Hellos, which can take many seconds. The Port-Shutdown message reports such an event explicitly. It is an RBridge Channel message using RBridge Channel Protocol number 0x006, and its payload is a list of Port IDs for the ports that have failed or are being shut down.</p><p>For robustness a switch sends a configurable number of copies separated by a configurable interval: the default is two copies at 20 milliseconds, configurable from one to three copies and from 0 to 1,000 milliseconds. The message SHOULD be sent at priority 7 and SHOULD NOT be marked drop eligible. When a port failure is detected, the message is sent as a sequential unicast through the rest of the campus to every RBridge that had an adjacency with that port and that advertises support for the message.</p><p>On receipt a switch checks the ingress nickname against its own adjacencies and drops the adjacencies listed in the message. A shutdown planned within one second is announced by broadcast through the port being shut down. A port coming back up needs no message, because sending Hellos out of the port says so. This document also updates <a href='/rfc7177'>RFC 7177</a> so that receiving this message moves the affected adjacency to the Detect state.</p>",
+      "plainLanguage": "<p>When a port fails, the switch that owns it sends a short message naming the failed ports. Neighbours read it and drop their link to those ports straight away, instead of waiting for the usual timeout. The message is repeated a couple of times so that it is not lost.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "10",
+      "title": "Encoding Appointments and VLAN Mappings",
+      "content": "<p>Four APPsub-TLVs are defined for use inside a TRILL GENINFO TLV in E-L1CS FS-LSPs. Type 17, AppointmentBitmap, names the RBridge being appointed and the first VLAN ID, then uses one bit per VLAN to list the VLANs it covers, which suits VLANs in a small numeric range. Type 18, AppointmentList, names the appointee and then lists 12-bit VLAN IDs one after another, which suits VLANs spread over a wide range. Type 19, FGL-VLAN-Bitmap, and type 20, FGL-VLAN-Pairs, let a switch advertise the mapping it applies between VLAN IDs and FGLs (Fine-Grained Labels).</p><p>The mapping matters because a VLAN ID in native traffic is carried inside a TRILL Data packet as an Inner.Label, and the mapping configured at the Appointed Forwarder is the mapping that is performed. Since the Appointed Forwarder for a VLAN can change, all TRILL switches on a link that are configured with a mapping SHOULD use the same one, and SHOULD advertise it so that consistency can be checked automatically. A switch SHOULD compare what it sees with its own mapping and alert the operator when they disagree, unless the disagreement lasts no longer than the switch's Holding Time.</p>",
+      "plainLanguage": "<p>The document defines four small sub-messages for carrying appointment and mapping data in link-state advertisements. One packs VLAN numbers into a row of bits, one lists them one by one, and two carry the label mapping that each switch uses for a VLAN.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
-      "title": "Security",
-      "content": "<p>The document does not change the security considerations of the TRILL base protocol in Section 6 of <a href='/rfc6325'>RFC 6325</a>. Port-Shutdown messages use the RBridge Channel facility and SHOULD be secured with the Channel Header Extension; unsecured, they are a potential denial-of-service vector. E-L1CS FS-LSPs are IS-IS PDUs and can be protected with Authentication TLVs in the same way as Hellos or other IS-IS PDUs.</p>",
-      "plainLanguage": "<p>Anyone could shout a fake \"I am leaving!\" So the shout should carry a secret stamp that proves who sent it.</p>"
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The document does not change the security considerations of the TRILL base protocol, which are described in Section 6 of <a href='/rfc6325'>RFC 6325</a>.</p><p>Port-Shutdown messages are sent using the RBridge Channel facility. They SHOULD be secured with the RBridge Channel Header Extension, because an inadequately secured message of this kind is a potential denial-of-service vector. The E-L1CS FS-LSPs added by this document are a kind of IS-IS PDU, so they can be secured in the same way as Hellos and other IS-IS PDUs, by adding Authentication TLVs.</p>",
+      "plainLanguage": "<p>Nothing here changes the security rules of TRILL itself. The new port-shutdown message should be protected, because an attacker who forges one could make switches drop working links. The link-state advertisements can use the same authentication as ordinary IS-IS messages.</p>"
+    },
+    {
+      "id": "management",
+      "number": "11",
+      "title": "Management and Configuration",
+      "content": "<p>The document mainly adds optional enhancements. The only configuration parameters it defines are for the Port-Shutdown message: PShutdownRepeat, whose default is 2 and whose range is 1 to 3, and PShutdownDelay, whose default is 20 milliseconds and whose range is 0 to 1,000 milliseconds.</p><p>SNMPv3 support is provided by the TRILL base protocol, and MIBs have been specified for RBridges and for TRILL operations, but they do not cover these parameters. YANG modules for TRILL are anticipated.</p><p>The document also changes earlier specifications. It makes support for E-L1CS FS-LSPs mandatory in the TRILL base protocol, updates <a href='/rfc7177'>RFC 7177</a> to treat a Port-Shutdown message as an adjacency event, and replaces <a href='/rfc6439'>RFC 6439</a>, the earlier Appointed Forwarders document, with this one.</p>",
+      "plainLanguage": "<p>Almost nothing in TRILL needs configuring, and this document keeps it that way. It adds two settings for the port-shutdown message, the number of copies and the gap between them, and leaves the rest to the existing TRILL management objects.</p>"
     }
   ],
   "viz": [
     {
-      "type": "key-grid",
-      "anchor": "operation",
+      "type": "timeline",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "SIX WAYS TO BECOME OR STOP BEING APPOINTED FORWARDER (RFC 8139, SECTION 2)",
+      "caption": "The TRILL documents this one depends on",
       "data": {
-        "items": [
+        "events": [
           {
-            "title": "Assumption",
-            "text": "The DRB decides to act as forwarder for a VLAN itself."
+            "year": 2011,
+            "label": "TRILL base protocol",
+            "rfc": 6325
           },
           {
-            "title": "E-L1CS appointment",
-            "text": "The DRB sends appointments in E-L1CS FS-LSPs."
+            "year": 2011,
+            "label": "Appointed Forwarders, replaced by this document",
+            "rfc": 6439
           },
           {
-            "title": "Hello appointment",
-            "text": "The DRB sends appointments in TRILL Hellos."
+            "year": 2014,
+            "label": "TRILL adjacency, including the DRB election",
+            "rfc": 7177
           },
           {
-            "title": "DRB election",
-            "text": "A change of DRB changes which appointments apply."
-          },
-          {
-            "title": "Port-Shutdown message",
-            "text": "A port failure or shutdown is announced."
-          },
-          {
-            "title": "Local configuration",
-            "text": "Enabling or disabling VLANs, or trunk and point-to-point settings."
+            "year": 2017,
+            "label": "This document",
+            "rfc": 8139
           }
         ]
       }
     },
     {
       "type": "compare-table",
-      "anchor": "data-model",
+      "anchor": "design",
       "position": "after",
-      "caption": "NEW APPSUB-TLVS ADDED BY RFC 8139",
+      "caption": "The two ways an appointment reaches the other switches",
       "data": {
         "columns": [
-          "Type",
-          "Name",
-          "Purpose"
+          "Aspect",
+          "E-L1CS FS-LSP method",
+          "TRILL Hello method"
         ],
         "rows": [
           {
             "cells": [
-              "17",
-              "AppointmentBitmap",
-              "Appoint a switch for compact VLAN ranges"
+              "Where it is sent",
+              "E-L1CS FS-LSPs sent on the link",
+              "A TRILL Hello on the Designated VLAN"
             ]
           },
           {
             "cells": [
-              "18",
-              "AppointmentList",
-              "Appoint a switch for listed VLAN IDs"
+              "Seen by legacy RBridges",
+              "No",
+              "Yes"
             ]
           },
           {
             "cells": [
-              "19",
-              "FGL-VLAN-Bitmap",
-              "Advertise FGL-VLAN mappings with a bit map"
+              "Room for the data",
+              "Not limited by the size of a Hello",
+              "About 1,000 bytes available"
             ]
           },
           {
             "cells": [
-              "20",
-              "FGL-VLAN-Pairs",
-              "Advertise FGL-VLAN mappings as pairs"
+              "Timing",
+              "The same IS-IS timing constants as link-state flooding",
+              "At least once per Holding Time"
             ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "design",
+      "position": "after",
+      "caption": "The six ways a switch can be appointed or unappointed",
+      "data": {
+        "items": [
+          {
+            "title": "Assumption of appointment",
+            "text": "The DRB decides to act as Appointed Forwarder for a VLAN."
+          },
+          {
+            "title": "E-L1CS appointment",
+            "text": "Appointments the DRB sent in E-L1CS FS-LSPs."
+          },
+          {
+            "title": "Hello appointment",
+            "text": "Appointments the DRB sent in a TRILL Hello."
+          },
+          {
+            "title": "DRB election",
+            "text": "A change in which port won the election for the link."
+          },
+          {
+            "title": "Port-Shutdown message",
+            "text": "A neighbour reports that a port has gone down."
+          },
+          {
+            "title": "Local configuration",
+            "text": "An operator changes VLAN or trunk settings on a port."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "AppointmentBitmap APPsub-TLV: the four fixed fields before the bit map",
+      "data": {
+        "title": "AppointmentBitmap APPsub-TLV",
+        "bytes": 8,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 16,
+            "desc": "APPsub-TLV type, set to 17 for AppointmentBitmap.",
+            "value": "17"
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "4 plus the size of the bit map in bytes. Less than 4 is corrupt."
+          },
+          {
+            "key": "appointee-nickname",
+            "name": "Appointee Nickname",
+            "bits": 16,
+            "desc": "The nickname of the TRILL switch being appointed as forwarder."
+          },
+          {
+            "key": "starting-vlan-id",
+            "name": "RESV and Starting VLAN ID",
+            "bits": 16,
+            "desc": "4 reserved bits sent as zero, then the smallest VLAN ID the bit map covers."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "encoding",
+      "position": "after",
+      "caption": "Code points registered by this document",
+      "data": {
+        "items": [
+          {
+            "code": "17",
+            "label": "AppointmentBitmap",
+            "desc": "Lists appointed VLANs as a bit map, for VLANs in a small range."
+          },
+          {
+            "code": "18",
+            "label": "AppointmentList",
+            "desc": "Lists appointed VLAN IDs one by one, for VLANs in a wide range."
+          },
+          {
+            "code": "19",
+            "label": "FGL-VLAN-Bitmap",
+            "desc": "Advertises the VLAN ID to Fine-Grained Label mapping as a bit map."
+          },
+          {
+            "code": "20",
+            "label": "FGL-VLAN-Pairs",
+            "desc": "Advertises the VLAN ID to Fine-Grained Label mapping as a list of pairs."
+          },
+          {
+            "code": "0x006",
+            "label": "Port-Shutdown channel protocol",
+            "desc": "RBridge Channel Protocol number used by the Port-Shutdown message."
           }
         ]
       }
@@ -203,47 +302,62 @@
   "references": [
     {
       "number": "[RFC6325]",
-      "text": "Perlman, R., et al., \"Routing Bridges (RBridges): Base Protocol Specification\", RFC 6325, July 2011.",
+      "text": "Perlman, R., Eastlake 3rd, D., Dutt, D., Gai, S., and A. Ghanwani, \"Routing Bridges (RBridges): Base Protocol Specification\", RFC 6325, July 2011.",
       "rfc": 6325
     },
     {
-      "number": "[RFC7177]",
-      "text": "Eastlake 3rd, D., et al., \"Transparent Interconnection of Lots of Links (TRILL): Adjacency\", RFC 7177, May 2014.",
-      "rfc": 7177
-    },
-    {
-      "number": "[RFC7176]",
-      "text": "Eastlake 3rd, D., et al., \"Transparent Interconnection of Lots of Links (TRILL) Use of IS-IS\", RFC 7176, May 2014.",
-      "rfc": 7176
+      "number": "[RFC6439]",
+      "text": "Perlman, R., Eastlake, D., Li, Y., Banerjee, A., and F. Hu, \"Routing Bridges (RBridges): Appointed Forwarders\", RFC 6439, November 2011.",
+      "rfc": 6439
     },
     {
       "number": "[RFC7172]",
-      "text": "Eastlake 3rd, D., et al., \"Transparent Interconnection of Lots of Links (TRILL): Fine-Grained Labeling\", RFC 7172, May 2014.",
+      "text": "Eastlake 3rd, D., Zhang, M., Agarwal, P., Perlman, R., and D. Dutt, \"Transparent Interconnection of Lots of Links (TRILL): Fine-Grained Labeling\", RFC 7172, May 2014.",
       "rfc": 7172
     },
     {
-      "number": "[RFC7780]",
-      "text": "Eastlake 3rd, D., et al., \"Transparent Interconnection of Lots of Links (TRILL): Clarifications, Corrections, and Updates\", RFC 7780, February 2016.",
-      "rfc": 7780
+      "number": "[RFC7176]",
+      "text": "Eastlake 3rd, D., Senevirathne, T., Ghanwani, A., Dutt, D., and A. Banerjee, \"Transparent Interconnection of Lots of Links (TRILL) Use of IS-IS\", RFC 7176, May 2014.",
+      "rfc": 7176
+    },
+    {
+      "number": "[RFC7177]",
+      "text": "Eastlake 3rd, D., Perlman, R., Ghanwani, A., Yang, H., and V. Manral, \"Transparent Interconnection of Lots of Links (TRILL): Adjacency\", RFC 7177, May 2014.",
+      "rfc": 7177
     },
     {
       "number": "[RFC7178]",
-      "text": "\"Transparent Interconnection of Lots of Links (TRILL): RBridge Channel Support\", RFC 7178.",
+      "text": "Eastlake 3rd, D., Manral, V., Li, Y., Aldrin, S., and D. Ward, \"Transparent Interconnection of Lots of Links (TRILL): RBridge Channel Support\", RFC 7178, May 2014.",
       "rfc": 7178
     },
     {
-      "number": "[RFC6439]",
-      "text": "Perlman, R., et al., \"Routing Bridges (RBridges): Appointed Forwarders\", RFC 6439, November 2011.",
-      "rfc": 6439
+      "number": "[RFC7356]",
+      "text": "Ginsberg, L., Previdi, S., and Y. Yang, \"IS-IS Flooding Scope Link State PDUs (LSPs)\", RFC 7356, September 2014.",
+      "rfc": 7356
+    },
+    {
+      "number": "[RFC7780]",
+      "text": "Eastlake 3rd, D., Zhang, M., Perlman, R., Banerjee, A., Ghanwani, A., and S. Gupta, \"Transparent Interconnection of Lots of Links (TRILL): Clarifications, Corrections, and Updates\", RFC 7780, February 2016.",
+      "rfc": 7780
+    },
+    {
+      "number": "[RFC7978]",
+      "text": "Eastlake 3rd, D., Umair, M., and Y. Li, \"Transparent Interconnection of Lots of Links (TRILL): RBridge Channel Header Extension\", RFC 7978, September 2016.",
+      "rfc": 7978
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

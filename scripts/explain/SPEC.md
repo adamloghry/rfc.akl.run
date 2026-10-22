@@ -490,6 +490,7 @@ Your unit's `tier` sets how much to write. The validator enforces the section co
   - **Clear sentences.** Active voice, a clear subject ("The server replies", not "A reply is sent"), concrete verbs, about 20 words or fewer.
   - **Concrete over figurative.** Describe the real mechanism. Use a comparison only when it is accurate and helps; never use a metaphor that hides how the protocol actually behaves.
   - **Accurate and complete for its purpose.** It must agree with the section it sits beside and with the RFC text; every number in it follows the rules below. Leaving out detail is fine; changing the meaning is not.
+  - **Never the old framing.** The site used to call this "ELI5" and to write it for a 10-year-old; that is retired. The words "ELI5", "Like I'm 5" and "10-year-old" are rejected by the validator, in the plain-language text and in the prose beside it. Name the standard instead: "ISO Plain Language".
 - **Every number, size, constant, port, code and date must appear in the RFC text** (or the unit metadata). If you are not sure, leave it out. Do not round, convert or compute new figures.
 - **Do not invent** implementations, products, deployments, adoption statistics, history or later events that the RFC text does not state. "Where this stands now" comes from `status`, `obsoletedBy`, `updatedBy` and what the text says.
 - **Status, stated plainly:** if the RFC is Historic, obsoleted or updated, say so in `today` and in `tldr.outcome`, and link the newer RFC (`/<number>/`). Do not present an obsoleted protocol as current.

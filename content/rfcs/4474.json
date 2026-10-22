@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines a way to securely identify who sent a SIP message, which matters especially between domains. It adds an Identity header carrying a signature and an Identity-Info header pointing to the signer's certificate. It is a proposed standard. It was replaced by RFC 8224.</p>",
   "plainLanguage": {
-    "summary": "<p>A signature on a letter that proves who really wrote it, plus a note saying where to look up the signer. A newer note replaced it.</p>"
+    "summary": "<p>The sender of a SIP request writes its own name in the request, and nothing stops it writing a name it does not own. This RFC lets the sender's own domain sign that name, so the receiving domain can check the signature.</p><p>The signature covers the important parts of the request, so it cannot be copied onto a different message without breaking.</p>"
   },
   "questions": [
     "sip identity header",
@@ -22,18 +22,18 @@
   ],
   "subtitle": "A signed Identity header lets a domain vouch for who really sent a SIP request.",
   "tldr": {
-    "problem": "The From header of a SIP request can be filled in with anything, so impersonation is easy, and the existing SIP security options (Digest, TLS, S/MIME) do not let a stranger check who sent a request.",
-    "mechanism": "An authentication service in the sender's domain authenticates the sender, signs a hash of key header fields and the body with the domain's certificate, and adds an Identity header plus an Identity-Info header that points to the certificate.",
-    "outcome": "A receiving domain can verify the signature and know the sender's domain authorized that From value. RFC 4474 was obsoleted by RFC 8224.",
+    "problem": "The From header of a SIP request can be filled in with anything, so impersonation is easy, and the security options already in SIP do not let a stranger check who sent a request.",
+    "mechanism": "An authentication service in the sender's domain authenticates the sender, signs a hash of selected header fields and the body with the domain certificate, and adds an Identity header plus an Identity-Info header pointing to that certificate.",
+    "outcome": "A receiving domain can verify the signature and know that the sender's domain authorized the From value. RFC 4474 was obsoleted by RFC 8224.",
     "outcomeLabel": "Status today"
   },
   "facts": [
     {
-      "label": "Algorithm defined",
-      "value": "rsa-sha1"
+      "label": "Signature algorithm",
+      "value": "rsa-sha1, which every implementation must support"
     },
     {
-      "label": "Minimum RSA key",
+      "label": "Minimum RSA key length",
       "value": "1024 bits"
     },
     {
@@ -41,15 +41,19 @@
       "value": "3600 seconds"
     },
     {
-      "label": "New response codes",
-      "value": "428, 436, 437, 438"
+      "label": "New SIP response codes",
+      "value": "428, 436, 437 and 438"
     },
     {
       "label": "Not protected",
       "value": "CANCEL requests"
+    },
+    {
+      "label": "Certificate media type",
+      "value": "application/pkix-cert"
     }
   ],
-  "today": "<p>RFC 4474 is a Proposed Standard that was obsoleted by <a href='/rfc8224'>RFC 8224</a>, which is the specification to read for SIP identity today.</p>",
+  "today": "<p>RFC 4474 was a Proposed Standard and has been obsoleted by <a href='/rfc8224'>RFC 8224</a>, which is the specification to read for authenticated identity in SIP today.</p>",
   "glossary": [
     "sip",
     "sip-proxy",
@@ -57,43 +61,53 @@
     "digital-signature",
     "certificate",
     "replay-attack",
-    "nonce"
+    "nonce",
+    "address-of-record",
+    "certificate-authority",
+    "digest-authentication"
   ],
   "sections": [
     {
       "id": "motivation",
       "number": "1",
-      "title": "Why SIP Needs Authenticated Identity",
-      "content": "<p>A SIP request names its sender in the <code>From</code> header field, but whoever controls a user agent can fill that field in arbitrarily. RFC 4474 notes that impersonation is therefore very simple, which defeats authorization policies such as a presence service checking subscribers against a whitelist, or a person reading a displayed Caller-ID.</p><p>The security tools in <a href='/rfc3261'>RFC 3261</a> do not solve this well. Few user agents have the end-user certificates needed for S/MIME, and Digest authentication needs a prearranged shared secret between originator and destination. Chained trust through mutual TLS between proxies is weaker than something checkable end to end. The <code>P-Asserted-Identity</code> approach only gives hop-by-hop trust inside a managed network of mutually trusting nodes.</p><p>This document instead defines an <strong>identity</strong> as a SIP URI, usually the address-of-record (AoR) such as <code>sip:alice@atlanta.example.com</code>, and lets the sender's own domain vouch for it. Its scope is SIP requests; responses are left for future work.</p>",
-      "plainLanguage": "<p>Anyone can write any name on the outside of an envelope. This gives the sender's post office a way to prove the name on the envelope is real.</p>"
+      "title": "Why SIP Needs a Signed Identity",
+      "content": "<p>SIP (Session Initiation Protocol) lets a user agent, the program on a phone or computer, set up calls and other sessions. A request names its sender in the <code>From</code> header field, but whoever controls the user agent can fill that field in with anything at all, so impersonation is very simple today.</p><p>Many SIP services decide what to allow from an authorization policy. A presence service might compare the identity of a subscriber against a whitelist before accepting a subscription. An Internet telephone application might display the caller's identification, and a person might review it before answering. In both cases an attacker tries to get around the policy by impersonating someone.</p><p>The security tools in <a href='/rfc3261'>RFC 3261</a> do not close this gap well. Few user agents hold the end-user certificates that S/MIME needs, and Digest authentication needs a secret that the sender and the receiver already share. Chained trust through mutual TLS between proxies is weaker than an assertion that can be checked end to end. The <code>P-Asserted-Identity</code> approach only gives hop-by-hop trust inside a managed network of mutually trusting nodes, which does not fit wide Internet use.</p><p>This document defines an identity as a SIP URI, usually the address-of-record used to reach a user, such as <code>sip:alice@atlanta.example.com</code>, and lets the sender's own domain vouch for it. The scope is SIP requests; responses are left for future work.</p>",
+      "plainLanguage": "<p>Nothing stops a SIP request from claiming to come from anyone. This RFC lets the sender's own domain sign that claim, so the receiving domain can check the signature.</p>"
     },
     {
       "id": "architecture",
-      "number": "2",
-      "title": "Authentication Service and Verifier",
-      "content": "<p>The design adds two roles. An <strong>authentication service</strong> is a proxy server or user agent that holds the private key of a domain certificate. A proxy is the common choice because it usually has a stable hostname, a certificate and access to registrar capabilities for authenticating users. A <strong>verifier</strong> checks the result.</p><p>In the overview, Alice at <code>example.com</code> sends an INVITE over TLS to her domain's authentication service. It authenticates her, perhaps with a Digest challenge, and checks that she may use the identity in <code>From</code>. It then hashes selected headers and the body, signs the hash with the domain certificate and inserts an <code>Identity</code> header and a companion <code>Identity-Info</code> header. Bob's domain checks the signature, and so can Bob's user agent server.</p><p>The service must first confirm it is responsible for the domain in <code>From</code>; if not, it must not add an Identity header. It must add a <code>Date</code> header and a <code>Content-Length</code> header if missing, and it should reject a request whose Date differs from its own clock by more than ten minutes. Proxies must not remove or modify an existing Identity or Identity-Info header.</p>",
-      "plainLanguage": "<p>Alice's post office checks that she is who she says she is, puts a seal on her letter, and leaves a note saying where to see what the seal looks like. Bob's post office checks the seal.</p>"
-    },
-    {
-      "id": "header-format",
-      "number": "3",
-      "title": "The Identity and Identity-Info Headers",
-      "content": "<p>The signed value is built from a canonical string of fields joined by a vertical bar: the <code>From</code> addr-spec, the <code>To</code> addr-spec, the Call-ID, the CSeq number and method, the Date, the Contact addr-spec (empty if there is no Contact) and the message body. The result is signed with the algorithm named by the <code>alg</code> parameter of <code>Identity-Info</code>.</p><p>The only algorithm defined is <code>rsa-sha1</code>, which every implementation must support. It uses sha1WithRSAEncryption with a base64 result, and an RSA key of 1024 bits or longer must be used. <code>Identity-Info</code> carries a URI, which must dereference to the signer's certificate, plus a required <code>alg</code> parameter. Implementations must support HTTP and HTTPS URIs, and the resource has the form <code>application/pkix-cert</code>.</p><p>Each header can appear only once in a message. The mechanism does not protect CANCEL, and the headers must not appear in CANCEL. When a certificate is rolled over, services should give each new certificate a new URI and keep older ones available for longer than the plausible lifetime of a SIP message, for which an hour would most likely suffice.</p>",
-      "plainLanguage": "<p>The seal is made from the important parts of the letter, such as who it is from, who it is for and when it was sent. If anyone changes those parts, the seal no longer matches.</p>"
+      "number": "4",
+      "title": "The Authentication Service and the Verifier",
+      "content": "<p>The design adds two roles. An <strong>authentication service</strong> is a proxy server or user agent that holds the private key of a domain certificate. A proxy is the common choice, because a proxy usually has a stable hostname, a certificate, and access to the registrar functions that authenticate users in its domain. A <strong>verifier</strong> is the entity that checks the result. The two roles may sit in the same entity or in different ones.</p><p>The overview runs through one case. Alice, whose address-of-record is <code>sip:alice@example.com</code>, wants to reach <code>sip:bob@example.org</code>. She sends an INVITE over TLS to the authentication service proxy of her domain. It authenticates her, perhaps with a Digest challenge, and checks that she may use the identity in the <code>From</code> field. It then hashes selected headers and the body, signs the hash with the domain certificate, and puts the signature in a new <code>Identity</code> header. A companion <code>Identity-Info</code> header tells Bob where to get the certificate.</p><p>When Bob's domain receives the request, it verifies the signature and can conclude that the domain named in the <code>From</code> field authenticated the user and allowed that value. The same check can be done by Bob's user agent server.</p>",
+      "plainLanguage": "<p>Alice's own domain checks who she is and signs the request. Bob's domain checks that signature and the certificate it was made with. Both sides can then rely on the name in the From header.</p>"
     },
     {
       "id": "procedures",
-      "number": "4",
-      "title": "Verifier Behavior and Error Codes",
-      "content": "<p>A verifier works in order. It first gets the signing domain's certificate, ideally from a cache indexed by the Identity-Info URI, and validates it by the procedures of RFC 3280. It then checks that the signer is authoritative for the domain in <code>From</code>, rebuilds the canonical string and compares it with the signature, and finally validates the Date, Contact and Call-ID headers. The Date must fall in the certificate's validity period.</p><p>Four new SIP response codes report failures. If local policy requires an Identity header and none is present, the verifier sends 428. The other codes cover an unusable certificate URI, an untrusted certificate and a signature mismatch.</p><p>User agents need no change for the mechanism to work, but a user agent that can verify identities should show signed From values differently from unsigned ones. The sending UAC should protect its link to the authentication service, for example with TLS, because the mechanism gives no integrity between those two.</p>",
-      "plainLanguage": "<p>The receiver looks up the seal, rebuilds it from the letter, and checks the two match. If they do not, it sends back a note saying what went wrong.</p>"
+      "number": "5",
+      "title": "What the Authentication Service Does",
+      "content": "<p>The authentication service works in four steps. First it extracts the identity from the <code>From</code> field and, for a SIP or SIPS URI, compares the host part with the domains it is responsible for. If it is not responsible for that identity, it should process and forward the request normally, but it MUST NOT add an Identity header.</p><p>Second, it authenticates the sender and decides whether that sender may claim the identity. When the role is played by a proxy, it can challenge the request with a 407 response using the Digest scheme, or reuse the result of an earlier Digest authentication on the same TLS connection. A domain may apply its own policy, for example requiring the username in the <code>Proxy-Authorization</code> header to match the <code>From</code> field exactly, or allowing any of several URIs that map to one username. The check runs on the addr-spec of the <code>From</code> field; the display-name is not converted.</p><p>Third, it checks that any existing <code>Date</code> header is accurate. The RECOMMENDED maximum discrepancy is ten minutes, and a request whose Date is further out SHOULD be rejected. The service MUST also check that the Date falls inside the validity period of its certificate. Fourth, it forms the signature, adds the <code>Identity</code> header and then the <code>Identity-Info</code> header, and forwards the message normally.</p><p>The service must add a <code>Date</code> header and a <code>Content-Length</code> header if the request does not already carry them.</p>",
+      "plainLanguage": "<p>The service first checks that the request really comes from a domain it is responsible for. Then it authenticates the sender and checks that the sender is allowed to use the name in the From header. It then signs the request and forwards it.</p>"
+    },
+    {
+      "id": "header-format",
+      "number": "9",
+      "title": "The Identity and Identity-Info Headers",
+      "content": "<p>Each of the two headers may appear only once in a message. <code>Identity</code> holds the signed digest: a quoted string of 32 hexadecimal characters, which is the base64 form of the signature. <code>Identity-Info</code> holds a URI from which the signer's certificate can be obtained, plus a required <code>alg</code> parameter naming the algorithm.</p><p>The signed value is built from a canonical string of parts of the request, joined by a vertical bar: the addr-spec of the <code>From</code> field, the addr-spec of the <code>To</code> field, the Call-ID, the number and method from the <code>CSeq</code> field, the <code>Date</code> field, the addr-spec of the <code>Contact</code> field, and the message body. If there is no Contact header, its place in the string is empty. If there is no body, the string ends with the last bar.</p><p>The only algorithm defined is <code>rsa-sha1</code>, and every implementation must support it. It is the SHA-1 hash of the canonical string signed with RSA, as described in <a href='/rfc3370'>RFC 3370</a>, and base64 encoded as in <a href='/rfc3548'>RFC 3548</a>. An RSA key of 1024 bits or longer must be used.</p><p>The URI in <code>Identity-Info</code> must dereference to the signer's certificate. Implementations must support HTTP and HTTPS URIs, and the resource must be of the form <code>application/pkix-cert</code>. Because the certificate at that address can change, the RFC asks for a new URI for each new certificate and for the older ones to stay available for longer than the likely lifetime of a SIP message, which it says an hour would most likely cover.</p>",
+      "plainLanguage": "<p>The signature is made from the important parts of the request: who it is from, who it is for, when it was sent and the body. Change any of them and the signature no longer matches.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "What the Verifier Does",
+      "content": "<p>A verifier works in four steps. It acquires the certificate for the signing domain, ideally from a cache indexed by the Identity-Info URI, and validates it following <a href='/rfc3280'>RFC 3280</a>, checking that it has not expired, that the chain is valid back to a trusted certification authority, and that it is not on a revocation list. If the URI cannot be dereferenced it MUST return 436, and if the certificate cannot be validated it MUST return 437.</p><p>It then checks that the signer is authoritative for the domain in the <code>From</code> field. It rebuilds the canonical string and verifies the signature against it; if the signature does not match, it MUST return 438. Finally it validates the <code>Date</code>, <code>Contact</code> and <code>Call-ID</code> headers, and checks that the Date falls within the validity period of the certificate.</p><p>If local policy requires an Identity header and the request has none, the verifier sends 428, asking for the request to be sent again with one.</p>",
+      "plainLanguage": "<p>The verifier fetches the certificate, rebuilds the signed text from the request, and checks the two against each other. If they do not match, it sends back a message saying what went wrong.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "5",
+      "number": "13",
       "title": "Security and Privacy Considerations",
-      "content": "<p>The signature covers more than <code>From</code> to stop replay and cut-and-paste attacks. The To header stops a valid Identity header being pasted into a request for another user. CSeq stops an INVITE being turned into a BYE. Verifiers must reject a stale Date (the recommended window is 3600 seconds) and must remember Call-IDs from valid requests for at least that long, so the Call-ID acts as a nonce.</p><p>The document is honest about limits. The headers cannot protect themselves, since an attacker can strip them. The display-name is not signed, because display-names are not unique. The Via header is not signed because an attacker could insert a further Via after it. An authentication service in an intermediary could still alter a message before signing, so users must trust their local domain. Domain certificates are checked by the procedures of RFC 2818 Section 3.1, and self-signed certificates should not be trusted without a prior key exchange.</p><p>For privacy, anonymous URIs with a valid domain can be signed, but <code>anonymous.invalid</code> cannot. Because Contact is signed, a privacy service cannot alter it after authentication without breaking the signature.</p>",
-      "plainLanguage": "<p>The seal also covers the date and a one-of-a-kind ID, so a stolen seal cannot be used on a new letter or reused later. It cannot stop someone from tearing the seal off, though.</p>"
+      "content": "<p>The signature covers more than the <code>From</code> field, so that a valid signature cannot be moved to a different request. The <code>To</code> field stops an Identity header being pasted into a request for another user. The <code>CSeq</code> field stops an INVITE being turned into a BYE. Verifiers must reject a stale Date, and the recommended window is 3600 seconds, and they must record Call-IDs from valid requests for at least that long, so the Call-ID acts as a nonce. Because a SIP user agent never generates the same Call-ID twice, a replayed Identity header is caught either by the Call-ID or by the stale Date.</p><p>The document is candid about the limits. The two headers cannot protect themselves, because an attacker can strip them. The display-name is not signed, since display-names are not unique. The <code>Via</code> header is not signed, because an attacker could insert a further Via after it, and the RFC says securing Via needs SIPS. An authentication service in the middle could alter a message before signing it, so users must trust their local domain. The correspondence between the domain in the <code>From</code> field and the certificate subject follows the procedures of <a href='/rfc2818'>RFC 2818</a>, Section 3.1, and self-signed certificates should not be trusted without a prior key exchange.</p><p>For privacy, anonymous URIs with a valid domain can be signed, but <code>anonymous.invalid</code> cannot, because no authority for that domain can exist. Because the <code>Contact</code> field is signed, a privacy service cannot alter it after authentication without breaking the signature. The RFC also notes that the presence of a valid Identity header should not be the only factor in an authorization decision.</p>",
+      "plainLanguage": "<p>The seal also covers the date and a call identifier that is never reused, so a copied seal cannot be used on a new request or reused later. It cannot stop someone from removing the seal, though.</p>"
     }
   ],
   "viz": [
@@ -101,20 +115,20 @@
       "type": "sequence",
       "anchor": "architecture",
       "position": "after",
-      "caption": "OVERVIEW OF OPERATIONS (RFC 4474, SIMPLIFIED)",
+      "caption": "Signing a request in the sender's domain",
       "data": {
         "lanes": [
           {
             "key": "alice",
-            "label": "Alice's UA"
+            "label": "Alice's user agent"
           },
           {
             "key": "auth",
-            "label": "Authentication service (example.com)"
+            "label": "Authentication service"
           },
           {
             "key": "bob",
-            "label": "Bob's domain (example.org)"
+            "label": "Bob's domain"
           }
         ],
         "messages": [
@@ -123,36 +137,61 @@
             "to": "auth",
             "label": "INVITE over TLS",
             "color": "blue",
-            "note": "From carries Alice's identity."
+            "note": "The From header carries Alice's address-of-record."
+          },
+          {
+            "from": "auth",
+            "to": "alice",
+            "label": "407 Proxy Authentication Required",
+            "color": "neutral",
+            "note": "The service challenges Alice so it can check her with Digest authentication."
+          },
+          {
+            "from": "alice",
+            "to": "auth",
+            "label": "INVITE with credentials",
+            "color": "blue",
+            "note": "Alice resends the request with an Authorization header."
           },
           {
             "from": "auth",
             "to": "bob",
-            "label": "INVITE + Identity + Identity-Info",
+            "label": "INVITE with Identity and Identity-Info",
             "color": "green",
-            "note": "Signed with the example.com certificate."
+            "note": "The service signs the request with the certificate of Alice's domain."
           },
           {
             "from": "bob",
             "to": "bob",
-            "label": "Verify signature",
+            "label": "Verify the signature",
             "color": "neutral",
-            "note": "Bob's user agent server can do the same check."
+            "note": "Bob's user agent server can run the same check."
           }
         ]
       }
     },
     {
-      "type": "opcodes",
-      "anchor": "procedures",
+      "type": "code",
+      "anchor": "header-format",
       "position": "after",
-      "caption": "RESPONSE CODES REGISTERED BY RFC 4474",
+      "caption": "The canonical string the signature covers, as printed in RFC 4474 Section 10.1",
+      "data": {
+        "title": "Digest string for the example INVITE",
+        "lang": "text",
+        "code": "sip:alice@atlanta.example.com|sip:bob@biloxi.example.org|\na84b4c76e66710|314159 INVITE|Thu, 21 Feb 2002 13:02:03 GMT|\nsip:alice@pc33.atlanta.example.com|v=0\no=UserA 2890844526 2890844526 IN IP4 pc33.atlanta.example.com\ns=Session SDP\nc=IN IP4 pc33.atlanta.example.com\nt=0 0\nm=audio 49172 RTP/AVP 0\na=rtpmap:0 PCMU/8000"
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "Response codes registered by RFC 4474",
       "data": {
         "items": [
           {
             "code": "428",
             "label": "Use Identity Header",
-            "desc": "Policy requires an Identity header and the request has none.",
+            "desc": "Local policy requires an Identity header and the request has none.",
             "highlight": true
           },
           {
@@ -168,7 +207,7 @@
           {
             "code": "438",
             "label": "Invalid Identity Header",
-            "desc": "The signature does not match the digest-string the verifier computed."
+            "desc": "The signature does not match the digest string the verifier computed."
           }
         ]
       }
@@ -177,7 +216,7 @@
   "references": [
     {
       "number": "[1]",
-      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
+      "text": "Rosenberg, J., Schulzrinne, H., Camarillo, G., Johnston, A., Peterson, J., Sparks, R., Handley, M., and E. Schooler, \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
       "rfc": 3261
     },
     {
@@ -187,32 +226,37 @@
     },
     {
       "number": "[3]",
-      "text": "Peterson, J., \"A Privacy Mechanism for the Session Initiation Protocol (SIP)\", RFC 3323.",
+      "text": "Peterson, J., \"A Privacy Mechanism for the Session Initiation Protocol (SIP)\", RFC 3323, November 2002.",
       "rfc": 3323
     },
     {
       "number": "[4]",
-      "text": "Rosenberg, J. and H. Schulzrinne, \"Session Initiation Protocol (SIP): Locating SIP Servers\", RFC 3263.",
+      "text": "Rosenberg, J. and H. Schulzrinne, \"Session Initiation Protocol (SIP): Locating SIP Servers\", RFC 3263, June 2002.",
       "rfc": 3263
     },
     {
+      "number": "[9]",
+      "text": "Housley, R., Polk, W., Ford, W., and D. Solo, \"Internet X.509 Public Key Infrastructure Certificate and Certificate Revocation List (CRL) Profile\", RFC 3280, April 2002.",
+      "rfc": 3280
+    },
+    {
       "number": "[11]",
-      "text": "Rescorla, E., \"HTTP Over TLS\", RFC 2818.",
+      "text": "Rescorla, E., \"HTTP Over TLS\", RFC 2818, May 2000.",
       "rfc": 2818
     },
     {
       "number": "[12]",
-      "text": "Jennings, C., Peterson, J., and M. Watson, \"Private Extensions to the Session Initiation Protocol (SIP) for Asserted Identity within Trusted Networks\", RFC 3325.",
+      "text": "Jennings, C., Peterson, J., and M. Watson, \"Private Extensions to the Session Initiation Protocol (SIP) for Asserted Identity within Trusted Networks\", RFC 3325, November 2002.",
       "rfc": 3325
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

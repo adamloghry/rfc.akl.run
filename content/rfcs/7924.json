@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>TLS handshakes usually carry fairly static data such as the server certificate chain and the list of trusted certificate authorities, which can be large. This proposed standard defines a TLS extension that lets a client say it already has a cached copy, so the server can skip sending it. That makes handshakes smaller, which matters most on constrained networks and devices.</p>",
   "plainLanguage": {
-    "summary": "<p>When you visit a friend you already know, you do not need to show your ID every time. This lets a computer say it already remembers the long paperwork, so the other side does not repeat it.</p>"
+    "summary": "<p>RFC 7924 adds an option to the TLS handshake for clients that have already talked to the same server. The client says which parts of the earlier handshake it has kept, and the server replies with a short fingerprint instead of repeating the full certificate. The link is only shortened when the fingerprint matches, so a changed certificate is still sent in full.</p>"
   },
   "questions": [
     "tls cached information extension",
@@ -20,11 +20,11 @@
     "Handshake",
     "Certificates"
   ],
-  "subtitle": "A TLS extension that lets a client say it already has the server's certificate, so the server can send a short hash instead.",
+  "subtitle": "A TLS extension that lets a client say it already has the server's certificate, so the server sends a fingerprint instead of the certificate chain.",
   "tldr": {
-    "problem": "TLS handshakes carry fairly static, sometimes large data such as the server certificate chain and the list of trusted CAs, which hurts on low-bandwidth, lossy networks such as IEEE 802.15.4, Bluetooth Low Energy or low power wide area networks.",
-    "mechanism": "The client sends a cached_info extension in its ClientHello listing fingerprints (SHA-256 hashes) of cached objects. If they are still current, the server replies with the extension and sends only the hash in place of the full Certificate or CertificateRequest message.",
-    "outcome": "Handshakes get smaller when the cache is valid, and stale caches fall back to the full message. The fingerprints are sent in the clear, which can let an observer correlate exchanges.",
+    "problem": "A TLS handshake carries data that rarely changes, such as the server certificate chain, and that data is expensive on low bandwidth or lossy radio links used by small devices.",
+    "mechanism": "The client caches the certificate from an earlier handshake and sends a cached_info extension in its ClientHello with the SHA-256 fingerprint of that certificate. The server compares the fingerprint with its own, and if they match it sends only the fingerprint in place of the certificate chain.",
+    "outcome": "A repeated handshake can be much smaller, which matters on constrained links. The RFC also requires the client to cache only from completed handshakes, so a man-in-the-middle cannot seed the cache with a false certificate.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -33,19 +33,27 @@
       "value": "cached_info(25)"
     },
     {
-      "label": "Cached types",
-      "value": "cert (1), cert_req (2)"
+      "label": "Cached information types",
+      "value": "cert(1) and cert_req(2)"
     },
     {
-      "label": "Fingerprint hash",
+      "label": "Fingerprint algorithm",
       "value": "SHA-256"
     },
     {
-      "label": "hash_value length",
-      "value": "1 to 255 bytes"
+      "label": "Maximum hash_value length",
+      "value": "255 octets"
+    },
+    {
+      "label": "CachedObject array limit",
+      "value": "2^16-1"
+    },
+    {
+      "label": "Example certificate payload",
+      "value": "566 bytes"
     }
   ],
-  "today": "<p>RFC 7924 is a Proposed Standard from July 2016 and, per the registry metadata, has not been obsoleted or updated. It describes the extension in terms of TLS 1.2 (<a href='/rfc5246'>RFC 5246</a>).</p>",
+  "today": "<p>RFC 7924 is a Proposed Standard and has not been obsoleted. It registers the cached_info extension type, number 25, in the TLS extension registry, and establishes the TLS CachedInformationType Values registry with the entries cert and cert_req.</p>",
   "glossary": [
     "tls",
     "tls-extension",
@@ -54,57 +62,62 @@
     "certificate-authority",
     "chain-of-trust",
     "fingerprint",
-    "x509-certificate"
+    "x509-certificate",
+    "session-resumption",
+    "sha-256",
+    "server-name-indication",
+    "raw-public-key",
+    "mitm"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Shrinking the TLS Handshake",
-      "content": "<p>Cutting the data in a Transport Layer Security handshake helps where devices sit on low-bandwidth, lossy radio links, as with the Internet of Things (the RFC names IEEE 802.15.4, Bluetooth Low Energy and low power wide area networks). The server certificate can be big, especially when bundled with the intermediate CA certificates up to the root.</p><p>The typical flow is: the client and server run a full handshake and the client caches the server's certificate. Later, without using session resumption, the client connects again and attaches the <code>cached_info</code> extension to its ClientHello with the fingerprint of the cached certificate. If the certificate has not changed, the server does not resend the certificate or chain. If it has changed, the server sends it in full so the client can update its cache. The description applies equally to DTLS.</p>",
-      "plainLanguage": "<p>The first time, the server shows everything. Next time you say 'I remember it, here is its nickname', and the server skips the long show.</p>"
+      "title": "Why Shrink the Handshake",
+      "content": "<p>Reducing the amount of information exchanged during a Transport Layer Security handshake helps performance where devices are on a network with low bandwidth and lossy radio technology. With the Internet of Things such environments exist, for example when devices use IEEE 802.15.4, Bluetooth Low Energy or low power wide area networks.</p><p>The RFC defines a TLS extension that allows a client and a server to exclude transmission of information cached in an earlier TLS handshake. The typical exchange works like this. The client and the server first perform a full handshake, and the client caches the certificate the server provided. Later, when the client connects again without using session resumption, it attaches the <code>cached_info</code> extension to the ClientHello, saying that it has the certificate and giving its fingerprint. If the server's certificate has not changed, the server does not need to send the certificate and its chain again. If the information has changed, which the fingerprint reveals, the certificate payload is transmitted so the client can update its cache.</p>",
+      "plainLanguage": "<p>Small devices on radio links pay for every byte of the handshake, and much of it is the server's certificate, which rarely changes. This extension lets a returning client say 'I already have that certificate' and prove it with a fingerprint, so the server can send a short value instead of the whole chain.</p>"
     },
     {
       "id": "message-format",
-      "number": "2",
-      "title": "The cached_info Extension",
-      "content": "<p>The extension type is <code>cached_info(25)</code>, used in ClientHello and ServerHello. In the ClientHello its data is a <code>CachedInformation</code> structure: a list of 1 to 2^16-1 <code>CachedObject</code> entries. Each client entry has a <code>type</code> and a <code>hash_value</code> of 1 to 255 bytes. In the server's reply, each entry holds only the type. A client MAY send several objects of the same type, for example when it cached multiple certificates from a server.</p><p>Two types are defined:</p><ul><li><code>cert</code> (1): the client sends the fingerprint of the server's Certificate message.</li><li><code>cert_req</code> (2): the client sends the fingerprint of the CertificateRequest message.</li></ul><p>New hash algorithms may be added by registering new types. They MUST NOT have a collision resistance worse than SHA-256.</p>",
-      "plainLanguage": "<p>The client holds up a little tag for each thing it remembers. There are two kinds of tags: one for the server's ID card and one for the server's list of whose ID cards it accepts.</p>"
+      "number": "3",
+      "title": "The Cached Information Extension",
+      "content": "<p>The RFC defines a new extension type, <code>cached_info(25)</code>, used in the ClientHello and ServerHello messages. The extension data in a ClientHello must contain the CachedInformation structure. The client may send multiple CachedObjects of the same CachedInformationType, for example when it has cached several certificates from one server.</p><p>The structures are:</p><pre>enum {\n     cert(1), cert_req(2) (255)\n} CachedInformationType;\n\nstruct {\n     select (type) {\n       case client:\n         CachedInformationType type;\n         opaque hash_value&lt;1..255&gt;;\n       case server:\n         CachedInformationType type;\n       } body;\n} CachedObject;\n\nstruct {\n     CachedObject cached_info&lt;1..2^16-1&gt;;\n} CachedInformation;</pre><p>Two types are defined. With the type set to <strong>'cert'</strong>, the client must include the fingerprint of the Certificate message in the hash_value field, computed by the procedure in Section 5 with the Certificate message as the input data. With the type set to <strong>'cert_req'</strong>, the client must include the fingerprint of the CertificateRequest message, computed the same way with that message as the input.</p><p>New cached information types can be added, and new message digest algorithms can be added by registering a new type that uses them. The RFC recommends reusing hash algorithms already available with TLS ciphersuites, and requires that new hash algorithms must not have collision resistance worse than SHA-256.</p>",
+      "plainLanguage": "<p>The extension is a list of entries. Each entry names a type of information and, when the client sends it, the fingerprint of that information. Two types are defined now: the server's certificate and the server's certificate request. A client may list several entries of the same type when it has more than one certificate cached.</p>"
     },
     {
       "id": "operation",
-      "number": "3",
+      "number": "4",
       "title": "How the Exchange Works",
-      "content": "<p>A client MAY include the extension, and if it does it MUST list at least one <code>CachedObject</code>. A server that supports it MAY echo the extension in the ServerHello, which tells the client that the listed types are supported. The server MUST only list types that the client offered. For each type it lists, it MUST alter the transmission of the matching message.</p><p>The server compares the client's hash with the fingerprint of the message it would normally send. On a mismatch it MUST send the information in full and MUST NOT list that type in the extension. When a server hosts many sites, the client SHOULD use the Server Name Indication extension (<a href='/rfc6066'>RFC 6066</a>) to pick the right cache entry.</p><p>For <code>cert</code>, the server MAY send a shortened Certificate message when it implements the extension, a policy enables it, and the fingerprint matches. The message then holds just <code>hash_value</code>. The same pattern applies to <code>cert_req</code>, and only when the server wants to request a client certificate. The extension is compatible with raw public keys (<a href='/rfc7250'>RFC 7250</a>).</p>",
-      "plainLanguage": "<p>The server checks the client's nickname against its own records. If it matches, it just says the nickname back. If the ID has changed, it hands over the new one.</p>"
+      "content": "<p>A client that supports the extension may include it in the ClientHello; if it does, it must contain one or more CachedObject attributes. A server that supports the extension may include it in the ServerHello, and by returning the extension it indicates that it supports the cached information types it lists. For each indicated type the server must alter the transmission of the corresponding payload, and it must only list types the client also indicated in its ClientHello.</p><p>Because the client sends a fingerprint of what it cached, the server can tell whether that information is stale. If the server notices a mismatch between the client's cached data and its own, it must include the information in full and must not list that type in the cached_info extension. In a hosting environment a client may have cached several items for one server, so the RFC recommends that the client uses the Server Name Indication extension to help the server select the right cached information.</p><p>For the 'cert' type the server may send a modified Certificate message, a structure holding only a hash_value of at most 255 octets, under three conditions: the server software implements the extension, the 'cert' type is enabled by policy, and the server has compared the client's hash_value with the fingerprint of the Certificate message it would normally send. That comparison is what makes sure the cached information is current.</p><p>The extension also interacts with raw public keys as defined in <a href='/rfc7250'>RFC 7250</a>, which lets the certificate payload carry only the SubjectPublicKeyInfo instead of a full certificate. When the negotiated certificate type is a raw public key, the server omits a certificate payload that contains an ASN.1 certificate structure with the included SubjectPublicKeyInfo rather than the full certificate chain.</p><p>For the 'cert_req' type the server may send a modified CertificateRequest message, again just a hash_value, under the same three conditions plus one more: the server wants to request a certificate from the client.</p>",
+      "plainLanguage": "<p>The client lists what it has cached, the server replies with the list it agrees to use, and from then on the server sends short fingerprints instead of the full messages for those types. If the fingerprints do not match what the server would send now, the server sends the full information and leaves that type out of its reply. The client tells the server which cached item to use through the Server Name Indication extension.</p>"
     },
     {
       "id": "algorithms",
-      "number": "4",
-      "title": "Fingerprint Calculation",
-      "content": "<p>The fingerprint is the SHA-256 hash (<a href='/rfc6234'>RFC 6234</a>) of the input data, which is the Certificate or CertificateRequest message. It covers only that structure, not record-layer type or length information. The output of SHA-256 is used as is.</p><p>Its purpose is to help the server select the right information, not to carry the security of the handshake, which depends on the private key. If an attacker injects a wrong fingerprint, either it matches nothing and the server falls back to a full exchange, or it points to data the client has not cached and the exchange fails later when the signature does not verify against the client's cached public key.</p>",
-      "plainLanguage": "<p>The fingerprint is a short code made by scrambling the whole document the same way every time, so two sides can check they mean the same document without sending it.</p>"
+      "number": "5",
+      "title": "Calculating the Fingerprint",
+      "content": "<p>The fingerprint for the two cached information objects must be computed in two steps. First, compute the SHA-256 hash of the input data, where the input data depends on the cached information type: the Certificate message for 'cert' and the CertificateRequest message for 'cert_req'. Second, use the output of that hash. The RFC notes that the computed hash covers only the input data structure and not any type and length information of the record layer.</p><p>The purpose of the fingerprint is to help the server select the correct information. For a Certificate message it identifies the server certificate, and the corresponding private key, for use with the rest of the handshake. A server may hold more than one certificate, so the hash has to be long enough to keep the probability of collisions low. The design also aims to reduce the amount of data exchanged, and the security of the handshake depends on the private key rather than on the size of the fingerprint. The fingerprint is therefore a way to stop the server accidentally selecting the wrong information.</p><p>If an attacker injects an incorrect fingerprint there are two outcomes. Either the fingerprint relates to no cached state, in which case the server falls back to a full exchange, or the attacker manages to inject a fingerprint that refers to data the client has not cached, in which case the exchange fails later, when the client verifies the digital signature. The signature verification fails because the public key the client cached does not correspond to the private key the server used to sign the message.</p>",
+      "plainLanguage": "<p>The fingerprint is a SHA-256 hash of the exact message the server would have sent. It is not a secret and it does not protect the handshake; it only tells the server which cached item to pick. A wrong fingerprint either causes a full handshake or makes the signature check fail later, so it cannot be used to slip a false certificate past the client.</p>"
     },
     {
       "id": "examples",
-      "number": "5",
-      "title": "Example Exchange",
-      "content": "<p>In the full handshake the server sends its Certificate in the first flight, and the client stores it. In a later handshake the client adds <code>cached_info=(cert)</code> to its ClientHello. The server answers with <code>cached_info=(cert)</code> in the ServerHello, and its Certificate message now carries just the fingerprint. The rest of the handshake, from ClientKeyExchange to Finished, proceeds as usual. Appendix A of the RFC shows a hash calculation over an example certificate with a NIST P256 elliptic curve public key.</p>",
-      "plainLanguage": "<p>Round one: the server shows its whole ID. Round two: the client says 'I remember it' and the server only repeats its nickname.</p>"
+      "number": "6",
+      "title": "The Example Exchanges",
+      "content": "<p>In a regular full TLS handshake, the server provides its certificate in the certificate payload, which lets the client store it for later. When the client returns to the same server and uses the cached_info extension, it indicates support with the extension in the ClientHello and states that it stored the certificate from the earlier exchange by indicating the 'cert' type. The server acknowledges support of the 'cert' type in the ServerHello, and by including the value there it tells the client that the certificate payload now contains the fingerprint of the certificate instead of the certificate itself as defined in <a href='/rfc5246'>RFC 5246</a>.</p><p>Appendix A works the calculation through with a certificate holding a NIST P256 elliptic curve public key, shown with an ASN.1 decoder. When that certificate is put into a TLS or DTLS Certificate message it is preceded by a message header, in the example 0b 00 02 36 00 02 33 00 02 00 02 30: a one byte type field indicating a Certificate message, a three byte length field of 566 bytes for the payload, a three byte length of 563 bytes for the whole certificates list, and a three byte length of 560 bytes for the certificate itself. Applying SHA-256 to the Certificate message, which starts with 0b 00 02 and ends with 9E 57 45, produces the hash 0x086eefb4859adfe977defac494fff6b73033b4ce1f86b8f2a9fc0c6bf98605af.</p>",
+      "plainLanguage": "<p>The RFC walks through a complete example with a real certificate, showing the bytes that go into the message and the resulting fingerprint. The point of the example is that the fingerprint is computed over the message exactly as it would have been sent, so the server and client agree on the same bytes.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
-      "title": "Security Considerations",
-      "content": "<p>Fingerprints travel in the unencrypted ClientHello and ServerHello, so an observer may be able to correlate independent TLS exchanges. Server certificates are public, but other cached types that may be defined later might not be, so deployers should decide whether this fits their privacy goals, and if worried avoid sending fingerprints in the clear.</p><p>Omitted parts are not in the handshake transcript covered by Finished, but since the fingerprints are exchanged in the early messages, they are included.</p><p>Clients MUST only cache information from legitimate sources, and only after a TLS exchange completes successfully. Otherwise an attacker could inject wrong data into the cache and mount man-in-the-middle attacks.</p>",
-      "plainLanguage": "<p>Because the nickname is said out loud, someone listening might notice you keep visiting the same friend. And only write a name down in your memory once you are sure it was really your friend.</p>"
+      "number": "7",
+      "title": "Security and Privacy",
+      "content": "<p>The mechanism references stored state using a fingerprint. Sending a fingerprint of cached information in an unencrypted handshake, as the ClientHello and ServerHello do, may allow an attacker or observer to correlate independent TLS exchanges. Some information elements used by the extension, such as server certificates, are public objects and usually do not carry sensitive information, but other types that are not yet defined may. Implementers and deployers should therefore decide whether the cached information fits their security and privacy goals, and where there are concerns it is advised to avoid sending the fingerprint of the data objects in clear.</p><p>Because the omitted parts are no longer sent, they are not included in the transcript of the handshake in the TLS Finish message. However, since the client and the server communicate the hash values of the cached data in the initial handshake messages, the fingerprints are included in the TLS Finish message.</p><p>Clients must ensure that they only cache information from legitimate sources. When a client populates the cache from a TLS exchange, it must only cache information after the successful completion of that exchange, so that an attacker cannot inject incorrect information into the cache. Failing to do so allows man-in-the-middle attacks.</p>",
+      "plainLanguage": "<p>A fingerprint sent in the clear can let an observer link two separate TLS connections that share a cached item. The RFC also insists that the client only stores what a completed handshake gave it, because a cache seeded by an attacker is a way to mount a man-in-the-middle attack later.</p>"
     },
     {
       "id": "iana-considerations",
-      "number": "7",
-      "title": "IANA Considerations",
-      "content": "<p>IANA added <code>cached_info(25)</code> to the TLS ExtensionType Values registry and created the TLS CachedInformationType Values registry. Its entries are 0 (Reserved), 1 (<code>cert</code>), 2 (<code>cert_req</code>) and 224-255 (Reserved for Private Use). Values 0-63 need Standards Action and values 64-223 need Specification Required.</p>",
-      "plainLanguage": "<p>A public list was started so everyone agrees what number means which kind of remembered item.</p>"
+      "number": "8",
+      "title": "Registry Entries",
+      "content": "<p>The RFC adds an entry to the existing TLS ExtensionType registry defined in <a href='/rfc5246'>RFC 5246</a>, for <code>cached_info(25)</code>.</p><p>It also establishes a new registry, the TLS CachedInformationType Values registry, holding the reserved value 0, <code>cert</code> at 1, <code>cert_req</code> at 2, and the range 224 to 255 reserved for private use. Values from 0 to 63 are added by Standards Action, and values from 64 to 223 are added by Specification Required, following the terminology of <a href='/rfc5226'>RFC 5226</a>.</p>",
+      "plainLanguage": "<p>Two registry changes are needed. The extension gets the number 25 in the TLS extension registry, and a new registry lists the kinds of information that can be cached: 1 for the certificate and 2 for the certificate request, with room for private values at the top of the range.</p>"
     }
   ],
   "viz": [
@@ -112,7 +125,7 @@
       "type": "sequence",
       "anchor": "examples",
       "position": "after",
-      "caption": "A LATER HANDSHAKE USING CACHED_INFO (SIMPLIFIED FROM THE RFC)",
+      "caption": "The cached-info exchange drawn in Figure 4 of the RFC",
       "data": {
         "lanes": [
           {
@@ -128,66 +141,103 @@
           {
             "from": "client",
             "to": "server",
-            "label": "ClientHello + cached_info=(cert)",
+            "label": "CLIENTHELLO cached_info=(cert)",
             "color": "blue",
-            "note": "Offers the fingerprint of the cached certificate."
+            "note": "The client says it has the certificate cached and sends its fingerprint."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "ServerHello + cached_info=(cert)",
+            "label": "SERVERHELLO cached_info=(cert)",
             "color": "green",
-            "note": "Acknowledges the cert type."
+            "note": "The server confirms that it supports the 'cert' type."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "Certificate (hash only)",
+            "label": "CERTIFICATE (fingerprint only)",
             "color": "green",
-            "note": "Fingerprint instead of the full chain."
+            "note": "The certificate payload carries the fingerprint instead of the certificate."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "The extension structures as written in the RFC",
+      "data": {
+        "title": "cached_info extension",
+        "lang": "text",
+        "code": "enum {\n     cached_info(25), (65535)\n} ExtensionType;\n\nenum {\n     cert(1), cert_req(2) (255)\n} CachedInformationType;\n\nstruct {\n     select (type) {\n       case client:\n         CachedInformationType type;\n         opaque hash_value<1..255>;\n       case server:\n         CachedInformationType type;\n       } body;\n} CachedObject;"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "What the two handshakes put on the wire",
+      "data": {
+        "columns": [
+          "Handshake message",
+          "Full exchange",
+          "With cached_info"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "ClientHello",
+              "No extension",
+              "cached_info=(cert) with the fingerprint"
+            ]
           },
           {
-            "from": "client",
-            "to": "server",
-            "label": "ClientKeyExchange ... Finished",
-            "color": "blue"
+            "cells": [
+              "ServerHello",
+              "No extension",
+              "cached_info=(cert)"
+            ]
           },
           {
-            "from": "server",
-            "to": "client",
-            "label": "ChangeCipherSpec, Finished",
-            "color": "green"
+            "cells": [
+              "Certificate",
+              "Full certificate chain",
+              "Fingerprint only"
+            ]
+          },
+          {
+            "cells": [
+              "CertificateRequest",
+              "Full request",
+              "Fingerprint only"
+            ]
           }
         ]
       }
     },
     {
       "type": "opcodes",
-      "anchor": "message-format",
+      "anchor": "iana-considerations",
       "position": "after",
-      "caption": "CACHEDINFORMATIONTYPE VALUES",
+      "caption": "The TLS CachedInformationType Values registry",
       "data": {
         "items": [
           {
             "code": "0",
-            "label": "Reserved",
-            "desc": "Not usable."
+            "label": "Reserved"
           },
           {
             "code": "1",
-            "label": "cert",
-            "desc": "Fingerprint of the server Certificate message.",
-            "highlight": true
+            "label": "cert"
           },
           {
             "code": "2",
-            "label": "cert_req",
-            "desc": "Fingerprint of the CertificateRequest message."
+            "label": "cert_req"
           },
           {
             "code": "224-255",
-            "label": "Private Use",
-            "desc": "Reserved for private use."
+            "label": "Reserved for private use"
           }
         ]
       }
@@ -211,22 +261,27 @@
     },
     {
       "number": "[RFC7250]",
-      "text": "Wouters, P., Ed., et al., \"Using Raw Public Keys in Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)\", RFC 7250, June 2014.",
+      "text": "Wouters, P., Ed., Tschofenig, H., Ed., Gilmore, J., Weiler, S., and T. Kivinen, \"Using Raw Public Keys in Transport Layer Security (TLS) and Datagram Transport Layer Security (DTLS)\", RFC 7250, June 2014.",
       "rfc": 7250
     },
     {
       "number": "[RFC6574]",
       "text": "Tschofenig, H. and J. Arkko, \"Report from the Smart Object Workshop\", RFC 6574, April 2012.",
       "rfc": 6574
+    },
+    {
+      "number": "[RFC5226]",
+      "text": "Narten, T. and H. Alvestrand, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 5226, December 2008.",
+      "rfc": 5226
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

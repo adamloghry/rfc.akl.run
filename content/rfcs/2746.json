@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes an approach for providing RSVP resource reservation services across IP tunnels. It is a standards-track document at the proposed standard level.</p>",
   "plainLanguage": {
-    "summary": "<p>Reserving a fast lane works on normal roads. This explains how to also reserve it inside a hidden tunnel.</p>"
+    "summary": "<p>RFC 2746 lets RSVP reservations cross an IP-in-IP tunnel. The two routers at the ends of the tunnel run a second RSVP session between themselves, and traffic that has been given a reservation is wrapped in an extra UDP header so the routers in between can tell it apart from ordinary traffic. A new object in the RSVP messages says which end-to-end session belongs to which tunnel session, and only the two tunnel endpoints need to change.</p>"
   },
   "questions": [
     "how does rsvp work over tunnels",
@@ -22,185 +22,244 @@
   ],
   "subtitle": "How tunnel endpoints run RSVP between themselves so end-to-end reservations can cross an IP-in-IP tunnel.",
   "tldr": {
-    "problem": "RSVP messages and data inside an IP-in-IP tunnel are wrapped in an outer header that intermediate routers cannot tell apart, so reservations cannot cover the tunnel.",
-    "mechanism": "The tunnel entry and exit routers run a second, recursive RSVP session between themselves. Data that has a reservation is wrapped in an outer IP and UDP header, and a new SESSION_ASSOC object ties each end-to-end session to its tunnel session.",
-    "outcome": "End-to-end reservations can be carried over a tunnel with changes only at its two ends. If an endpoint does not support the scheme, the tunnel acts as a best-effort link.",
-    "outcomeLabel": "Why it matters"
+    "problem": "An IP-in-IP tunnel looks like an ordinary link to the routers inside it, but RSVP messages cannot travel through one. They are wrapped in an outer IP header with a protocol number other than 46 and no Router-Alert option, so the routers in between cannot see them, and the wrapper carries nothing that tells reserved traffic from ordinary traffic.",
+    "mechanism": "The memo applies RSVP recursively over the tunnel: the entry router sends PATH messages and the exit router sends RESV messages for a separate RSVP session between the two of them. Data that has a reservation is wrapped in an extra UDP header, so intermediate routers can tell sessions apart with ordinary RSVP filter matching, and a new SESSION_ASSOC object tells the exit router which end-to-end session maps to which tunnel session.",
+    "outcome": "The scheme supports both a single static reservation for the whole tunnel and a separate reservation per end-to-end flow, and it needs changes only at the two tunnel endpoints. The cost is two new RSVP objects and an extra UDP header on reserved traffic, and the memo notes that the first RESV of an end-to-end session fixes its mapping for the life of that reservation.",
+    "outcomeLabel": "How it works"
   },
   "facts": [
     {
-      "label": "SESSION_ASSOC class",
-      "value": "192"
+      "label": "RSVP IP protocol number",
+      "value": "46"
     },
     {
-      "label": "NODE_CHAR class (proposed)",
-      "value": "128"
+      "label": "Tunnel session UDP port",
+      "value": "363, as assigned by IANA"
+    },
+    {
+      "label": "SESSION_ASSOC class",
+      "value": "192"
     },
     {
       "label": "NODE_CHAR length",
       "value": "8 bytes"
     },
     {
-      "label": "Destination UDP port",
-      "value": "363 (IANA assigned)"
+      "label": "NODE_CHAR class",
+      "value": "128 proposed, in the 10bbbbbb range"
     },
     {
-      "label": "Admission control failure error code",
-      "value": "01"
+      "label": "Tunnel types",
+      "value": "1 best effort, 2 aggregate, 3 per flow"
     }
   ],
-  "today": "<p>RFC 2746 is a Proposed Standard and the unit metadata lists no RFC that obsoletes or updates it. It builds on the RSVP specification in <a href='/rfc2205'>RFC 2205</a>.</p>",
+  "today": "<p>RFC 2746 is an Internet standards track document at the Proposed Standard level, and it has not been obsoleted. It describes one way of carrying RSVP reservations across IP-in-IP tunnels, using the SESSION_ASSOC and NODE_CHAR objects, and it builds on the tunneling mechanisms described in documents such as <a href='/rfc2003'>RFC 2003</a> and <a href='/rfc2473'>RFC 2473</a>.</p>",
   "glossary": [
     "rsvp",
     "quality-of-service",
     "udp",
     "ipsec",
     "multicast",
-    "tcp-udp-port"
+    "tcp-udp-port",
+    "ip-tunnel",
+    "ip-in-ip-encapsulation",
+    "tspec",
+    "flowspec"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem with Tunnels",
-      "content": "<p>IP-in-IP tunnels are widely used to carry datagrams through parts of the network that do not directly support a service, or to change routing behaviour, for example for multicast, mobile IP or virtual private networks. To deploy the RSVP framework (<a href='/rfc2205'>RFC 2205</a>) flexibly, it is desirable for tunnels to act as RSVP-controllable links.</p><p>Today that does not work. RSVP packets entering a tunnel get an outer IP header with a protocol number other than 46 (for IP-in-IP it is 4) and no Router-Alert option, which makes them invisible to RSVP routers between the tunnel endpoints. And with only an IP header as wrapper, nothing distinguishes packets that use reservations from those that do not, or packets of different RSVP sessions.</p><p>This document describes an enhancement that lets RSVP make reservations across IP-in-IP tunnels, with minimal changes to RSVP and the integrated services framework.</p>",
-      "plainLanguage": "<p>Once a message goes into a tunnel, the roads inside cannot see who is in the car, so they cannot give anyone a reserved lane.</p>"
+      "title": "Tunnels and the Problem for RSVP",
+      "content": "<p>IP-in-IP tunnels have become a widespread mechanism for transporting datagrams through the Internet. A tunnel is typically used to route packets through parts of the network that do not directly implement the desired service, such as IPv6, or to augment and modify the behaviour of the deployed routing architecture, for example multicast routing, Mobile IP and virtual private networks.</p><p>Many tunneling methods exist. <a href='/rfc2003'>RFC 2003</a> tunnels using an additional IPv4 header. <a href='/rfc2004'>RFC 2004</a> reduces the size of the inner IP header used that way when the original datagram is not fragmented. The generic tunneling method of <a href='/rfc2473'>RFC 2473</a> can tunnel either IPv4 or IPv6 packets within IPv6, and <a href='/rfc1933'>RFC 1933</a> describes tunneling IPv6 datagrams through IPv4 networks. <a href='/rfc1701'>RFC 1701</a> describes a generic routing encapsulation and <a href='/rfc1702'>RFC 1702</a> applies it to IPv4. <a href='/rfc1827'>RFC 1827</a> describes a mechanism that can tunnel an encrypted IP datagram.</p><p>From the point of view of ordinary best-effort IP delivery, a tunnel behaves like any other link: packets enter one end and are delivered to the other unless resource overload or an error loses them.</p><p>RSVP, the setup protocol of <a href='/rfc2205'>RFC 2205</a>, is one component of a framework designed to extend IP with several controlled classes of service over many kinds of link. To deploy it with the most flexibility, it is desirable for tunnels to act as RSVP-controllable links inside the network.</p><p>At the time of writing, RSVP signalling over tunnels is not possible. RSVP packets entering a tunnel are encapsulated with an outer IP header whose protocol number is something other than 46, which is 4 for IP-in-IP encapsulation, and they do not carry the Router-Alert option, so they are effectively invisible to the RSVP routers between the two tunnel endpoints. The current IP-in-IP encapsulation adds only an IP header as the external wrapper. It is therefore impossible to tell packets that use reservations from those that do not, or to tell apart packets belonging to different RSVP sessions, because the wrapper carries no distinguishing information such as a UDP port.</p>",
+      "plainLanguage": "<p>A tunnel wraps packets in a second IP header so they can cross a network that would not otherwise carry them. That wrapper hides RSVP messages from the routers inside the tunnel, and it carries nothing that says which packets have been given a reservation. The memo fixes both problems.</p>"
     },
     {
-      "id": "concepts",
-      "number": "2",
+      "id": "overview",
+      "number": "1",
       "title": "Three Kinds of Tunnel",
-      "content": "<p>A tunnel, like any link, can take part in an RSVP-aware network in one of three ways.</p><ul><li><strong>Type 1:</strong> no reservation or QoS support at all; a best-effort link. This is also what you get when an endpoint does not support this scheme.</li><li><strong>Type 2:</strong> the link can promise some overall level of resources but not allocate it to individual flows, such as a statically configured allocation.</li><li><strong>Type 3:</strong> the link can reserve for individual end-to-end flows, with tunnel reservations created and torn down dynamically as end-to-end reservations come and go.</li></ul><p>A tunnel may also mix type 2 and type 3 behaviour, and how an end-to-end session is treated is a matter of local policy. A tunnel whose reservation cannot be adjusted is a <strong>hard pipe</strong>; one whose reserved amount can be adjusted is a <strong>soft pipe</strong>.</p>",
-      "plainLanguage": "<p>Some tunnels have no reserved lane, some have one shared lane, and some can open a private lane for each traveller.</p>"
+      "content": "<p>A tunnel, like any link, can take part in an RSVP-aware network in one of three ways, depending on the capabilities of the equipment it is built from and on what the operator wants.</p><p>A <strong>type 1</strong> tunnel is a best-effort link. It does not support resource reservation or QoS control at all. Type 1 tunnels exist when at least one of the routers forming the tunnel endpoints does not support the scheme described in the memo, in which case the tunnel acts as a best-effort link and the goal is only to make sure that RSVP messages traverse it correctly and that the presence of the uncontrolled link is detected, as the integrated services framework requires.</p><p>A <strong>type 2</strong> tunnel can promise that some overall level of resources is available to carry traffic, but cannot allocate resources to individual flows. A configured resource allocation over a tunnel is the example given.</p><p>A <strong>type 3</strong> tunnel can make reservations for individual end-to-end data flows. The feature that distinguishes type 3 from type 2 is that in a type 3 tunnel new tunnel reservations are created and torn down dynamically as end-to-end reservations come and go.</p><p>When both ends of a tunnel can support RSVP over tunnels, the memo would like proper resources to be reserved along it. Depending on the requirements, that means putting one client's data flow into a larger aggregate reservation, which is the type 2 case, or making a separate reservation for the flow, which is the type 3 case.</p><p>The memo adds an important qualification. An RSVP reservation between the two tunnel endpoints does not mean that every router along the tunnel path supports RSVP. That is the same situation as an existing end-to-end RSVP session passing transparently through a cloud of routers that do not support RSVP.</p>",
+      "plainLanguage": "<p>There are three kinds of tunnel. A type 1 tunnel gives no guarantees at all. A type 2 tunnel holds a fixed amount of reserved capacity that several flows share. A type 3 tunnel makes and cancels a separate reservation for each flow. Whether the routers inside the tunnel support RSVP does not matter; the reservation is between the two ends.</p>"
     },
     {
       "id": "design",
-      "number": "3",
-      "title": "Recursive RSVP and Session Binding",
-      "content": "<p>The design goals are to coexist with most current IP-in-IP schemes, change RSVP as little as possible, touch only the two tunnel endpoints, and interoperate with routers that have not been upgraded, in which case the tunnel behaves as a non-RSVP link.</p><p>The basic idea is to apply RSVP <strong>recursively</strong> over the tunnel. The entry router Rentry sends PATH messages and the exit router Rexit sends RESV messages for tunnel sessions, using one or more Fixed-Filter style unicast reservations. The end-to-end session sees the tunnel as one logical link.</p><p>Packets that need a reservation are wrapped with an IP and a UDP header, and the UDP port numbers distinguish different sessions. All sessions between the same two routers share source address, destination address and destination UDP port; the source port identifies the session.</p><p>To tell Rexit which tunnel session an end-to-end session maps to, the RFC weighs three options (a new message, a new object on end-to-end PATH messages, or UDP-encapsulating the PATH messages) and chooses the new object because it is simpler and works even if Rexit does not support the scheme.</p>",
-      "plainLanguage": "<p>The two ends of the tunnel act like a sender and receiver, and hand each traveller a ticket number so both ends know which reserved lane belongs to whom.</p>"
+      "number": "2",
+      "title": "Design Goals and Basic Approach",
+      "content": "<p>The design is motivated by four goals: to coexist with most, if not all, current IP-in-IP tunneling schemes; to limit the changes to the RSVP specification to the minimum possible; to limit the necessary changes to only the two endpoints of a tunnel, which gives simpler deployment, lower overhead in the intermediate routers and less chance of failure when the set of intermediate routers changes because of a routing change; and to interoperate correctly with RSVP routers that have not been upgraded to handle RSVP over tunnels and with non-RSVP tunnel endpoint routers, in which case the tunnel behaves as a non-RSVP link.</p><p>The basic idea is to apply RSVP recursively over the tunnel portion of the path. In this new session, the tunnel entry point, called Rentry, sends PATH messages and the tunnel exit point, called Rexit, sends RESV messages, to reserve resources for the end-to-end sessions that cross the tunnel.</p><p>Four design decisions follow. One or more Fixed-Filter style unicast reservations between the two endpoints of the tunnel are used to reserve resources for the packets traversing it; in the type 2 case these are configured statically through a management interface, and in the type 3 case they are created and torn down on demand as end-to-end reservation requests come and go. Packets that do not require reservations are encapsulated in the normal way, being wrapped with an IP header only, naming the tunnel entry point as source and the exit point as destination. Data packets that do require resource reservations inside a tunnel must have some attribute other than the IP addresses visible to the intermediate routers, so that the routers can map the packet to an appropriate reservation; to let intermediate routers use standard RSVP filter specification handling, such packets are encapsulated by prepending an IP and a UDP header, and UDP port numbers distinguish packets of different RSVP sessions. The protocol number in the outer IP header is then UDP.</p><p>The memo explains the arrangement of the two endpoints and the routers between them. Rentry is the tunnel entry router that encapsulates the data into the tunnel. Some number of intermediate routers forward the data across the network based on the encapsulating IP header added by Rentry. Rexit is the endpoint of the tunnel: it decapsulates the data and forwards it based on the original, inner, IP header.</p>",
+      "plainLanguage": "<p>The memo keeps the changes small: only the two tunnel endpoints need to know about it, and the RSVP specification itself changes very little. The entry router and the exit router run a second RSVP session between them, and reserved data is given an extra UDP header so the routers in between can sort it out with the rules they already have.</p>"
     },
     {
       "id": "message-format",
-      "number": "4",
-      "title": "The SESSION_ASSOC and NODE_CHAR Objects",
-      "content": "<p>The <code>SESSION_ASSOC</code> object, class 192, carries the end-to-end SESSION object and the Sender FILTER-SPEC of the tunnel session it maps to. Ctype is sent as zero and ignored on receipt. Rentry adds it to end-to-end PATH messages, and Rexit records the association and removes the object before forwarding.</p><p>The <code>NODE_CHAR</code> object lets Rexit tell Rentry that it supports this scheme, through a single <strong>T bit</strong>. Its length is eight and the proposed class is 128, in the range that unknown receivers drop without an error report. Rexit appends it to RESV messages sent to Rentry, and Rentry removes it before forwarding upstream. A Rentry that does not support the scheme simply ignores it.</p>",
-      "plainLanguage": "<p>One note says which tunnel lane a traveller uses. Another note, with a single tick box, says that the far end knows how to do all this.</p>"
+      "number": "2.3",
+      "title": "Binding Sessions, and the Two New Objects",
+      "content": "<p>When an end-to-end RSVP session crosses an RSVP-capable tunnel there are two cases: mapping it to an existing tunnel RSVP session, which is the type 2 tunnel, or creating a new tunnel RSVP session for each end-to-end session, which is the type 3 tunnel. In both cases the tunnel session views the two tunnel endpoints as two end hosts with a unicast Fixed-Filter style reservation in between, while the end-to-end session views the tunnel as a single logical link on the path. A tunnel may combine type 2 and type 3 characteristics, and the choice of how an end-to-end session is treated is a matter of local policy.</p><p>The problem is that the entry router and the exit router have to agree on which end-to-end reservation maps to which tunnel reservation, so that changes in one are reflected in the other and errors reported by intermediate routers can be transformed correctly. The memo identified three possible mechanisms. One is a new RSVP message exchanged only between the two tunnel endpoints. The second is a new RSVP object attached to end-to-end PATH messages at Rentry, associating the end-to-end session with one of the tunnel sessions, and interpreted by Rexit. The third is to apply the same UDP encapsulation to the end-to-end PATH messages as to the data packets of the session, so that Rexit deduces the relation from the source UDP port when it decapsulates the message.</p><p>The third approach needs no new design, but it reserves extra resources for PATH messages, since they become subject to the tunnel reservation, and it needs to be known in advance whether Rexit supports RSVP over tunnels by UDP encapsulation. If Rentry encapsulates all the end-to-end PATH messages that way and Rexit does not understand it, the encapsulated PATH messages are lost at Rexit.</p><p>The first two options handle that case transparently, because they let Rexit pass on end-to-end PATH messages it receives through the tunnel, since they are decapsulated normally, while discarding the tunnel PATH messages, all without extra configuration. The memo chose the second option because it is simpler.</p><p><strong>SESSION_ASSOC</strong> is the new object. It carries a length field holding the size of the object in bytes, a class field that should be 192, a c-type field that should be sent as zero and ignored on receipt, the end-to-end SESSION object, and the Sender FILTER-SPEC of the tunnel session that the end-to-end session is mapped to. A Sender FILTER-SPEC is used in place of a SESSION object for the tunnel session because a tunnel session is identified primarily by its source port.</p><p><strong>NODE_CHAR</strong> is the second new object. It gives Rexit a way, other than through configuration, to tell Rentry that it is a tunnel endpoint supporting the scheme. A node that receives the object but does not understand it should drop it without producing any error report. The object uses a class number of the form 10bbbbbb, as defined in the RSVP specification, and for now carries a single bit of information, though it could in future describe other characteristics of an RSVP-capable node that are not part of the original RSVP specification. Its length should be set to eight bytes, the class value 128 is proposed, the c-type should be sent as zero and ignored on receipt, and the T bit shows that the node is an RSVP-tunnel capable node.</p><p>When Rexit receives an end-to-end reservation it appends a NODE_CHAR object with the T bit set to the RESV object, encapsulates the message and sends it to Rentry. Rentry then knows that Rexit implements the mechanism, so it creates or adjusts a tunnel session and associates it with the end-to-end session through a SESSION_ASSOC object. Rentry should remove the NODE_CHAR object before forwarding the RESV message upstream, and if Rentry does not support the mechanism it simply ignores the object and does not forward it further upstream.</p>",
+      "plainLanguage": "<p>The two ends of the tunnel have to agree on which end-to-end reservation belongs to which tunnel reservation. The memo does that with a new object, SESSION_ASSOC, carried in the PATH messages, and a second new object, NODE_CHAR, which is how the exit router tells the entry router that it understands the scheme.</p>"
     },
     {
-      "id": "procedures",
-      "number": "5",
-      "title": "Handling RSVP Messages at the Endpoints",
-      "content": "<p>Rentry encapsulates end-to-end PATH messages and sends them to Rexit. When the matching RESV reaches Rexit with a NODE_CHAR object attached, Rentry decides, from the PATH and RESV contents and local policy, whether and how to map the session. It then either creates a new tunnel session or adds to an existing one, and sends a PATH with SESSION_ASSOC. Rexit answers the tunnel PATH with a tunnel RESV that reserves resources inside the tunnel.</p><p>If an end-to-end PATH arrives at Rexit without SESSION_ASSOC, Rexit sets the Non_RSVP flag and the global break bit in the ADSPEC, unless it can safely use the tunnel sessions' worst-case parameters. With SESSION_ASSOC, Rexit composes the tunnel session's ADSPEC parameters into the end-to-end ADSPEC.</p><p>For a hard pipe, a request that would exceed the tunnel reservation is an admission control failure and a RESV_ERR with error code 01 goes back. For a soft pipe the tunnel reservation can be adjusted when end-to-end reservations arrive, change or leave, and the RFC suggests some hysteresis. A configured tunnel session stays active even when its last end-to-end session goes away. One stated limitation: the first RESV of an end-to-end session fixes its mapping for as long as the reservation is active.</p>",
-      "plainLanguage": "<p>The entry gate and exit gate exchange notes, agree on a lane, and the exit gate reserves it. If a lane is too small, the request is refused.</p>"
+      "id": "operation",
+      "number": "4",
+      "title": "Handling RSVP Messages at the Tunnel Endpoints",
+      "content": "<p>The memo lists the packet exchanges the design has to follow. Rentry encapsulates and sends end-to-end PATH messages over the tunnel to Rexit, where they are decapsulated and forwarded downstream. When the corresponding end-to-end RESV message arrives at Rexit, Rexit encapsulates it and sends it to Rentry. Based on some or all of the information in the end-to-end PATH messages, the flow specification in the end-to-end RESV message and local policies, Rentry decides whether and how to map the end-to-end session to a tunnel session. If it should be mapped, Rentry either sends a PATH message for a new tunnel session or updates an existing one. Rentry then sends an end-to-end PATH containing a SESSION_ASSOC object that ties the end-to-end session to the tunnel session, and Rexit records the association and removes the object before forwarding the PATH further. Rexit answers the tunnel PATH message with a tunnel RESV message, reserving resources inside the tunnel. Finally, Rentry applies UDP encapsulation to arriving packets only if a tunnel session reservation is actually in place for them.</p><p>At Rentry, a PATH message that refreshes a previously known end-to-end session leads to the path state being refreshed, and if the session is mapped to a tunnel session the refreshed PATH carries a SESSION_ASSOC object linking the two. A PATH from a new end-to-end session leads to path state being created with the outgoing interface set to the tunnel interface, and the message is sent on without a SESSION_ASSOC object. When an end-to-end PATH TEAR arrives, the message is forwarded to Rexit; if the session had a one-to-one mapping, or was the last of several mapping to a tunnel session, the tunnel session is torn down with a PATH TEAR, and otherwise a tunnel PATH message adjusting the traffic specification of the tunnel session is sent.</p><p>At Rexit, an encapsulated end-to-end PATH without a SESSION_ASSOC object means the entry router does not support the mechanism, so Rexit sets the Non_RSVP flag in the path state and the global break bit in the ADSPEC and forwards the message. If tunnel sessions exist and none of them has the Non_RSVP flag set, Rexit can instead take the worst-case path ADSPEC parameters from the existing tunnel sessions and update the end-to-end ADSPEC with them, which is a conservative estimate of the composed ADSPEC and avoids setting the break bit before the mapping information is available.</p><p>When an end-to-end PATH does carry a SESSION_ASSOC object and no association for that session exists yet, Rexit records it, and if the end-to-end PATH arrived before the tunnel PATH it creates path state for the tunnel session, treating the later tunnel PATH as an update. Before forwarding further, Rexit turns on the Non_RSVP flag in the end-to-end path state if it was on for the tunnel session. If the end-to-end PATH carries an ADSPEC object, Rexit composes the characterization parameters in it, taking the tunnel session's composed parameters as the local parameters of the logical link the tunnel implements and applying each parameter's composition function. The minimum path latency may account for the encapsulation and decapsulation delay, and the bandwidth estimate may account for the loss of bandwidth caused by the extra UDP header. If the end-to-end session has reservation state while the matching tunnel session does not, Rexit sends a tunnel RESV matching the reservation of the end-to-end session.</p><p>At Rexit, forwarding a RESV message upstream may reveal that one of the upstream interfaces is a tunnel. Rexit first checks whether a tunnel session is bound to the end-to-end session in the RESV. If not, the tunnel is treated as a non-RSVP link and Rexit appends a NODE_CHAR object with the T bit set and forwards the message over the tunnel interface. If a bound tunnel session is found, Rexit checks whether a reservation is already in place for it. A refresh of existing RESV state is sent through the tunnel with the NODE_CHAR object added, and for dynamic tunnel sessions the end-to-end RESV acts as a refresh for the tunnel session reservation state, while for configured tunnel sessions reservation state never expires.</p><p>A change in the end-to-end flow specification may also trigger a change in the tunnel session's, in which case Rexit sends a tunnel session RESV with a RESV_CONFIRM object. On a hard pipe, where the tunnel reservation cannot be adjusted, a new end-to-end reservation or a change in the resources requested may make the total exceed what the tunnel reserved. That is treated as an admission control failure, exactly as if RSVP requests exceeded the resources available over a hardware link, and a RESV_ERR message with error code 01 is sent back to the originator.</p><p>On a soft pipe, where the amount of allocated resources can be adjusted, the tunnel session is reduced whenever one of the end-to-end sessions using it goes away or is reduced, and the configured tunnel session stays active even after the last end-to-end session bound to it has gone, perhaps with a configured minimal flow specification. The memo notes that hysteresis is often appropriate, rather than adjusting the tunnel reservation up and down with each arriving or departing reservation, and that doing so requires the exit router to track the resources allocated to the tunnel and the resources actually in use by the end-to-end reservations separately.</p><p>At Rentry, a RESV that refreshes an existing reservation updates the reservation state and is forwarded upstream. A first RESV for an end-to-end session that carries a NODE_CHAR object with the T bit set causes Rentry to start the mapping between the end-to-end session and some, possibly new, tunnel session, based on the contents of the PATH and RESV messages and on local policies. If the session maps to an existing configured tunnel session, Rentry binds it there. If the session is allowed to set up a new tunnel session, Rentry creates tunnel session path state as if it were a source of data and starts sending tunnel-session PATH messages to Rexit, with the traffic specification computed from the original PATH by adjusting its parameters to include the tunnel overhead of the encapsulation. It also sends a PATH from the end-to-end session containing the SESSION_ASSOC object, and the receipt of that message at Rexit triggers an update of the end-to-end path state, which in turn makes Rexit send a tunnel RESV allocating resources inside the tunnel. If the end-to-end session is not allowed to use the tunnel resources, no association and no tunnel session are created.</p><p>The memo names one limitation: the first RESV message of an end-to-end session determines the mapping between that session and its counterpart over the tunnel, and as long as the reservation is active the mapping cannot change.</p>",
+      "plainLanguage": "<p>Once the mapping is decided, the two ends exchange four kinds of message: the end-to-end PATH, the end-to-end RESV coming back the other way, a tunnel PATH that sets up the reservation inside the tunnel, and a tunnel RESV that confirms it. The exit router also adjusts the reservation it holds in the tunnel as end-to-end reservations come and go, unless the tunnel is a hard pipe, in which case a request that does not fit is refused as an admission control failure.</p>"
     },
     {
       "id": "data-transfer",
-      "number": "6",
-      "title": "Forwarding Data and Other Details",
-      "content": "<p>Rentry uses the IP+UDP encapsulation only when a resource reservation, not just PATH state, is actually in place for the tunnel session that matches the packet. Otherwise it uses the tunnel's normal format. That keeps data decodable at Rexit.</p><p>The source UDP port is chosen by Rentry when it sets up the tunnel session, and conveyed in SESSION_ASSOC. The destination port should be the one assigned by IANA, 363. Errors on a tunnel session are relayed by Rentry or Rexit back to the end host. Since UDP-encapsulated packets should not be fragmented, entry routers must support tunnel MTU discovery as in <a href='/rfc2003'>RFC 2003</a>, or can use the Path MTU Discovery mechanism of <a href='/rfc2210'>RFC 2210</a>.</p><p>When several end-to-end sessions share one tunnel session, an aggregate Tspec is needed. The RFC leaves the semantics open; the simplest way is a sum, as in the Controlled-Load and Guaranteed service specifications (<a href='/rfc2211'>RFC 2211</a>, <a href='/rfc2212'>RFC 2212</a>).</p>",
-      "plainLanguage": "<p>Only travellers who really hold a reserved lane get the special wrapper. Everyone else goes through the tunnel the normal way.</p>"
+      "number": "5",
+      "title": "Forwarding Data, Ports and Other Details",
+      "content": "<p>When data packets arrive at Rentry, the router must decide whether to forward them with the normal IP-in-IP tunnel encapsulation or with the IP and UDP encapsulation the tunnel session expects. The decision is made by determining whether a resource reservation, and not merely path state, is actually in place for the tunnel session bound to the arriving packet, that is, whether the packet matches any active filter specification. If a reservation is in place, both Rentry and Rexit are RSVP-tunneling aware routers and the data will be decapsulated correctly at Rexit. If no tunnel session reservation is in place, the data is encapsulated in the tunnel's normal format, regardless of whether end-to-end path state covering the data is present.</p><p><strong>UDP port numbers.</strong> There may be several end-to-end RSVP sessions between the two endpoints, and they are distinguished by the source UDP port. The other components of the session identifier, the source and destination IP addresses and the destination UDP port, are identical for all such sessions. The source UDP port is chosen by Rentry when it establishes the initial path state for a new tunnel session, and it is conveyed to Rexit by the SESSION_ASSOC object. The destination UDP port used in tunnel sessions should be the one assigned by IANA, which is 363.</p><p><strong>Error reporting.</strong> When a tunnel session PATH message meets an error it is reported back to Rentry, which must relay the error report back to the original source of the end-to-end session. When a tunnel session RESV request fails, an error message is returned to Rexit, which treats this as an error in crossing the logical link and forwards the error message back to the end host.</p><p><strong>MTU discovery.</strong> Because the UDP encapsulated packets should not be fragmented, tunnel entry routers must support tunnel MTU discovery, or the path MTU discovery mechanism of <a href='/rfc2210'>RFC 2210</a> can be used.</p><p><strong>Traffic and flow specification calculations.</strong> Since several end-to-end sessions can be mapped to a single tunnel session, the aggregate traffic specification of all their senders has to be computed, and that aggregate becomes the traffic specification of the representative tunnel session. The same operation is needed for the flow specifications of end-to-end reservations arriving at Rexit. The memo does not fix the semantics of these operations. The simplest way to do them is to compute a sum of the end-to-end traffic specifications, as the Controlled-Load and Guaranteed service specifications define, but a more sophisticated statistical or measurement-based computation of the aggregate reservation level may also be appropriate.</p><p><strong>IPsec tunnels.</strong> Where the IP-in-IP tunnel supports IPsec, especially ESP in tunnel mode with or without AH, the tunnel session uses the GPI SESSION and the GPI SENDER_TEMPLATE or FILTER_SPEC defined in <a href='/rfc2207'>RFC 2207</a> for its PATH and RESV messages. Data packets are not then encapsulated with a UDP header, because the SPI can be used by the intermediate nodes for classification. User oriented keying must be used between Rentry and Rexit, so that different SPIs are assigned to packets that have a reservation, to best-effort packets, and to packets belonging to different tunnel sessions if those are supported.</p>",
+      "plainLanguage": "<p>Reserved packets get the extra UDP header only when a reservation is really in place for them. The UDP source port tells the two ends which tunnel session a packet belongs to, and the destination port is the one IANA assigned, 363. The memo also covers error reporting, how the right packet size is found, how several flows are added up into one tunnel reservation, and how the same idea works over an IPsec tunnel.</p>"
     },
     {
       "id": "extensibility",
-      "number": "7",
-      "title": "IPsec, Multicast Tunnels and Security",
-      "content": "<p>When the tunnel uses IPsec, especially ESP in tunnel mode, the tunnel session uses the GPI SESSION and SENDER_TEMPLATE/FILTER_SPEC from <a href='/rfc2207'>RFC 2207</a>. Data packets then get no UDP header because the SPI can classify them, and user oriented keying must give reserved and best-effort packets different SPIs.</p><p>The RFC also sketches multicast tunnels and multipoint tunnels, noting that concrete details are left for future versions. For multipoint tunnels endpoints MUST NOT make wildcard reservations.</p><p>On security, the scheme adds no new issues beyond those of RSVP and tunnels. The major RSVP issue is controlling and authenticating access to enhanced quality of service, and message integrity is protected as described in RFC 2747.</p>",
-      "plainLanguage": "<p>If the tunnel is already locked with a secret code, the code number is used to spot reserved traffic. It is only as safe as the tunnel and RSVP themselves.</p>"
+      "number": "8",
+      "title": "Multicast and Multipoint Tunnels",
+      "content": "<p>The mechanisms so far are for unicast tunnels, which provide logical point-to-point links in the IP infrastructure, though they may carry either unicast or multicast traffic between those points. The memo imagines two other kinds.</p><p>A <strong>multicast tunnel</strong> encapsulates packets arriving at an entry point and transports them, by multicast, to all of the exit points. Such a tunnel might be useful for a hierarchical multicast distribution network, or for emulating part of a native multicast distribution tree.</p><p>A <strong>multipoint tunnel</strong> normally encapsulates packets arriving at an entry point and transports them to one of the exit points, chosen by some route selection algorithm. This differs from the previous kinds in that the shape of the usual data distribution path does not match the shape of the tunnel: the topology of the tunnel does not by itself define the data transmission function. Instead the tunnel becomes a way to express a shared property of the set of connected tunnel endpoints, for example a logical shared broadcast network inside a larger network, with the tunnel endpoints as the nodes connected to it. Data traffic may then be unicast between two of those nodes, broadcast to all of them, or multicast between a subset. The tunnel defines a domain in which to manage routing and resource management, essentially a virtual private network. A VPN of this form can always be built with a multicast tunnel emulating a broadcast medium, but that is very inefficient for wide area VPNs, and a multipoint tunnel with the right control mechanisms is preferable.</p><p>Using RSVP over a multicast tunnel is relatively straightforward. One or more RSVP sessions may be used, and end-to-end sessions may be mapped onto tunnel sessions many-to-one or one-to-one as in the unicast case. The mapping is complicated by RSVP's heterogeneity semantics: if different receivers have made different reservation requests, the RESV messages arriving at the tunnel would logically map those requests to different tunnel sessions, yet the data can only be placed in one session, so the choice has to be reconciled to select the one that meets the needs of all the applications. That needs a relatively simple extension to the session mapping mechanism.</p><p>Using RSVP for multipoint tunnels is more difficult, because the goal is to give the tunnel as a whole a specific level of resources, such as a logical shared 10 megabit Ethernet rather than a logical shared Ethernet. The complication is that in this kind of tunnel the data does not always go to all the endpoints, so the destination address of the encapsulated packets cannot be part of the packet classification filter, because it varies between packets within the tunnel. This needs an extension to the current RSVP session semantics, in which the session identifier, the destination IP address, is used only to identify the session state inside the network nodes and not to classify packets.</p><p>Otherwise the use of RSVP for multipoint tunnels follows the multicast case. A multicast group represents the set of nodes that are tunnel endpoints, and one or more tunnel RSVP sessions reserve resources for the encapsulated packets. For a simple VPN there is most likely one session reserving resources for the whole VPN, and each tunnel endpoint takes part both as a source of PATH messages and as a source of Fixed-Filter or Shared-Filter RESV messages for that session, creating a single shared reservation for the entire logical shared medium. Tunnel endpoints must not make wildcard reservations over multipoint tunnels.</p><p>Finally, the memo notes that the RSVP daemon has to learn which of its local interfaces are IP-in-IP tunnels with the capabilities described here, since the RSVP specification only requires it to learn the list of local interfaces and their IP addresses. The daemon can get this information by querying the underlying network and physical layers directly, or through an existing interface between RSVP and the routing protocol, properly extended to provide it.</p>",
+      "plainLanguage": "<p>The scheme is written for tunnels between two points. The memo also sketches a multicast tunnel that reaches every exit point, and a multipoint tunnel that picks one exit point per packet. For the multipoint case the destination address cannot be used to recognise which session a packet belongs to, because the address changes from packet to packet, so the session rules have to be extended. The memo leaves the details of both for a later version.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>The memo says that introducing RSVP tunnels raises no new security issues beyond those already associated with the use of RSVP and of tunnels. For RSVP itself, the major issue is the need to control and authenticate access to enhanced qualities of service, a requirement discussed further in <a href='/rfc2205'>RFC 2205</a>. <a href='/rfc2747'>RFC 2747</a> describes the mechanism used to protect the integrity of the RSVP messages that carry the information described in the memo. The security issues associated with IP-in-IP tunnels are discussed in <a href='/rfc2003'>RFC 2003</a> and <a href='/rfc2473'>RFC 2473</a>.</p>",
+      "plainLanguage": "<p>The memo finds no new security problems beyond those that RSVP and tunnels already have. It points to the RSVP specification for the question of who may ask for a better level of service, and to a separate document for protecting the integrity of the RSVP messages.</p>"
     }
   ],
   "viz": [
     {
-      "type": "sequence",
-      "anchor": "procedures",
+      "type": "key-grid",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "SETTING UP A TUNNEL SESSION FOR AN END-TO-END RESERVATION (RFC 2746)",
+      "caption": "WHAT THE MEMO CHANGES",
       "data": {
-        "lanes": [
+        "items": [
           {
-            "key": "rentry",
-            "label": "Rentry (tunnel entry)"
+            "title": "A second RSVP session",
+            "text": "The two tunnel endpoints run RSVP between themselves, over the tunnel."
           },
           {
-            "key": "rexit",
-            "label": "Rexit (tunnel exit)"
-          }
-        ],
-        "messages": [
-          {
-            "from": "rentry",
-            "to": "rexit",
-            "label": "E2E PATH (encapsulated)",
-            "color": "blue",
-            "note": "Sent without SESSION_ASSOC for a new session."
+            "title": "An extra UDP header",
+            "text": "Reserved data is wrapped in IP and UDP, so the routers in between can tell sessions apart."
           },
           {
-            "from": "rexit",
-            "to": "rentry",
-            "label": "E2E RESV + NODE_CHAR (T bit)",
-            "color": "green",
-            "note": "Tells Rentry that Rexit supports the scheme."
+            "title": "SESSION_ASSOC",
+            "text": "A new RSVP object that says which end-to-end session maps to which tunnel session."
           },
           {
-            "from": "rentry",
-            "to": "rexit",
-            "label": "Tunnel PATH",
-            "color": "blue",
-            "note": "Creates or updates the tunnel session."
+            "title": "NODE_CHAR",
+            "text": "A new RSVP object that lets the exit router say it understands the scheme."
           },
           {
-            "from": "rentry",
-            "to": "rexit",
-            "label": "E2E PATH + SESSION_ASSOC",
-            "color": "blue",
-            "note": "Binds the end-to-end session to the tunnel session."
-          },
-          {
-            "from": "rexit",
-            "to": "rentry",
-            "label": "Tunnel RESV",
-            "color": "green",
-            "note": "Reserves resources inside the tunnel."
+            "title": "Only the ends change",
+            "text": "Routers inside the tunnel keep using ordinary RSVP filter matching."
           }
         ]
       }
     },
     {
       "type": "compare-table",
-      "anchor": "concepts",
+      "anchor": "overview",
       "position": "after",
-      "caption": "THE THREE TUNNEL TYPES (RFC 2746)",
+      "caption": "THE THREE KINDS OF TUNNEL",
       "data": {
         "columns": [
-          "Type",
-          "Resource support",
-          "Reservations"
+          "Aspect",
+          "Type 1",
+          "Type 2",
+          "Type 3"
         ],
         "rows": [
           {
             "cells": [
-              "Type 1",
-              "None; best-effort link",
-              "None"
+              "Reservation",
+              "None, the tunnel is best effort",
+              "One overall level for the tunnel",
+              "One per end-to-end flow"
             ]
           },
           {
             "cells": [
-              "Type 2",
-              "Overall level promised, for example configured",
-              "Configured statically, flows share them"
-            ],
-            "self": true
+              "When it is made",
+              "Never",
+              "Statically, through a management interface",
+              "Created and torn down as end-to-end reservations come and go"
+            ]
           },
           {
             "cells": [
-              "Type 3",
-              "Per end-to-end flow",
-              "Created and torn down dynamically"
-            ],
-            "self": true
+              "How flows are mapped",
+              "Not applicable",
+              "Many end-to-end sessions into one tunnel session",
+              "One end-to-end session to one tunnel session"
+            ]
+          },
+          {
+            "cells": [
+              "Tunnel reservation size",
+              "Not applicable",
+              "Fixed, a hard pipe, or adjustable, a soft pipe",
+              "Set per end-to-end session"
+            ]
           }
         ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "design",
+      "position": "after",
+      "caption": "Illustrative, not from the RFC: the messages that set up a reservation across a tunnel",
+      "data": {
+        "lanes": [
+          {
+            "key": "rentry",
+            "label": "Rentry"
+          },
+          {
+            "key": "rexit",
+            "label": "Rexit"
+          }
+        ],
+        "messages": [
+          {
+            "from": "rentry",
+            "to": "rexit",
+            "label": "E2E PATH",
+            "color": "blue",
+            "note": "The end-to-end PATH message is wrapped with the tunnel IP header and sent to Rexit."
+          },
+          {
+            "from": "rexit",
+            "to": "rentry",
+            "label": "E2E RESV",
+            "color": "neutral",
+            "note": "The matching end-to-end RESV arrives at Rexit and is encapsulated back to Rentry."
+          },
+          {
+            "from": "rentry",
+            "to": "rexit",
+            "label": "TUNNEL PATH with SESSION_ASSOC",
+            "color": "blue",
+            "note": "Rentry creates or updates the tunnel session and states which end-to-end session it belongs to."
+          },
+          {
+            "from": "rexit",
+            "to": "rentry",
+            "label": "TUNNEL RESV",
+            "color": "green",
+            "note": "Rexit reserves resources inside the tunnel and answers."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE TWO NEW OBJECTS, VERBATIM FROM RFC 2746",
+      "data": {
+        "title": "SESSION_ASSOC and NODE_CHAR",
+        "lang": "text",
+        "code": "+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n|          length               |  class        |     c-type    |\n+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n|          SESSION object  (for the end-to-end session)         |\n+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n|           Sender FILTER-SPEC (for the tunnel session)         |\n+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n\n+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n|          length               |  class        |     c-type    |\n+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n|                         Reserved                            |T|\n+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+"
       }
     }
   ],
@@ -216,16 +275,6 @@
       "rfc": 2473
     },
     {
-      "number": "[MINENC]",
-      "text": "Perkins, C., \"Minimal Encapsulation within IP\", RFC 2004, October 1996.",
-      "rfc": 2004
-    },
-    {
-      "number": "[RFC1701]",
-      "text": "Hanks, S., Li, T., Farinacci, D. and P. Traina, \"Generic Routing Encapsulation (GRE)\", RFC 1701, October 1994.",
-      "rfc": 1701
-    },
-    {
       "number": "[RFC2205]",
       "text": "Braden, R., Zhang, L., Berson, S., Herzog, S. and S. Jamin, \"Resource ReSerVation Protocol (RSVP) -- Version 1 Functional Specification\", RFC 2205, September 1997.",
       "rfc": 2205
@@ -236,28 +285,23 @@
       "rfc": 2210
     },
     {
-      "number": "[RFC2211]",
-      "text": "Wroclawski, J., \"Specification of the Controlled-Load Network Element Service\", RFC 2211, September 1997.",
-      "rfc": 2211
-    },
-    {
-      "number": "[RFC2212]",
-      "text": "Shenker, S., Partridge, C. and R. Guerin, \"Specification of the Guaranteed Quality of Service\", RFC 2212, September 1997.",
-      "rfc": 2212
-    },
-    {
       "number": "[RSVPESP]",
       "text": "Berger, L. and T. O'Malley, \"RSVP Extensions for IPSEC Data Flows\", RFC 2207, September 1997.",
       "rfc": 2207
+    },
+    {
+      "number": "[RSVPCRYPTO]",
+      "text": "Baker, F., Lindell, B. and M. Talwar, \"RSVP Cryptographic Authentication\", RFC 2747, January 2000.",
+      "rfc": 2747
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

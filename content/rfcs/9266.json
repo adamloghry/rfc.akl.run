@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines a channel binding type called tls-exporter that works with TLS 1.3, following the channel binding framework in RFC 5056. It also changes the default channel binding to the new type for TLS versions above 1.2, and updates RFC 5801, RFC 5802, RFC 5929, and RFC 7677. It is a standards-track specification.</p>",
   "plainLanguage": {
-    "summary": "<p>A channel binding glues a login to the exact secure tunnel it was done in, so nobody can slip it into another tunnel. This gives TLS 1.3 a proper glue.</p>"
+    "summary": "<p>A channel binding proves that a login happened over one specific encrypted connection, so a stolen password cannot be replayed on a different connection. TLS 1.3 had no way to do this. RFC 9266 defines one, called tls-exporter, built on key material that TLS already lets applications extract.</p>"
   },
   "questions": [
     "what is tls-exporter channel binding",
@@ -22,9 +22,9 @@
   ],
   "subtitle": "A way to tie a login to the exact TLS 1.3 connection it runs over, using exported keying material.",
   "tldr": {
-    "problem": "The older tls-unique channel binding was found to be open to the triple handshake vulnerability, and it is not defined for TLS 1.3, so TLS 1.3 had no channel binding.",
-    "mechanism": "A new binding type, tls-exporter, takes 32 bytes of exported keying material from the TLS connection using the label EXPORTER-Channel-Binding and an empty context.",
-    "outcome": "tls-exporter becomes the default channel binding over TLS 1.3 and later for SCRAM and GS2, and the mandatory-to-implement one whenever channel binding is implemented for TLS 1.3.",
+    "problem": "The older tls-unique channel binding was found to be open to the triple handshake vulnerability, and it is not defined for TLS 1.3, so TLS 1.3 had no channel binding at all.",
+    "mechanism": "A new binding type, tls-exporter, takes 32 bytes of exported keying material from the TLS connection, using the label EXPORTER-Channel-Binding and an empty context value.",
+    "outcome": "tls-exporter becomes the default channel binding over TLS 1.3 and later for SCRAM and the GS2 mechanism family, and the mandatory-to-implement one whenever channel binding is implemented for TLS 1.3.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -45,66 +45,122 @@
       "value": "32 bytes"
     },
     {
+      "label": "Binding is secret",
+      "value": "No"
+    },
+    {
       "label": "Updates",
-      "value": "RFC 5801, 5802, 5929, 7677"
+      "value": "RFC 5801, RFC 5802, RFC 5929, RFC 7677"
     }
   ],
-  "today": "<p>RFC 9266 is a Proposed Standard published in July 2022. It has not been obsoleted or updated by a later RFC. It updates <a href='/rfc5801'>RFC 5801</a>, <a href='/rfc5802'>RFC 5802</a>, <a href='/rfc5929'>RFC 5929</a> and <a href='/rfc7677'>RFC 7677</a>.</p>",
+  "today": "<p>RFC 9266 is a Proposed Standard, published in July 2022. It updates <a href='/rfc5801'>RFC 5801</a>, <a href='/rfc5802'>RFC 5802</a>, <a href='/rfc5929'>RFC 5929</a> and <a href='/rfc7677'>RFC 7677</a>. No RFC obsoletes it and no RFC updates it.</p>",
   "glossary": [
     "tls",
     "scram",
     "sasl",
     "tls-handshake",
-    "channel-binding"
+    "channel-binding",
+    "tls-exporter",
+    "gss-api",
+    "keying-material-exporter",
+    "pre-shared-key"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why TLS 1.3 Needs a New Binding",
-      "content": "<p>A <strong>channel binding</strong> ties an authentication exchange to the secure channel it runs over. The <code>tls-unique</code> type from <a href='/rfc5929'>RFC 5929</a> was found to be susceptible to the triple handshake vulnerability unless the extended master secret extension of <a href='/rfc7627'>RFC 7627</a> is used.</p><p>TLS 1.3 uses a complete transcript hash, similar to the extended master secret procedures. Even so, the safety of channel bindings with TLS 1.3 was not analyzed as part of the core protocol work, so <a href='/rfc8446'>RFC 8446</a> left them unspecified. RFC 9266 fills that gap by adding <code>tls-exporter</code> to RFC 5929, replacing some usage of <code>tls-unique</code>.</p>",
-      "plainLanguage": "<p>The old way of gluing a login to a tunnel had a hole, and the newest kind of tunnel had no glue at all. This RFC makes new glue that fits.</p>"
+      "title": "Why TLS 1.3 Needed a New Channel Binding",
+      "content": "<p>The <code>tls-unique</code> channel binding type defined in <a href='/rfc5929'>RFC 5929</a> was found to be susceptible to the triple handshake vulnerability without the extended master secret extension defined in <a href='/rfc7627'>RFC 7627</a>. While TLS 1.3 uses a complete transcript hash akin to the extended master secret procedures, the safety of channel bindings with TLS 1.3 was not analysed as part of the core protocol work, so the specification of channel bindings for TLS 1.3 was deferred. Appendix C.5 of <a href='/rfc8446'>RFC 8446</a> notes the lack of channel bindings for TLS 1.3. This document defines such channel bindings and fills that gap.</p><p>It also updates RFC 5929 by adding an additional unique channel binding type, <code>tls-exporter</code>, that replaces some usage of <code>tls-unique</code>.</p><p>A channel binding is what ties an authentication exchange, such as a password login, to the encrypted connection underneath it. The two ends of the connection can then show that they belong together, which stops a password captured on one connection from being replayed on another.</p>",
+      "plainLanguage": "<p>TLS 1.3 was released without a way to tie a login to the connection it runs over, so this RFC adds one. It is called tls-exporter, and it works by asking the TLS library for a value that only this connection can produce.</p>"
     },
     {
-      "id": "design",
+      "id": "algorithms",
       "number": "2",
-      "title": "How tls-exporter Is Computed",
-      "content": "<p>The binding uses <strong>Exported Keying Material</strong> (EKM), which TLS implementations already widely expose. The EKM comes from the keying material exporters of <a href='/rfc5705'>RFC 5705</a> and Section 7.5 of <a href='/rfc8446'>RFC 8446</a>, called with three inputs.</p><ul><li>Label: the ASCII string <code>EXPORTER-Channel-Binding</code>, with no terminating NUL.</li><li>Context value: a zero-length string.</li><li>Length: 32 bytes.</li></ul><p>The mechanism is defined only when the TLS handshake results in unique master secrets. That is always true for TLS 1.3, and true for earlier versions when the extended master secret extension is in use.</p>",
-      "plainLanguage": "<p>Both ends of the tunnel run the same recipe on a secret they share and get the same 32-byte code. The code is like a stamp that only this tunnel can make.</p>"
+      "title": "The tls-exporter Channel Binding",
+      "content": "<p>Channel binding mechanisms are not useful until TLS implementations expose the required data. To facilitate this, <code>tls-exporter</code> uses Exported Keying Material (EKM), which is already widely exposed by TLS implementations. The EKM is obtained using the keying material exporters for TLS, as defined in <a href='/rfc5705'>RFC 5705</a> and Section 7.5 of RFC 8446, by supplying the following inputs.</p><ul><li><strong>Label:</strong> the ASCII string <code>EXPORTER-Channel-Binding</code> with no terminating NUL.</li><li><strong>Context value:</strong> a zero-length string.</li><li><strong>Length:</strong> 32 bytes.</li></ul><p>This channel binding mechanism is defined only when the TLS handshake results in unique master secrets. That is true of TLS versions prior to 1.3 when the extended master secret extension of RFC 7627 is in use, and it is always true for TLS 1.3.</p><p>The value that comes out is not secret. The IANA registration records the channel-binding type as unique, the channel type as TLS, and that channel binding is secret: no. The derived data MUST NOT be used for any purpose other than channel bindings as described in <a href='/rfc5056'>RFC 5056</a>, and in particular implementations MUST NOT use channel binding as a secret key to protect privileged information.</p>",
+      "plainLanguage": "<p>The binding is 32 bytes produced by the TLS library's exporter, which takes a label, an optional context and a length. The label here is the fixed string EXPORTER-Channel-Binding, the context is empty, and the result is the same on both ends of the connection and different on any other connection.</p>"
     },
     {
-      "id": "compatibility",
+      "id": "interoperability",
       "number": "3",
-      "title": "SCRAM and GSS-API over SASL",
-      "content": "<p>The specifications for SCRAM (<a href='/rfc5802'>RFC 5802</a>, <a href='/rfc7677'>RFC 7677</a>) and for GSS-API mechanisms in SASL (<a href='/rfc5801'>RFC 5801</a>) name <code>tls-unique</code> as the default channel binding over TLS. Because <code>tls-unique</code> is not defined for TLS 1.3 and greater, RFC 9266 updates those documents to make <code>tls-exporter</code> the default over TLS 1.3 and greater.</p><p>It also makes <code>tls-exporter</code> the mandatory-to-implement channel binding if any channel bindings are implemented for TLS 1.3: implementations that support channel binding over TLS 1.3 MUST implement it. The default for SCRAM over TLS 1.2 does not change and is still <code>tls-unique</code>.</p>",
-      "plainLanguage": "<p>Programs that log in over a tunnel used to pick the old glue by default. For the newest tunnels they now pick the new glue, and anyone who supports glue there must support this one.</p>"
+      "title": "Using tls-exporter with SCRAM and GSS-API",
+      "content": "<p>The specifications for Salted Challenge Response Authentication Mechanism (SCRAM) (<a href='/rfc5802'>RFC 5802</a>, <a href='/rfc7677'>RFC 7677</a>) and for Generic Security Service Application Program Interface mechanisms over Simple Authentication and Security Layer (SASL) (<a href='/rfc5801'>RFC 5801</a>) define <code>tls-unique</code> as the default channel binding to use over TLS. As <code>tls-unique</code> is not defined for TLS 1.3 and later, this document updates RFC 5801, RFC 5802 and RFC 7677 to use <code>tls-exporter</code> as the default channel binding over TLS 1.3 and later. The document does not change the default channel binding for SCRAM mechanisms over TLS 1.2, which is still <code>tls-unique</code>.</p><p>The same update makes <code>tls-exporter</code> the mandatory-to-implement channel binding if any channel bindings are implemented for TLS 1.3. Implementations that support channel binding over TLS 1.3 MUST implement <code>tls-exporter</code>.</p>",
+      "plainLanguage": "<p>SCRAM and the GS2 mechanism family, which cover most password and Kerberos logins over TLS, used to have one default way of binding to the connection. From TLS 1.3 onwards that default is tls-exporter. The rule for TLS 1.2 and older is unchanged.</p>"
     },
     {
       "id": "security-considerations",
       "number": "4",
-      "title": "Uniqueness and Legacy TLS",
-      "content": "<p>The binding is built so that disclosing it does not leak secret information about the TLS channel or affect its security. The derived data MUST NOT be used for any purpose other than channel binding, and in particular MUST NOT be used as a secret key to protect privileged information.</p><p>The binding gives only the weaker kind of uniqueness from <a href='/rfc5056'>RFC 5056</a>: it identifies the TLS connection, not the upper-layer authentication protocol instance. So applications MUST NOT use it for more than one authentication mechanism instance on a given TLS connection, and MUST immediately close the connection when the upper-layer protocol ends.</p><p>It can be used with TLS below 1.3 only with care to ensure unique master secrets. When TLS renegotiation is enabled on a connection, <code>tls-exporter</code> is not defined for it and implementations MUST NOT support it. Users who want channel binding should upgrade to TLS 1.3 or later.</p>",
-      "plainLanguage": "<p>The code only says which tunnel you are in, so use it for one login and then close the tunnel. Do not reuse it as a password.</p>"
+      "title": "Security Considerations",
+      "content": "<p>The channel binding type defined in this document is constructed so that disclosure of the channel binding data does not leak secret information about the TLS channel and does not affect the security of the TLS channel. The derived data MUST NOT be used for any purpose other than channel bindings as described in RFC 5056. In particular, implementations MUST NOT use channel binding as a secret key to protect privileged information. The security considerations sections of <a href='/rfc5056'>RFC 5056</a>, <a href='/rfc5705'>RFC 5705</a> and RFC 8446 apply.</p><p>The definition of channel bindings in RFC 5056 defines a unique channel binding as one that is unique to the channel endpoints and unique over time, that is, a value unique to a specific instance of the lower-layer security protocol. With TLS as the lower-layer protocol, this corresponds to uniquely identifying the specific TLS connection. However, a stronger form of uniqueness is possible, which would also uniquely identify the upper-layer application or authentication protocol consuming the binding. The distinction matters only when there are multiple instances of an authentication protocol, or multiple distinct authentication protocols, running over the same lower-layer protocol, which is rare. In the usual case, where a client establishes one TLS connection, runs a single upper-layer protocol over it and then closes both, the stronger uniqueness is trivially achieved.</p><p>The channel binding type defined here provides only the weaker form of uniqueness. It does not protect against cross-protocol attacks for multiple authentication protocols running over the same instance of the lower-layer protocol, and it does not protect against replay attacks that replay a message from one instance of an authentication protocol in a different instance of the same protocol over the same lower-layer connection. Both properties are highly desirable when performing formal analysis of upper-layer protocols, because without them such analysis is essentially impossible. In some cases one or both properties are already provided by specific upper-layer protocols, but that depends on the mechanism in question, and formal analysis requires the property in a generic manner across all potential upper-layer protocols.</p><p>Accordingly, applications that use this channel binding type MUST NOT use the binding for more than one authentication mechanism instance on a given TLS connection, and MUST immediately close the TLS connection after the conclusion of the upper-layer protocol.</p><p>While it is possible to use this channel binding mechanism with TLS versions below 1.3, extra precaution must be taken to ensure that the chosen cipher suites always result in unique master secrets. When TLS renegotiation is enabled on a connection, the <code>tls-exporter</code> channel binding type is not defined for that connection, and implementations MUST NOT support it. In general, users wishing to take advantage of channel binding should upgrade to TLS 1.3 or later.</p>",
+      "plainLanguage": "<p>The binding value is not a secret, so it must not be used to protect anything. It also only identifies the TLS connection, not the login that runs over it, so one connection should carry one authentication exchange and then be closed. Renegotiating a TLS connection makes the binding undefined, so TLS 1.3 is the safe choice.</p>"
     },
     {
       "id": "iana-considerations",
       "number": "5",
       "title": "IANA Registrations",
-      "content": "<p>IANA registered <code>tls-exporter</code> in the Channel-Binding Types registry as a <code>unique</code> type for TLS, with the note that the channel binding is not secret and the intended usage is COMMON. The description is the EKM value obtained from the current TLS connection.</p><p>IANA also added the exporter label <code>EXPORTER-Channel-Binding</code> to the TLS Exporter Labels registry, marked DTLS-OK and Recommended.</p>",
-      "plainLanguage": "<p>The new glue and the name of its recipe were written in the official lists so nobody else picks the same names.</p>"
+      "content": "<p>IANA has registered <code>tls-exporter</code> in the Channel-Binding Types registry. The channel-binding unique prefix is <code>tls-exporter</code>, the channel-binding type is unique, the channel type is TLS, the published specification is RFC 9266, and channel binding is secret: no. The description is the EKM value obtained from the current TLS connection, the intended usage is COMMON, and the change controller is the IESG. The registry entry also points readers at the published specification for advice on the applicability of this channel binding type.</p><p>IANA has also added a registration in the TLS Exporter Labels registry, under the Transport Layer Security parameters registry: the value <code>EXPORTER-Channel-Binding</code>, with DTLS-OK set to Y and Recommended set to Y, referenced to RFC 9266.</p>",
+      "plainLanguage": "<p>The RFC registers the name tls-exporter for the new binding type and the label EXPORTER-Channel-Binding in the list of TLS exporter labels.</p>"
     }
   ],
   "viz": [
     {
-      "type": "key-grid",
-      "anchor": "design",
+      "type": "sequence",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "THE THREE EXPORTER INPUTS (RFC 9266)",
+      "caption": "Illustrative, not from the RFC: where the binding value is produced and used",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "TLS Client"
+          },
+          {
+            "key": "server",
+            "label": "TLS Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "TLS handshake",
+            "color": "blue",
+            "note": "TLS 1.3 always produces unique master secrets."
+          },
+          {
+            "from": "client",
+            "to": "client",
+            "label": "Export 32 bytes",
+            "color": "green",
+            "note": "Label EXPORTER-Channel-Binding, empty context value."
+          },
+          {
+            "from": "server",
+            "to": "server",
+            "label": "Export the same 32 bytes",
+            "color": "green",
+            "note": "Both ends derive the same binding for this connection."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Authentication exchange with the binding",
+            "color": "blue",
+            "note": "SCRAM or a GS2 mechanism includes the binding value."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "What goes into the tls-exporter binding",
       "data": {
         "items": [
           {
             "title": "Label",
-            "text": "EXPORTER-Channel-Binding, ASCII, no terminating NUL."
+            "text": "The ASCII string EXPORTER-Channel-Binding, with no terminating NUL."
           },
           {
             "title": "Context value",
@@ -112,7 +168,54 @@
           },
           {
             "title": "Length",
-            "text": "32 bytes of exported keying material."
+            "text": "32 bytes."
+          },
+          {
+            "title": "Not a secret",
+            "text": "The binding value must not be used to protect privileged information."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "interoperability",
+      "position": "after",
+      "caption": "The two channel binding types for TLS",
+      "data": {
+        "columns": [
+          "Aspect",
+          "tls-unique",
+          "tls-exporter"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Defined for TLS 1.3",
+              "No",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "Default for SCRAM over TLS 1.2",
+              "Yes",
+              "No"
+            ]
+          },
+          {
+            "cells": [
+              "Default for SCRAM over TLS 1.3 and later",
+              "No",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "Value used",
+              "From the handshake",
+              "32 bytes of exported keying material"
+            ]
           }
         ]
       }
@@ -130,19 +233,29 @@
       "rfc": 5705
     },
     {
+      "number": "[RFC5801]",
+      "text": "Josefsson, S. and N. Williams, \"Using Generic Security Service Application Program Interface (GSS-API) Mechanisms in Simple Authentication and Security Layer (SASL): The GS2 Mechanism Family\", RFC 5801, July 2010.",
+      "rfc": 5801
+    },
+    {
+      "number": "[RFC5802]",
+      "text": "Newman, C., Menon-Sen, A., Melnikov, A., and N. Williams, \"Salted Challenge Response Authentication Mechanism (SCRAM) SASL and GSS-API Mechanisms\", RFC 5802, July 2010.",
+      "rfc": 5802
+    },
+    {
       "number": "[RFC5929]",
       "text": "Altman, J., Williams, N., and L. Zhu, \"Channel Bindings for TLS\", RFC 5929, July 2010.",
       "rfc": 5929
     },
     {
-      "number": "[RFC5802]",
-      "text": "Newman, C., et al., \"Salted Challenge Response Authentication Mechanism (SCRAM) SASL and GSS-API Mechanisms\", RFC 5802, July 2010.",
-      "rfc": 5802
-    },
-    {
       "number": "[RFC7627]",
       "text": "Bhargavan, K., Ed., et al., \"Transport Layer Security (TLS) Session Hash and Extended Master Secret Extension\", RFC 7627, September 2015.",
       "rfc": 7627
+    },
+    {
+      "number": "[RFC7677]",
+      "text": "Hansen, T., \"SCRAM-SHA-256 and SCRAM-SHA-256-PLUS Simple Authentication and Security Layer (SASL) Mechanisms\", RFC 7677, November 2015.",
+      "rfc": 7677
     },
     {
       "number": "[RFC8446]",
@@ -153,10 +266,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

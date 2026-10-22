@@ -16,14 +16,15 @@
   "obsoletes": null,
   "summary": "<p>This informational document describes how some operators use BGP as the sole routing protocol in very large data centers, where simplicity of operation matters a great deal. It covers design choices such as the network topology, address assignment and routing configuration used in this approach. It is a description of practice rather than a new protocol.</p>",
   "plainLanguage": {
-    "summary": "<p>In a huge building with many hallways, signs keep people from getting lost. This describes how a big data center can use one familiar routing system for all its signs, which keeps things simple.</p>"
+    "summary": "<p>Large data centres often run their own copy of the Internet routing protocol inside the building, because it scales by adding identical switches and keeps failures local. This document explains how that is done and why.</p>"
   },
   "questions": [
     "bgp in the data center",
     "using ebgp as the only data center routing protocol",
     "clos topology explained",
     "data center ecmp load balancing",
-    "large scale data center design"
+    "large scale data center design",
+    "why use bgp inside a data center"
   ],
   "tags": [
     "Routing",
@@ -31,154 +32,191 @@
   ],
   "subtitle": "Routing large server farms with BGP instead of traditional switching",
   "tldr": {
-    "problem": "Warehouse-scale data centers with hundreds of thousands of servers need network designs that can scale horizontally by adding identical switches, not by upgrading them, while keeping operations simple.",
-    "mechanism": "Use a flat Clos (folded fat-tree) topology where all switches are the same type, and run External BGP (EBGP) as the only routing protocol, avoiding the complexity of multiple protocols or centralized control.",
-    "outcome": "This approach has been proven in large deployments and enables scaling to very large sizes while keeping the network easy to operate and maintain with a small team.",
-    "outcomeLabel": "Proven operational practice"
+    "problem": "Data centres with over a hundred thousand servers need a network that a small team can run, that scales by adding identical gear, and that fails in small places.",
+    "mechanism": "The document describes running external BGP as the only routing protocol over a Clos topology, with each tier of switches given its own autonomous system number and every link forming a point-to-point BGP session.",
+    "outcome": "It is a report of operational experience rather than a specification, written so that others can adopt the same design.",
+    "outcomeLabel": "Status today"
   },
   "facts": [
     {
-      "label": "Minimum scale",
-      "value": "100,000+ servers"
+      "label": "Servers supported",
+      "value": "Over 100,000"
     },
     {
-      "label": "Network infrastructure cost",
-      "value": "10-15% of total data center CAPEX"
+      "label": "Network share of data centre cost",
+      "value": "About 10-15% of total data centre expenditure"
     },
     {
-      "label": "Typical failure detection",
-      "value": "Seconds via BGP keepalives"
+      "label": "Design requirements",
+      "value": "5 (REQ1 to REQ5)"
     },
     {
-      "label": "Topology property",
-      "value": "Non-blocking with ECMP (M >= N)"
+      "label": "Private Use ASN range",
+      "value": "64512-65534"
+    },
+    {
+      "label": "Private Use ASNs available",
+      "value": "1023"
+    },
+    {
+      "label": "Example ECMP fan-out",
+      "value": "32 with 64-port devices"
     }
   ],
-  "today": "<p>RFC 7938 is an Informational RFC that remains current and widely referenced in the data center industry. It has not been obsoleted and continues to document a proven approach to large-scale data center networking that is used by major Internet operators.</p>",
+  "today": "<p>RFC 7938 is an Informational document with no obsoleting or updating RFC recorded against it, so it stands as a description of practice rather than a standard. It reports on a design that its authors had already built and tested, and it notes that a thorough understanding of BGP is assumed before deploying it.</p>",
   "glossary": [
     "clos-topology",
     "equal-cost-multipath",
     "bgp",
     "ibgp-and-ebgp",
-    "asn1"
+    "asn1",
+    "as-path",
+    "fib",
+    "rib",
+    "spanning-tree-protocol",
+    "link-aggregation-group",
+    "ospf"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "Scaling Data Center Networks",
-      "content": "<p>Large data centers operate at warehouse scale, supporting more than one hundred thousand servers in a single facility. These environments need networks that can handle enormous amounts of server-to-server traffic (called \"east-west\" traffic) in addition to traffic going in and out of the data center (\"north-south\" traffic).</p><p>Traditional tree-based network designs cannot scale to this size without becoming expensive or hitting physical limits. The RFC describes how operators at large scale build and run data centers using BGP as the sole routing protocol. This design prioritizes operational simplicity and network stability so that a small team can manage the entire network effectively.</p><p>This is not a new protocol design but rather a description of proven operational practice.</p>",
-      "plainLanguage": "<p>A huge company warehouse needs to move packages efficiently between all the workers. The usual switching design breaks down. This describes a better way that has actually worked.</p>"
+      "title": "What the Document Is About",
+      "content": "<p>The document describes a practical routing design for use in a large-scale data centre. Such data centres, also known as hyper-scale or warehouse-scale, have the distinctive attribute of supporting over one hundred thousand servers, and operators are revisiting networking designs and platforms to accommodate networks of that scale.</p><p>The design is based on operational experience with data centres built to support large-scale distributed software infrastructure, such as a web search engine. The primary requirements in such an environment are operational simplicity and network stability, so that a small group of people can effectively support a significantly sized network.</p><p>Experimentation and extensive testing have shown that External BGP, defined in <a href='/rfc4271'>RFC 4271</a>, is well suited as a stand-alone routing protocol for these types of data centre application. This contrasts with more traditional data centre designs, which may use simple tree topologies and rely on extending Layer 2 domains across multiple network devices. The document sets out the requirements that led to the choice, presents the details of the EBGP routing design, and explores ideas for further enhancements. A thorough understanding of BGP is assumed of a reader planning to deploy the design.</p><p>The requirements themselves follow from the traffic the network must carry. Until recently it was common for most traffic to enter and leave the data centre, called north-south traffic, and traditional tree topologies with high oversubscription ratios between layers were sufficient. Today many large-scale data centres host applications generating significant amounts of server-to-server traffic that does not leave the data centre, called east-west traffic, such as computer clusters like Hadoop, massive data replication between clusters, or virtual machine migrations. Scaling tree topologies to match these bandwidth demands becomes either too expensive or impossible because of physical limitations such as port density in a switch.</p><p>Cost shapes the rest of the design. The capital expenditure on network infrastructure constitutes about 10-15% of total data centre expenditure, so costs are driven down by unifying all network elements, preferably with the same hardware type or even the same device, which allows volume pricing and reduces maintenance and inventory costs, and by introducing multiple equipment vendors, which requires minimising the software feature requirements so that interoperability rests on open standards. Operating large-scale infrastructure is expensive because a larger number of elements fail more often, and a simpler design using a limited software feature set minimises software-related failures. Ethernet networks are susceptible to broadcast or unicast storms with a dramatic effect on performance and availability, and a fully routed design significantly reduces the size of the data-plane failure domains, limiting them to the lowest level of the hierarchy, though this introduces distributed control-plane failures, which argues for simpler control-plane protocols and fewer protocol interaction issues.</p>",
+      "plainLanguage": "<p>Big data centres need a network that grows by adding more of the same switches, does not break in one place, and can be run by a handful of people. The document says that running the Internet's own routing protocol inside the building achieves that.</p>"
     },
     {
       "id": "requirements",
-      "number": "2",
-      "title": "Design Requirements for Large Scale",
-      "content": "<p>The RFC identifies five key requirements. First, the topology must scale horizontally by adding more identical links and switches, not by upgrading the switches themselves. This keeps capital costs down and allows infinite scaling.</p><p>Second, only a narrow set of standard features should be required from different vendors' equipment. This maximizes choice and competition while ensuring interoperability.</p><p>Third, the routing protocol must be simple to implement and operate, not complex or hard to understand.</p><p>Fourth, failure domains must be minimized so that when something breaks, it affects as few devices as possible. Ethernet networks with large Layer 2 domains are susceptible to broadcast storms that can bring down entire networks, so routing (Layer 3) is preferred.</p><p>Fifth, the design must support some traffic engineering, ideally by giving operators explicit control over which path carries which traffic. This helps with load balancing and distributing traffic across available paths.</p>",
-      "plainLanguage": "<p>Add more hallways without rebuilding them. Use standard equipment from different makers. Keep routing simple. Don't have big broadcast storms. Let operators control traffic flow.</p>"
+      "number": "2.5",
+      "title": "The Five Design Requirements",
+      "content": "<p>Section 2.5 summarises the requirements the design has to meet. <strong>REQ1</strong> asks for a topology that can be scaled horizontally by adding more links and network devices of the same type, without requiring upgrades to the network elements themselves. <strong>REQ2</strong> asks for a narrow set of software features and protocols supported by a multitude of networking equipment vendors. <strong>REQ3</strong> asks for a routing protocol with a simple implementation in terms of programming code complexity and ease of operational support. <strong>REQ4</strong> asks to minimise the failure domain of equipment or protocol issues as much as possible. <strong>REQ5</strong> asks to allow some traffic engineering, preferably through explicit control of the routing prefix next hop using built-in protocol mechanics.</p>",
+      "plainLanguage": "<p>Everything else in the document follows from five rules: grow sideways, use standard features many vendors support, keep the protocol simple, keep failures small, and allow traffic to be steered deliberately.</p>"
     },
     {
       "id": "architecture",
       "number": "3",
-      "title": "Topology: Traditional Tree versus Clos",
-      "content": "<p>Traditional data center topologies use a tree structure with three layers: Tier 1 (core), Tier 2 (aggregation), and Tier 3 (access). As you move up the tree, switches have higher port density and capacity. This works for mostly external traffic, but it cannot scale for massive server-to-server traffic without expensive upgrades.</p><p>The RFC recommends a <strong>folded Clos topology</strong> (also called \"leaf-spine\" or \"fat-tree\"), which uses uniform switches at two main levels: Tier 1 (spine) switches in the middle, and Tier 2 (leaf) switches at the edges connected to servers. All switches are identical, allowing horizontal scaling. The topology is fully non-blocking or slightly oversubscribed, meaning traffic between servers can use any available path without contention.</p><p>Tier 1 switches have exactly one path to every server, which is an important property for routing. The topology can be scaled further by adding more stages in a 5-stage or higher Clos design.</p>",
-      "plainLanguage": "<p>Instead of one big tree with a thick trunk, use a web of identical switches. Every hallway has the same capacity. Add more switches without changing anything else.</p>"
+      "title": "Tree Topologies, Clos Topologies and the Layer 3 Choice",
+      "content": "<p>The traditional data centre topology looks like an upside-down tree with redundant uplinks and three layers of hierarchy, which the document calls Tier 1, Tier 2 and Tier 3, using core, aggregation and access for comparison. Each higher layer has higher port density and bandwidth capacity, with the core as the trunk. It cannot be scaled to a large enough degree, because Tier 1 devices with enough port density to scale Tier 2 cannot be acquired, and continuous upgrades or replacement of the upper tiers are required as deployment size or bandwidth grows, which is operationally complex. That is why REQ1 exists and why this design is ruled out.</p><p>The alternative is a folded Clos topology, sometimes called a fat tree, which features an odd number of stages and is commonly made of uniform elements such as switches with the same port count. This is also called a leaf and spine network, where spine names the middle stage and leaf the input/output stage. Its key properties are that it is fully non-blocking, or more accurately non-interfering, if M is at least N and is oversubscribed by a factor of N/M otherwise, where M and N are the uplink and downlink port counts of a Tier 2 switch; that using it requires control and data-plane support for ECMP with a fan-out of M or more; that Tier 1 switches have exactly one path to every server, which makes route summarisation dangerous; and that traffic flowing from server to server is load balanced over all available paths using ECMP. A Clos topology can be scaled either by increasing network element port density or by adding more stages, for example moving to a five-stage Clos, and a set of directly connected Tier 2 and Tier 3 devices along with their attached servers is called a cluster, a useful unit of deployment or maintenance. Tier 3, typically top-of-rack switches, is where oversubscription is introduced, and limiting oversubscription to a single layer simplifies application development that would otherwise have to account for multiple bandwidth pools. If the network is small, the number of switches in Tier 1 or Tier 2 can be reduced by a factor of two by mapping two uplinks from a Tier 2 device to the same Tier 1 device, which saves cost but halves the maximum data centre size and requires the parallel links to be grouped in link aggregation groups, or an equivalent fate-sharing technique, so that one failed link does not overload the other.</p><p>On the routing question there are three designs. <strong>Layer 2 only</strong> designs originally used Spanning Tree Protocol for loop-free topology creation. RSTP and MST improve convergence and load balancing but the fundamentals of the protocol limit its applicability: STP and its variants use an active/standby approach to path selection and are therefore hard to deploy in horizontally scaled topologies, and operators have had many experiences of large failures caused by improper cabling, misconfiguration or flawed software on a single device, regularly affecting the entire spanning-tree domain and being very hard to troubleshoot. Multi-Chassis Link Aggregation made it possible to use active-active paths with STP as the backup, but the approach does not scale linearly past two in most implementations, lacks standards-based implementations and adds the failure domain risk of syncing state between devices. TRILL allows large horizontally scalable Layer 2-only networks without STP and resolves many of STP's problems, but the limited number of implementations and the requirement for specific equipment have limited its applicability and raised its cost, and neither TRILL nor M-LAG eliminates the shared broadcast domain, so TRILL-based designs have issues meeting REQ2, REQ3 and REQ4. <strong>Hybrid Layer 2 and Layer 3</strong> designs put a routing protocol in either Tier 1 or Tier 2 and divide the Layer 2 domain into numerous smaller domains, which allows scaling but costs complexity in managing multiple network protocols; operators retain Layer 2 in the access tier, or in both access and aggregation, to support legacy applications needing direct Layer 2 adjacency or non-IP protocols, to give virtual machines seamless mobility with preserved IP addresses, to simplify IP addressing, to allow application load balancing techniques that need direct Layer 2 reachability, and because of continued cost differences between Layer 2- and Layer 3-capable switches. <strong>Layer 3 only</strong> designs, which route down to Tier 3, gain improved stability and scalability by confining Layer 2 broadcast domains, and are typically built on an interior gateway protocol such as OSPF. As data centres grow past tens of thousands of servers, fully routed designs become more attractive, and choosing a Layer 3-only design greatly simplifies the network and helps meet REQ1 and REQ2.</p>",
+      "plainLanguage": "<p>The old shape was a tree with three layers, which cannot grow far enough. The replacement is a Clos, a set of identical switches arranged so every server has several paths to every other server. The document also rules out designs that keep large Layer 2 domains, because one faulty switch or cable can take out a whole floor of the building.</p>"
     },
     {
-      "id": "routing",
-      "number": "4",
-      "title": "Using EBGP as the Routing Protocol",
-      "content": "<p>The RFC argues for EBGP (External BGP) as the sole routing protocol in the data center. Each switch is assigned an Autonomous System Number (ASN), even though all switches are in the same organization. Tier 2 (leaf) switches advertise host or prefix routes upward, and Tier 1 (spine) switches advertise routes downward.</p><p>Benefits of this approach include simplicity (only one protocol to operate), vendor interoperability (BGP is standard and widely supported), and operational familiarity (network operators already know BGP from the Internet backbone). The RFC recommends using private ASNs from the reserved ranges.</p><p>Each Tier 2 switch peers with multiple Tier 1 switches, creating multiple paths. BGP's path selection and ECMP (Equal Cost Multipath) spread traffic across all available paths, providing load balancing and resilience.</p>",
-      "plainLanguage": "<p>Use the same routing system that the Internet uses, but inside the data center. Every switch can talk to every other switch about which ways work best.</p>"
-    },
-    {
-      "id": "section-1",
+      "id": "design",
       "number": "5",
-      "title": "Equal Cost Multipath and Traffic Distribution",
-      "content": "<p>In a Clos topology, multiple equal-cost paths typically exist between any two endpoints. ECMP allows switches to load-balance traffic across these paths. When a switch has multiple BGP routes with the same cost, it can forward traffic across all of them, distributing the load.</p><p>The RFC discusses basic ECMP, ECMP across multiple ASNs (different upstream choices), and weighted ECMP where some paths carry more traffic than others. For applications that need very fine-grained control, consistent hashing can be used to ensure the same flow always takes the same path, avoiding out-of-order delivery.</p>",
-      "plainLanguage": "<p>Traffic can take many routes at once. The switches split traffic fairly among them so no single path gets overloaded.</p>"
+      "title": "Running BGP as the Only Routing Protocol",
+      "content": "<p>REQ2 favours a single routing protocol to reduce complexity and interdependencies. While it is common to rely on an IGP, sometimes with EBGP added at the device bordering the WAN or IBGP throughout, the document proposes an EBGP-only design. BGP is not generally deployed as the primary routing protocol inside a data centre because it is perceived as a WAN-only protocol, because it is believed to converge much more slowly than IGPs, because large-scale BGP deployments usually use an IGP for next-hop resolution, and because it is believed to require significant configuration overhead and to lack neighbour auto-discovery.</p><p>The document answers each of those perceptions. BGP has less complexity in parts of its design, since its internal data structures and state machine are simpler than those of most link-state IGPs such as OSPF: instead of implementing adjacency formation, adjacency maintenance and flow control, it relies on TCP as the underlying transport, which serves REQ2 and REQ3. Its information flooding overhead is lower, because every BGP router calculates and propagates only the selected best path, so a network failure is masked as soon as the speaker finds an alternate path, which exists when highly symmetric topologies such as Clos are combined with an EBGP-only design; the event propagation scope of a link-state IGP, by contrast, is an entire area regardless of failure type, so BGP better meets REQ3 and REQ4. BGP supports third-party, recursively resolved next hops, which allows multipath to be non-ECMP-based or forwarding-based on application-defined paths by establishing a peering session with an application controller that injects routing information, satisfying REQ5; OSPF offers similar functionality through concepts such as the Forwarding Address but with more implementation difficulty and far less control of information propagation scope. With a well-defined ASN allocation scheme and standard AS_PATH loop detection, BGP path hunting can be controlled and complex unwanted paths ignored, whereas in a link-state IGP the same goal would need multi-instance, multi-topology or multi-process support that is not available on all data centre devices and is complex to configure and troubleshoot. Finally, EBGP configuration with minimal routing policy is easier to troubleshoot, because in most implementations it is straightforward to view the contents of the BGP Loc-RIB and compare them with the router's RIB, and an operator can view every neighbour's Adj-RIB-In and Adj-RIB-Out structures, so incoming and outgoing NLRI can be correlated on both sides of a session.</p><p>The configuration guidelines for a Clos topology are explicit. EBGP single-hop sessions are established over direct point-to-point links, with no multi-hop or loopback sessions even where multiple links join the same pair of nodes. Private Use ASNs from the range 64512-65534 are used to avoid ASN conflicts. A single ASN is allocated to all Tier 1 devices, a unique ASN to each set of Tier 2 devices in the same cluster, and a unique ASN to every Tier 3 device. The original Private Use ASN range limited operators to 1023 unique ASNs, so one workaround is to re-use the ASNs assigned to Tier 3 devices across different clusters, for example 65001, 65002 and so on up to 65032 within each cluster; to avoid route suppression from AS_PATH loop detection, the upstream EBGP sessions on Tier 3 devices must be configured with the Allowas-in feature, which is not standardised but widely available, and which does not make routing loops more likely because the AS_PATH is added to at each tier and its length is an early tie breaker in the BGP path selection process, with further loop protection still in place at the Tier 1 device, which will not accept routes whose path includes its own ASN. Four-Octet ASNs are an alternative solution, but they add protocol complexity and are not yet supported by all BGP implementations, which may limit vendor selection.</p><p>On prefix advertisement, a Clos topology has a large number of point-to-point links and associated prefixes, and advertising all of them may overload the FIB and stress the control plane for little benefit. The document offers two solutions: do not advertise the point-to-point links at all, which works because the EBGP-based design changes the next-hop address at every device so distant networks are reachable via the advertising peer, though this complicates operations and monitoring, since traceroute will display IP addresses that are not reachable; or advertise the point-to-point links but summarise them on every device, which requires an address allocation scheme giving each Tier 1 and Tier 2 device a consecutive block of addresses for its downlinks. Server subnets on Tier 3 devices must be announced into BGP without summarisation on Tier 2 and Tier 1 devices, because summarising subnets in a Clos topology results in route black-holing under a single link failure and must be avoided. Using peer links within the same tier to provide bypass paths is undesirable because of the quadratic complexity of the peering mesh and the waste of ports, and a ring alternative adds extra hops with limited bandwidth and would need special tweaks such as splitting every device into an ASN of its own.</p><p>For external connectivity, a dedicated cluster of Tier 3 devices replaced by WAN routers can be used, with the Tier 2 devices in that cluster called Border Routers. They must hide network topology by removing Private Use ASNs from the AS_PATH when advertising paths to WAN routers, which is typically done to avoid ASN collisions between data centres and to give a uniform AS_PATH length for WAN ECMP to anycast prefixes; the process for stripping them is not standardised, but most implementations follow the same logic. They must also originate a default route to the data centre devices, which is the only place a default route can be originated because route summarisation is risky in the unmodified Clos topology, and it is more desirable to readvertise the default route than to originate it through complicated conditional schemes, so that a simultaneous failure of all EBGP sessions to the WAN routers does not black-hole traffic. Route summarisation at the edge is possible if the Border Routers are given a different connectivity model, either a peer mesh of physical links or extra links from Tier 1 devices to at least two Border Routers, both of which make the topology non-uniform.</p>",
+      "plainLanguage": "<p>Every link in the network becomes its own BGP session, and each group of switches gets a number that identifies it. The point of giving every tier its own number is that a route can then be checked for loops the way the Internet checks them, and that a failure in one part of the network stops at that part.</p>"
     },
     {
-      "id": "section-2",
+      "id": "operation",
       "number": "6",
-      "title": "Routing Convergence and Failure Recovery",
-      "content": "<p>When a link or switch fails, the network must converge (update routes) quickly. In a Clos topology, failures are detected relatively quickly through BGP keepalives and timers. Tier 1 switches detect a downed link within seconds, and other switches learn of the failure through BGP updates.</p><p>The RFC notes that the Clos topology itself limits failure impact. A single downed Tier 2 switch affects only the servers connected to that switch. A downed Tier 1 spine switch does not cause complete loss of connectivity (multiple spines exist) but may create a traffic bottleneck if other paths become congested.</p><p>The document also discusses routing micro-loops, which can occur briefly during convergence when different switches have inconsistent routing information. These are generally short-lived and acceptable in data center environments.</p>",
-      "plainLanguage": "<p>When something breaks, the switches notice within seconds and find alternate routes. Because every switch talks to many others, one break does not isolate anyone.</p>"
+      "title": "ECMP, Convergence and Failure Scope",
+      "content": "<p>ECMP is the fundamental load-sharing mechanism of a Clos topology: every lower-tier device uses all of its directly attached upper-tier devices to share traffic destined for the same prefix. The number of ECMP paths between any two Tier 3 devices equals the number of devices in the middle stage, so the BGP implementation must support multipath fan-out up to the maximum number of devices directly attached in the upstream or downstream direction, a number that normally does not exceed half the ports on a device; an ECMP fan-out of 32 would be needed in a Clos built from 64-port devices. If hardware does not support wider ECMP, logical link grouping at Layer 2 can provide hierarchical ECMP, at the cost of a greater risk of flow polarisation since less entropy is available at the second stage. Most implementations declare paths equal if they match up to step (e) of the BGP best path algorithm, and since the proposed design has no underlying IGP, all IGP costs are assumed zero or the same across paths, with policies applied as necessary to equalise vendor-specific attributes such as the MULTI_EXIT_DISC attribute and origin code. Routing loops are unlikely, because BGP best-path selection prefers shorter AS_PATH lengths.</p><p>For application load balancing it is desirable to have the same prefix advertised from multiple Tier 3 devices, which produces paths with different AS_PATH values but the same length, so BGP implementations must support load sharing across different neighbouring ASNs when all other attributes are equal. This is sometimes called multipath relax or multipath multiple-AS. Weighted ECMP, which sends more traffic over some paths in the fan-out, may be desirable to compensate for failures or to use paths with more capacity; the prefixes needing it would have to be injected by a remote BGP speaker over a multi-hop session, and weight distribution could be signalled using the technique in the LINK document. Consistent hashing for the ECMP function is often desirable, to minimise the effect of adding or removing a next hop on flow to next-hop affinity, which matters when the device acts as a load balancer; the downside is increased hardware resource utilisation, since more resources such as ternary content-addressable memory space are needed.</p><p>On convergence, the document argues that sub-second convergence is achievable if the implementation supports fast EBGP peering session deactivation and timely RIB and FIB updates on link failure. BGP typically relies on an IGP to route around failures inside an AS, but the proposed design has no IGP, so fault detection relies on the BGP keep-alive timeout or link-failure triggers. Relying solely on keep-alives may cause delays on the order of multiple seconds, since the minimum configurable BGP hold timer on many implementations is three seconds, but many implementations can shut down local EBGP sessions in response to the link-down event for the outgoing interface, a feature sometimes called fast fallover, and since links in modern data centres are predominantly point-to-point fibre, a physical interface failure is often detected in milliseconds and triggers reconvergence. Ethernet links may support failure signalling such as Connectivity Fault Management, and some platforms support Bidirectional Forwarding Detection for sub-second failure detection, though both add requirements to vendor software and possibly hardware and may contradict REQ1. The minimum route advertisement interval timer must also be considered, since it spaces out consecutive UPDATE messages; the initial UPDATE messages carrying withdrawn routes are commonly not affected. In a Clos topology each EBGP speaker typically has either one path, because Tier 2 devices do not accept paths from other Tier 2 devices in the same cluster since they share an ASN, or N paths for the same prefix, where N is significantly large, for example 32.</p><p>Clos topologies have large fan-outs, which can affect convergence in some cases. When a link between a Tier 3 and a Tier 2 device fails, the Tier 2 device sends UPDATE messages to all upstream Tier 1 devices withdrawing the affected prefixes, and the Tier 1 devices relay these to all downstream Tier 2 devices except the originator. Those Tier 2 devices should wait for all upstream Tier 1 devices to send an UPDATE before removing the prefixes, and if the original or relaying devices introduce delay the result can be UPDATE dispersion lasting multiple seconds. To avoid this, implementations must support update groups, collections of neighbours sharing the same outbound policy, to which the local speaker sends updates synchronously. Because of false positives in route flap dampening implementations, especially under such dispersion events, that feature is not recommended in this design.</p><p>Failure impact scope is reduced in two cases. When a link between Tier 2 and Tier 1 devices fails, the Tier 2 device updates its affected ECMP groups and removes the failed link; there is no need to send new information downstream unless the path was selected as best, in which case only an implicit withdraw is needed and forwarding is unaffected. The affected Tier 1 device loses its only path to a particular cluster and withdraws the associated prefixes, which affects only the Tier 2 devices directly connected to it, and the Tier 3 devices are not involved in reconvergence at all. When a Tier 1 device fails, all Tier 2 devices directly attached to it update their ECMP groups for all prefixes from a non-local cluster, and again the Tier 3 devices are not involved. The worst failure impact scope on the control plane is the network as a whole, for instance when a link between Tier 2 and Tier 3 devices fails, but the number of impacted prefixes is much smaller than in an upper-layer failure, and that large scope is a result of the Clos topology rather than of choosing EBGP.</p><p>Routing micro-loops can occur. When a downstream device loses all paths for a prefix, it normally has a default route pointing upstream, so a Tier 2 switch can lose a prefix while a Tier 1 switch still points at it, producing a transient loop in which packets bounce between them until the upstream device updates its forwarding tables. To limit the impact, Tier 2 and Tier 1 switches can be configured with static discard or null routes more specific than the default route for prefixes missing during convergence: a summary route covering all server subnets of the underlying Tier 3 devices on Tier 2 switches, and a summary covering the server subnets allocated for the whole data centre on Tier 1 switches. Those discard routes take precedence only for the duration of convergence, until a more specific prefix is learned.</p>",
+      "plainLanguage": "<p>Traffic between servers is spread over all the available paths, and the number of paths is set by how many switches sit in the middle layer. The document then works through what happens when something breaks: how fast it is noticed, how far the change spreads, and how to stop packets bouncing between two switches during the change.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>Section 9 states that the design does not introduce any additional security concerns, and points to the general BGP security considerations in <a href='/rfc4271'>RFC 4271</a> and <a href='/rfc4272'>RFC 4272</a>. Since a data centre is a single-operator domain, the document assumes that edge filtering is in place to prevent attacks against the BGP sessions themselves from outside the perimeter of the data centre. That may be a more feasible option for most deployments than dealing with key management for TCP MD5, or with the lack of implementations of the TCP Authentication Option available at the time of publication. The Generalized TTL Security Mechanism could also be used to further reduce the risk of BGP session spoofing.</p>",
+      "plainLanguage": "<p>The security note is short: the design adds no new exposure, so the ordinary BGP protections apply, and keeping outsiders away from the sessions is easier than managing keys for every one of them.</p>"
     }
   ],
   "viz": [
     {
-      "type": "compare-table",
+      "type": "tree",
       "anchor": "architecture",
       "position": "after",
-      "caption": "Traditional versus Clos data center topology",
+      "caption": "The tiers of a Clos topology as named in the document",
       "data": {
-        "columns": [
-          "Aspect",
-          "Traditional Tree",
-          "Clos (Leaf-Spine)"
-        ],
-        "rows": [
+        "root": {
+          "label": "Clos topology",
+          "children": [
+            {
+              "label": "Tier 1, spine",
+              "note": "A single ASN is allocated to all Tier 1 devices.",
+              "children": [
+                {
+                  "label": "Tier 2, leaf",
+                  "note": "A unique ASN for each set of Tier 2 devices in the same cluster.",
+                  "children": [
+                    {
+                      "label": "Tier 3, top-of-rack",
+                      "note": "A unique ASN for every Tier 3 device."
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "label": "Servers",
+              "note": "Reached through Tier 3; every server has several paths to every other server."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "requirements",
+      "position": "after",
+      "caption": "The five requirements the design has to satisfy",
+      "data": {
+        "items": [
           {
-            "cells": [
-              "Switch types",
-              "Different at each tier",
-              "Identical at each tier"
-            ]
+            "title": "REQ1",
+            "text": "A topology that scales horizontally by adding more links and devices of the same type, without upgrading the elements themselves."
           },
           {
-            "cells": [
-              "Scaling",
-              "Upgrade existing switches",
-              "Add identical switches"
-            ]
+            "title": "REQ2",
+            "text": "A narrow set of software features and protocols supported by a multitude of networking equipment vendors."
           },
           {
-            "cells": [
-              "East-West bandwidth",
-              "Limited by core",
-              "Full bisection (non-blocking)"
-            ]
+            "title": "REQ3",
+            "text": "A routing protocol with a simple implementation in code complexity and ease of operational support."
           },
           {
-            "cells": [
-              "Paths between servers",
-              "One or few",
-              "Multiple equal-cost paths"
-            ],
-            "self": true
+            "title": "REQ4",
+            "text": "Minimise the failure domain of equipment or protocol issues as much as possible."
+          },
+          {
+            "title": "REQ5",
+            "text": "Allow some traffic engineering, preferably through explicit control of the routing prefix next hop using built-in protocol mechanics."
           }
         ]
       }
     },
     {
-      "type": "layers",
-      "anchor": "routing",
+      "type": "compare-table",
+      "anchor": "architecture",
       "position": "after",
-      "caption": "Data center routing stack in Clos topology",
+      "caption": "The three routing designs and how each fares",
       "data": {
-        "layers": [
+        "columns": [
+          "Design",
+          "Routing",
+          "Assessment in the document"
+        ],
+        "rows": [
           {
-            "label": "Applications",
-            "detail": "Services and microservices"
+            "cells": [
+              "Layer 2 only",
+              "Spanning Tree Protocol, with RSTP, MST or TRILL as variants.",
+              "Active and standby path selection does not scale horizontally, and a single cabling, configuration or software fault can affect a whole spanning-tree domain."
+            ]
           },
           {
-            "label": "Load balancing",
-            "detail": "Anycast and ECMP for traffic distribution",
-            "highlight": true
+            "cells": [
+              "Hybrid Layer 2/L3",
+              "A routing protocol in Tier 1 or Tier 2, with many small Layer 2 domains.",
+              "Scales up, but at the cost of running several protocols; Layer 2 is kept for legacy applications, virtual machine mobility, simpler addressing and load balancing."
+            ]
           },
           {
-            "label": "EBGP routing",
-            "detail": "Route advertisement and selection",
-            "highlight": true
-          },
-          {
-            "label": "Switch forwarding",
-            "detail": "Packet forwarding based on routing table"
-          },
-          {
-            "label": "Physical links",
-            "detail": "Ethernet connections between switches"
+            "cells": [
+              "Layer 3 only",
+              "IP routing down to Tier 3, usually with an interior gateway protocol such as OSPF.",
+              "Confines Layer 2 broadcast domains, improves stability and scalability, and simplifies the network, helping to meet REQ1 and REQ2."
+            ]
           }
         ]
       }
@@ -187,8 +225,13 @@
   "references": [
     {
       "number": "[RFC4271]",
-      "text": "Rekhter, Y., et al., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "text": "Rekhter, Y., Ed., Li, T., Ed., and S. Hares, Ed., \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
       "rfc": 4271
+    },
+    {
+      "number": "[RFC4272]",
+      "text": "Murphy, S., \"BGP Security Vulnerabilities Analysis\", RFC 4272, January 2006.",
+      "rfc": 4272
     },
     {
       "number": "[RFC4786]",
@@ -196,21 +239,38 @@
       "rfc": 4786
     },
     {
-      "number": "[CLOS1953]",
-      "text": "Clos, C., \"A study of non-blocking switching networks\", Bell System Technical Journal, 1953."
+      "number": "[RFC5880]",
+      "text": "Katz, D. and D. Ward, \"Bidirectional Forwarding Detection (BFD)\", RFC 5880, June 2010.",
+      "rfc": 5880
     },
     {
-      "number": "[ALFARES2008]",
-      "text": "Alfares, M., et al., \"A scalable, commodity data center network architecture\", in Proceedings of ACM SIGCOMM, 2008."
+      "number": "[RFC6325]",
+      "text": "Perlman, R., et al., \"Routing Bridges (RBridges): Base Protocol Specification\", RFC 6325, July 2011.",
+      "rfc": 6325
+    },
+    {
+      "number": "[RFC6769]",
+      "text": "Raszuk, R., et al., \"Simple Virtual Aggregation (S-VA)\", RFC 6769, October 2012.",
+      "rfc": 6769
+    },
+    {
+      "number": "[RFC6996]",
+      "text": "Mitchell, J., \"Autonomous System (AS) Reservation for Private Use\", BCP 6, RFC 6996, July 2013.",
+      "rfc": 6996
+    },
+    {
+      "number": "[RFC7911]",
+      "text": "Walton, D., et al., \"Advertisement of Multiple Paths in BGP\", RFC 7911, July 2016.",
+      "rfc": 7911
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>The RADIUS protocol is limited to a total packet size of 4096 bytes. Provisions exist for fragmenting large authentication data using Access-Challenge packets, but not for other kinds of data. This experimental document defines a way to fragment larger amounts of data across multiple packets.</p>",
   "plainLanguage": {
-    "summary": "<p>RADIUS messages have a size limit. This experiment says how to chop a big message into smaller pieces and put it together on the other side.</p>"
+    "summary": "<p>RADIUS messages cannot be bigger than about four kilobytes, which is too small for some of the authorization information a server now wants to send. RFC 7499 splits such a message into several ordinary RADIUS messages, each carrying a piece. Because every piece is a normal message, the proxies in between do not need to change anything at all.</p>"
   },
   "questions": [
     "radius packet size limit",
@@ -22,10 +22,10 @@
   ],
   "subtitle": "A way to send large amounts of authorization data by splitting RADIUS packets across multiple exchanges.",
   "tldr": {
-    "problem": "The RADIUS protocol limits packets to 4096 bytes, and authentication servers and clients need to exchange large amounts of authorization data (such as SAML statements) that exceed this limit. Standard RADIUS mechanisms only allow fragmenting authentication data through multi-stage exchanges, not authorization data.",
-    "mechanism": "RADIUS peers exchange a series of smaller packets called chunks, each containing part of the large data. A new Frag-Status attribute signals when fragmentation is ongoing, and a State attribute ties chunks together. The process works before authentication (pre-authorization) when the client sends large data to the server, and after authentication (post-authorization) when the server sends large data to the client.",
-    "outcome": "This experimental specification allows servers and clients to exchange more than 4096 bytes of authorization data while remaining compatible with existing RADIUS proxies that do not implement the fragmentation feature. The fragmented data is reconstructed and processed as if it had been received in a single packet.",
-    "outcomeLabel": "Impact"
+    "problem": "RADIUS packets are limited to 4096 bytes, and authentication servers and clients need to exchange large amounts of authorization data that exceed this limit.",
+    "mechanism": "RADIUS peers exchange a series of smaller packets called chunks, each containing part of the large data. A new Frag-Status attribute signals when fragmentation is ongoing, and a State attribute ties the chunks together.",
+    "outcome": "The only systems that need to change are those that generate or consume the large data; intermediate proxies pass the chunks through unchanged. The document is Experimental.",
+    "outcomeLabel": "Status today"
   },
   "facts": [
     {
@@ -37,102 +37,219 @@
       "value": "100 kilobytes"
     },
     {
-      "label": "Authentication data field size",
-      "value": "64 bits"
+      "label": "Maximum round trips",
+      "value": "25"
     },
     {
-      "label": "Authentication type field size",
-      "value": "16 bits"
+      "label": "Frag-Status attribute",
+      "value": "241.1"
+    },
+    {
+      "label": "Proxy-State-Length attribute",
+      "value": "241.2"
+    },
+    {
+      "label": "Additional-Authorization Service-Type",
+      "value": "19"
     }
   ],
-  "today": "<p>RFC 7499 is an Experimental RFC published in April 2015. It defines a mechanism for fragmenting RADIUS packets to allow exchange of large amounts of authorization data exceeding the 4096-byte limit. The specification remains experimental and is undergoing testing in ABFAB deployments and related projects to verify real-world usability and operational behavior before potential advancement to Standards Track.</p>",
+  "today": "<p>RFC 7499 is an Experimental document that has not been obsoleted or updated. It says the experiment is to check whether the approach is usable at scale by watching how it is taken up in real deployments, and it names the transport of large SAML statements as the main use case so far. It also records two features that still need testing before the document could become a standard: access requests that carry none of the authentication attributes RFC 2865 requires, and the need for proxies to route on the value of the User-Name attribute.</p>",
   "glossary": [
-    "radius"
+    "radius",
+    "saml",
+    "path-mtu"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Problem and Motivation",
-      "content": "<p>RFC 2865 defines RADIUS (Remote Authentication Dial-In User Service), a protocol for carrying authentication, authorization, and accounting information between a RADIUS Client and RADIUS Server. Each RADIUS packet has a maximum size of 4096 bytes, a limit intended to avoid UDP fragmentation. This size was considered adequate when RADIUS was designed, but modern use cases require exchanging large amounts of authorization data.</p><p>Emerging scenarios, particularly the ABFAB (Application Bridging for Federated Access Beyond web) architecture, require sending Security Assertion Markup Language (SAML) statements from the server to the client. These statements are frequently larger than 4096 bytes. In some deployments, the RADIUS Client also needs to send large amounts of authorization data to the Server. Unlike authentication data (where multi-stage EAP exchanges are defined), no mechanism existed for fragmenting large authorization data across multiple packets. This document provides that mechanism in a way that remains compatible with existing RADIUS infrastructure.</p>",
-      "plainLanguage": "<p>RADIUS messages have a size limit because they were designed for small authentication data. But now people need to send big documents (like employee access lists) in one message. This RFC shows how to chop up big messages into small pieces that fit the limit.</p>"
+      "title": "The Problem: RADIUS Packets Are Small",
+      "content": "<p>RADIUS carries authentication, authorization and accounting information between a client and a server. Each packet is a header plus zero or more attributes, up to a maximum size of 4096 bytes. The limit was there to avoid IP-level fragmentation of the UDP datagram, and 4096 bytes seemed large enough for any purpose at the time.</p><p>New scenarios now need to exchange authorization information larger than that. The example the memo gives is the transport of SAML statements from the server to the client, which is likely to exceed 4096 bytes. Peers that want to send large amounts of data have to fragment it across multiple packets. RADIUS-EAP defines how an EAP exchange occurs across multiple request and challenge sequences, but no such exchange is possible for accounting or authorization data.</p><p>The three approaches recommended elsewhere in RADIUS do not solve the problem. Using a sequence of packets does not cover data sent from the client to the server, and using names rather than values is hard when the data is highly dynamic, as a SAML statement is. Path MTU discovery does not help either, because it does not allow the sending of data larger than the smaller of the MTU or 4096 bytes. The combination of the size limit and a path MTU that may be far smaller means there is a pressing need for a way to send large amounts of authorization data, and no accompanying solution.</p>",
+      "plainLanguage": "<p>The four-kilobyte limit was sensible when RADIUS was designed, but modern authorization data does not fit in it. The obvious workarounds each fail for a different reason, so the memo builds the splitting into RADIUS itself.</p>"
     },
     {
-      "id": "architecture",
-      "number": "2",
-      "title": "Fragmentation Architecture and Scope",
-      "content": "<p>This specification limits fragmentation to authorization data (not accounting or Change-of-Authorization packets), and allows at most about 100 kilobytes of fragmented data to be sent. The specification defines two phases for authorization exchange: <strong>pre-authorization</strong> (before the end user is authenticated, with the client sending data to the server) and <strong>post-authorization</strong> (after authentication, with the server sending data to the client).</p><p>The mechanism is designed to be transparent to existing RADIUS proxies. Proxies that do not implement fragmentation can simply forward the packets without understanding the fragmentation process. The design carefully uses service type indicators that cause older RADIUS clients not implementing fragmentation to treat fragmented packets as if authentication had failed, making the mechanism fail-safe for legacy systems. The specification also does not require modification of intermediary proxies; only the endpoints that generate or consume fragmented data need to implement it.</p>",
-      "plainLanguage": "<p>The system is designed to be invisible to old routers that pass messages between client and server. Old clients that don't understand fragmentation will just say 'I do not recognize this' and move on, rather than breaking.</p>"
-    },
-    {
-      "id": "concepts",
+      "id": "scope",
       "number": "3",
+      "title": "What the Document Covers and What It Does Not",
+      "content": "<p>The mechanism should not be used to exchange more than 100 kilobytes of data. Any more than this may turn RADIUS into a generic transport protocol, such as TCP or SCTP, which is undesirable. Experience shows that attempts to transport bulk data across the Internet with UDP will inevitably fail unless they reimplement all the behaviour of TCP, and RADIUS lacks the retransmission policies and congestion control mechanisms that would make it a competitor of TCP.</p><p>The scope is limited to authorization data, because the other exchanges do not need it. Authentication exchanges have already been defined to overcome the limit, and since they are the most critical part of a RADIUS conversation it is preferable not to change them. There is no need to fragment accounting packets either, because accounting data is typically composed of many small updates rather than indivisible blocks of more than 4 kilobytes, and the need for large amounts of data per user session is handled by the existing multi-session identifier attribute. Change-of-Authorization packets are not fragmented either; the CoA client sends session identification attributes and a State attribute, and an implementation without fragmentation support responds with a negative acknowledgement and an Unsupported-Service error cause.</p><p>The document says the experiment is to verify whether the approach is usable at scale by observing its uptake, usability and operational behaviour in real deployments. It also notes two features that still need testing: the specification may generate access requests with none of the authentication attributes that RFC 2865 requires, and it requires proxies to base their routing decisions on the value of the User-Name attribute.</p>",
+      "plainLanguage": "<p>This is for authorization data only, and not for bulk transfers: a hundred kilobytes is the recommended ceiling, with the idea that RADIUS should not turn into a file transfer protocol. Authentication and accounting keep the mechanisms they already have.</p>"
+    },
+    {
+      "id": "design",
+      "number": "4",
       "title": "The Chunking Mechanism",
-      "content": "<p>When a RADIUS endpoint needs to send data exceeding the practical size limit (the minimum of 4096 bytes or the current Path MTU), the data is split into multiple smaller packets called <strong>chunks</strong>. Each chunk is a valid RADIUS packet containing a portion of the original attributes. The chunks are reassembled at the destination by simply concatenating them together.</p><p>Unlike IPv4 fragmentation, there is no Fragment Offset field; the chunks are explicitly ordered because RADIUS is a lock-step protocol. Chunk N+1 cannot be sent until all chunks up to and including N have been received and acknowledged. The ordering is enforced through the <strong>Frag-Status</strong> attribute, which signals whether fragmentation is ongoing (More-Data-Pending) or finished. A <strong>State</strong> attribute ties related chunks together by being copied from the previous response packet into the next request.</p><p>When a Long Extended Type attribute (as defined in RFC 6929) is split across chunks, a new T (Truncation) flag is set to indicate that the attribute continues in the next chunk. This is the only case where the chunking process modifies attribute content; the actual attribute values remain unchanged.</p>",
-      "plainLanguage": "<p>Break the big message into pieces (chunks). Number them in order. Send one piece, wait for acknowledgment, send the next. The receiver sticks them back together in order. If a piece spans two chunks, mark it as 'continues next.'</p>"
+      "content": "<p>Instead of encoding one large RADIUS packet, a series of smaller packets of the same type is encoded, each called a chunk. The encoding is a simple linear walk over the attributes to be encoded, which preserves the order of attributes of the same type as RFC 2865 requires. The number of attributes in a chunk depends on the size limit, the size of each attribute, the number of proxies in the path, and the overhead of the signalling attributes.</p><p>The client and the server exchange a series of request and accept packets until all the fragmented data has been transported. Every packet carries a Frag-Status attribute that tells the other party whether fragmentation is desired, ongoing or finished, and each packet may carry the fragmented data or act as an acknowledgement of a chunk from the other side. The chunks are tied together with the State attribute, and each access request carries a User-Name attribute so that the packet can be proxied. The reconstruction is simply appending all the chunks together: unlike IP fragmentation there is no offset field, because the chunks are explicitly ordered and RADIUS is a lock-step protocol, so chunk N+1 cannot be sent until all the chunks up to and including N have been received and acknowledged.</p><p>Every packet sent or received as part of the chunking must be a valid packet subject to all format and security requirements. That is what allows a proxy that simply forwards packets to proxy chunks without examining them. The one place where chunking affects the content of an attribute is when a large attribute is split across two chunks, which the Long Extended Type attribute format does not permit; a new T flag in its reserved field marks such a split. The value fields of all attributes remain unchanged, and any per-packet security attributes are calculated for each chunk independently, with no integrity or security checks performed on the reassembled packet.</p>",
+      "plainLanguage": "<p>The big message is cut into ordinary RADIUS packets, each carrying a marker that says more is coming. The receiver glues them back together in order, one exchange at a time, so nothing has to be reassembled out of sequence.</p>"
     },
     {
       "id": "operation",
-      "number": "4",
-      "title": "Pre-Authorization and Post-Authorization Exchange",
-      "content": "<p><strong>Pre-authorization</strong> happens when the RADIUS Client sends large authorization data to the Server before the user is authenticated. The client sends the first chunk with a Frag-Status attribute set to More-Data-Pending. The server responds with an Access-Accept packet containing a State attribute and Frag-Status set to More-Data-Request. The client then sends the next chunk using the State from the previous response. This continues until the client sends a final chunk without a Frag-Status attribute. The server then processes all received attributes as if they had arrived in a single packet.</p><p><strong>Post-authorization</strong> happens when the Server sends large authorization data to the Client after authentication is complete. The server sends the first chunk with Frag-Status = More-Data-Pending. The client responds with an Access-Request containing the State from that packet and Frag-Status = Fragmentation-Supported. The server continues sending chunks until it sends a final chunk without Frag-Status. The client then reconstructs and processes the received authorization data.</p><p>Each chunk MUST include certain attributes: User-Name (for proxy routing), Message-Authenticator (for security), and Service-Type = Additional-Authorization (to signal to older systems that this is a fragmented exchange, not a normal authorization). State is copied from the previous response to tie chunks together. This design ensures even transparent proxies that simply forward packets can pass fragments without modification.</p>",
-      "plainLanguage": "<p>The conversation goes: 'I have a big message, part 1.' 'Got it, send part 2.' 'Here is part 2, one more coming.' 'Got it, send part 3.' 'Here is part 3, that is all.' 'Got it, processing the full message now.'</p>"
+      "number": "5",
+      "title": "Pre-Authorization and Post-Authorization",
+      "content": "<p>An authorization exchange can happen before or after the end user has been authenticated. In the pre-authorization phase, the client may send a large packet of authorization information to the server before authentication starts, and only the client may send authorization data. In the post-authorization phase, the server may send a large packet of authorization data to the client after authentication, and only the server may send it.</p><p>In the pre-authorization case the client sends the first chunk as an access request carrying a Frag-Status attribute with the value More-Data-Pending, plus a Service-Type attribute showing that the packet is part of the chunking process. A server that implements fragmentation sees the Frag-Status attribute and postpones all authorization and authentication handling until every chunk has arrived. A server that does not implement it sees a request for an unknown service and returns a rejection, and a client that implements fragmentation must treat such a response as a rejection. A server that wants the rest of the chunks replies with Frag-Status set to More-Data-Request and a State attribute that the client echoes in its next request.</p><p>The post-authorization case runs the other way. The server sends chunks as access accepts with Frag-Status set to More-Data-Pending, and the client replies with an access request carrying Frag-Status set to More-Data-Request and the State value from the accept. The last chunk carries no Frag-Status attribute and restores the original Service-Type and State, and the client then processes the attributes as if they had arrived in a single packet. A client that wants to receive fragmented data from the server must say so in its first access request with a Frag-Status attribute set to Fragmentation-Supported, unless the pre-authorization exchange already took place.</p>",
+      "plainLanguage": "<p>There are two directions. The client can send a big block of information before the user logs in, and the server can send one after. Each side marks its packets as part of a longer exchange and waits for the other to ask for the next piece.</p>"
     },
     {
-      "id": "deployment",
-      "number": "5",
-      "title": "Compatibility and Proxy Handling",
-      "content": "<p>This specification is designed to work with existing RADIUS proxies that do not implement fragmentation. A legacy proxy simply passes chunks forward because each chunk is a valid RADIUS packet. The User-Name attribute in each chunk allows proxies to route packets correctly based on user identity. The Frag-Status and Service-Type = Additional-Authorization attributes cause non-compliant RADIUS servers to return Access-Reject, allowing the client to detect incompatibility.</p><p>The specification requires two minor updates to standards-track documents. First, it allocates a new T (Truncation) flag in the Reserved field of the Long Extended Type attribute defined in RFC 6929, allowing attributes to be marked as continuing in the next chunk. Second, it notes that RFC 6158's statement 'attribute designers SHOULD NOT assume that a RADIUS implementation can successfully process RADIUS packets larger than 4096 bytes' is no longer universally true if this specification is widely implemented.</p><p>For systems not implementing fragmentation, the mechanism fails safely: older RADIUS clients see Service-Type with an unknown value and treat it as Access-Reject. Older RADIUS servers also receive packets with Service-Type = Additional-Authorization (an unknown service type) and respond with Access-Reject. Only endpoints implementing this specification recognize and handle fragmented exchanges correctly.</p>",
-      "plainLanguage": "<p>Old systems that don't know about fragmentation just ignore the special attributes and say no. New systems that understand fragmentation use the special attributes to know which pieces go together. Everything still works because each piece is a valid message by itself.</p>"
+      "id": "message-format",
+      "number": "10",
+      "title": "The New Attributes",
+      "content": "<p>Two new attributes are defined, both taken from the short extended space. <strong>Frag-Status</strong> has type 241.1 and length 7, and carries a four-byte code whose value says what is happening: 0 is reserved, 1 means Fragmentation-Supported, 2 means More-Data-Pending and 3 means More-Data-Request. It may appear in access requests, challenges and accepts, and must not be included in access rejects.</p><p><strong>Proxy-State-Length</strong> has type 241.2 and length 7, and carries the total length in bytes of the Proxy-State attributes the server received. This lets the client adjust the size of the chunks it sends. It may appear in access challenges and accepts, and must not be included in access requests or rejects.</p><p>A third change is needed elsewhere. A new Service-Type value of 19, Additional-Authorization, marks the packets that belong to a chunked exchange, so that a peer which does not understand the mechanism treats them as a request for an unknown service and rejects them. A new T flag is allocated in the reserved field of the Long Extended Type attribute to mark a large attribute that has been split across chunks. The memo also records that a proxy which cannot add its own Proxy-State attribute to a packet may discard it, which is why the Proxy-State-Length attribute is needed.</p>",
+      "plainLanguage": "<p>Two small attributes carry the signalling: one says how far the exchange has got, and the other tells the client how much the proxies have added. A third marker in the service type tells an old peer that this is not a normal request.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
+      "number": "13",
       "title": "Security and Practical Limits",
-      "content": "<p>Each chunk is authenticated and validated independently. RADIUS security mechanisms (such as Message-Authenticator) are applied to each chunk separately. The Message-Authenticator attribute is calculated over each individual chunk, not over the reconstructed full packet. Neither integrity checks nor security checks are performed on the original (assembled) packet; each piece must be valid on its own.</p><p>The specification recommends that implementers limit fragmented data transfers to a maximum of 100 kilobytes. RADIUS/UDP transport is fundamentally unsuitable for bulk data transfer, as it lacks the retransmission policies and congestion control mechanisms of TCP. Larger data transfers should use RADIUS/TCP or other appropriate transport protocols instead. Administrators should adjust limitations based on the specific capabilities of their systems in terms of memory and processing power.</p><p>This is an Experimental RFC designed to test whether the fragmentation approach works in real-world deployments through ABFAB and related projects. The specification may advance to Standards Track if operational experience shows it is usable in large-scale environments.</p>",
-      "plainLanguage": "<p>Each chunk is signed and checked. Do not send more than 100 kilobytes in chunks (use a better protocol if you need more). This is experimental; we are testing if it works in the real world.</p>"
+      "content": "<p>The memo says RADIUS security is already problematic, as earlier specifications have noted, and that this specification changes nothing about it. Every access request associated with fragmentation must be authenticated with the existing Message-Authenticator attribute, which prevents forging and replay to the limits of the existing security.</p><p>Sending bulk data does create new considerations. Clients and servers may have to store large amounts of data per session, and that can be significant, so implementations should limit the amount of bulk data stored per session. The method is implementation specific, and section 7 of the document gives some indications of reasonable limits. The bulk data can often be kept outside the memory of the RADIUS implementation, in an external database or in files, which mitigates the resource exhaustion problem, and RADIUS servers already store large amounts of accounting data that way.</p><p>Section 7 sets out the practical limits. Implementations must limit the total amount of data sent or received this way, with a default of 100 kilobytes, and must limit the total number of round trips used, with a default of 25. Going beyond either may indicate an implementation error, a misconfiguration or a denial-of-service attack. Both limits should be configurable. The reason for the round trip limit is that an unauthenticated end user can trigger the exchange of large amounts of data, and an attacker could open many connections each asking the server to store a large amount, which could exhaust the server's memory and deny access to real users.</p>",
+      "plainLanguage": "<p>Each chunk is signed in the usual way, so the existing protection still applies. The new risk is storage, so both the amount of data and the number of round trips are capped, and the caps should be configurable.</p>"
     }
   ],
-  "viz": [],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE PRE-AUTHORIZATION CHUNK EXCHANGE (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "RADIUS Client"
+          },
+          {
+            "key": "server",
+            "label": "RADIUS Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Access-Request (chunk 1)",
+            "color": "blue",
+            "note": "Frag-Status = More-Data-Pending."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "Access-Accept",
+            "color": "green",
+            "note": "Frag-Status = More-Data-Request, with a State attribute."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Access-Request (chunk 2)",
+            "color": "blue",
+            "note": "The next chunk, tied to the first by the State attribute."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE FRAG-STATUS CODE VALUES (RFC 7499 SECTION 10.1)",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "Reserved",
+            "desc": "Not used."
+          },
+          {
+            "code": "1",
+            "label": "Fragmentation-Supported",
+            "desc": "The client says it will accept fragmented data from the server."
+          },
+          {
+            "code": "2",
+            "label": "More-Data-Pending",
+            "desc": "More chunks of this exchange are still to come."
+          },
+          {
+            "code": "3",
+            "label": "More-Data-Request",
+            "desc": "The sender is asking for the next chunk."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "WHERE THE NEW ATTRIBUTES MAY APPEAR (RFC 7499 SECTION 10.3)",
+      "data": {
+        "columns": [
+          "Attribute",
+          "Access-Request",
+          "Access-Accept",
+          "Access-Reject",
+          "Access-Challenge"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Frag-Status",
+              "0-1",
+              "0-1",
+              "0",
+              "0-1"
+            ]
+          },
+          {
+            "cells": [
+              "Proxy-State-Length",
+              "0",
+              "0-1",
+              "0",
+              "0-1"
+            ]
+          }
+        ]
+      }
+    }
+  ],
   "references": [
     {
       "number": "[RFC2865]",
-      "text": "Rigney, C., Willens, S., Rubens, A., and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
+      "text": "Rigney, C., Willens, S., Rubens, A. and W. Simpson, \"Remote Authentication Dial In User Service (RADIUS)\", RFC 2865, June 2000.",
       "rfc": 2865
     },
     {
-      "number": "[RFC2866]",
-      "text": "Rigney, C., \"RADIUS Accounting\", RFC 2866, June 2000.",
-      "rfc": 2866
-    },
-    {
-      "number": "[RFC3579]",
-      "text": "Aboba, B., Blunk, L., Vollbrecht, J., Carlson, J., and H. Levkowetz, \"RADIUS (Remote Authentication Dial In User Service) Support For Extensible Authentication Protocol (EAP)\", RFC 3579, September 2003.",
-      "rfc": 3579
-    },
-    {
-      "number": "[RFC5176]",
-      "text": "Chiba, M., Dommety, G., Eklund, M., Kagi, D., and D. Mitton, \"Dynamic Authorization Extensions to Remote Authentication Dial In User Service (RADIUS)\", RFC 5176, January 2008.",
-      "rfc": 5176
+      "number": "[RFC3575]",
+      "text": "Aboba, B., \"IANA Considerations for RADIUS (Remote Authentication Dial In User Service)\", RFC 3575, July 2003.",
+      "rfc": 3575
     },
     {
       "number": "[RFC6158]",
-      "text": "DeKok, A., and G. Weber, \"RADIUS Design Guidelines\", RFC 6158, March 2011.",
+      "text": "DeKok, A., Ed. and G. Weber, \"RADIUS Design Guidelines\", BCP 158, RFC 6158, March 2011.",
       "rfc": 6158
     },
     {
       "number": "[RFC6929]",
-      "text": "DeKok, A., and A. Lior, \"Remote Authentication Dial In User Service (RADIUS) Protocol Extensions\", RFC 6929, April 2013.",
+      "text": "DeKok, A. and A. Lior, \"Remote Authentication Dial In User Service (RADIUS) Protocol Extensions\", RFC 6929, April 2013.",
       "rfc": 6929
+    },
+    {
+      "number": "[RFC7930]",
+      "text": "Hartman, S., \"Larger Packets for RADIUS over TCP\", RFC 7930, August 2016.",
+      "rfc": 7930
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

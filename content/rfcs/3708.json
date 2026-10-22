@@ -5,25 +5,27 @@
   "categoryReviewed": false,
   "summary": "<p>Presents conservative methods of using TCP DSACKs and SCTP duplicate TSN notifications to identify unnecessary retransmissions for various applications. Both protocols tell the sender when a segment arrived more than once. It is experimental.</p>",
   "plainLanguage": {
-    "summary": "<p>Sometimes a sender repeats a message that already arrived. The receiver says it got two copies, and this explains how the sender can use that hint to learn it repeated too soon.</p>"
+    "summary": "<p>Sometimes a sender repeats a message that already arrived, because it never heard back. The receiver notices the second copy and says so. RFC 3708 explains how a sender can use that notice to work out that it sent something twice for no reason, and how to be careful not to mistake a real loss for a wasted resend.</p>"
   },
   "questions": [
     "detect spurious retransmissions with dsack",
     "tcp dsack sctp duplicate tsn",
     "how to use dsack for congestion control",
-    "spurious retransmission detection"
+    "spurious retransmission detection",
+    "what is a dsack",
+    "how do you detect a spurious retransmission"
   ],
   "tags": [
     "Transport",
     "TCP",
     "Congestion"
   ],
-  "subtitle": "Identifying wasted retransmissions using duplicate notifications",
+  "subtitle": "Using the receiver's duplicate notices to spot a retransmission that was never needed.",
   "tldr": {
-    "problem": "A TCP or SCTP sender sometimes sends a segment again even though it already arrived, causing wasted bandwidth. The receiver can detect these unnecessary retransmissions by announcing duplicate arrivals.",
-    "mechanism": "This RFC presents conservative algorithms to interpret duplicate notifications (DSACKs in TCP, duplicate TSNs in SCTP) to distinguish real packet loss from false alarms caused by network reordering or other factors.",
-    "outcome": "A sender can now use these algorithms to avoid incorrectly reverting congestion control changes when a retransmission was actually unnecessary, improving network efficiency.",
-    "outcomeLabel": "Why it matters"
+    "problem": "A TCP or SCTP sender sometimes sends a segment again even though the first copy arrived, wasting bandwidth and making congestion control cut the sending rate for no reason.",
+    "mechanism": "Both protocols tell the sender when a segment arrives more than once, through a DSACK in TCP and a duplicate TSN notification in SCTP. The RFC gives a simple counting method and a conservative algorithm that tells the sender whether a whole window of retransmissions was spurious.",
+    "outcome": "A sender can learn which retransmissions were unnecessary, and can avoid undoing congestion control changes that were justified. The document is Experimental.",
+    "outcomeLabel": "Status today"
   },
   "facts": [
     {
@@ -37,54 +39,193 @@
     {
       "label": "Status",
       "value": "Experimental"
+    },
+    {
+      "label": "Timestamp option cost",
+      "value": "12 bytes per packet"
+    },
+    {
+      "label": "Time-delta detector at f = 1/2",
+      "value": "Finds roughly 59% of needless timeouts"
+    },
+    {
+      "label": "Same detector, wrong calls",
+      "value": "Labels needed retransmits 2.5% of the time"
     }
   ],
-  "today": "<p>RFC 3708 is an Experimental specification that has not been obsoleted. It defines conservative algorithms for safely using duplicate notifications to detect spurious retransmissions without incorrectly reducing congestion control.</p>",
+  "today": "<p>RFC 3708 is an Experimental document and has not been obsoleted or updated. It leaves open the question of what a sender should do once a spurious retransmission has been detected, noting that several proposals exist and that it is not yet clear which of them are appropriate.</p>",
   "glossary": [
     "tcp",
     "sctp",
     "retransmission",
-    "congestion-control"
+    "congestion-control",
+    "selective-acknowledgment",
+    "scoreboard",
+    "sequence-number",
+    "fast-retransmit",
+    "round-trip-time",
+    "ecn"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction",
-      "content": "<p>TCP and SCTP both support mechanisms for the receiver to report when it receives a duplicate segment: <strong>Duplicate Selective Acknowledgement</strong> (DSACK) in TCP and <strong>Duplicate Transmission Sequence Number</strong> (TSN) notification in SCTP. When a segment arrives more than once, the receiver sends this notification back to the sender.</p><p>The sender can use these notifications to detect <strong>spurious retransmissions</strong>—segments that were sent again unnecessarily because the sender believed they were lost when they actually arrived the first time. This RFC outlines two conservative approaches: one for simple counting of spurious events for monitoring, and a second algorithm designed to safely undo congestion control changes that were made in response to a retransmission that did not indicate real loss.</p>",
-      "plainLanguage": "<p>The receiver says \"I got that message twice.\" The sender can use this hint to figure out if it retransmitted too soon.</p>"
+      "title": "What a Duplicate Notice Tells the Sender",
+      "content": "<p>TCP and SCTP both tell the sending side when a segment turns up twice. TCP does it with a duplicate selective acknowledgement, described in <a href='/rfc2883'>RFC 2883</a>; SCTP does it with a duplicate transmission sequence number notification. From that information a sender can generally tell when a retransmission was sent in error.</p><p>The RFC offers two ways to use it. The first is simple and suits accounting work. The second is a conservative algorithm for telling unnecessary retransmissions apart from real loss, so that the sender can undo congestion control changes that were not warranted. The memo is explicit that it is not the only possible method, but that its guidelines should be taken into account by anyone designing an alternative.</p><p>One thing the document deliberately leaves out is what a sender should do once it has detected a spurious retransmission. Several proposals exist for that, and the authors say it is not yet clear which of them are appropriate. All of them depend on detecting the spurious retransmit in the first place, so they can share the algorithm given here.</p>",
+      "plainLanguage": "<p>The receiver can tell the sender that a segment arrived twice. This memo explains how to turn that notice into a reliable answer to the question: was the resend necessary?</p>"
     },
     {
       "id": "operation",
       "number": "2",
-      "title": "Counting Spurious Retransmissions",
-      "content": "<p>The simplest application of duplicate notifications is to count how many segments were retransmitted unnecessarily. A sender can track every time a duplicate notification arrives for a previously retransmitted segment, giving it a count of spurious retransmissions.</p><p>This count is useful for monitoring and adapting transport algorithms. For example, some TCP improvements (such as Early Retransmit, which triggers faster retransmission with fewer duplicate ACKs) could be tuned by observing the spurious retransmission rate. If the rate is high, the algorithm may be too aggressive. This counting method works reliably across both TCP and SCTP without additional complexity.</p>",
-      "plainLanguage": "<p>Keep score of how many times you sent something twice by mistake. If the number gets too high, you know your guessing is too trigger-happy.</p>"
+      "title": "Counting Duplicate Notifications",
+      "content": "<p>For some applications a straight count of duplicate notifications is enough. A stack that simply wants to know how many segments were spuriously retransmitted can count every duplicate notification for a retransmitted segment and get a good answer.</p><p>The same count can also be used to watch and adapt a transport algorithm, so that the transport does not send large amounts of spurious data into the network. The Early Retransmit algorithm, for example, could use duplicate notifications to see whether fast retransmitting segments with a lower than normal duplicate acknowledgement threshold is working, or whether segment reordering is producing spurious retransmits.</p><p>More speculatively, duplicate notification has been proposed as a key part of estimating TCP's total loss rate, so that the effect of corruption-based losses on transport performance can be reduced. One approach alters the congestion response according to the fraction of losses that are really caused by congestion, and needs the transport sender to estimate the total loss rate. Accurate estimation of that rate depends on duplicate notifications.</p>",
+      "plainLanguage": "<p>Sometimes a simple count is all that is needed: how many times did the sender repeat something that had already arrived? The memo also notes that the count can be used to watch a transport algorithm and check whether it is behaving.</p>"
     },
     {
-      "id": "architecture",
+      "id": "algorithms",
       "number": "3",
-      "title": "Congestion-Loss Disambiguation Algorithm",
-      "content": "<p>The RFC's second and more sophisticated algorithm lets the sender safely revert congestion control changes when it detects a spurious retransmission. The key challenge is distinguishing between two scenarios: (a) a real loss occurred in the network (congestion), and (b) the sender simply transmitted too fast. A sender must not undo congestion control reductions if real loss occurred, even if some individual segments were spuriously retransmitted.</p><p>The algorithm works by tracking which segments have been retransmitted and checking incoming duplicate notifications. The sender maintains a <strong>scoreboard</strong> (as defined in RFC 3517 for TCP) that records the status of segments. When a duplicate notification arrives, the algorithm checks whether the segment was retransmitted exactly once. If it was retransmitted multiple times or not retransmitted at all, the algorithm stops and does not revert congestion control. This conservative approach ensures safety.</p><p>Additionally, the algorithm checks whether all retransmitted segments in a window of data have been acknowledged as duplicates. Only if every retransmitted segment received a duplicate notification can the sender conclude that the entire window contained only spurious retransmissions and no real loss.</p>",
-      "plainLanguage": "<p>Before giving up your caution, check every retransmit in a batch: did they all come back as duplicates? If even one segment was truly lost, keep being cautious.</p>"
-    },
-    {
-      "id": "security-considerations",
-      "number": "4",
-      "title": "Security and Network Duplication",
-      "content": "<p>The main security concern is that a malicious or buggy receiver could falsely report duplicate notifications, tricking a sender into believing it did not lose a segment when it actually did. This could cause the sender to send at an inappropriately high rate, potentially overwhelming the network.</p><p>The RFC notes that packet duplication in the network is rare (less than 1% of packets), so the algorithm does not attempt to distinguish between spurious retransmissions and network duplication of original segments. Instead, if the algorithm detects network duplication (a duplicate notification for a segment that was never retransmitted), it disables itself for the remainder of the connection. Future extensions, such as using TCP timestamps to add more evidence, could allow continued use of the algorithm even with network duplication present.</p>",
-      "plainLanguage": "<p>A dishonest receiver could fake duplicate reports and make you send too fast. The algorithm is designed to stop itself if it detects something fishy.</p>"
+      "title": "The Congestion and Duplicate Disambiguation Algorithm",
+      "content": "<p>To undo an unnecessary congestion control change, the sender has to satisfy two conditions. First, spurious retransmissions in a window of data must not hide real loss. If segments N and N+1 were both retransmitted although only segment N was dropped by the network, then segment N+1 was needlessly resent. But the sender cannot conclude that it is right to revert the congestion control state, because that same window held at least one valid congestion indication. Second, the duplicate notice must not be caused by the network duplicating a packet. Telling those two apart is nearly impossible in theory, and since packet duplication by the network is rare, the algorithm simply stops working when network duplication is detected, by seeing a duplicate notification for a segment the sender never retransmitted.</p><p>The algorithm assumes the sender has a structure to hold selective acknowledgement information, such as the scoreboard in <a href='/rfc3517'>RFC 3517</a>, extended to keep a slightly longer history of retransmissions than that document calls for. On receiving each duplicate notification the sender must first check the corresponding sequence range or TSN to see whether the segment was retransmitted. If the scoreboard is empty, because no selective acknowledgement has been received, and the left edge of the incoming notice equals SND.UNA, processing stops and the congestion control state must not be reverted during the current window. This covers the case where an entire window of acknowledgements was dropped by the network, where slowing down is the conservative choice. If the segment was retransmitted exactly once it is marked as a duplicate. If it was retransmitted more than once, processing stops and the congestion control state must not be reverted for that window. If it was not retransmitted at all, the network duplicated the segment, so processing stops and the algorithm must not be used for the rest of the connection, because later notices may also be reporting network duplication.</p><p>Only if processing continues does the sender check every retransmitted segment in the previous window of data. If all of them have also been marked as acknowledged and duplicated, then all the retransmissions in that window were spurious and no loss occurred. If any segment is still marked as retransmitted but not as a duplicate, there are outstanding retransmissions that could indicate loss in that window, and no conclusion can be drawn from that particular notification. Alongside the state described in <a href='/rfc3517'>RFC 3517</a> for TCP and in <a href='/rfc2960'>RFC 2960</a> for SCTP, an implementation must track every sequence number or TSN acknowledged as a duplicate.</p>",
+      "plainLanguage": "<p>The algorithm is careful on purpose. It only says a window of data was resent for no reason when every resent piece in that window came back as a duplicate and nothing else is still outstanding. Anything less, and the sender keeps its slower sending rate, because a real loss may be hiding in the same window.</p>"
     },
     {
       "id": "related-work",
+      "number": "4",
+      "title": "Other Ways to Spot a Spurious Retransmission",
+      "content": "<p>The Eifel detection algorithm uses the TCP timestamp option to work out whether an acknowledgement for a given retransmission is for the original transmission or for the resend. It can detect spurious retransmissions faster than a scheme based on duplicate notices, but the price is the overhead of the 12-byte timestamp option, which has to be carried in every packet transmitted for the scheme to work.</p><p>The F-RTO scheme changes the sending pattern immediately after a retransmission timeout and then watches the pattern of the acknowledgements coming back, which can show whether the retransmitted segment was needed. Its advantage is that it runs entirely on the sender side and nothing extra crosses the network. Its downside is that it is a heuristic that network pathologies such as duplication or reordering of key packets can confuse, and it only works for spurious retransmissions triggered by the transport's retransmission timer.</p><p>A third scheme uses the time between retransmitting a segment through the retransmission timer and the arrival of the next acknowledgement as an indicator. It compares that gap with a fraction of the smallest round trip time seen so far on the connection, and calls the retransmission spurious when the gap is smaller. With the fraction set to one half, the scheme finds roughly 59% of the needless retransmission timeouts and wrongly labels a needed retransmission only 2.5% of the time. Like F-RTO, it only detects retransmissions sent by the retransmission timer.</p>",
+      "plainLanguage": "<p>Three other methods exist. Eifel uses a timestamp in every packet. F-RTO changes what the sender does after a timeout and watches the replies. A third method measures the gap between a resend and the next reply. Each one works in a different situation, and each has a cost.</p>"
+    },
+    {
+      "id": "security-considerations",
       "number": "5",
-      "title": "Related Detection Methods",
-      "content": "<p>Several alternative approaches exist for detecting spurious retransmissions. The <strong>Eifel detection algorithm</strong> (RFC 3522) uses TCP timestamps to determine whether an ACK is for an original transmission or a retransmission, enabling faster and more precise detection. However, Eifel requires the 12-byte timestamp option on every packet. The <strong>F-RTO scheme</strong> observes the pattern of ACKs after a retransmission timeout to infer whether the timeout was spurious, but it only detects spurious timeout-based retransmissions, not those triggered by duplicate ACKs. Time-based heuristics that compare the time between a timeout retransmit and the next ACK to a fraction of the minimum RTT have also been explored, with mixed accuracy.</p><p>The DSACK-based algorithm in this RFC requires no additional packet overhead beyond duplicate notifications already defined in TCP and SCTP, making it practical to deploy. It trades off some detection speed and precision for simplicity and safety.</p>",
-      "plainLanguage": "<p>Other ways to detect mistakes exist, but this one is simple and does not need extra stuff in every packet.</p>"
+      "title": "Security Considerations",
+      "content": "<p>A receiver can falsely report a spurious retransmission when there was a real loss, and that may lead a sender to conclude wrongly that no loss took place and to make inappropriate changes to its congestion control state. The scenario the memo imagines is a receiver that watches every segment arriving and acknowledges as a duplicate any segment that turns up out of order by more than some threshold, assuming it is a retransmission. A sender running the algorithm will then assume the retransmission was spurious.</p><p>The ECN nonce sum proposal could perhaps reduce the receiver's ability to hide real losses from the sender, with a modest extension. In the usual case of an original transmission and a spurious retransmission, the receiver has the nonce from the original and can therefore prove that the duplication notice is valid. When the receiver never had the original and is trying to push the sender into transmitting at an inappropriately high rate, it does not know the nonce and so is unlikely to fool the sender for long.</p><p>The memo notes one obstacle: <a href='/rfc3540'>RFC 3540</a> calls for disabling nonce sums on duplicate acknowledgements, so the nonce sum is not directly usable as a mitigation for receivers that lie about duplicate information. It suggests that later work might use that document as a starting point.</p>",
+      "plainLanguage": "<p>The whole scheme rests on the receiver telling the truth. A dishonest receiver could report duplicates for segments that were genuinely lost, and the sender would then send too fast. The memo discusses a way to make that harder, and explains why it cannot be used as it stands.</p>"
     }
   ],
-  "viz": [],
+  "viz": [
+    {
+      "type": "sequence",
+      "anchor": "algorithms",
+      "position": "before",
+      "caption": "THE RFC'S EXAMPLE: SEGMENTS N AND N+1 (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "Sender"
+          },
+          {
+            "key": "receiver",
+            "label": "Receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Segment N",
+            "color": "neutral",
+            "note": "Lost on the way; the sender never learns this."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Segment N+1",
+            "color": "neutral",
+            "note": "Arrives."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Retransmission of N and N+1",
+            "color": "neutral",
+            "note": "The sender resends both because it has not heard back."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "Duplicate notification for N+1",
+            "color": "green",
+            "note": "The receiver holds N+1 twice, so that resend was needless, but segment N was a real loss."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "THE FOUR CASES AT STEP (A) OF THE ALGORITHM",
+      "data": {
+        "items": [
+          {
+            "title": "Retransmitted once",
+            "text": "Mark the segment as a duplicate and carry on to step B."
+          },
+          {
+            "title": "Retransmitted more than once",
+            "text": "Stop. The congestion control state is not reverted for this window of data."
+          },
+          {
+            "title": "Never retransmitted",
+            "text": "The network duplicated the segment. Stop, and do not use the algorithm again on this connection."
+          },
+          {
+            "title": "Empty scoreboard",
+            "text": "No selective acknowledgement has arrived and the notice starts at SND.UNA. Stop, and do not revert the congestion control state for this window."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "related-work",
+      "position": "after",
+      "caption": "OTHER WAYS TO SPOT A SPURIOUS RETRANSMISSION (RFC 3708 SECTION 4)",
+      "data": {
+        "columns": [
+          "Scheme",
+          "What it relies on",
+          "What it costs"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Eifel",
+              "The TCP timestamp option",
+              "12 bytes carried in every packet"
+            ]
+          },
+          {
+            "cells": [
+              "F-RTO",
+              "The pattern of replies after a timeout",
+              "A heuristic that reordering can confuse"
+            ]
+          },
+          {
+            "cells": [
+              "Time delta",
+              "The gap between a resend and the next reply",
+              "Only works for timeouts, not fast retransmits"
+            ]
+          }
+        ]
+      }
+    }
+  ],
   "references": [
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
     {
       "number": "[RFC2883]",
       "text": "Floyd, S., Mahdavi, J., Mathis, M. and M. Podolsky, \"An Extension to the Selective Acknowledgement (SACK) Option for TCP\", RFC 2883, July 2000.",
@@ -106,23 +247,23 @@
       "rfc": 3522
     },
     {
+      "number": "[RFC1323]",
+      "text": "Jacobson, V., Braden, R. and D. Borman, \"TCP Extensions for High Performance\", RFC 1323, May 1992.",
+      "rfc": 1323
+    },
+    {
       "number": "[RFC3540]",
       "text": "Spring, N., Wetherall, D. and D. Ely, \"Robust Explicit Congestion Notification (ECN) Signaling with Nonces\", RFC 3540, June 2003.",
       "rfc": 3540
-    },
-    {
-      "number": "[RFC793]",
-      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
-      "rfc": 793
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

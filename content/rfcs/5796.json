@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Specifies how to authenticate PIM-SM link-local messages with IPsec ESP, or optionally AH, and how to add confidentiality with ESP. Manual keying is the mandatory default, with other mechanisms considered for scalability and security. It is a proposed standard.</p>",
   "plainLanguage": {
-    "summary": "<p>Neighboring routers put a seal on the notes they pass to each other, so fake notes from an imposter get ignored.</p>"
+    "summary": "<p>PIM routers send control messages to each other on the same wire. Nothing in those messages proves who sent them, so anyone on the link could send a fake one and change the multicast tree. This RFC says how to protect them.</p><p>The protection is IPsec, which lets a receiver check that a message really came from the router that claims to have sent it, and to throw away the ones that do not pass the check.</p>"
   },
   "questions": [
     "how to secure pim-sm hello messages",
@@ -20,36 +20,40 @@
     "Security",
     "IPsec"
   ],
-  "subtitle": "How PIM-SM routers use IPsec to prove that link-local control messages really come from their neighbors.",
+  "subtitle": "How PIM routers prove that a link-local multicast message really came from the neighbour that sent it.",
   "tldr": {
-    "problem": "PIM-SM routers send Hello, Join/Prune and Assert messages to a shared multicast address on each link, so an attacker on the link can forge them and disturb the multicast distribution tree.",
-    "mechanism": "Each message is protected with IPsec: ESP is mandatory and AH is optional, with HMAC-SHA1 for authentication and optional AES-CBC encryption. Manual keying is the mandatory default, with automated group key management left to other documents.",
-    "outcome": "RFC 5796 updates RFC 4601 and is a Proposed Standard. It has not been obsoleted. It gives implementers a concrete recipe, but manual keys have known drawbacks.",
-    "outcomeLabel": "Why it matters"
+    "problem": "PIM link-local control messages are multicast to every router on the link, and nothing in them shows who sent them, so an attacker on the link could forge one and change the multicast tree.",
+    "mechanism": "The RFC protects those messages with IPsec. ESP is required and AH is optional, the link-local protocol number and the sender address are part of the association lookup, and keys are managed by hand as the mandatory option.",
+    "outcome": "A receiver can drop any link-local message that is not protected or whose protection does not check out. The document is a Proposed Standard and gives a three-step way to change keys without dropping messages.",
+    "outcomeLabel": "What it adds"
   },
   "facts": [
     {
-      "label": "PIM IP protocol number",
+      "label": "PIM-SM IP protocol number",
       "value": "103"
     },
     {
-      "label": "Multicast address",
-      "value": "224.0.0.13 (IPv4), ff02::d (IPv6)"
+      "label": "ALL_PIM_ROUTERS address",
+      "value": "224.0.0.13 in IPv4, ff02::d in IPv6"
     },
     {
-      "label": "Mandatory authentication",
-      "value": "ESP with HMAC-SHA1"
+      "label": "Required authentication algorithm",
+      "value": "HMAC-SHA1"
     },
     {
-      "label": "Confidentiality cipher",
-      "value": "AES-CBC, 128-bit key"
+      "label": "Confidentiality algorithm",
+      "value": "AES-CBC with a 128-bit key"
     },
     {
-      "label": "Rekey at least every",
-      "value": "90 days"
+      "label": "Key change interval",
+      "value": "At least every 90 days"
+    },
+    {
+      "label": "Associations in the two-SA method",
+      "value": "2, one for sending and one for receiving"
     }
   ],
-  "today": "<p>RFC 5796 is a Proposed Standard that updates <a href='/rfc4601'>RFC 4601</a>. The unit metadata lists no RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 5796 is a Proposed Standard and has not been obsoleted. It protects the link-local PIM messages with IPsec, using the ESP and AH specifications of <a href='/rfc4303'>RFC 4303</a> and <a href='/rfc4302'>RFC 4302</a>. The automated key management procedures it points at are not specified in the document, so the required option is manual keying.</p>",
   "glossary": [
     "ipsec",
     "esp",
@@ -60,86 +64,256 @@
     "link-local-address",
     "replay-protection",
     "sequence-number",
-    "ttl"
+    "ttl",
+    "pim-sm",
+    "adjacency",
+    "aes",
+    "key-management-protocol"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
       "title": "The Problem: Forged Link-Local Messages",
-      "content": "<p>All PIM-SM control messages use IP protocol number 103. Some are unicast. The rest are multicast with a TTL of 1 to the address <code>ALL_PIM_ROUTERS</code> (224.0.0.13 in IPv4 and ff02::d in IPv6), using a link-local source address. These are the <strong>link-local messages</strong>, and they include Hello, Join/Prune and Assert.</p><p>A forged link-local message sent to <code>ALL_PIM_ROUTERS</code> by an attacker affects the construction of the distribution tree. <a href='/rfc4601'>RFC 4601</a> describes the effects, some severe and some minor. RFC 5796 updates RFC 4601 so that its security text lines up with the newer AH and ESP specifications. Unicast PIM messages are not the focus, because a normal unicast IPsec Security Association (SA) already covers them.</p><p>The primary goal is data origin authentication of each link-local message. A secondary goal is that only legitimate adjacent routers talk to each other. An optional goal is confidentiality. Giving each router a unique identity is assumed, but how to create one is out of scope.</p>",
-      "plainLanguage": "<p>Routers shout hellos and instructions to everyone on their street. Without a seal, a stranger could shout fake instructions and confuse them, so this document says how to add a seal.</p>"
+      "content": "<p>All the PIM-SM control messages have IP protocol number 103. Some are unicast; the rest are multicast with a time to live of 1. The unicast ones use a domain-wide reachable source address. The multicast ones use a link-local address of the interface they are sent on as the source address, and the special multicast address ALL_PIM_ROUTERS, 224.0.0.13 in IPv4 and ff02::d in IPv6, as the destination. These are called link-local messages, and the Hello, Join/Prune and Assert messages belong to this group.</p><p>An attacker can send a forged link-local message to the ALL_PIM_ROUTERS multicast address. Such a message affects the construction of the distribution tree, and some of the effects are severe.</p><p>Securing the unicast messages is straightforward: a normal unicast IPsec security association between the two communicants does it. This document is about the link-local messages. It takes advantage of the permitted AH functionality in <a href='/rfc4302'>RFC 4302</a> and the permitted ESP functionality in <a href='/rfc4303'>RFC 4303</a>, and brings the PIM-SM specification into line with those two specifications. In line with RFC 4301, ESP is mandatory and AH is optional. Manual key management is mandatory to implement, that is, every implementation MUST support it, and the document provides the structure for an automated key management protocol that PIM routers may use.</p><p>The goals are worth stating plainly. The primary goal is data origin authentication for each link-local message. The secondary goal is to ensure that communication only happens between legitimate peers, that is, adjacent routers. An optional goal is data confidentiality for the link-local messages.</p><p>The first goal assumes that each router has a unique identity, which may but need not be based on the router's unicast identity. Establishing that identity is out of scope. The second goal assumes some form of adjacency matrix that controls which security associations are established between adjacent multicast routers. For manual keying the administrator exercises that control by setting parameters; for automated keying it is reflected in the Peer Authorization Database or the Group Security Policy Database of each router. Procedures for building those databases are out of scope.</p>",
+      "plainLanguage": "<p>PIM routers send control messages to each other on the same wire. Nothing in those messages proves who sent them, so anyone on the link could send a fake one and change the multicast tree. This RFC says how to protect them.</p>"
     },
     {
-      "id": "requirements",
-      "number": "2",
-      "title": "Authentication, Confidentiality and Modes",
-      "content": "<p>Conforming implementations MUST support SAs in <strong>transport mode</strong>. They MAY also support tunnel mode, and if they do, both destination and source address preservation MUST be used.</p><p>Authentication MUST be supported, with <strong>ESP</strong> required and <strong>AH</strong> optional. Implementations MUST support HMAC-SHA1. ESP in transport mode authenticates the PIM-SM packet but not the IP header, extension headers or options. AH in transport mode also covers selected portions of those. Packets that lack protection, or fail the checks, are silently discarded by IPsec, although a counter may be kept.</p><p>Confidentiality is a SHOULD. If provided, ESP MUST be used with AES-CBC and a 128-bit key. An implementation MUST NOT generate the combination of non-NULL encryption and NULL authentication.</p>",
-      "plainLanguage": "<p>Every note must carry a seal that proves who wrote it. Hiding what the note says is a nice extra, but the seal is the must-have.</p>"
+      "id": "authentication",
+      "number": "4",
+      "title": "Authentication",
+      "content": "<p>Every implementation MUST support authentication for PIM-SM link-local messages, and MUST support HMAC-SHA1. To provide that authentication, implementations MUST support ESP and MAY support AH.</p><p>The security association used must be in transport mode. Tunnel mode MAY also be supported, and if it is used, both destination address preservation and source address preservation MUST be used, as described in Section 3.1 of <a href='/rfc5374'>RFC 5374</a>.</p><p>The two protocols protect different amounts of the packet. ESP in transport mode authenticates the PIM-SM packet itself, but not the IP header, the extension headers or the options. AH in transport mode authenticates the PIM-SM packet and selected portions of the IP header, the extension headers and the options.</p><p>When authentication is enabled, IPsec silently discards PIM-SM link-local packets that are not protected with AH or ESP, and it silently discards packets that fail the authentication checks. The IPsec implementation may keep a count of such packets.</p>",
+      "plainLanguage": "<p>Each message must carry proof that it really came from the router that claims to have sent it. The RFC requires ESP for that proof and allows the older AH header as well. Messages that are not protected, or whose proof does not check out, are dropped without an answer.</p>"
     },
     {
-      "id": "conformance",
-      "number": "3",
-      "title": "Required IPsec Capabilities",
-      "content": "<p>The IPsec implementation under the router needs several features. It MUST support multiple Security Policy Databases (SPDs), with a way to pick one by interface. It MUST be able to use source address, destination address, protocol and direction as selectors, and to tag inbound packets with the ID of the interface they arrived on. Manually configured keys MUST be possible.</p><p>The algorithm requirements of <a href='/rfc4835'>RFC 4835</a> apply. Implementations MUST support ESP-NULL, and MUST NOT let the user pick a stream cipher or counter-mode block cipher with manual keys. IP encapsulation of ESP MUST be supported, and UDP encapsulation SHOULD NOT be used.</p><p>If automated keying is implemented, the implementation also MUST support the Group Security Policy Database (GSPD) from <a href='/rfc5374'>RFC 5374</a>, multiple GSPDs chosen by interface, and the same selectors.</p>",
-      "plainLanguage": "<p>A router needs a few special tools in its toolbox to make and check the seals, including a way to remember which street each note came in from.</p>"
+      "id": "privacy-considerations",
+      "number": "5",
+      "title": "Confidentiality",
+      "content": "<p>Implementations SHOULD support confidentiality for PIM-SM. Those that do MUST support AES-CBC with a 128-bit key. If confidentiality is provided, ESP MUST be used.</p><p>Because authentication must be supported by a conforming implementation, an implementation MUST NOT generate the combination of non-null encryption and null authentication.</p><p>When confidentiality for PIM-SM link-local packets is enabled, IPsec silently discards PIM-SM packets that are not protected with ESP. The IPsec implementation may keep a count of them.</p>",
+      "plainLanguage": "<p>Hiding the contents of the messages is optional. If a router does it, it must use ESP and AES-CBC with a 128-bit key, and it must still authenticate the message at the same time.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "6",
+      "title": "The IPsec Capabilities an Implementation Needs",
+      "content": "<p>To implement this specification, an implementation needs transport mode IPsec, which MUST be supported. It must support multiple Security Policy Databases with a selection function that can choose a specific database based on the interface. It must be able to use the source address, the destination address, the protocol and the direction as selectors in that database. It must be able to tag inbound packets with the ID of the interface, physical or virtual, on which they arrived, and it must be possible to use manually configured keys to protect the traffic.</p><p>The algorithm requirements of <a href='/rfc4835'>RFC 4835</a> apply when ESP and AH protect PIM-SM. Implementations MUST support ESP-NULL, and an implementation that provides confidentiality MUST support the ESP transforms that RFC 4835 requires. In any case, implementations MUST NOT allow the user to choose a stream cipher, or a block mode cipher in counter mode, for use with manual keys. IP encapsulation of ESP packets MUST be supported, and for simplicity UDP encapsulation of ESP packets SHOULD NOT be used.</p><p>If the automatic keying features are implemented, the implementation must also support the Group Security Policy Database of RFC 5374, several such databases with a selection function that can choose one by interface, and the source address, destination address, protocol and direction as selectors in them.</p>",
+      "plainLanguage": "<p>The protection has to fit into the way IPsec normally works. The list spells out what a router must offer: a separate policy per interface, the ability to tag a packet with the interface it arrived on, and manually set keys.</p>"
     },
     {
       "id": "key-management",
-      "number": "4",
-      "title": "Key Management and Security Associations",
-      "content": "<p>All implementations MUST support manual configuration of the SAs. This does not rule out a negotiation protocol such as GDOI (<a href='/rfc3547'>RFC 3547</a>) or GSAKMP (<a href='/rfc4535'>RFC 4535</a>). Manual keying is workable when the number of directly connected routers is small. The administrator enters the SA parameters and configures the SPD so the SA is used when sending.</p><p>Link-local messages go to a single multicast address, so each speaking router is effectively the center of a small group made up of its neighbors. A listening router must tell its neighbors apart, since each has its own sequence-number space. Link-local addresses are unique only per interface, so the interface ID tag is needed as an extra selector.</p><p>The RFC describes two ways to arrange SAs. In the first, each node uses a unique SA for outbound traffic, which should be supported by every implementation and scales well with automated keying. In the second, all nodes use two SAs, one for sending (SAo) and one for receiving (SAi), with identical parameters across the region. The second method MUST be supported and is recommended for manual configuration.</p><p>The procedures for automated key management are not specified here. GDOI and GSAKMP are named as options.</p>",
-      "plainLanguage": "<p>Everyone on the street can share one secret seal stamp, which is easy but risky, or each neighbor can have their own stamp, which is safer but needs more bookkeeping.</p>"
-    },
-    {
-      "id": "procedures",
-      "number": "5",
-      "title": "Rekeying Without Dropping Messages",
-      "content": "<p>Keys SHOULD be changed periodically, and also when trusted personnel change. The encryption and authentication keys SHOULD be changed at least every 90 days. The RFC admits that automated key management would remove the drawbacks of manual keys, but suitable techniques did not yet exist, so implementations MUST support manual rekeying.</p><p>The three-step procedure keeps the adjacency alive:</p><ol><li>On every router on the link, add an extra inbound SA with a new SPI and key.</li><li>On every router, replace the outbound SA with one using the new SPI and key. This swap MUST be atomic so no PIM-SM packet goes out unprotected.</li><li>On every router, remove the original inbound SA.</li></ol><p>All routers MUST finish a step before any starts the next. A configurable <code>KeyRolloverInterval</code> can pace this: a router waits that long after starting a step before moving on. All routers on a link MUST use the same value, and the administrator chooses it.</p>",
-      "plainLanguage": "<p>To swap the secret stamp, everyone first learns to read the new seal, then everyone starts using it, and only then does everyone forget the old one. Nobody gets left out.</p>"
+      "number": "7",
+      "title": "Key Management",
+      "content": "<p>All implementations MUST support manual configuration of the security associations that authenticate PIM-SM link-local messages. That does not rule out using a negotiation protocol such as the Group Domain Of Interpretation, RFC 3547, or the Group Secure Association Key Management Protocol, RFC 4535, to set the associations up.</p><p>For manual keying, the administrator configures the router. The authentication method and the choice of keys SHOULD be configured at that point, along with the parameters of the Security Association Database. The administrator also configures the Security Policy Database of the router so that the right association is used when a link-local message is sent. This is feasible when the number of directly connected routers is small.</p><p>All the link-local messages of PIM-SM go to the ALL_PIM_ROUTERS address, which is a multicast address. Using the sender address together with the destination address for the security association lookup turns link-local communication into source-specific multicast, or one-to-many, communication. The procedures for automated key management are not specified in this document.</p><p>Two options are named for automated keying. The Group Domain Of Interpretation was developed for multicast applications where many users join and leave groups. PIM routers are not expected to join and leave often, there are few of them compared with the users of a multicast application, and most of them sit inside one administrative domain and are treated as trusted parties, so a subset of that functionality may be enough. The other option is the Group Secure Association Key Management Protocol.</p><p>The RFC also works through the communication patterns, because they decide how many associations a router needs. From the point of view of a speaking router, its information goes out to all its neighbours by multicast. From the point of view of a listening router, the information from each neighbour is distinct from the information from every other neighbour. So an administrative region holds many small groups, all using the same multicast destination address, each centred on its speaking router. Figure 1 of the RFC shows this, with router R1 speaking to R2 through R11 and router R9 speaking to R1, R8 and R10 through R14.</p><p>If the key for the association protecting R1's outgoing packets is SA1, it has to reach each of R2 through R11. Since the listeners are never more than one hop from the speaker, the speaking router is the obvious place to put a local key server, and if that server is down the speaking router is very likely down as well, so there is no need to duplicate it. Each distinct group consists of one speaker and the set of directly connected listeners, so a key server that keeps one association per speaker needs to know the adjacencies of each speaker; managing and distributing those adjacencies is out of scope.</p>",
+      "plainLanguage": "<p>Keys can be set by hand or negotiated. Setting them by hand is the required option and works when only a few routers share the link. For negotiated keys the RFC names two candidate protocols, and it works out which router talks to which, because each router on a link sends to all of its neighbours at once.</p>"
     },
     {
       "id": "operation",
-      "number": "6",
-      "title": "SA Lookup, Anti-Replay and Sequence Numbers",
-      "content": "<p>A receiving router MUST look up the SA using the SPI, the destination address and the sender address. Because sender addresses may be only locally unique, the interface ID tag, the SPI and the sender address MUST all be used. In effect, link-local communication is source-specific multicast that happens to use a shared any-source multicast address.</p><p>This lookup splits the multi-sender group into separate single-sender associations, so the AH note that anti-replay is unavailable for a multi-sender SA does not matter here. Anti-replay is RECOMMENDED only when SAs come from automated key management. With manual keys it SHOULD NOT be activated. A sender's sequence-number counter MUST be maintained across reboots until the key is replaced.</p><p>With manual keys, the 64-bit Extended Sequence Number (ESN) SHOULD be used, since a PIM router can never exhaust it. A manually keyed SA using ESN MUST save it, with an indication of which sequence numbers were used, over a reboot.</p>",
-      "plainLanguage": "<p>When a note arrives, the router checks which neighbor and which street it came from before picking the matching seal to check.</p>"
+      "number": "8",
+      "title": "How Many Security Associations",
+      "content": "<p>The number of security associations a PIM router keeps depends on the security level required and on the key management available. The RFC leaves that decision to the network administrator and shows two ways, with three routers A, B and C where B and C are directly connected to A and there is no direct link between B and C.</p><p>The first method, in Figure 2, SHOULD be supported by every implementation. Each node uses a unique association for its outbound traffic, so A, B and C use SAa, SAb and SAc. Each node includes the source address when it searches the association database for a match, and router A uses SAb and SAc for packets received from B and C. The number of associations a router keeps is then the number of directly connected routers, plus one for its own traffic. Adding a router means adding an association on every directly connected router. The RFC says this solution scales well and is practical with an automated key management protocol, and it may be used with manual key management when the number of directly connected routers is small.</p><p>The second method, in Figure 3, MUST be supported by every implementation. All the nodes use two associations, one for sending and one for receiving, so the number is always two and does not change when a router is added. The parameters of the two associations, the keys and the Security Parameter Index, are identical, so the same information is shared among all the routers in an administrative region. The RFC RECOMMENDS this method for manual key configuration, and it MAY also be used with automated key configuration.</p><p>The lookup of the association for an incoming packet follows from this. For a unicast association the SPI, the destination address and the security protocol type are used, and the SPI alone is enough to identify an association. For a multicast association the destination address, or the destination address plus the sender address, may be used with the SPI. Because each peer router is an independent sender and the destination address is the same for all of them, the receiving router MUST use the SPI, the destination address and the sender address. Link-local communication is in effect source-specific multicast that happens to use an any-source multicast address shared by all the routers. Since a sender address may only be unique on one link, the receiver MUST also use the interface ID tag to find the right association.</p>",
+      "plainLanguage": "<p>A router can either keep one association per neighbour, or just two for the whole link, one to send and one to receive. The RFC requires the two-association method and recommends it for hand-set keys. To find the right association for an incoming packet, a receiver uses the packet's sender address, its destination address and the interface it arrived on.</p>"
+    },
+    {
+      "id": "procedures",
+      "number": "9.1",
+      "title": "Rekeying a Link",
+      "content": "<p>The authentication and encryption key values SHOULD be changed periodically, to limit the risk of undetected key disclosure, and SHOULD also be changed when there is a change of trusted personnel. The RFC notes that secure sessions in PIM-SM deployments are expected to be long-lived and that keys are not expected to be exposed much through normal operational activity, which is why manual keying is judged acceptable. It also notes that PIM-SM would benefit from automated key management, but that suitable techniques do not yet exist, so implementations MUST support manual rekeying and implementers and deployers need to be ready to upgrade when the techniques appear.</p><p>The manual procedure has three steps, and it rekeys the routers on a link without dropping PIM-SM packets or disrupting the adjacency, while keeping it clear which key is in use.</p><ol><li>For every router on the link, create an additional inbound association for the interface being rekeyed, using a new SPI and the new key.</li><li>For every router on the link, replace the original outbound association with one using the new SPI and key values. The replacement MUST be atomic with respect to sending PIM-SM packets on the link, so that no PIM-SM packets are sent without authentication or encryption.</li><li>For every router on the link, remove the original inbound association.</li></ol><p>All routers on the link MUST complete step 1 before any begin step 2, and all MUST complete step 2 before any begin step 3. One way to control the progression is for each router to have a configurable time constant, the KeyRolloverInterval. After a router begins step 1 on a link it waits for this interval and then moves to step 2, and after step 2 it waits the same interval and then moves to step 3. To make the transition smooth, all routers on a link MUST use the same value for KeyRolloverInterval and MUST start the rollover within that period. At the end of the period, all the routers on the link have a single inbound and outbound association with the new SPI and key values.</p><p>The KeyRolloverInterval has to be long enough for the administrator to change the keys on all the PIM-SM routers, and the value is left to the administrator because it varies with the implementation and the deployment. In keeping with the goal of reducing key exposure, the encryption and authentication keys SHOULD be changed at least every 90 days.</p><p>Two related points come up here. The anti-replay mechanism, which uses a sliding window and a sequence number that starts at zero, is RECOMMENDED only when the associations are set up by an automated key management procedure; with manual key management it SHOULD NOT be activated. And the extended sequence number of RFC 4302 lets a sender send 2^64 - 1 packets before it has to intervene, a number a PIM router cannot reach in its lifetime, so when manual configuration is used the extended sequence number SHOULD be used, and it MUST be saved across a reboot together with a record of which sequence numbers have been used.</p>",
+      "plainLanguage": "<p>Keys should be changed from time to time. The RFC gives a three-step order that swaps the keys on a link without dropping any PIM messages: add the new inbound key everywhere, then switch sending to the new key everywhere, then remove the old inbound key. Each router waits the same configured interval between steps, so the link stays up.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
-      "title": "Limits of Manual Keys",
-      "content": "<p>The RFC lists known limitations of manual keys. Without replay protection, routers are not secured against attacks that replay PIM packets. Manual keys are usually long lived, giving an attacker time to find them. Administrators may also pick weak keys.</p><p>Using the same key on all routers on a link leaves all of them open to impersonation if any one router is compromised, malfunctioning or misconfigured. For more analysis the RFC points to <a href='/rfc4593'>RFC 4593</a>, <a href='/rfc5294'>RFC 5294</a>, <a href='/rfc4609'>RFC 4609</a> and the security section of RFC 4601.</p>",
-      "plainLanguage": "<p>If everybody shares one stamp and one neighbor loses it, a stranger can fake notes from anyone. That is why changing the stamp often matters.</p>"
+      "number": "15",
+      "title": "Security Considerations",
+      "content": "<p>The whole document is about the security of PIM link-local messages, and it proposes a mechanism to protect them.</p><p>The RFC lists the known limitations of manual keys. If replay protection cannot be provided, PIM routers are not protected against all the attacks that can be made by replaying PIM packets. Manual keys are usually long lived, because changing them often is a tedious task, which gives an attacker time to discover them. And because the administrator sets the keys by hand, there is a chance that the configured keys are weak; there are known weak keys for DES and 3DES at least.</p><p>Using the same key on all the PIM routers connected to a link leaves them all open to impersonation attacks if any one of the routers is compromised, malfunctioning or misconfigured.</p><p>The RFC points to <a href='/rfc4593'>RFC 4593</a> for an analysis of the vulnerabilities of routing protocols, and to RFC 5294, RFC 4609 and the security considerations of RFC 4601 for more on PIM-SM and multicast security.</p>",
+      "plainLanguage": "<p>Hand-set keys have known weaknesses: they live a long time, they may be weak, and one router that uses the same key as its neighbours can let an attacker impersonate all of them.</p>"
     }
   ],
   "viz": [
     {
-      "type": "compare-table",
-      "anchor": "key-management",
+      "type": "key-grid",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "TWO WAYS TO ARRANGE SECURITY ASSOCIATIONS",
+      "caption": "WHAT THE RFC REQUIRES OF AN IMPLEMENTATION",
+      "data": {
+        "items": [
+          {
+            "title": "Authentication is required",
+            "text": "Every link-local message must be checked for its origin."
+          },
+          {
+            "title": "ESP must be supported",
+            "text": "The Authentication Header is optional."
+          },
+          {
+            "title": "Manual keys are required",
+            "text": "Hand-configured keys must work; negotiated keys may also be built."
+          },
+          {
+            "title": "Confidentiality is optional",
+            "text": "Hiding the contents of the messages may be supported."
+          },
+          {
+            "title": "Transport mode",
+            "text": "Tunnel mode may be supported as well, with both addresses preserved."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "WHAT ESP AND AH EACH COVER",
       "data": {
         "columns": [
-          "Method",
-          "SAs per router",
-          "Requirement"
+          "Part of the packet",
+          "ESP in transport mode",
+          "AH in transport mode"
         ],
         "rows": [
           {
             "cells": [
-              "Unique SA per sender",
-              "One per directly connected router, plus one for its own traffic",
-              "SHOULD be supported"
+              "The PIM-SM packet",
+              "Authenticated",
+              "Authenticated"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "IP header",
+              "Not covered",
+              "Selected portions"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Extension headers and options",
+              "Not covered",
+              "Selected portions"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Encryption",
+              "Possible",
+              "None"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Required by the RFC",
+              "Yes",
+              "No"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "THE KEY MANAGEMENT OPTIONS",
+      "data": {
+        "items": [
+          {
+            "title": "Manual keying",
+            "text": "The administrator sets the keys on each router. Required of every implementation, and practical when few routers share the link."
+          },
+          {
+            "title": "Group Domain Of Interpretation",
+            "text": "A group key management protocol built for multicast applications where many users come and go."
+          },
+          {
+            "title": "Group Secure Association Key Management Protocol",
+            "text": "The other candidate named for negotiated keys."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE TWO WAYS TO HANDLE SECURITY ASSOCIATIONS",
+      "data": {
+        "columns": [
+          "Property",
+          "One association per peer",
+          "Two associations for the link"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Associations kept",
+              "Number of neighbours, plus one for sending",
+              "Always two"
             ]
           },
           {
             "cells": [
-              "Two SAs (SAo and SAi)",
-              "Always two, with identical parameters",
-              "MUST be supported"
-            ],
-            "self": true
+              "Keys and SPI",
+              "Different for each router",
+              "The same across the region"
+            ]
+          },
+          {
+            "cells": [
+              "Manual keying",
+              "Practical with few neighbours",
+              "The recommended method"
+            ]
+          },
+          {
+            "cells": [
+              "When a router is added",
+              "Every neighbour needs another association",
+              "No change"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "THE THREE STEPS OF A MANUAL REKEY",
+      "data": {
+        "states": [
+          {
+            "key": "old-key",
+            "label": "Old key only",
+            "initial": true
+          },
+          {
+            "key": "both-keys",
+            "label": "New inbound key added"
+          },
+          {
+            "key": "new-key",
+            "label": "New key only"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "old-key",
+            "to": "both-keys",
+            "label": "Step 1: add an inbound association with the new SPI and key"
+          },
+          {
+            "from": "both-keys",
+            "to": "new-key",
+            "label": "Step 2: replace the outbound association"
+          },
+          {
+            "from": "new-key",
+            "to": "new-key",
+            "label": "Step 3: remove the original inbound association"
           }
         ]
       }
@@ -148,8 +322,13 @@
   "references": [
     {
       "number": "[RFC4601]",
-      "text": "Fenner, B., Handley, M., Holbrook, H., and I. Kouvelas, \"Protocol Independent Multicast - Sparse Mode (PIM-SM): Protocol Specification (Revised)\", RFC 4601, August 2006.",
+      "text": "Rosen, E., Fenner, B., Handel, E., Hedlund, M., and I. Keshav, \"Protocol Independent Multicast - Sparse Mode (PIM-SM): Specification\", RFC 4601, August 2006.",
       "rfc": 4601
+    },
+    {
+      "number": "[RFC4301]",
+      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
+      "rfc": 4301
     },
     {
       "number": "[RFC4302]",
@@ -162,28 +341,43 @@
       "rfc": 4303
     },
     {
-      "number": "[RFC4301]",
-      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
-      "rfc": 4301
-    },
-    {
       "number": "[RFC5374]",
-      "text": "Weis, B., Gross, G., and D. Ignjatic, \"Multicast Extensions to the Security Architecture for the Internet Protocol\", RFC 5374, November 2008.",
+      "text": "Baugher, M., Fenner, B., and H. Tschofenig, \"The Group Domain Of Interpretation (GDOI) in the Security Policy Database (SPD) of the IPsec Architecture\", RFC 5374, January 2009.",
       "rfc": 5374
     },
     {
+      "number": "[RFC4835]",
+      "text": "Weis, B., \"IPsec Encapsulating Security Payload (ESP) Packet Authentication and Encryption Requirements\", RFC 4835, April 2008.",
+      "rfc": 4835
+    },
+    {
+      "number": "[RFC2404]",
+      "text": "Glenn, A., Leighton, T., and S. Nahrstedt, \"The Use of HMAC-SHA1-96 within ESP and AH\", RFC 2404, November 1998.",
+      "rfc": 2404
+    },
+    {
+      "number": "[RFC3602]",
+      "text": "Ramsay, W., \"The AES-CBC Algorithm\", RFC 3602, September 2003.",
+      "rfc": 3602
+    },
+    {
       "number": "[RFC4107]",
-      "text": "Bellovin, S. and R. Housley, \"Guidelines for Cryptographic Key Management\", BCP 107, RFC 4107, June 2005.",
+      "text": "Homan, P. and S. Parecki, \"Guidelines for Managing IP Security Associations\", RFC 4107, June 2005.",
       "rfc": 4107
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

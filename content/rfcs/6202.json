@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This informational document describes known problems and best practices for using HTTP for server-initiated updates, mainly long polling and streaming. These techniques bend HTTP into a two-way channel by keeping requests open. It points out issues with connections, proxies, and timing, and gives advice to avoid them.</p>",
   "plainLanguage": {
-    "summary": "<p>Normally you must keep asking a shop if your order is ready. With long polling you ask once and wait at the counter until they answer. This document gives tips to make that waiting work well.</p>"
+    "summary": "<p>HTTP is one-way: the browser asks, the server answers, and only when asked. This RFC explains the two common ways websites work around that so the server can send news to the browser as it happens, what goes wrong with each, and how to set them up so that proxies and firewalls do not break them.</p>"
   },
   "questions": [
     "what is http long polling",
@@ -18,12 +18,12 @@
     "Long Polling",
     "Server Push"
   ],
-  "subtitle": "What goes wrong when HTTP is stretched to push server updates, and how to make long polling and streaming behave.",
+  "subtitle": "How websites work around HTTP being one-way, what each method costs, and how to deploy them without tripping over proxies.",
   "tldr": {
-    "problem": "HTTP is request/response, so a server cannot send updates on its own, and clients that poll constantly waste bandwidth and add delay.",
-    "mechanism": "The RFC analyzes the two common workarounds, long polling and streaming, surveys Bayeux, BOSH and Server-Sent Events, and lists best practices for connections, proxies, timeouts and caching.",
-    "outcome": "It neither encourages nor discourages these techniques. It only documents issues and advice for working within HTTP 1.0 and 1.1.",
-    "outcomeLabel": "The catch"
+    "problem": "HTTP is a request and response protocol, so a server cannot send anything to a browser unless the browser asks, and continual polling wastes bandwidth and delays the data.",
+    "mechanism": "Two mechanisms stretch HTTP into a two-way channel: long polling, where the server holds a request open until it has something to send, and streaming, where the server holds it open indefinitely.",
+    "outcome": "It proposes nothing and takes no position on whether to use them. It lists the issues with each, the three named technologies that use them, and a set of best practices for deployment.",
+    "outcomeLabel": "What it produces"
   },
   "facts": [
     {
@@ -31,23 +31,27 @@
       "value": "300 seconds"
     },
     {
-      "label": "Timeout shown to work",
-      "value": "As high as 120 seconds"
-    },
-    {
-      "label": "Safer timeout",
+      "label": "Safer long poll timeout",
       "value": "30 seconds"
     },
     {
-      "label": "Modern browser connection limit",
+      "label": "Timeouts shown to work",
+      "value": "As high as 120 seconds"
+    },
+    {
+      "label": "Old per-client connection limit",
+      "value": "2 connections"
+    },
+    {
+      "label": "Recent browser connection limit",
       "value": "6 or 8 connections"
     },
     {
-      "label": "Max latency of long polling",
-      "value": "Over three network transits"
+      "label": "Shared proxy connections, in the example",
+      "value": "Often 8 or 16"
     }
   ],
-  "today": "<p>RFC 6202 is an Informational RFC from April 2011 and has not been obsoleted or updated. It describes practice at that time, and it targets HTTP 1.0 and 1.1 only.</p>",
+  "today": "<p>RFC 6202 is an Informational document published in April 2011, and the unit metadata lists no RFC that obsoletes or updates it. It proposes no change to HTTP and takes no position on whether to use these mechanisms; it records the issues with them and the practices that avoid those issues.</p>",
   "glossary": [
     "http",
     "tcp",
@@ -58,58 +62,63 @@
     "chunked-transfer-coding",
     "cookie",
     "websocket",
-    "long-polling"
+    "long-polling",
+    "server-sent-events",
+    "reverse-proxy",
+    "cache-control",
+    "cors",
+    "denial-of-service"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem with Polling",
-      "content": "<p>In standard HTTP a server cannot start a connection with a client or send an unrequested response, so it cannot push asynchronous events. A client that wants timely news must poll, which burns bandwidth on empty round trips and delays data until the next poll. Server-push mechanisms, often grouped under the label \"Comet\", try to fix this. The two most common are <strong>long polling</strong> and <strong>streaming</strong>.</p><p>The authors say both stretch the original meaning of HTTP, which was not designed for bidirectional communication. The document takes no position on whether they are appropriate, and only covers techniques that work within HTTP 1.1 (<a href='/rfc2616'>RFC 2616</a>) and HTTP 1.0 (<a href='/rfc1945'>RFC 1945</a>).</p>",
-      "plainLanguage": "<p>A web page cannot be told things by the shop unprompted. These tricks let the shop answer as soon as it has news.</p>"
+      "title": "Why HTTP Needed a Second Way Round",
+      "content": "<p>HTTP is a request and response protocol with three kinds of entity: clients, servers and proxies. A client opens connections to a server to send requests; a server accepts connections from clients to service requests by sending back responses; proxies sit in between and can be involved in delivering requests and responses. In the standard model a server cannot open a connection to a client or send an unrequested response, so it cannot push asynchronous events. To receive them as soon as possible, the client has to poll periodically, which burns bandwidth on round trips that return nothing and makes the application less responsive, because data sits queued until the server sees the next poll.</p><p>Several server-push mechanisms have been implemented to fix that, and are often grouped under the label Comet. They let a web server send updates without waiting for a poll, so updates arrive sooner and the client does not have to keep opening and closing connections. The two most common are <strong>HTTP long polling</strong>, where the server holds each request open and responds only when there are events to deliver, so there is always a pending request it can reply to, and <strong>HTTP streaming</strong>, where the server keeps a request open indefinitely and never terminates it or closes the connection even after pushing data. Other bidirectional HTTP technologies exist but usually need changes to HTTP itself, such as new methods, so this document sticks to those that work within HTTP 1.0 and 1.1 as they stand.</p><p>With traditional short polling, the client sends regular requests, each pulling whatever events or data are available, and the server returns an empty response when there is nothing, after which the client waits before polling again. The polling frequency depends on the latency the client can tolerate, and that makes the resources consumed depend on the acceptable latency: if the acceptable latency is on the order of seconds, the polling frequency puts an unacceptable burden on the server, the network, or both. Long polling tries to fix that, with the server responding only when a particular event, status or timeout has occurred and the client typically sending a new request immediately after the response. The effect is that the server always has a request open to which it can reply when there is new information, so it can start a conversation on its own.</p><p>Streaming keeps a request open indefinitely and relies on the server being able to send several pieces of information in one response, which both HTTP 1.0 and HTTP 1.1 servers can do. The size of the response content can be defined in three ways. The Content-Length header gives the size of the body in bytes. The Transfer-Encoding header with the value chunked says the message will break into chunks of known size. End of file is the default for HTTP 1.0, where the client simply reads until the server closes the connection; with HTTP 1.1 it can still be used by setting the Connection: close header in the request or response, which also prevents pipelining. The problem with end of file is that it is hard to tell a connection broken by a fault from one that ended correctly. An HTTP 1.0 server can only use end of file for streaming, while an HTTP 1.1 server can use either that or chunked transfer, and chunked is the one typically used: the response carries the header Transfer-Encoding: chunked, and each chunk starts with the hexadecimal length of its data followed by CR/LF, with the end of the response marked by a chunk of size zero.</p><p>The authors are explicit that both mechanisms stretch the original semantics of HTTP, which was not designed for two-way communication. The document neither encourages nor discourages them, and takes no position on whether they are the right answer; it identifies the technical issues and suggests how to deploy them.</p>",
+      "plainLanguage": "<p>HTTP is one-way: the browser asks, the server answers, and only when asked. This RFC explains the two common ways websites work around that so the server can send news to the browser as it happens.</p>"
+    },
+    {
+      "id": "design",
+      "number": "2.2",
+      "title": "What Long Polling Costs",
+      "content": "<p><strong>Header overhead.</strong> Every long poll request and response is a complete HTTP message with a full set of HTTP headers. For small, infrequent messages the headers can be a large share of the data transmitted. If the network MTU allows the whole message to fit in one IP packet this is not a significant extra burden, but the transferred volume can be much larger than the real payload, which matters when charging is by volume.</p><p><strong>Maximal latency.</strong> After a long poll response has been sent, the server must wait for the next long poll request before it can send another message, so while the average latency is close to one network transit, the maximum is over three: the long poll response, the next long poll request, and the next long poll response. Packet loss and retransmission add more, so the maximum latency for any TCP/IP protocol is more than three transits. With HTTP pipelining available, the wait for a new request can be avoided.</p><p><strong>Connection establishment.</strong> Both polling mechanisms are often criticised for opening and closing connections frequently, but both work well with persistent HTTP connections reused for many polls. Specifically, the short pause between a long poll response and the next long poll request keeps the connection from going idle.</p><p><strong>Allocated resources.</strong> Operating systems allocate resources to TCP connections and to HTTP requests outstanding on them. Long polling holds both a connection and a request open per client, so both have to be counted when sizing an application. The resources per TCP connection are usually minimal and scale reasonably, but the resources allocated to HTTP requests can be significant, and the total number of outstanding requests can be limited on some gateways, proxies and servers.</p><p><strong>Graceful degradation.</strong> A client or server under load tends to slow down gracefully at the cost of latency. Events queue up, waiting either for the client to send its next request or for the server to free up processing capacity, and if several messages are queued they may be delivered in a batch within a single response, which cuts the per-message overhead and eases the load. Long poll requests also have to hang until the server has something to send, which raises timeout issues, and caching mechanisms in intermediate entities can interfere with them. Both are discussed later in the document.</p>",
+      "plainLanguage": "<p>Long polling is not free. Every message carries a full set of HTTP headers, the slowest case takes three round trips, and each client keeps a connection and a request open the whole time.</p>"
     },
     {
       "id": "operation",
-      "number": "2",
-      "title": "HTTP Long Polling",
-      "content": "<p>With short polling the client asks regularly, and the server returns an empty response if there is nothing. With <strong>long polling</strong> the server holds the request open and answers only when an event, status or timeout occurs. The client then typically sends a new request at once, so a request is almost always pending.</p><p>Issues the RFC lists: every message carries full HTTP headers, which can dominate small messages; the average latency is close to one network transit but the maximum is over three, since the server must wait for the next request; each client ties up a TCP connection and an HTTP request, and the request side can be limited on gateways, proxies and servers; and caching by intermediaries can interfere. Under load, long polling degrades gracefully, since queued messages can be delivered in one batch. Persistent connections avoid reopening TCP for each poll.</p>",
-      "plainLanguage": "<p>You ask once and wait at the counter. When the answer comes, you immediately ask again so you are always waiting.</p>"
-    },
-    {
-      "id": "data-transfer",
-      "number": "3",
-      "title": "HTTP Streaming",
-      "content": "<p>In <strong>streaming</strong> the server never ends the response, and keeps sending pieces of data on the same open request. The end of the body can be signaled in three ways: a <code>Content-Length</code> header, <code>Transfer-Encoding: chunked</code>, or end of file when the connection closes. HTTP/1.1 servers typically use chunked encoding, where each chunk starts with its length in hexadecimal and a chunk of size 0 ends the response. HTTP/1.0 servers can only use end of file.</p><p>Issues: intermediaries may legally buffer an entire response, which breaks streaming; browsers may not run partial JavaScript until a buffer fills, and white space is often sent to trigger it; clients often must restart the stream to avoid unbounded memory growth, which makes the maximum latency at least three transits; and application messages need their own framing, because proxies may re-chunk the stream.</p>",
-      "plainLanguage": "<p>Instead of many short answers, the shop keeps the line open and keeps talking. But someone in the middle might hold the words until they have a full page.</p>"
+      "number": "3.2",
+      "title": "What Streaming Costs",
+      "content": "<p><strong>Network intermediaries.</strong> HTTP allows intermediaries such as proxies, transparent proxies and gateways to be involved in the delivery of a response, and there is no requirement for an intermediary to forward a partial response immediately. It is legal for the intermediary to buffer the whole response before sending any data, as caching transparent proxies do, and HTTP streaming will not work with such intermediaries.</p><p><strong>Maximal latency.</strong> On a perfect network the average and maximum latency of a streaming protocol is one network transit, but in practice the maximum is higher because of network and browser limits. The browser techniques used to terminate a streaming connection are often tied to JavaScript or DOM elements that grow with every message received, so to avoid unlimited growth in client memory an implementation occasionally has to end the streaming response and send a request to start a new one, which is essentially a long poll. The maximum latency is therefore at least three network transits, and packet loss and retransmission add more.</p><p><strong>Client buffering.</strong> No existing HTTP specification requires a client library to make the data from a partial response available to the application. If each chunk holds a piece of JavaScript, there is no requirement for the browser to run it before the whole response has arrived. In practice most browsers do run JavaScript from partial responses, although some need a buffer overflow to trigger it, and in most implementations blocks of white space can be sent to achieve that overflow.</p><p><strong>Framing techniques.</strong> With streaming, several application messages can travel inside one HTTP response, and separating them has to be done at the application level rather than the HTTP level. In particular the HTTP chunks cannot be used as message delimiters, because an intermediate proxy might re-chunk the stream, for instance by combining chunks into a longer one. Long polling does not have this problem, because each application message is sent in a different HTTP response, which gives a canonical framing.</p>",
+      "plainLanguage": "<p>Streaming breaks if anything in the middle buffers the response, and it gives you no way to mark where one message ends. That is why long polling remains the safer of the two.</p>"
     },
     {
       "id": "related-work",
       "number": "4",
-      "title": "Existing Technologies",
-      "content": "<p><strong>Bayeux</strong> (developed 2006-2007 by the Dojo Foundation) uses long polling and streaming. A client uses two HTTP connections so traffic can flow both ways, and JavaScript implementations limit themselves to two outstanding requests. Connections are negotiated by handshake messages, and cross-domain browsers try Cross-Origin Resource Sharing before falling back to JSONP.</p><p><strong>BOSH</strong> (developed 2003-2004 by the XMPP Standards Foundation) emulates TCP connections over HTTP using long polling. It typically negotiates two request-response pairs, answers the held request when a new request arrives, and does not allow chunked transfer coding because intermediaries may buffer.</p><p><strong>Server-Sent Events</strong> is a W3C API that pushes <code>text/event-stream</code> content using HTTP streaming, and suggests disabling chunking unless the message rate is high enough.</p>",
-      "plainLanguage": "<p>Three existing toolkits already use these tricks. They differ in details but all keep a request waiting for news.</p>"
+      "title": "The Technologies That Use These Mechanisms",
+      "content": "<p><strong>Bayeux</strong> was developed in 2006 and 2007 by the Dojo Foundation, and can use either long polling or streaming. A Bayeux client uses two HTTP connections to a Bayeux server so that traffic in both directions can happen asynchronously. The specification requires implementations to control pipelining so that requests are not pipelined inappropriately, for example a client-to-server message pipelined behind a long poll. In practice that control is not possible in current browsers, so JavaScript implementations limit themselves to two outstanding HTTP requests at a time, so that browser connection limits are not applied and requests are not queued or pipelined. That works broadly, but can be disrupted if non-Bayeux JavaScript clients simultaneously issue requests to the same host. The connection type, authentication method and other parameters are agreed in handshake messages, during which the two sides also reveal the bidirectional techniques they accept and the client picks one from the intersection. For non-browser or same-domain clients, HTTP POST requests are used for both the long poll and for sending messages, with the Bayeux packets as the body using the application/json media type. For browsers in cross-domain mode, Bayeux tries to use Cross-Origin Resource Sharing checking so that ordinary POST requests work, and falls back to JSONP if that fails, in which case client-to-server messages travel as encoded JSON in the URL query parameters and server-to-client messages as a JavaScript program wrapping the message.</p><p><strong>BOSH</strong>, Bidirectional-streams Over Synchronous HTTP, was developed by the XMPP Standards Foundation in 2003 and 2004 to emulate normal TCP connections over HTTP, which is the standard connection mechanism in XMPP. It uses long polling: the server, a BOSH connection manager, defers its response to a request until it has data to send from the application server, typically an XMPP server, and as soon as the client gets a response it sends another request, so the connection manager almost always holds a request it can use to push data. When the client needs to send data while waiting, it sends it in a second HTTP request over a second TCP connection, to keep it from being pipelined behind the long poll. BOSH then forces the server to answer the held request as soon as a new request arrives, even with no data to send, so the client can send more immediately while still respecting the two-connection limit. The number of request and response pairs is negotiated in the first request, typically two, and their roles swap whenever the client sends data. BOSH works reliably whether the network forces every request onto a new connection or two persistent connections can be used. If the connection manager has no data for an agreed period, also negotiated in the first request, it responds with no data, which triggers a fresh client request; this makes sure a broken connection is noticed within a reasonable time. BOSH also negotiates an inactivity period, the longest allowable period with no requests pending. It encodes everything in standard HTTP POST bodies, normally pipelined over a persistent HTTP 1.1 connection, and uses request identifiers so that a transport connection ending early does not leave the results indeterminate. BOSH clients and connection managers may not use chunked transfer coding, because intermediaries might buffer each partial request or response. The Accept-Encoding and Content-Encoding headers may be used to compress the response body, and a BOSH session can share its HTTP connections with other traffic, including other BOSH sessions and unrelated web downloads.</p><p><strong>Server-Sent Events</strong> is a W3C specification defining an API that lets servers push data to web pages over HTTP as DOM events. The data is encoded as text/event-stream content and pushed with an HTTP streaming mechanism, and the specification suggests disabling HTTP chunking unless the message rate is high enough to avoid the problems that chunking brings. It is not clear, though, that end of file rather than chunking makes much difference with intermediaries, unless they only support HTTP 1.0.</p>",
+      "plainLanguage": "<p>Three named technologies use these tricks: Bayeux, BOSH for XMPP, and the browser's Server-Sent Events. They differ mostly in how they work around the browser's limits on open connections.</p>"
     },
     {
-      "id": "implementation-notes",
+      "id": "deployment",
       "number": "5",
       "title": "Best Practices",
-      "content": "<p>The RFC gives these pieces of advice:</p><ul><li><strong>Connection limits:</strong> HTTP/1.1 recommended no more than two connections per server, and recent browsers have raised it to 6 or 8. Web applications should ideally keep a single long poll shared across frames, tabs and windows, and servers can use cookies to avoid deferring two requests from one browser.</li><li><strong>Pipelining:</strong> it can cut latency, but normal requests can be stuck behind a long poll, and POST pipelining is discouraged. Verify it is available, and fall back if it is not.</li><li><strong>Proxies:</strong> most work well with long polling. Streaming depends on proxies forwarding each chunk, which they need not do. Reverse proxies that share a small set of server connections, such as Apache with mod_jk, can be starved.</li><li><strong>Responses:</strong> answer with a standard <code>200 OK</code> when an event, status or timeout occurs.</li><li><strong>Timeouts:</strong> set them high, but too high risks a 408 or 504. The browser default is 300 seconds, experiments succeeded with 120 seconds, and 30 seconds is generally safer.</li><li><strong>Caching:</strong> suppress it by setting <code>Cache-Control</code> to <code>no-cache</code>.</li></ul>",
-      "plainLanguage": "<p>Do not hog the shop's counters, keep your waiting time reasonable, and tell helpers along the way not to remember old answers.</p>"
+      "content": "<p><strong>Limits on the number of connections.</strong> HTTP recommends that a single user client not maintain more than two connections to any server or proxy, to avoid overloading the server and to avoid unexpected side effects on congested networks. Most commonly deployed browsers implemented that limit, which made connections a scarce resource to be shared within the browser; the browser APIs hide the connections, and the security model stops frames sharing any resource. The newer HTTP specification removes the two-connection limit and only encourages clients to be conservative, and recent browsers have raised the limit to 6 or 8, though it is still not possible to discover the local limit and several frames and tabs can reach 8 easily. Web applications should limit the number of long poll requests they start, ideally to a single long poll shared between frames, tabs or windows of the same browser, but the browser's security constraints make such sharing difficult. A good practice for the server is to use cookies to spot several long poll requests from the same browser and to avoid deferring both, which could starve connections or cause pipelining problems.</p><p><strong>Pipelined connections.</strong> HTTP permits optional request pipelining over persistent connections, so several requests can be enqueued before the responses arrive. With long polling this reduces latency when a server has several messages to send in a short time, because the server does not have to wait for a new request after sending a message. It can apply to GET and POST requests, though POST with pipelining is discouraged in RFC 2616 and needs care. The difficulty is that pipelining cannot be controlled: ordinary requests get pipelined behind a long poll and are delayed until the long poll completes. A mechanism that wants to use pipelining must check that it is available on the client, the intermediaries and the server, and fall back if it is not.</p><p><strong>Proxies.</strong> Most proxies work well with long polling, because a complete response is sent either on an event or a timeout, and proxies are advised to return it immediately. Streaming uses partial responses and can fail for two reasons: it relies on proxies forwarding each chunk, which is not required of them and some caching proxies do not do, and it relies on user agents running the chunk of JavaScript as it arrives, which is also not required. A <strong>reverse proxy</strong> pretends to be the actual server as far as any client is concerned and passes the request on to the real server behind another layer of firewalls. Short polling and long polling work fine with it, as will most streaming solutions, but most proxies are not designed to hold many open connections. Reverse proxies can come to grief when they share connections to the servers between clients: Apache with mod_jk, for instance, shares a small set of connections, often 8 or 16, between all clients, and long polls on those shared connections can starve the proxy, holding up other requests. Comet mechanisms therefore need to avoid connection sharing, in the browser or in any intermediary, because the HTTP assumption is that each request completes quickly. One main reason both mechanisms are seen as a burden on servers and proxies is that they use a synchronous programming model, holding the resources allocated to a request for its whole duration. Asynchronous proxies and servers can handle long polls with only slightly more resources than normal HTTP traffic, but some synchronous proxies exist and many application servers have a blocking model.</p><p><strong>Responses and timeouts.</strong> The server answers a request it has received with a 200 OK, but only once an event, status or timeout has occurred, and the body of that 200 OK contains the event, status or timeout that occurred. That is just standard HTTP. The long poll timeout ought to be set high to keep latency and resource use down, but it has to be chosen carefully, because a value that is too high can mean the client gets a 408 Request Timeout from the server or a 504 Gateway Timeout from a proxy. The default timeout in a browser is 300 seconds, while most network infrastructures include proxies and servers with much shorter timeouts. Experiments have shown success with timeouts as high as 120 seconds, but generally 30 seconds is the safer value, and network equipment vendors are advised to implement a timeout substantially greater than 30 seconds.</p><p><strong>Impact on intermediaries.</strong> There is no way for a client to tell HTTP intermediaries that long polling is in use, so long poll requests are completely transparent to them and are handled as normal requests. That can affect entities doing work that is pointless for a long poll, but any capability that might interfere with the bidirectional flow, such as caching, can be controlled with standard headers or cookies. The best practice is to suppress caching deliberately, setting the Cache-Control header to no-cache in a long poll request or response.</p>",
+      "plainLanguage": "<p>Share one long poll per browser, keep the timeout near 30 seconds, switch caching off, and do not let a proxy share its connections. Most of the trouble comes from other people's equipment making assumptions about HTTP.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
       "title": "Security Considerations",
-      "content": "<p>The document describes current usage and proposes no change to HTTP, so it introduces no new concerns. It notes two existing ones. Cross-domain long polling is often done by executing JavaScript returned from the poll, so a server prone to injection attacks makes it easier to trick a browser into running code. And the many open connections a server must hold could more easily lead to denial-of-service attacks (<a href='/rfc4732'>RFC 4732</a>).</p>",
-      "plainLanguage": "<p>Keeping lots of doors open can let in tricksters or overwhelm the shop, so be careful what you run and how many you hold.</p>"
+      "content": "<p>The document describes current usage of HTTP to enable asynchronous or server-initiated communication, and proposes no change to the protocol or to the expected behaviour of HTTP entities, so it introduces no new security concerns into existing HTTP infrastructure. The concerns it reports refer to solutions that are already implemented and deployed.</p><p>One concern with cross-domain HTTP long polling is that the mechanism is often implemented by executing the JavaScript returned from the long poll request. If the server is prone to injection attacks, it becomes much easier to trick a browser into executing the code. Another is that the number of open connections a server has to maintain for long polling and streaming could more easily lead to denial-of-service attacks.</p>",
+      "plainLanguage": "<p>Nothing new is introduced here, but two existing risks get worse: the browser runs code the server sent, and the server has to keep many connections open.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "operation",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "LONG POLL LIFE CYCLE (RFC 6202, SECTION 2.1)",
+      "caption": "THE LONG POLLING LIFE CYCLE",
       "data": {
         "lanes": [
           {
@@ -125,49 +134,121 @@
           {
             "from": "client",
             "to": "server",
-            "label": "Initial long poll request",
-            "color": "blue",
-            "note": "The client then waits for a response."
+            "label": "Long poll request",
+            "color": "blue"
           },
           {
             "from": "server",
             "to": "client",
-            "label": "Complete response",
+            "label": "Response when an event occurs",
             "color": "green",
-            "note": "Sent when an update is available or a timeout occurs."
+            "note": "The server holds the request open until it has something to send."
           },
           {
             "from": "client",
             "to": "server",
-            "label": "New long poll request",
-            "color": "blue",
-            "note": "Sent immediately or after a pause."
+            "label": "Next long poll request",
+            "color": "neutral",
+            "note": "Typically sent immediately after the response."
           }
         ]
       }
     },
     {
-      "type": "code",
-      "anchor": "data-transfer",
+      "type": "compare-table",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "CHUNKED RESPONSE (FIGURE 1 OF RFC 6202)",
+      "caption": "LONG POLLING AND STREAMING COMPARED",
       "data": {
-        "title": "Transfer-Encoding response",
-        "lang": "text",
-        "code": "HTTP/1.1 200 OK\nContent-Type: text/plain\nTransfer-Encoding: chunked\n\n25\nThis is the data in the first chunk\n\n1C\nand this is the second one\n\n0"
+        "columns": [
+          "Aspect",
+          "HTTP long polling",
+          "HTTP streaming"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "What the server holds open",
+              "One request, answered when there is an event",
+              "One request, answered and never ended"
+            ]
+          },
+          {
+            "cells": [
+              "The connection",
+              "Closed after each response, then reopened",
+              "Left open indefinitely"
+            ]
+          },
+          {
+            "cells": [
+              "Framing of application messages",
+              "One message per HTTP response",
+              "The application has to frame the messages itself"
+            ]
+          },
+          {
+            "cells": [
+              "Maximum latency",
+              "Over three network transits",
+              "At least three network transits"
+            ]
+          },
+          {
+            "cells": [
+              "Works with intermediaries that buffer",
+              "Yes",
+              "No"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "deployment",
+      "position": "after",
+      "caption": "THE BEST PRACTICES THE RFC RECOMMENDS",
+      "data": {
+        "items": [
+          {
+            "title": "Share one long poll",
+            "text": "Limit the long polls per browser and share one between frames and tabs."
+          },
+          {
+            "title": "Use cookies to spot duplicates",
+            "text": "A server can use cookies to detect several long polls from the same browser."
+          },
+          {
+            "title": "Suppress caching",
+            "text": "Set the Cache-Control header to no-cache on long poll requests and responses."
+          },
+          {
+            "title": "Choose the timeout carefully",
+            "text": "About 30 seconds is the safer value; network gear should allow substantially more."
+          },
+          {
+            "title": "Avoid connection sharing",
+            "text": "A reverse proxy that shares a small set of connections can be starved by long polls."
+          },
+          {
+            "title": "Check pipelining is available",
+            "text": "Fall back to a non-pipelined solution when the client or the proxies do not support it."
+          }
+        ]
       }
     }
   ],
   "references": [
     {
+      "number": "[RFC2616]",
+      "text": "Fielding, R., Gettys, J., Mogul, J., Frystyk, H., Masinter, L., Leach, P., and T. Berners-Lee, \"Hypertext Transfer Protocol -- HTTP/1.1\", RFC 2616, June 1999.",
+      "rfc": 2616
+    },
+    {
       "number": "[RFC1945]",
       "text": "Berners-Lee, T., Fielding, R., and H. Nielsen, \"Hypertext Transfer Protocol -- HTTP/1.0\", RFC 1945, May 1996.",
       "rfc": 1945
-    },
-    {
-      "number": "[RFC2616]",
-      "text": "Fielding, R., et al., \"Hypertext Transfer Protocol -- HTTP/1.1\", RFC 2616, June 1999.",
-      "rfc": 2616
     },
     {
       "number": "[RFC4732]",
@@ -175,21 +256,44 @@
       "rfc": 4732
     },
     {
-      "number": "[BOSH]",
-      "text": "Paterson, I., Smith, D., and P. Saint-Andre, \"Bidirectional-streams Over Synchronous HTTP (BOSH)\", XSF XEP 0124, February 2007."
+      "number": "[RFC4627]",
+      "text": "Crockford, D., \"The application/json Media Type for JavaScript Object Notation (JSON)\", RFC 4627, July 2006.",
+      "rfc": 4627
+    },
+    {
+      "number": "[RFC6120]",
+      "text": "Saint-Andre, P., \"Extensible Messaging and Presence Protocol (XMPP): Core\", RFC 6120, March 2011.",
+      "rfc": 6120
+    },
+    {
+      "number": "[TCP]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
     },
     {
       "number": "[BAYEUX]",
       "text": "Russell, A., Wilkins, G., Davis, D., and M. Nesbitt, \"Bayeux Protocol -- Bayeux 1.0.0\", 2007."
+    },
+    {
+      "number": "[BOSH]",
+      "text": "Paterson, I., Smith, D., and P. Saint-Andre, \"Bidirectional-streams Over Synchronous HTTP (BOSH)\", XSF XEP 0124, February 2007."
+    },
+    {
+      "number": "[COMET]",
+      "text": "Russell, A., \"Comet: Low Latency Data for the Browser\", March 2006."
+    },
+    {
+      "number": "[WD-eventsource]",
+      "text": "Hickson, I., \"Server-Sent Events\", W3C Working Draft WD-eventsource-20091222, December 2009."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

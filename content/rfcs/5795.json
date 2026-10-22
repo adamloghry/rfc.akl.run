@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines the Robust Header Compression framework, a way to shrink packet headers efficiently over links with different characteristics. It separates the framework and the profile for uncompressed packets from the original definition in RFC 3095. It is a proposed standard that replaced RFC 4995.</p>",
   "plainLanguage": {
-    "summary": "<p>When the same long address label is on every box, you agree on a short nickname after the first one, so later boxes carry less writing.</p>"
+    "summary": "<p>ROHC is the rulebook for making packet headers smaller on a link. It works by sending the parts of a header that never change only once, and then sending only what changed. Each end keeps a note of what it has already sent, so a lost packet is noticed rather than silently corrupting everything after it.</p>"
   },
   "questions": [
     "what is robust header compression",
@@ -22,38 +22,38 @@
   ],
   "subtitle": "The common rulebook for squeezing IP, UDP, RTP and TCP headers over links that lose and corrupt packets.",
   "tldr": {
-    "problem": "Packet headers repeat the same information in every packet of a flow, which wastes bandwidth on expensive links. Older compression schemes did poorly on lossy links with long round-trip times.",
-    "mechanism": "ROHC keeps matching state (a context) at both ends of a link and sends only what changed, tagged with a context identifier. The framework defines the channel, packet types, feedback, segmentation and CRCs that every compression profile shares.",
-    "outcome": "RFC 5795 states the framework separately from the profiles, replaces RFC 4995 and fixes one interoperability error in how the feedback Size field was described.",
+    "problem": "On a slow or expensive link, the repeated part of every packet header is a large share of the traffic, and a scheme that assumes nothing is ever lost cannot take that saving.",
+    "mechanism": "ROHC splits the header into fields by how they change, sends the constant parts once, and keeps a context at each end. Every compressed packet carries a checksum, so a receiver that rebuilds a header wrongly can notice and ask for a repair.",
+    "outcome": "Headers can be cut to a few octet on lossy links without a lost packet causing every later packet to fail. This document separates the framework from the profiles, and adds the profile that does not compress at all. It replaced RFC 4995 in 2010.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Small CID range",
+      "label": "Small context identifier space",
       "value": "0 to 15"
     },
     {
-      "label": "Large CID range",
+      "label": "Large context identifier space",
       "value": "0 to 16383"
     },
     {
-      "label": "Uncompressed profile",
+      "label": "Reserved packet types",
+      "value": "Padding, Add-CID, Feedback, IR-DYN, IR and Segment"
+    },
+    {
+      "label": "CRC in IR and IR-DYN headers",
+      "value": "8 bits"
+    },
+    {
+      "label": "Feedback categories",
+      "value": "ACK, NACK and STATIC-NACK"
+    },
+    {
+      "label": "Uncompressed profile identifier",
       "value": "0x0000"
-    },
-    {
-      "label": "CRC sizes",
-      "value": "3, 7, 8 and 32 bits"
-    },
-    {
-      "label": "IPv4/UDP/RTP header",
-      "value": "40 octets"
-    },
-    {
-      "label": "Obsoletes",
-      "value": "RFC 4995"
     }
   ],
-  "today": "<p>RFC 5795 is a Proposed Standard that obsoletes <a href='/rfc4995'>RFC 4995</a>. The metadata for this RFC lists no later RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 5795 is a Proposed Standard on the IETF Standards Track. It replaced <a href='/rfc4995'>RFC 4995</a> in 2010, fixing one interoperability issue that RFC 4995 had introduced in the reading of the Size field in ROHC feedback, and it has not itself been obsoleted or updated. It separates the framework from the profiles, and adds the uncompressed profile 0x0000; the framework itself is unchanged from <a href='/rfc3095'>RFC 3095</a>.</p>",
   "glossary": [
     "header-compression",
     "context-identifier",
@@ -63,178 +63,214 @@
     "tcp",
     "ipv4",
     "ipv6",
-    "iana"
+    "iana",
+    "rohc",
+    "robust-header-compression",
+    "compression-context",
+    "flow",
+    "rohc-channel"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why Compress Headers",
-      "content": "<p>On some links the headers cost more than the data. An application sending RTP over IPv4 carries an IPv4 header (20 octets), a UDP header (8 octets) and an RTP header (12 octets), a total of 40 octets. With IPv6 the IPv6 header is 40 octets, for a total of 60. For Voice over IP, the coded speech can be as small as 15-20 octets, so the saving is large.</p><p>Compression works because most header fields barely change between packets of the same flow. The <strong>Robust Header Compression</strong> (ROHC) protocol is meant to work efficiently and robustly over different link technologies. Older schemes such as those in <a href='/rfc2507'>RFC 2507</a> and <a href='/rfc2508'>RFC 2508</a> performed inadequately where the link is lossy and the round-trip time is not negligible, as on wireless links and IP tunnels.</p><p>The framework and a first set of profiles were defined together in <a href='/rfc3095'>RFC 3095</a>. This document defines the framework on its own, together with the profile for uncompressed packets. It does not modify the framework of RFC 3095, and implementations based on either definition interoperate. The intent is that this text replaces RFC 3095 as the base for all future profiles.</p>",
-      "plainLanguage": "<p>Sending the full address on every packet is like writing your whole home address on every postcard to the same friend. ROHC lets you write it once and then use a short code.</p>"
+      "title": "What Header Compression Is For",
+      "content": "<p>For many kinds of network, reducing deployment and operating costs by using the available bandwidth well is of vital importance. Header compression over a link is possible because some of the information carried in a packet header becomes redundant from packet to packet.</p><p>The redundancy is there between consecutive packets of the same flow. End to end, the whole header is needed for every packet of a flow, but over a single link much of it becomes redundant and can be left out, as long as the receiving end of the link can put it back transparently.</p><p>The header can be reduced by first sending the field information that is expected to stay static for the lifetime of the flow. Further compression comes from the fields that change more often, using methods chosen for the way each field is expected to change. To do this, the compressor and the decompressor each keep a context holding what they need from earlier packets. The two update their contexts on events that are not necessarily synchronised, so a loss or a damaged packet can leave the two out of step, which the document calls context damage. A robust scheme therefore needs both mechanisms to reduce the chance of context damage and mechanisms to repair it.</p>",
+      "plainLanguage": "<p>Every packet in a flow repeats the same addresses and the same options. On a single link those repeats are wasted bytes, so the sender can leave them out and the receiver can fill them in again from what it already knows.</p>"
     },
     {
       "id": "background",
-      "number": "3",
-      "title": "How Earlier Schemes Fell Short",
-      "content": "<p>The RFC gives a short history. The first scheme, compressed TCP (CTCP, often called VJ compression and defined in <a href='/rfc1144'>RFC 1144</a>), shrinks the 40 octets of a TCP/IP header to 4 octets using delta encoding. IP header compression (<a href='/rfc2507'>RFC 2507</a>) handles arbitrary IP, TCP and UDP headers but does not compress RTP. CRTP (<a href='/rfc2508'>RFC 2508</a>) compresses the 40 octets of IPv4/UDP/RTP headers to a minimum of 2 octets when the UDP checksum is not enabled.</p><p>The weakness is loss. On lossy links with long round-trip times, each packet lost makes several following packets fail to decompress, because the context stays invalid for at least one link round-trip time. The large headers sent to repair the context then waste more bandwidth. The enhanced variant eCRTP (<a href='/rfc3545'>RFC 3545</a>) added robustness at the cost of extra overhead and lower efficiency.</p><p>The RFC names three properties by which a scheme is judged: <strong>compression efficiency</strong> (how much the average header shrinks), <strong>robustness</strong> (tolerating loss, residual bit errors and reordering without causing extra damage) and <strong>transparency</strong> (whether decompressed headers are bitwise identical to the originals). More robustness always costs some efficiency, and the reverse.</p>",
-      "plainLanguage": "<p>Old shortcuts worked only if no mail was ever lost. When a letter went missing, everyone got confused and had to start over. ROHC is built to keep going even when something goes missing.</p>"
+      "number": "3.2",
+      "title": "How Header Compression Got Here",
+      "content": "<p>The first header compression scheme, compressed TCP (CTCP), was introduced by Van Jacobson. Often called VJ compression, it compresses the 40 octets of the TCP/IP header down to 4 octets, and uses delta encoding for fields that change one after another. The compressor detects transport-level retransmissions and sends a header that updates the whole context when they occur, so the repair needs no explicit signalling between the two ends.</p><p>IP header compression, IPHC, improves on CTCP and can compress arbitrary IP, TCP and UDP headers. When compressing non-TCP headers it does not use delta encoding and is robust, and its repair mechanism is augmented with negative acknowledgements called CONTEXT_STATE messages, which speed up the repair but limit it by the round-trip time of the link. IPHC does not compress RTP headers.</p><p>CRTP is an RTP extension to IPHC. It compresses the 40 octets of IPv4, UDP and RTP headers to a minimum of 2 octets when the UDP checksum is not enabled, and to 4 octets when it is. On lossy links with long round-trip times CRTP does not perform well: each lost packet causes several later packets to fail to decompress, because the context stays invalid for at least one round-trip time, and the large headers sent to update the context waste bandwidth. Its local repair mechanism, TWICE, exploits the fact that when the flow of compressed packets is regular, the right guess after a lost packet is to apply the update twice. Even with TWICE, CRTP doubled the number of lost packets. The enhanced variant eCRTP was written to be more robust in the presence of reordering and loss, at the cost of extra overhead and so of lower compression efficiency.</p>",
+      "plainLanguage": "<p>Earlier schemes compressed well but were fragile: one lost packet could spoil several that followed. That is the problem ROHC was written to fix.</p>"
     },
     {
       "id": "concepts",
-      "number": "4",
-      "title": "Contexts, Flows and Profiles",
-      "content": "<p>Packets are grouped into <strong>flows</strong>, usually by source and destination address, transport protocol and ports. The compressor and decompressor each keep a <strong>context</strong> for a flow, the state used to compress or decompress its headers, and identify it with a <strong>Context Identifier</strong> (CID) carried in each compressed header. The context has a static part (fields classified STATIC, STATIC-KNOWN or STATIC-DEF) and a dynamic part (fields classified CHANGING). Fields are also classed as INFERRED when they can be worked out from elsewhere, such as the frame size from the link layer.</p><p>Changing fields are compressed as a function of a <strong>master sequence number</strong> (MSN), which is either taken from a protocol field such as the RTP sequence number or created by the compressor. When a field stops following its function, extra information is sent to update the function.</p><p>A <strong>profile</strong> is a compression protocol for a specific combination of headers. Each has a unique profile identifier, and the set supported by both ends of the channel is negotiated. A <strong>ROHC channel</strong> is a logical unidirectional point-to-point channel from one compressor to one decompressor. It may also carry feedback for a channel in the opposite direction.</p><p>The CID space is either small (values 0 through 15) or large (0 through 16383). Which one is used MUST be established before any compressed packet is sent. The CID space is separate for each channel, so CID 3 on channel A and CID 3 on channel B are different contexts.</p>",
-      "plainLanguage": "<p>Each conversation gets a number, like a table number at a restaurant. Both sides keep notes under that number, so they do not have to repeat everything each time.</p>"
+      "number": "4.1",
+      "title": "Flows, Field Types and Contexts",
+      "content": "<p>The first step is to identify and group packets into flows, so that the redundancy from packet to packet is as large as possible. Grouping is usually based on the source and destination addresses, the transport protocol, the port numbers, and possibly extra application identifiers such as the synchronization source in RTP. The compressor and the decompressor each build a context for the flow and identify it with a Context Identifier carried in every compressed header.</p><p>The second step is to understand how each header field changes. Fields fall into classes. INFERRED fields can be worked out from other fields or from outside the packet, such as the frame size, which the link layer protocol can supply. STATIC fields are assumed constant for the lifetime of the flow, so their values are communicated only at the start. STATIC-DEF fields are the ones that define a flow, so packets that differ in them belong to different flows, and they are compressed as static fields. STATIC-KNOWN fields are expected to have well-known values and need not be communicated at all. CHANGING fields vary, either within a limited range or in some other manner, and are handled in more sophisticated ways.</p><p>The last step is to choose the encoding method for each field, and then to weigh compression efficiency against robustness to loss and errors and against the ability to detect errors in the decompression.</p>",
+      "plainLanguage": "<p>Before compressing anything, the two ends agree on what kind of traffic this is and what each field in the header is expected to do. A field that never changes is sent once; a field that the link can work out for itself is never sent at all.</p>"
     },
     {
-      "id": "packet-format",
+      "id": "design",
+      "number": "4.2",
+      "title": "Efficiency, Robustness and Transparency",
+      "content": "<p>The performance of a header compression protocol is described with three parameters. Compression efficiency is how much the average header size is reduced. Robustness is the ability to tolerate packet losses, residual bit errors and out-of-order delivery on the link without losing additional packets or introducing additional errors in the decompressed headers. Compression transparency is the extent to which the scheme keeps the semantics of the original headers: if every decompressed header is bitwise identical to the original, the scheme is transparent.</p><p>The challenge is to reconcile all three. Increasing robustness always costs compression efficiency and the other way round, and the scheme has to be flexible enough to cope with the different round-trip times and loss patterns of the links where it is used. The scheme must give the decompressor a way to verify a decompression and detect possible context damage, and it must offer context recovery mechanisms such as feedback. The header compression schemes that came before the Robust Header Compression working group were not designed with these objectives in mind.</p>",
+      "plainLanguage": "<p>Three things matter at once: how small the header gets, how well the scheme survives a lossy link, and whether the rebuilt header is exactly right. You can have more of one only by giving up some of another.</p>"
+    },
+    {
+      "id": "architecture",
+      "number": "5.1",
+      "title": "The ROHC Channel and Its Parameters",
+      "content": "<p>A ROHC channel is a logical unidirectional point-to-point channel carrying ROHC packets from one compressor to one decompressor, and it may carry feedback on behalf of another compressor-decompressor pair running the other way. Each compressed flow has a context, and each context has a Context Identifier. A context is new when the identifier is associated with a profile for the first time since the channel was created, or when it is associated with a different profile by an IR packet.</p><p>The identifier space is either small, with values from 0 to 15, or large, with values from 0 to 2^14 minus 1, which is 16383. Which of the two is used must be established, possibly by negotiation, before any compressed packet is sent. The space is distinct for each channel, so identifier 3 on one channel and identifier 3 on another do not refer to the same context even between the same nodes.</p><p>The channel also has a set of parameters agreed before the first packet. LARGE_CIDS is a boolean choosing the identifier representation. MAX_CID is the highest identifier the compressor will use, and by agreeing it the decompressor promises memory for at least that many contexts. PROFILES is the set of profiles both ends support, each identified by a 16-bit value whose lowest 8 bits give the profile and whose highest 8 bits give the variant, so only one variant of a profile may be in the set. FEEDBACK_FOR names the channel in the opposite direction that feedback on this channel refers to. MRRU is the maximum reconstructed reception unit, the largest reassembled unit in octets the decompressor is expected to build; if it is negotiated as zero, segmentation must not be used and received segments must be discarded.</p>",
+      "plainLanguage": "<p>Before any compressed packet is sent, the two ends agree on the rules: how many flows can share the link, which compression profiles are allowed, and how big a reassembled packet may be. A flow is identified by a short number carried in each packet.</p>"
+    },
+    {
+      "id": "message-format",
       "number": "5.2",
-      "title": "ROHC Packets and Packet Types",
-      "content": "<p>A ROHC packet is made of optional Padding octets, optional Feedback elements, at most one Header and then the Payload. At least one of Feedback or Header MUST be present. The Header is a profile-specific compressed header, an IR or IR-DYN header, or a segment.</p><p>The framework reserves a few packet types by their leading bits and leaves the rest to profiles. With small CIDs, CID 0 costs no bits at all, and CIDs 1 to 15 use an Add-CID octet before the packet type. With large CIDs the CID is always present, encoded in one or two octets using the self-describing variable-length scheme.</p><p>Two packet types set up contexts. The <strong>IR</strong> (Initialization and Refresh) header associates a CID with a profile and typically initializes the context. The <strong>IR-DYN</strong> header can never initialize a context that has not been initialized, but it can redefine the profile of a context if that profile allows it. Both carry an 8-bit profile field (the 8 least significant bits of the profile identifier) and an 8-bit CRC.</p><p>Initially, every context is in a no context state. If the 8-bit CRC of an IR or IR-DYN packet fails, the packet MUST NOT be decompressed and delivered. If a parsing error occurs for any packet type, the decompressor MUST discard the packet.</p>",
-      "plainLanguage": "<p>Each packet starts with a tiny label that says what kind it is. Some labels start a new conversation, and some just carry the short version.</p>"
-    },
-    {
-      "id": "operation",
-      "number": "5.4",
-      "title": "Feedback, Segmentation and the Uncompressed Profile",
-      "content": "<p><strong>Feedback</strong> carries information from the decompressor back to the compressor. There are three categories: an <strong>ACK</strong> (decompression succeeded and the context is considered valid), a <strong>NACK</strong> (some or all of the dynamic context is considered invalid) and a <strong>STATIC-NACK</strong> (the entire static context is invalid or not established). A feedback element starts with a type octet whose 3-bit Code is either 0, meaning a Size octet follows, or 1 to 7, giving the total size in octets of the feedback data and CID field. The Acktype value 3 is reserved and MUST NOT be used.</p><p>Feedback can be interspersed with other packets or piggybacked on them, and several elements can be concatenated in one packet. This RFC fixes the interoperability issue from <a href='/rfc4995'>RFC 4995</a>: the Size field counts the FEEDBACK data and the CID field together, in octets.</p><p><strong>Segmentation</strong> lets a compressor split a packet that is too large for the channel. It is not particularly efficient, and link-layer segmentation SHOULD be used instead when available. It assumes in-order delivery, and if that cannot be guaranteed, ROHC segmentation MUST NOT be used. The segments are rebuilt into a reconstructed unit that ends with a 32-bit CRC and must not exceed the channel parameter MRRU, otherwise the unit is discarded. If MRRU is negotiated to be 0, segmentation MUST NOT be used.</p><p><strong>Profile 0x0000</strong> (UNCOMPRESSED) sends IP packets without compressing them. After initialization its only overhead is the CID. The compressor initializes it with IR packets, and the only feedback it defines is an ACK.</p>",
-      "plainLanguage": "<p>The receiver can wave back to say all is fine or that it got confused. Very big parcels can be cut into pieces, and a plain, unshrunk mode exists for when shrinking is not possible.</p>"
+      "title": "Packet Types and the General Format",
+      "content": "<p>A ROHC packet has up to four parts: any number of padding octets, any number of feedback elements, a header, and the payload. The header is either a profile-specific compressed header, an IR or IR-DYN header, or a segment. There can be at most one header in a packet, and it may be left out when the packet carries feedback only. At least one of feedback or header must be present.</p><p>Several packet types are reserved at the framework level: 11100000 for padding, 1110nnnn for an Add-CID octet where nnnn is an identifier from 1 to 15, 11110 for feedback, 11111000 for an IR-DYN packet, 1111110 for an IR packet, and 1111111 for a segment. The remaining patterns are available to individual profiles. A padding octet looks like an Add-CID octet for identifier 0, but must not be read as one.</p><p>Every header starts with a packet type indication, or with an Add-CID octet followed by the type indication. With a small identifier space, identifier 0 costs no bits at all and identifier 1 to 15 is written as an Add-CID octet. With a large identifier space the identifier is always present, in one or two octets. An IR header carries a one-octet profile identifier and an 8-bit CRC, and it associates the context with that profile and typically initialises the context. An IR-DYN header has the same shape but can never initialise a context that is not already initialised, though it can redefine which profile a context uses. The IR type octet is 1111110 and the IR-DYN type octet is 11111000.</p><p>The document also defines profile 0x0000, the uncompressed profile, which sends IP packets without compressing them. It is used when no compression profile is available for a packet or when compression is not wanted. After initialisation the only overhead is the size of the identifier, and a normal packet in this profile is an ordinary IP packet with identifier information attached.</p>",
+      "plainLanguage": "<p>Each packet names its type in the first bits. Some types set up a flow from scratch, some carry a compressed header, one carries feedback back the other way, and one is a piece of a packet too big to send at once.</p>"
     },
     {
       "id": "error-handling",
-      "number": "5.3",
-      "title": "CRCs and Variable-Length Values",
-      "content": "<p>ROHC uses four CRCs, all computed with the algorithm of <a href='/rfc1662'>RFC 1662</a> and an initial register of all ones. They let the decompressor check its work and notice <strong>context damage</strong>, which happens when its context no longer matches the compressor's.</p><ul><li>The <strong>8-bit CRC</strong> in IR and IR-DYN headers MUST cover at least the start of the header through the Profile field. It does not let the decompressor verify a full decompression, but it is enough to update the context from the header.</li><li>The <strong>3-bit CRC</strong> in compressed headers is computed over the whole original header. It is too weak to repair a context from a single header, so profiles should not allow decompression with it when the context is assumed invalid.</li><li>The <strong>7-bit CRC</strong> is strong enough that one verified header can validate a repair.</li><li>The <strong>32-bit CRC</strong> verifies a segmented, reconstructed unit.</li></ul><p>Many values are sent with a self-describing variable-length encoding. The first bits of the first octet give the length: 0 means 1 octet (7 bits, up to 127), 10 means 2 octets (14 bits, up to 16383), 110 means 3 octets and 111 means 4 octets (29 bits, up to 536870911).</p>",
-      "plainLanguage": "<p>A CRC is a tiny check number, like counting the pieces after unpacking a box. If the count does not match, something went wrong along the way.</p>"
+      "number": "5.2.4",
+      "title": "Feedback, Repair and Segmentation",
+      "content": "<p>Feedback carries information from the decompressor to the compressor. Three categories are defined. An ACK acknowledges successful decompression and says the decompressor considers its context valid. A NACK says the decompressor considers some or all of the dynamic part of its context invalid. A STATIC-NACK says the whole static context is invalid or was never established. Feedback can be interspersed, piggybacked on a data packet, or both. The length of a feedback element can be worked out from its first few octets, so a receiver can extract feedback without understanding it, and the identifier it carries says which context the feedback is about.</p><p>Checksums do the work of spotting errors. An 8-bit CRC in IR and IR-DYN headers covers at least the start of the header up to and including the profile field, and is enough to update the context safely when it verifies. A 3-bit CRC in a compressed header covers the whole original header and lets the decompressor check a decompression attempt, but it is too weak to be trusted on its own, so a profile should not allow a header with only a 3-bit CRC to be used to repair a context. A 7-bit CRC is strong enough to assume a repair worked from a single header, so a profile may allow decompression with it when part of the context is thought to be invalid. A 32-bit CRC protects the reassembled unit in the segmentation scheme.</p><p>ROHC also defines a simple segmentation protocol, for packets too large for the channel. It is not particularly efficient and is not meant to replace link-layer segmentation, and it assumes in-order delivery, using only a CRC and no sequence numbers, so it must not be used where in-order delivery cannot be guaranteed. Segments carry no identifier of their own and must arrive consecutively and in order; a final segment completes the reassembled unit, and if a non-segment packet follows a non-final segment the reassembly is aborted. A reassembled unit of 4 octets or less, one whose CRC fails, or one larger than the MRRU must be discarded.</p>",
+      "plainLanguage": "<p>Each compressed packet carries a small checksum. If the receiver rebuilds the header wrongly, the checksum will not match and it says so. A receiver can also send back a request to resend the parts of the context that have gone wrong.</p>"
     },
     {
       "id": "security-considerations",
       "number": "9",
       "title": "Security Considerations",
-      "content": "<p>Encryption removes the redundancy that header compression exploits, so there is some pressure to leave headers unencrypted on low-bandwidth links. A malfunctioning or malicious compressor could make the decompressor rebuild packets that do not match the originals but still have valid headers and possibly valid transport checksums. End-to-end authentication and integrity mechanisms are unaffected by compression and can catch this, and ROHC's internal checksum also lowers the chance of unnoticed mismatches.</p><p>Denial of service is possible if an intruder injects bogus IR, IR-DYN or feedback packets onto the link and reduces compression efficiency. The RFC notes that an intruder able to inject arbitrary packets at the link layer raises additional security issues that dwarf those of header compression.</p>",
-      "plainLanguage": "<p>If someone sneaks fake notes into the pile, the shortcuts stop working well. But anyone who can do that can cause far bigger trouble.</p>"
-    },
-    {
-      "id": "iana-considerations",
-      "number": "8",
-      "title": "The Profile Identifier Registry",
-      "content": "<p>RFC 3095 created an IANA registry of ROHC profile identifiers. Because only the 8 least significant bits are used in packets, two identifiers with identical low 8 bits should be assigned only when the higher-numbered one is meant to supersede the lower. The policy is Specification Required. In the low 8 bits, 0 to 127 is reserved for IETF Standards Track specifications, 128 to 254 is available for other specifications, and 255 is reserved for future extensibility.</p><p>The RFC lists the identifiers allocated so far, including <code>0x0000</code> for ROHC uncompressed, <code>0x0001</code> to <code>0x0003</code> for RTP, UDP and ESP from <a href='/rfc3095'>RFC 3095</a>, <code>0x0006</code> for ROHC TCP from <a href='/rfc4996'>RFC 4996</a>, and the ROHCv2 profiles <code>0x0101</code> to <code>0x0104</code> from <a href='/rfc5225'>RFC 5225</a>. This document requires no additional IANA action.</p>",
-      "plainLanguage": "<p>Every shortcut method gets its own ID number from a central list, so nobody picks the same number twice.</p>"
+      "content": "<p>Because encryption removes the redundancy that header compression schemes try to exploit, there is some inducement to forego encrypting headers in order to work over low-bandwidth links.</p><p>A malfunctioning or malicious header compressor could cause the decompressor to reconstitute packets that do not match the originals but still have valid headers, and possibly valid transport checksums as well. Such corruption may be detected with end-to-end authentication and integrity mechanisms, which compression does not affect. The ROHC scheme also uses an internal checksum to verify reconstructed headers, which reduces the chance of producing decompressed headers that do not match the originals without it being noticed.</p><p>Denial-of-service attacks are possible if an intruder can put bogus IR, IR-DYN or feedback packets onto the link and so reduce the compression efficiency. However, an intruder able to inject arbitrary packets at the link layer in this way raises additional security issues that dwarf those related to header compression.</p>",
+      "plainLanguage": "<p>Encrypting the header removes the very repetition that compression exploits, so there is a pull towards leaving it in the clear. The document also notes that a hostile compressor could hand the receiver a wrong header, and that a checksum is not the same as an end-to-end guarantee.</p>"
     }
   ],
   "viz": [
     {
-      "type": "opcodes",
-      "anchor": "packet-format",
+      "type": "key-grid",
+      "anchor": "concepts",
       "position": "after",
-      "caption": "PACKET TYPES RESERVED BY THE FRAMEWORK (RFC 5795)",
+      "caption": "HOW A HEADER FIELD IS CLASSIFIED",
+      "data": {
+        "items": [
+          {
+            "title": "INFERRED",
+            "text": "Can be worked out from other fields or from outside the packet, such as the frame size, so it need not be sent."
+          },
+          {
+            "title": "STATIC",
+            "text": "Assumed constant for the lifetime of the flow. The value is sent once."
+          },
+          {
+            "title": "STATIC-DEF",
+            "text": "Defines the flow itself. Packets that differ in these fields belong to different flows."
+          },
+          {
+            "title": "STATIC-KNOWN",
+            "text": "Expected to have a well-known value, so it need not be communicated at all."
+          },
+          {
+            "title": "CHANGING",
+            "text": "Varies, and is handled with more careful encodings chosen for how it changes."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THE THREE PROPERTIES OF A COMPRESSION SCHEME",
+      "data": {
+        "items": [
+          {
+            "title": "Compression efficiency",
+            "text": "How much the average header is reduced by applying the scheme."
+          },
+          {
+            "title": "Robustness",
+            "text": "Tolerating losses, residual bit errors and reordering without losing more packets or corrupting headers."
+          },
+          {
+            "title": "Compression transparency",
+            "text": "Keeping the semantics of the original header. If every rebuilt header is bit for bit identical, the scheme is transparent."
+          }
+        ]
+      }
+    },
+    {
+      "type": "layers",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE GENERAL ROHC PACKET FORMAT",
+      "data": {
+        "layers": [
+          {
+            "label": "Padding",
+            "detail": "Zero or more padding octets"
+          },
+          {
+            "label": "Feedback",
+            "detail": "Zero or more feedback elements for the compressor"
+          },
+          {
+            "label": "Header",
+            "detail": "A compressed header, an IR or IR-DYN header, or a segment",
+            "highlight": true
+          },
+          {
+            "label": "Payload",
+            "detail": "The uncompressed payload that follows the last compressible header"
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE PACKET TYPES RESERVED BY THE FRAMEWORK",
       "data": {
         "items": [
           {
             "code": "11100000",
             "label": "Padding",
-            "desc": "One padding octet."
+            "desc": "A padding octet."
           },
           {
             "code": "1110nnnn",
             "label": "Add-CID",
-            "desc": "nnnn is the CID, 0x1 through 0xF."
+            "desc": "An Add-CID octet, where nnnn is an identifier from 1 to 15.",
+            "highlight": true
           },
           {
             "code": "11110",
             "label": "Feedback",
-            "desc": "Feedback from decompressor to compressor."
+            "desc": "A feedback packet, which can carry variable-length feedback information."
           },
           {
             "code": "11111000",
             "label": "IR-DYN",
-            "desc": "Refreshes dynamic context, cannot start a context.",
-            "highlight": true
+            "desc": "Initialization and refresh, dynamic part."
           },
           {
             "code": "1111110",
             "label": "IR",
-            "desc": "Initialization and refresh; ties a CID to a profile.",
-            "highlight": true
+            "desc": "Initialization and refresh."
           },
           {
             "code": "1111111",
             "label": "Segment",
-            "desc": "One piece of a segmented packet."
+            "desc": "One segment of a packet that is too large for the channel."
           }
         ]
       }
     },
     {
-      "type": "compare-table",
+      "type": "key-grid",
       "anchor": "error-handling",
       "position": "after",
-      "caption": "THE FOUR ROHC CRCS",
+      "caption": "THE FOUR CHECKSUMS",
       "data": {
-        "columns": [
-          "CRC",
-          "Used in",
-          "Polynomial",
-          "Role"
-        ],
-        "rows": [
+        "items": [
           {
-            "cells": [
-              "8-bit",
-              "IR and IR-DYN headers",
-              "1 + x + x^2 + x^8",
-              "Validates context-initializing headers"
-            ]
+            "title": "8-bit CRC",
+            "text": "In IR and IR-DYN headers, covering at least the start of the header up to and including the profile field. Enough to update the context when it verifies."
           },
           {
-            "cells": [
-              "3-bit",
-              "Compressed headers",
-              "1 + x + x^3",
-              "Verifies small headers; too weak to repair a context"
-            ]
+            "title": "3-bit CRC",
+            "text": "In compressed headers, covering the whole original header. Lets the decompressor check a decompression attempt, but is too weak to trust on its own."
           },
           {
-            "cells": [
-              "7-bit",
-              "Compressed headers",
-              "1 + x + x^2 + x^3 + x^6 + x^7",
-              "Verifies larger headers; can validate a repair"
-            ]
+            "title": "7-bit CRC",
+            "text": "In compressed headers. Strong enough to assume a context repair worked from a single header."
           },
           {
-            "cells": [
-              "32-bit",
-              "Segmentation",
-              "x^0 + x^1 + x^2 + x^4 + x^5 + x^7 + x^8 + x^10 + x^11 + x^12 + x^16 + x^22 + x^23 + x^26 + x^32",
-              "Verifies a reconstructed unit"
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "type": "packet",
-      "anchor": "operation",
-      "position": "after",
-      "caption": "FEEDBACK ELEMENT TYPE OCTET (RFC 5795)",
-      "data": {
-        "title": "Feedback type octet",
-        "bytes": 1,
-        "width": 8,
-        "fields": [
-          {
-            "key": "type",
-            "name": "11110",
-            "bits": 5,
-            "desc": "Fixed bit pattern marking a feedback element."
-          },
-          {
-            "key": "code",
-            "name": "Code",
-            "bits": 3,
-            "desc": "0 means a Size octet follows; 1 to 7 is the size of the FEEDBACK data and CID field in octets."
+            "title": "32-bit CRC",
+            "text": "Used by the segmentation scheme to verify the reassembled unit."
           }
         ]
       }
@@ -243,7 +279,7 @@
   "references": [
     {
       "number": "[RFC3095]",
-      "text": "Bormann, C., et al., \"RObust Header Compression (ROHC): Framework and four profiles: RTP, UDP, ESP, and uncompressed\", RFC 3095, July 2001.",
+      "text": "Bormann, C., Burmeister, C., Degermark, M., Fukushima, H., Hannu, H., Jonsson, L-E., Hakenberg, R., Koren, T., Le, K., Liu, Z., Martensson, A., Miyazaki, A., Svanbro, K., Wiebke, T., Yoshimura, T., and H. Zheng, \"RObust Header Compression (ROHC): Framework and four profiles: RTP, UDP, ESP, and uncompressed\", RFC 3095, July 2001.",
       "rfc": 3095
     },
     {
@@ -257,19 +293,9 @@
       "rfc": 5225
     },
     {
-      "number": "[RFC4996]",
-      "text": "Pelletier, G., Sandlund, K., Jonsson, L-E., and M. West, \"RObust Header Compression (ROHC): A Profile for TCP/IP (ROHC-TCP)\", RFC 4996, July 2007.",
-      "rfc": 4996
-    },
-    {
       "number": "[RFC3759]",
       "text": "Jonsson, L-E., \"RObust Header Compression (ROHC): Terminology and Channel Mapping Examples\", RFC 3759, April 2004.",
       "rfc": 3759
-    },
-    {
-      "number": "[RFC4224]",
-      "text": "Pelletier, G., Jonsson, L-E., and K. Sandlund, \"RObust Header Compression (ROHC): ROHC over Channels That Can Reorder Packets\", RFC 4224, January 2006.",
-      "rfc": 4224
     },
     {
       "number": "[RFC1144]",
@@ -280,25 +306,15 @@
       "number": "[RFC2507]",
       "text": "Degermark, M., Nordgren, B., and S. Pink, \"IP Header Compression\", RFC 2507, February 1999.",
       "rfc": 2507
-    },
-    {
-      "number": "[RFC2508]",
-      "text": "Casner, S. and V. Jacobson, \"Compressing IP/UDP/RTP Headers for Low-Speed Serial Links\", RFC 2508, February 1999.",
-      "rfc": 2508
-    },
-    {
-      "number": "[RFC3545]",
-      "text": "Koren, T., et al., \"Enhanced Compressed RTP (CRTP) for Links with High Delay, Packet Loss and Reordering\", RFC 3545, July 2003.",
-      "rfc": 3545
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

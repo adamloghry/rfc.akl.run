@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This Standards Track document defines SCIM security events using Security Event Tokens (RFC 8417), so SCIM service providers and receivers can exchange messages asynchronously. It updates RFC 7643 with extra ServiceProviderConfig attributes and RFC 7644 with an optional new capability.</p>",
   "plainLanguage": {
-    "summary": "<p>Instead of repeatedly asking whether the list changed, the system sends a short note whenever something happens.</p>"
+    "summary": "<p>SCIM is a protocol for changing user and group records in identity systems. This RFC lets a service provider send a token whenever a record changes, so other systems learn about the change without asking for it. The token names the record and either carries its new values or only lists which attributes changed.</p>"
   },
   "questions": [
     "scim security event tokens",
@@ -20,17 +20,21 @@
     "SCIM",
     "Events"
   ],
-  "subtitle": "SCIM events carried in Security Event Tokens, so identity systems can push change notices and finish async requests.",
+  "subtitle": "How SCIM services push change notices as Security Event Tokens instead of being polled.",
   "tldr": {
-    "problem": "When several SCIM clients change resources, other parties fall out of date. Polling with repeated GET requests becomes costly as changes and resources grow, and long requests tie up HTTP connections.",
-    "mechanism": "The RFC defines SCIM event URIs carried in Security Event Tokens (RFC 8417): feed, provisioning and asynchronous-completion events. It adds the Prefer: respond-async request, a Set-Txn response header, and a securityEvents discovery attribute.",
-    "outcome": "Receivers learn only about changes and decide their own follow-up. The RFC updates RFC 7643 and RFC 7644 and creates an IANA registry of SCIM event URIs.",
+    "problem": "SCIM clients change user and group records over HTTP. When many independent clients do this, each one ends up with an old copy, and fetching updates with repeated GET requests becomes costly as the number of changes and resources grows.",
+    "mechanism": "The RFC defines SCIM events carried in Security Event Tokens (RFC 8417). Each token names the resource that changed and either carries its new values or only the list of changed attributes. It adds a Prefer: respond-async request, a Set-Txn response header, and a securityEvents discovery attribute.",
+    "outcome": "Receivers learn about changes without asking for them and decide their own follow-up action. The RFC updates RFC 7643 and RFC 7644 and creates an IANA registry of SCIM event URIs.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
       "label": "Event URI prefix",
       "value": "urn:ietf:params:scim:event"
+    },
+    {
+      "label": "Event URI classes",
+      "value": "feed, prov, misc"
     },
     {
       "label": "New HTTP header",
@@ -41,19 +45,15 @@
       "value": "202 (Accepted), no body"
     },
     {
-      "label": "Bulk txn format",
-      "value": "original txn + \":\" + zero-based index"
+      "label": "Bulk transaction format",
+      "value": "original txn, then a colon, then the zero-based operation index"
     },
     {
       "label": "asyncRequest values",
       "value": "none, long, request"
-    },
-    {
-      "label": "Registry procedure",
-      "value": "Expert Review"
     }
   ],
-  "today": "<p>RFC 9967 is a Proposed Standard published in May 2026. It updates <a href='/rfc7643'>RFC 7643</a> with new ServiceProviderConfig attributes and <a href='/rfc7644'>RFC 7644</a> with an optional asynchronous request capability, and the metadata lists no RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 9967 is a Proposed Standard published in May 2026. It updates <a href='/rfc7643'>RFC 7643</a> with new ServiceProviderConfig attributes and <a href='/rfc7644'>RFC 7644</a> with an optional asynchronous request capability. No later RFC obsoletes or updates it.</p>",
   "glossary": [
     "scim",
     "security-event-token",
@@ -73,50 +73,57 @@
       "id": "introduction",
       "number": "1",
       "title": "Why SCIM Needs Events",
-      "content": "<p>SCIM clients change resources with HTTP methods such as POST, PATCH and DELETE. When many independent clients do this, each one goes out of date. Polling with periodic GET requests becomes a problem as the number of changes and resources increases.</p><p>RFC 9967 instead shares <strong>Security Events</strong> using Security Event Tokens (SETs, RFC 8417) over an event feed. A SET describes a state change at a SCIM service provider. It is not a command: each <strong>Event Receiver</strong> decides its own best follow-up action, such as reconciling schema or resource-type differences between domains.</p><p>The document defines three kinds of event (resource feed changes, provisioning changes and asynchronous request completion) and uses the HTTP header <code>Prefer: respond-async</code> (RFC 7240) so a client can ask for an asynchronous response.</p>",
-      "plainLanguage": "<p>A SET is a short note saying what changed. The person who gets the note decides what to do about it.</p>"
+      "content": "<p>SCIM clients issue commands to a SCIM service provider over HTTP, using methods such as POST, PATCH and DELETE, and each command changes the state of a SCIM resource. When several independent clients change resources, individual clients fall out of date as those changes occur.</p><p>The alternative is polling: the client sends periodic SCIM GET requests to find out what changed. The RFC says this rapidly becomes problematic as the number of changes and the number of resources increases.</p><p>Instead, the RFC defines <strong>Security Events</strong> shared over an established event feed, a logical series of events shared with a unique receiving client. A Security Event Token (SET) is defined in <a href='/rfc8417'>RFC 8417</a>. A SET conveys information about a state change that has occurred at a SCIM service provider.</p><p>A SET is not a command. Each Event Receiver determines the best local follow-up action within its own context, for example reconciling schema and resource type differences between domains. The RFC defines three kinds of SCIM Security Event: asynchronous request completion, resource replication, and provisioning coordination.</p>",
+      "plainLanguage": "<p>Many programs change user and group records through one service. Each program then holds an old copy of the data. Instead of asking for updates all the time, the service can send a short token when a record changes. The token is a notice, not an instruction, so the receiving system decides what to do next.</p>"
     },
     {
       "id": "data-model",
       "number": "2",
-      "title": "Subjects and Common Attributes",
-      "content": "<p>A SCIM event is a SET whose <code>events</code> claim holds one or more event URIs beginning with <code>urn:ietf:params:scim:event</code>. Events fall into the <code>feed</code> and <code>prov</code> sub-namespaces, and a <code>misc</code> class covers asynchronous completion.</p><p>Events MUST identify their subject with the <code>sub_id</code> claim (RFC 9493) in the main JWT claims, not inside an event payload. The JWT <code>sub</code> claim MUST NOT be used, to avoid confusion with authorization tokens. Its <code>format</code> is <code>scim</code>, and it carries a required <code>uri</code> (the relative path, such as a <code>/Users/...</code> path), plus an optional <code>externalId</code> and <code>id</code>. Other attributes whose uniqueness is <code>server</code> or <code>global</code> may be added when those are not enough.</p><p>Common attributes are <code>txn</code> (identifies a transaction at the service provider and stays the same across retransmission or multiple receivers, unlike the per-token <code>jti</code>), <code>version</code> (the resource ETag), and either <code>data</code> or <code>attributes</code>, never both.</p>",
-      "plainLanguage": "<p>Each note says whose record changed, using the name on the file folder. A transaction number lets you match several copies of the same news.</p>"
+      "title": "Identifying the Subject and Common Attributes",
+      "content": "<p>A SCIM Event is a SET whose <code>events</code> claim contains one or more event URI subclaims, each a JSON object holding the event information. The RFC defines the URI prefix <code>urn:ietf:params:scim:event</code> and groups events into the <code>feed</code> and <code>prov</code> sub-namespaces, with a <code>misc</code> class for asynchronous completion.</p><p>Events MUST use the <code>sub_id</code> claim from <a href='/rfc9493'>RFC 9493</a> to identify the subject. It MUST sit in the main JWT claims body and MUST NOT sit inside an event payload. The JWT <code>sub</code> claim MUST NOT be used, to prevent confusion with authorization tokens.</p><p>The <code>sub_id</code> object carries a <code>format</code> of <code>scim</code> and a required <code>uri</code>, the relative path of the resource, such as <code>/Users/2b2f880af6674ac284bae9381673d462</code>. It may also carry <code>externalId</code> and <code>id</code>. When those are not enough to match a resource across domains, the object MAY carry attributes whose SCIM uniqueness is <code>server</code> or <code>global</code>, such as <code>emails</code> or <code>userName</code>.</p><p>Three attributes apply to every event. <code>txn</code> is a string identifying a transaction at the service provider; unlike the per-token <code>jti</code>, it stays the same across retransmission and across publication to multiple receivers, so a receiver can detect duplicates. <code>version</code> is the ETag version of the resource. Only one of <code>data</code> or <code>attributes</code> is provided, never both.</p>",
+      "plainLanguage": "<p>Each token says which record changed by giving its path on the service, such as /Users/2b2f880af6674ac284bae9381673d462. It also carries a transaction number that stays the same when one change is sent to several receivers or sent again, so a receiver can tell a duplicate from a new change.</p>"
     },
     {
       "id": "design",
-      "number": "3",
-      "title": "Feed, Provisioning and Misc Events",
-      "content": "<p><strong>Feed events</strong> (<code>feed:add</code>, <code>feed:remove</code>) say a resource joined or left an event feed. Adding does not mean the resource is new, and removing does not mean it was deleted.</p><p><strong>Provisioning events</strong> cover <code>create</code>, <code>patch</code> and <code>put</code>, each in a <code>full</code> form (the <code>data</code> attribute holds the final representation) or a <code>notice</code> form (the <code>attributes</code> attribute lists what changed). <code>delete</code> has no payload and no full/notice qualifier, and no <code>feed:remove</code> is issued alongside it. <code>activate</code> and <code>deactivate</code> signal that an account is ready for use or disabled, with the exact meaning agreed between publisher and receiver.</p><p>The <code>misc:asyncresp</code> event signals completion of an asynchronous request.</p>",
-      "plainLanguage": "<p>Some notes say everything that changed; others just say that something changed so you can go look. Delete notes are simply \"this one is gone\".</p>"
+      "number": "2.3",
+      "title": "Feed and Provisioning Events",
+      "content": "<p>Feed events use the prefix <code>urn:ietf:params:scim:event:feed</code>. <code>feed:add</code> says the resource has been added to the event feed. It does not mean the resource is new: the RFC's example is an existing user who was given a new role, which caused the resource to join a feed. <code>feed:remove</code> says the resource has left the feed, and does not mean the resource was deleted or deactivated.</p><p>Provisioning events use the prefix <code>urn:ietf:params:scim:event:prov</code> and describe resource changes inside a SCIM service provider. When the <code>data</code> payload attribute is included, the event URI MUST end with <code>full</code>; otherwise it ends with <code>notice</code>. In <code>full</code> mode the <code>data</code> attribute holds the final representation of the resource as the service provider would return it. In <code>notice</code> mode the <code>attributes</code> attribute lists the attributes created or modified, for example <code>userName</code>, <code>emails</code> and <code>name.familyName</code>. Exactly one of the two payload attributes MUST be present, and they MUST NOT both be present.</p><p>The provisioning event types are <code>prov:create</code>, <code>prov:patch</code> and <code>prov:put</code>, each in a full or notice form, plus <code>prov:delete</code>, <code>prov:activate</code> and <code>prov:deactivate</code>. A delete event has no payload attributes, so the qualifiers <code>full</code> and <code>notice</code> are not used, and no <code>feed:remove</code> is issued alongside a delete. The <code>id</code> assigned by the service provider is shared in a create event, so that all replicas in a domain may use the same resource identifier.</p><p>An activate event does not necessarily reflect a state change at the provider. It may only mean that the account is ready for use, as agreed between publisher and receiver; the RFC notes that an activated resource can represent an account that may be logged in. A deactivate event means the resource has been deactivated and disabled, and the exact meaning SHOULD be agreed between the two parties.</p>",
+      "plainLanguage": "<p>Two kinds of event describe a change. A full event carries the record as it now stands. A notice event carries only the names of the attributes that changed, and the receiver can then fetch the values. A delete event carries nothing at all.</p>"
     },
     {
       "id": "operation",
-      "number": "4",
-      "title": "Asynchronous Requests and Set-Txn",
-      "content": "<p>A client can add <code>Prefer: respond-async</code> to a POST, PUT, PATCH or DELETE. The <code>wait</code> preference SHOULD be supported to set a maximum time before the provider may answer asynchronously. The provider returns either a normal SCIM response or HTTP status 202 (Accepted) with no body. A 202 response MUST carry the new <code>Set-Txn</code> header, whose value MUST match the <code>txn</code> claim of the later completion SET. It also includes <code>Preference-Applied</code> and a <code>Location</code> header.</p><p>For a SCIM bulk request with asynchronous handling, one completion event MUST be generated per operation. Each <code>txn</code> is the original value, a colon, and the zero-based operation index, for example <code>2d80e537a3f64622b0347b641ebc8f44:0</code>. The <code>bulkId</code> MUST NOT be used for this. If processing fails, the event includes a <code>response</code> attribute with the SCIM error details.</p><p>Intermediaries SHOULD NOT insert, modify or delete the <code>Set-Txn</code> value, and clients MAY ignore it when confirmation is not needed.</p>",
-      "plainLanguage": "<p>You hand in a big job and get a claim ticket right away. Later a note arrives with the same ticket number telling you whether the job worked.</p>"
+      "number": "2.5.1",
+      "title": "Asynchronous Requests and the Set-Txn Header",
+      "content": "<p>A SCIM client MAY ask for asynchronous processing by sending a normal POST, PUT, PATCH or DELETE with the HTTP <code>Prefer</code> header set to <code>respond-async</code>, as defined in <a href='/rfc7240'>RFC 7240</a>. The RFC gives the reason: to avoid holding HTTP connections open during long requests when the result is not needed by the client, or when the result is delivered to another entity. The <code>Accept</code> header MUST be ignored for an asynchronous response, and the <code>wait</code> preference SHOULD be supported to set a maximum time before the provider MAY choose to answer asynchronously.</p><p>The provider then returns either a normal SCIM response or HTTP status code 202 (Accepted). The asynchronous response MUST contain no response body. It carries the new <code>Set-Txn</code> header, whose value MUST match the <code>txn</code> claim in the later Security Event Token, plus the <code>Preference-Applied</code> header from RFC 7240 and a <code>Location</code> header. That <code>Location</code> value MUST be either a URI where the completion token may be retrieved with an HTTP GET, or the normal SCIM location header response from <a href='/rfc7644'>RFC 7644</a>.</p><p>The <code>Set-Txn</code> header field is defined in Section 3 of the RFC. It MUST be used in SCIM responses that return 202 with no message body. Its value is a unique string, for example a Globally Unique Identifier, which the client uses to find the matching SET. Intermediaries SHOULD NOT insert, modify or delete the value, and clients MAY ignore it when confirmation of completion is not required.</p><p>For a SCIM bulk request handled asynchronously, one Asynchronous Request Completion Event MUST be generated for each requested operation: a bulk request with 10 operations produces 10 completion events. The <code>txn</code> claim of each event is the value originally returned to the client, followed by a colon and the zero-based index of the operation in the original bulk request, for example <code>2d80e537a3f64622b0347b641ebc8f44:0</code> and <code>2d80e537a3f64622b0347b641ebc8f44:1</code>. The <code>bulkId</code> parameter MUST NOT be used for this, because it is temporary and is not present on every operation.</p><p>The completion event is <code>urn:ietf:params:scim:event:misc:asyncresp</code>. Its payload is the same as a single SCIM Bulk Response Operation and carries the method, the version and the status. If an error occurs during asynchronous processing, the event operation MUST include a <code>response</code> attribute holding a non-200-series HTTP status and the sub-attributes defined in Section 3.12 of RFC 7644.</p>",
+      "plainLanguage": "<p>A client can ask for an answer later by adding Prefer: respond-async to a request. The provider replies with status 202 and a Set-Txn header, and no body. Later a completion token arrives carrying the same transaction number, the HTTP method used, and the status code of the original request.</p>"
     },
     {
       "id": "management",
-      "number": "5",
+      "number": "4",
       "title": "Discovering Event Support",
-      "content": "<p>RFC 9967 adds an optional complex attribute, <code>securityEvents</code>, to the ServiceProviderConfig schema. When it is absent, the provider does not support or is not configured for Security Events.</p><p>Its sub-attribute <code>asyncRequest</code> is a case-insensitive string: <code>none</code> (no asynchronous requests), <code>long</code> (the server completes asynchronously at its own discretion, for instance after a maximum wait) or <code>request</code> (asynchronously when the client asks). The sub-attribute <code>eventUris</code> lists the event URIs the server can deliver through a SET stream. It is informational only; stream registration and configuration are out of scope.</p><p>IANA created a \"SCIM Event URIs\" registry with Expert Review and registered the <code>Set-Txn</code> header field name.</p>",
-      "plainLanguage": "<p>A sign on the door says whether this office sends notes, and which kinds.</p>"
-    },
-    {
-      "id": "deployment",
-      "number": "6",
-      "title": "Two Ways to Use the Events",
-      "content": "<p>The appendix describes two non-normative modes. In <strong>Domain-Based Replication</strong> (DBR), replicas in one administrative domain stay in sync, and events usually use the <code>full</code> variant, so no callback is needed.</p><p>In <strong>Coordinated Provisioning</strong> (CP), events act as change notices without raw data, and the receiver calls back (for example with a SCIM GET) to fetch the new state. The RFC lists benefits: differing schemas, per-receiver access rights and data filtering, independent decisions about what to accept, and the ability to throttle or buffer. The cost is a possible callback per event, though a receiver need not call back on every event.</p>",
-      "plainLanguage": "<p>In one mode, everyone gets a full copy of the news. In the other, you get a short heads-up and ask for details only if you want them.</p>"
+      "content": "<p>The RFC adds an optional complex attribute named <code>securityEvents</code> to the <code>urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig</code> schema defined in Section 5 of <a href='/rfc7643'>RFC 7643</a>. The attribute is OPTIONAL, and when it is absent it indicates that the SCIM service provider does not support, or is not currently configured for, Security Events.</p><p>Its first sub-attribute, <code>asyncRequest</code>, is a case-insensitive string with three values. <code>none</code> indicates that the asynchronous requests of Section 2.5.1.1 are not supported. <code>long</code> indicates that the server completes requests asynchronously at its own discretion, for example based on a maximum wait time. <code>request</code> indicates that the server completes requests asynchronously when the client asks for it.</p><p>The second sub-attribute, <code>eventUris</code>, is a multivalued string listing the SET event URIs the server is capable of generating and delivering through a SET stream, using the push-based or poll-based delivery mechanisms of <a href='/rfc8935'>RFC 8935</a> and <a href='/rfc8936'>RFC 8936</a>. The RFC states that this information is informational only, and that stream registration and configuration are out of scope.</p>",
+      "plainLanguage": "<p>A provider advertises what it can do in an optional securityEvents part of its service configuration. The asyncRequest value says whether asynchronous requests are refused, done at the provider's discretion, or done only on request. The eventUris value lists the event types the provider can deliver.</p>"
     },
     {
       "id": "security-considerations",
+      "number": "5",
+      "title": "Security and Privacy Considerations",
+      "content": "<p>The security and privacy considerations of <a href='/rfc8417'>RFC 8417</a>, <a href='/rfc8935'>RFC 8935</a> and <a href='/rfc8936'>RFC 8936</a> also apply here.</p><p>SETs may contain sensitive information, including personally identifiable information. In that case, SET transmitters and SET recipients MUST protect the confidentiality of the SET contents in transit using TLS. Event Publishers can keep events available for longer than the usual retry window, and Event Receivers MUST ensure events are persisted, directly or indirectly, before acknowledging receipt, to meet local recovery needs. Access to event recovery and forwarding MUST be limited to the parties needed to support recovery or forwarding.</p><p>When the Event Publisher is not communicating directly with the Event Receiver, an attacker or other system may insert an event. Event Receivers MUST therefore verify the originator of a SET using JSON Web Signature signatures from <a href='/rfc7515'>RFC 7515</a>. The RFC adds that validating signatures helps auditing, because signed SETs are protected from tampering if an intermediate system, such as a TLS-terminating proxy, decrypts the payload before sending it on.</p><p>Some SCIM resources change often. A group with more than a few thousand member values can produce excessive change rates and a loss of events. The RFC recommends using SCIM PATCH rather than SCIM PUT for large groups, or using the put notice event as a trigger to fetch the full information later, or combining the patch notice event with periodic GETs, or aggregating several membership changes into a single event.</p><p>For asynchronous requests, the provider returns a URI for retrieving the event result. An unauthorized party could obtain completion information by querying that endpoint, so the returned URI endpoint MUST be protected and requires an HTTP Authorization header or some other form of client authentication. For privacy, the RFC assumes either a common administrative domain with one owner of the data, or a cooperative relationship where information is shared on an as-authorized and as-needed basis.</p>",
+      "plainLanguage": "<p>Tokens can contain personal data, so they must travel over TLS. A receiver must store an event before it acknowledges it, and must check the signature when the publisher does not send the token directly. The address given for an asynchronous result must require authentication.</p>"
+    },
+    {
+      "id": "iana-considerations",
       "number": "7",
-      "title": "Security and Privacy",
-      "content": "<p>The security and privacy sections of RFC 8417, RFC 8935 and RFC 8936 also apply. SETs may contain personally identifiable information, so transmitters and recipients MUST protect them in transit with TLS. Receivers MUST persist events directly or indirectly before acknowledging them. Access to event recovery and forwarding MUST be limited to the parties that need it.</p><p>When the publisher does not talk directly to the receiver, receivers MUST verify the originator using JWS signatures (RFC 7515). The URI returned for an asynchronous result MUST be protected and require an Authorization header or other client authentication.</p><p>For busy resources such as large Groups, the RFC recommends SCIM PATCH instead of PUT, or using the <code>notice</code> events with periodic GETs, or aggregating several PATCH changes into one event.</p>",
-      "plainLanguage": "<p>The notes can contain private details, so they travel in sealed envelopes and only the right people may open the mailbox.</p>"
+      "title": "IANA Registrations",
+      "content": "<p>The RFC registers the HTTP field name <code>Set-Txn</code> in the HTTP Field Name Registry, with the status permanent and Section 3 of RFC 9967 as the reference.</p><p>It also adds a reference to Section 4 of the document to the <code>urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig</code> entry in the SCIM Server-Related Schema URIs registry.</p><p>Finally, IANA created a new registry called \"SCIM Event URIs\" under the SCIM Schema URIs registry group. The registration procedure is Expert Review, and new registrations are evaluated by designated experts for relevance to SCIM-based systems and to avoid duplication or conflict with event definitions outside SCIM. The sub-namespace ID assigned is \"event\", and the Namespace Specific String of every URN in it follows the structure <code>urn:ietf:params:scim:event:{class}:{name}:{other}</code>. The class is one of <code>feed</code>, <code>prov</code> or <code>misc</code>; the name is a descriptive event name such as <code>create</code>; and the other part is an optional qualifier such as <code>full</code> or <code>notice</code>.</p><p>The initial contents of the registry hold the eleven event URIs defined by the document: the two feed events, the create, patch and put events in both notice and full forms, the delete, activate and deactivate events, and the asynchronous response event.</p>",
+      "plainLanguage": "<p>The new header name and the event names are registered so that every implementation uses the same spelling for them. The registry is reviewed by experts, and a name that has been allocated is never reused for a different meaning.</p>"
+    },
+    {
+      "id": "deployment",
+      "number": "8",
+      "title": "Two Ways to Use the Events (Appendix A)",
+      "content": "<p>Appendix A describes two non-normative ways of using SCIM events.</p><p>In <strong>Domain-Based Replication</strong> (DBR), the objective is to synchronize resource changes between SCIM service providers in a common administrative domain. Complete information about modified resources is shared between replicas for immediate processing, so the events usually use the <code>full</code> form with the <code>data</code> payload attribute, and no callback is needed. The RFC assumes that servers sharing DBR events are secured by a common access policy and that all servers are required to be up to date.</p><p>In <strong>Coordinated Provisioning</strong> (CP), the events act as change notification without raw data. The receiver of an event must call back to the originating SCIM service provider, for example with a SCIM GET request, to reconcile the newly changed resource. An event feed can be limited to a subset of resources, such as users who have consented to sharing information between domains.</p><p>The RFC lists the benefits of CP: differences in schema between domains, such as a receiving domain that may only be interested in or allowed to access a few attributes; different receivers with different access rights, which allows data filtering; receivers taking independent action, such as choosing which domain to prefer in a conflict; and throttling or buffering, for example marking resources as dirty on receipt and fetching them on a schedule. The stated disadvantage is cost: each event received might trigger a callback, and that cost should be weighed against producing filtered information in each event for each receiver.</p>",
+      "plainLanguage": "<p>In Domain-Based Replication the event carries the whole record, so a replica can store it without asking. In Coordinated Provisioning the event only says that something changed, and the receiver fetches the record if it needs it. That costs a request per event, but it lets each receiver fetch only what it is allowed to see.</p>"
     }
   ],
   "viz": [
@@ -124,53 +131,68 @@
       "type": "opcodes",
       "anchor": "design",
       "position": "after",
-      "caption": "SCIM EVENT URIS (TABLE 1 OF RFC 9967)",
+      "caption": "SCIM EVENT URIS REGISTERED BY RFC 9967",
       "data": {
         "items": [
           {
             "code": "feed:add",
             "label": "Resource added to Feed",
-            "desc": "Resource joined the event feed."
+            "desc": "The resource joined the event feed. It need not be new."
           },
           {
             "code": "feed:remove",
             "label": "Remove resource from Feed",
-            "desc": "Left the feed; not necessarily deleted."
+            "desc": "The resource left the feed. It need not have been deleted."
           },
           {
-            "code": "prov:create:{notice|full}",
-            "label": "New Resource",
-            "desc": "A new resource was created."
+            "code": "prov:create:notice",
+            "label": "New Resource Event",
+            "desc": "A resource was created; the attributes list is given."
           },
           {
-            "code": "prov:patch:{notice|full}",
-            "label": "Resource Patch",
-            "desc": "Resource updated using PATCH."
+            "code": "prov:create:full",
+            "label": "New Resource Event",
+            "desc": "A resource was created; the final representation is given."
           },
           {
-            "code": "prov:put:{notice|full}",
-            "label": "Resource Put",
-            "desc": "Resource updated using PUT."
+            "code": "prov:patch:notice",
+            "label": "Resource Patch Event",
+            "desc": "Updated with PATCH; the attributes list is given."
+          },
+          {
+            "code": "prov:patch:full",
+            "label": "Resource Patch Event",
+            "desc": "Updated with PATCH; the final representation is given."
+          },
+          {
+            "code": "prov:put:notice",
+            "label": "Resource Put Event",
+            "desc": "Updated with PUT; the attributes list is given."
+          },
+          {
+            "code": "prov:put:full",
+            "label": "Resource Put Event",
+            "desc": "Updated with PUT; the final representation is given."
           },
           {
             "code": "prov:delete",
-            "label": "Resource Deleted",
-            "desc": "No payload; no full or notice form."
+            "label": "Resource Deleted Event",
+            "desc": "No payload; neither full nor notice is used."
           },
           {
             "code": "prov:activate",
-            "label": "Resource Activated",
-            "desc": "Account ready for use."
+            "label": "Resource Activated Event",
+            "desc": "The account is ready for use, as agreed by both parties."
           },
           {
             "code": "prov:deactivate",
-            "label": "Resource Deactivated",
-            "desc": "Account disabled."
+            "label": "Resource Deactivated Event",
+            "desc": "The account is disabled; the meaning is agreed by both parties."
           },
           {
             "code": "misc:asyncresp",
             "label": "Asynchronous Request Completion",
-            "desc": "Signals a SCIM request has completed.",
+            "desc": "Signals that a SCIM request has completed.",
             "highlight": true
           }
         ]
@@ -180,7 +202,7 @@
       "type": "sequence",
       "anchor": "operation",
       "position": "after",
-      "caption": "ASYNCHRONOUS SCIM REQUEST (SIMPLIFIED FROM SECTION 2.5.1)",
+      "caption": "AN ASYNCHRONOUS SCIM REQUEST AND ITS COMPLETION EVENT",
       "data": {
         "lanes": [
           {
@@ -189,7 +211,7 @@
           },
           {
             "key": "provider",
-            "label": "Service provider"
+            "label": "SCIM service provider"
           }
         ],
         "messages": [
@@ -197,23 +219,35 @@
             "from": "client",
             "to": "provider",
             "label": "PUT with Prefer: respond-async",
-            "color": "blue"
+            "color": "blue",
+            "note": "A normal SCIM request asking for a later answer."
           },
           {
             "from": "provider",
             "to": "client",
             "label": "202 Accepted with Set-Txn",
             "color": "green",
-            "note": "No body; Set-Txn will match the txn claim of the completion event."
+            "note": "No body. Set-Txn will match the txn claim of the completion event."
           },
           {
             "from": "provider",
             "to": "client",
-            "label": "SET with misc:asyncresp event",
+            "label": "SET with misc:asyncresp",
             "color": "green",
-            "note": "Carries the same txn value and the outcome."
+            "note": "Carries the same txn value, the method and the status."
           }
         ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE ASYNCHRONOUS REQUEST AND RESPONSE FROM SECTION 2.5.1.1",
+      "data": {
+        "title": "Async SCIM request and 202 response",
+        "lang": "text",
+        "code": "PUT /Users/2819c223-7f76-453a-919d-413861904646\nHost: scim.example.com\nPrefer: respond-async\nContent-Type: application/scim+json\nAuthorization: Bearer h480djs93hd8\n\nHTTP/1.1 202 Accepted\nSet-Txn: 734f0614e3274f288f93ac74119dcf78\nPreference-Applied: respond-async\nLocation:\n  \"/Users/2819c223-7f76-453a-919d-413861904646\""
       }
     },
     {
@@ -224,7 +258,7 @@
       "data": {
         "columns": [
           "Mode",
-          "Typical events",
+          "Event form",
           "Receiver follow-up"
         ],
         "rows": [
@@ -232,15 +266,16 @@
             "cells": [
               "Domain-Based Replication",
               "full, with the data attribute",
-              "Updates local node; no callback needed"
+              "Updates the local node; no callback needed"
             ]
           },
           {
             "cells": [
               "Coordinated Provisioning",
               "notice, without raw data",
-              "Calls back to the publisher, such as a SCIM GET"
-            ]
+              "Calls back to the publisher, for example with a SCIM GET"
+            ],
+            "self": true
           }
         ]
       }
@@ -249,32 +284,32 @@
   "references": [
     {
       "number": "[RFC8417]",
-      "text": "Hunt, P., Ed., et al., \"Security Event Token (SET)\", RFC 8417, July 2018.",
+      "text": "Hunt, P., Ed., Jones, M., Denniss, W., and M. Ansari, \"Security Event Token (SET)\", RFC 8417, July 2018.",
       "rfc": 8417
     },
     {
       "number": "[RFC7643]",
-      "text": "Hunt, P., Ed., et al., \"System for Cross-domain Identity Management: Core Schema\", RFC 7643, September 2015.",
+      "text": "Hunt, P., Ed., Grizzle, K., Wahlstroem, E., and C. Mortimore, \"System for Cross-domain Identity Management: Core Schema\", RFC 7643, September 2015.",
       "rfc": 7643
     },
     {
       "number": "[RFC7644]",
-      "text": "Hunt, P., Ed., et al., \"System for Cross-domain Identity Management: Protocol\", RFC 7644, September 2015.",
+      "text": "Hunt, P., Ed., Grizzle, K., Ansari, M., Wahlstroem, E., and C. Mortimore, \"System for Cross-domain Identity Management: Protocol\", RFC 7644, September 2015.",
       "rfc": 7644
     },
     {
       "number": "[RFC8935]",
-      "text": "Backman, A., Ed., et al., \"Push-Based Security Event Token (SET) Delivery Using HTTP\", RFC 8935, November 2020.",
+      "text": "Backman, A., Ed., Jones, M., Ed., Scurtescu, M., Ansari, M., and A. Nadalin, \"Push-Based Security Event Token (SET) Delivery Using HTTP\", RFC 8935, November 2020.",
       "rfc": 8935
     },
     {
       "number": "[RFC8936]",
-      "text": "Backman, A., Ed., et al., \"Poll-Based Security Event Token (SET) Delivery Using HTTP\", RFC 8936, November 2020.",
+      "text": "Backman, A., Ed., Jones, M., Ed., Scurtescu, M., Ansari, M., and A. Nadalin, \"Poll-Based Security Event Token (SET) Delivery Using HTTP\", RFC 8936, November 2020.",
       "rfc": 8936
     },
     {
       "number": "[RFC9493]",
-      "text": "Backman, A., Ed., et al., \"Subject Identifiers for Security Event Tokens\", RFC 9493, December 2023.",
+      "text": "Backman, A., Ed., Scurtescu, M., and P. Jain, \"Subject Identifiers for Security Event Tokens\", RFC 9493, December 2023.",
       "rfc": 9493
     },
     {
@@ -286,15 +321,20 @@
       "number": "[RFC7515]",
       "text": "Jones, M., Bradley, J., and N. Sakimura, \"JSON Web Signature (JWS)\", RFC 7515, May 2015.",
       "rfc": 7515
+    },
+    {
+      "number": "[RFC7519]",
+      "text": "Jones, M., Bradley, J., and N. Sakimura, \"JSON Web Token (JWT)\", RFC 7519, May 2015.",
+      "rfc": 7519
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes the Mailbox Update (MUPDATE) protocol, which lets a group of IMAP or POP servers share a distributed mailbox database. This allows many machines to share the work of mail delivery instead of depending on a single machine. It is experimental.</p>",
   "plainLanguage": {
-    "summary": "<p>One mail room can get overloaded or break. This lets many mail rooms share one up-to-date list of who lives where, so mail still gets delivered if one room stops.</p>"
+    "summary": "<p>RFC 3656 defines MUPDATE, a protocol that lets a group of IMAP or POP3 servers share one list of user mailboxes. One server keeps the authoritative copy, the others keep copies that follow it, and users can look up a mailbox on any of them. The protocol is a short, tagged text protocol on TCP port 3905, with commands to reserve, activate and delete mailbox names.</p>"
   },
   "questions": [
     "what is mupdate",
@@ -22,38 +22,38 @@
   ],
   "subtitle": "A small text protocol that lets many mail servers share one authoritative list of which mailbox lives where.",
   "tldr": {
-    "problem": "A single machine handling mail delivery is limited in capacity, and its failure stops delivery for every user. Spreading mailboxes over many IMAP or POP3 servers needs them to agree, atomically, on one mailbox namespace.",
-    "mechanism": "One master server keeps the authoritative mailbox database. Slave servers and other clients connect to it over TCP, and a slave issues UPDATE to receive a stream of every change. New mailboxes are claimed with RESERVE and then made live with ACTIVATE.",
-    "outcome": "MUPDATE is an Experimental protocol, not an Internet standard. It trusts every authenticated user completely, and it is updated by RFC 8996.",
-    "outcomeLabel": "Status today"
+    "problem": "A single mail delivery agent cannot serve a large site, and when it fails, mail delivery stops for everyone. Running several machines instead needs a shared, consistent view of which mailbox is stored where.",
+    "mechanism": "MUPDATE gives one master server the authoritative mailbox database and lets slave servers hold replicas that follow it. Clients search against any server, but only the master accepts changes, which are reserved, activated or deleted by name and streamed to the slaves.",
+    "outcome": "The document defines the protocol, the responses, the commands and a mupdate URL scheme, and registers TCP port 3905 and a GSSAPI service name for it. It is an Experimental specification.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
       "label": "TCP port",
-      "value": "3905 (mupdate)"
+      "value": "3905"
     },
     {
-      "label": "Minimum line length",
-      "value": "1024 octets"
+      "label": "Maximum atom length",
+      "value": "Less than 15 octets"
     },
     {
-      "label": "Minimum literal size",
+      "label": "Minimum line length support",
+      "value": "1024 octets including CR and LF"
+    },
+    {
+      "label": "Minimum literal size supported",
       "value": "4096 octets"
-    },
-    {
-      "label": "Update stream delay",
-      "value": "within 30 seconds"
     },
     {
       "label": "Minimum inactivity timeout",
       "value": "15 minutes"
     },
     {
-      "label": "Required SASL mechanism",
-      "value": "GSSAPI"
+      "label": "Update streaming deadline",
+      "value": "30 seconds"
     }
   ],
-  "today": "<p>RFC 3656 is an Experimental protocol specification, not an Internet standard, and it is updated by <a href='/rfc8996'>RFC 8996</a>.</p>",
+  "today": "<p>RFC 3656 is an Experimental document published in December 2003. It was later updated by <a href='/rfc8996'>RFC 8996</a>, which deprecates TLS 1.0 and TLS 1.1 and updates the documents that refer to them.</p>",
   "glossary": [
     "imap",
     "pop3",
@@ -63,51 +63,97 @@
     "tls",
     "pipelining",
     "man-in-the-middle",
-    "abnf"
+    "abnf",
+    "base64"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "Why a Shared Mailbox Database",
-      "content": "<p>As demand for high-performance mail delivery grows, the RFC argues that single-machine solutions are inadequate. They hit capacity limits, and if the one machine fails, mail delivery stops for all users. It is preferable to let many machines share the work.</p><p>The <strong>Mailbox Update (MUPDATE)</strong> protocol lets a group of IMAP or POP3 servers act with a unified mailbox namespace. To do that, the servers need atomic mailbox operations and enough guarantees about database consistency. The primary goal of the protocol is to be simple to implement while still giving consistency between participants.</p>",
-      "plainLanguage": "<p>If one mail room breaks, nobody gets mail. With many mail rooms sharing one list of who lives where, the others can keep working.</p>"
+      "title": "Why a Distributed Mailbox Database",
+      "content": "<p>As the demand for high-performance mail delivery agents increases, it becomes apparent that single-machine solutions are inadequate, both because of capacity limits and because the failure of the single machine means a loss of mail delivery for all users. It is preferable to allow many machines to share the responsibility of mail delivery.</p><p>The MUPDATE protocol allows a group of IMAP or POP3 servers to function with a unified mailbox namespace. To support an architecture where several servers share a common mailbox database, the protocol has to provide atomic mailbox operations and offer sufficient guarantees about database consistency. The primary goal of the protocol is to be simple to implement while still allowing database consistency between participants.</p>",
+      "plainLanguage": "<p>One mail server can only take so much mail, and if it goes down everyone stops receiving mail. The memo defines a way for several servers to share the job, with one authoritative copy of the list of mailboxes that the others follow.</p>"
     },
     {
       "id": "architecture",
       "number": "2",
-      "title": "Master, Slaves and Clients",
-      "content": "<p>MUPDATE assumes a reliable data stream such as TCP, and IANA has registered port <code>3905</code> with the short name <code>mupdate</code>. There are three kinds of participants: a single <strong>master</strong> server, <strong>slave</strong> (replica) servers, and clients. The master holds the authoritative copy of the mailbox database.</p><p>Slaves connect to the master as ordinary clients and act as replicas. End clients may connect to the master or to any slave and search the database. Operations that change the database can only be performed against the master.</p><p>Every command carries a unique alphanumeric tag. Commands MAY be pipelined, but the server MUST execute them in the order received. If a server has an inactivity timeout, it MUST be at least 15 minutes.</p>",
-      "plainLanguage": "<p>One mail room keeps the real list and is the only one allowed to change it. The other rooms keep copies and can answer questions about it.</p>"
+      "title": "The Master, the Slaves and the Clients",
+      "content": "<p>The protocol assumes a reliable data stream such as a TCP network connection, and IANA has registered port 3905 with the short name mupdate. There are three kinds of participant: a single master server, slave or replica servers, and clients. The master maintains an authoritative copy of the mailbox database. Slave servers connect to the master as clients and function as replicas from the point of view of end clients. End clients may connect to either the master or any slave and perform searches against the database, but operations that change the database can only be performed against the master. For the purposes of protocol discussion, a slave's connection to the master is considered identical to that of any other client.</p><p>After connection, all commands from a client to a server must have an associated unique tag, which is an alphanumeric string. Commands may be pipelined, so the client need not wait for the response before sending the next command, but the server must execute the commands in the order they were received. If the server supports an inactivity login timeout, it must be at least 15 minutes.</p><p>The data formats are similar to those used in ACAP: atoms and strings. Commands and tags are transmitted as atoms, and all other data is a string, which must be quoted or transmitted as a literal. Outside a literal, both clients and servers must support line lengths of at least 1024 octets, including the trailing CR and LF, and longer lines must use literals. An atom is one or more alphanumeric characters and must be less than 15 octets long. A string may be a literal, prefix-quoted with an octet count in braces, or a quoted string; servers must support literals of at least 4096 octets, and the receiver of a synchronized literal must send a + go ahead response before the sender continues.</p><p>The memo also registers a URL scheme, in the form mupdate://iserver/ for a server as a whole and mupdate://iserver/mailbox for a server and a mailbox to run a FIND against once authenticated. It is similar to the IMAP URL scheme, has no associated MIME type, and the consumer needs credentials for the host.</p>",
+      "plainLanguage": "<p>One server is in charge of the list. The other servers hold copies and keep them up to date, and a user can ask any of them where a mailbox is. Only the server in charge accepts changes.</p>"
     },
     {
       "id": "message-format",
       "number": "3",
-      "title": "Atoms, Strings and Responses",
-      "content": "<p>Data uses formats similar to ACAP: atoms and strings. Commands and tags are atoms, which are alphanumeric and MUST be less than 15 octets long. Everything else is a string, either quoted or a literal given as an octet count in braces. Both sides MUST support lines of at least 1024 octets, and servers MUST support literals of at least 4096 octets.</p><p>Each tagged response starts with the tag of the command it answers. <code>OK</code> means success, <code>NO</code> means the request was denied or failed, <code>BAD</code> means the command could not be understood, and <code>BYE</code> means the server is closing the connection. Each of these carries a human-readable string.</p><p>Two responses describe database records. <code>RESERVE</code> carries a mailbox name and a location string, and says the name is no longer available in the namespace without saying the mailbox is ready. <code>MAILBOX</code> carries the name, a location and an IMAP ACL string, and says the mailbox is ready for clients. A <code>DELETE</code> response, valid only during an update stream, tells a slave to remove a mailbox.</p>",
-      "plainLanguage": "<p>Messages are short lines with a tag, like a ticket number, so you can match each answer to your question. Some answers say a name is held for someone, and others say the mailbox is ready to use.</p>"
+      "title": "Server Responses",
+      "content": "<p>Every client command may receive one or more tagged responses, each preceded by the same tag as the command that caused it. A tagged OK response indicates that the operation completed successfully, and also indicates the beginning of the streaming update mode when given in response to an UPDATE command. A tagged NO response means the operation was explicitly denied by the server or otherwise failed. A tagged BAD response means the command could not be parsed or understood, and untagged BAD responses are allowed when it is unclear which tag applies, in which case the tag should be replaced with a *. A tagged BYE response means the server has decided to close the connection, and the server must close it immediately after sending the response.</p><p>Three responses carry mailbox state. A RESERVE response may only follow a FIND, LIST or UPDATE command and gives the name of the mailbox being reserved, in mUTF-7 encoding, and a location string whose contents are defined by the clients using the database, though it is recommended that the format be the hostname of the server storing the mailbox. It indicates that the name is no longer available in the namespace, though not that the mailbox is available to clients at that time. A MAILBOX response carries the mailbox name, a location string and a client-defined string giving the IMAP ACL of the mailbox, and means that the mailbox is ready to be accessed by clients. A DELETE response may only follow an UPDATE command, must not be given before the OK response to that command, and names the mailbox that should be deleted from the slave's database.</p><p>On connection, and directly following a successful STARTTLS command, the server must issue a capabilities banner. It must contain a line beginning with * AUTH and a space-separated list of the SASL mechanisms the server accepts, and, if the banner is issued without a TLS layer and the server supports STARTTLS, a line reading * STARTTLS. The last line must start with * OK MUPDATE and be followed by four strings: the server's hostname, an implementation-defined name, an implementation-defined version, and either (master) or a MUPDATE URL saying where the master can be contacted.</p>",
+      "plainLanguage": "<p>Every answer carries the tag of the command it answers, so the client can match them up. Besides the usual success and failure codes, three answers describe mailboxes: reserved, ready to use, and gone.</p>"
     },
     {
       "id": "operation",
       "number": "4",
-      "title": "Commands and Mailbox Creation",
-      "content": "<p>The client commands are AUTHENTICATE, ACTIVATE, DEACTIVATE, DELETE, FIND, LIST, LOGOUT, NOOP, RESERVE, STARTTLS and UPDATE. Before a successful AUTHENTICATE, the server MUST NOT accept anything except AUTHENTICATE, STARTTLS and LOGOUT. AUTHENTICATE starts a SASL negotiation with the service name <code>mupdate</code>, and implementations are REQUIRED to implement the GSSAPI mechanism.</p><p><code>FIND</code> returns the record for one mailbox, and <code>LIST</code> acts like FIND across the whole database, optionally filtered by a location prefix. The commands that change data, RESERVE, ACTIVATE, DEACTIVATE and DELETE, MUST NOT be issued to a slave.</p><p>Creating a mailbox is a two-step process. The client sends <code>RESERVE</code> with the name and location. If the server answers OK, the name is held; if NO, another server may already have reserved it. The client then does its local mailbox creation and sends <code>ACTIVATE</code> with the name, location and ACL. DEACTIVATE moves an active mailbox back to the reserved state.</p><p>A slave uses <code>UPDATE</code> to stay current. The server first returns every record, as LIST would, then an OK, and from then on the master MUST stream each change to the slave within 30 seconds. After UPDATE, the client may only send NOOP and LOGOUT. A slave can send NOOP and wait for the OK to know its copy is current as of that moment.</p>",
-      "plainLanguage": "<p>To make a new mailbox you first put a sign saying 'this name is mine', then set it up, then announce it is ready. A copy-keeping room asks once for the whole list and after that gets a message for every change.</p>"
+      "title": "Client Commands and the Update Stream",
+      "content": "<p>The valid commands are AUTHENTICATE, ACTIVATE, DEACTIVATE, DELETE, FIND, LIST, LOGOUT, NOOP, RESERVE, STARTTLS and UPDATE. Before a successful AUTHENTICATE has occurred, the server must not accept any command except AUTHENTICATE, STARTTLS and LOGOUT. AUTHENTICATE starts a SASL negotiation, with the desired mechanism as its first parameter and an optional BASE64 encoded client first send as the second; the SASL service name for the protocol is mupdate, and implementations are required to implement the GSSAPI mechanism. STARTTLS requests the start of a TLS negotiation, is only valid in the unauthenticated state, and once the TLS layer is established the server must re-issue the capabilities banner, which protects against man-in-the-middle attacks that alter the capability list before STARTTLS.</p><p>The mailbox commands work on a name in three states. RESERVE takes the mailbox name and location data and reserves the name, so that no one else can take it. ACTIVATE takes the mailbox name, its location and its ACL, and puts the mailbox into service; it may also be used to update the ACL or the location, and it is not a requirement for the mailbox to be reserved, or even to exist, for an ACTIVATE to succeed, because that behaviour facilitates synchronizing the database with the current state of the mailboxes. DEACTIVATE takes the mailbox name and location data and moves the mailbox back to the RESERVE state. DELETE removes the mailbox name from the namespace. The typical sequence for creating a mailbox is to RESERVE it, do the local mailbox create operations, and then ACTIVATE it. None of ACTIVATE, DEACTIVATE, DELETE or RESERVE may be issued to a slave server.</p><p>FIND takes a mailbox name and returns the current record for it, if any. LIST does the same across the whole database, with an optional prefix matched against the location field, and returns a MAILBOX or RESERVE response for each match followed by an OK. NOOP takes no parameters, resets any idle timeout on the connection, and after an UPDATE has been issued its OK also means that all pending database updates have been sent, which is how a slave can be sure its local database is up to date.</p><p>The UPDATE command is how a slave starts an update stream from the master. The server returns a list of all mailboxes in its database, the same results as a parameterless LIST, followed by an OK response, and from then on it must stream every change to the master to the slave within 30 seconds, as RESERVE, MAILBOX or DELETE responses. After a client has issued UPDATE it may only issue NOOP and LOGOUT commands for the remainder of the session.</p>",
+      "plainLanguage": "<p>Creating a mailbox is two steps: take the name, then announce that it is ready. Once a slave asks for updates, the master pushes every change to it, and the slave can ask at any time whether it has caught up.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "5",
-      "title": "TLS, SASL and Trust",
-      "content": "<p>Unauthenticated users cannot search or change the database. The server may support <code>STARTTLS</code>, which begins a TLS negotiation right after the OK response. After TLS is up, the server MUST send its capability banner again, which protects against a man-in-the-middle altering the list before STARTTLS. The client MUST discard its cached capabilities and use the new ones.</p><p>The RFC is frank about the limits. The specification assumes no protection of any kind for authenticated users: all of them have complete access to the database, so accounts using it must be well secured. A more secure deployment might send read-only access through slaves and keep write access to the master, at the cost of a marginally longer time for updates to reach clients.</p><p>The protocol also assumes authenticated users cooperate to keep operations atomic. New mailboxes SHOULD be RESERVEd before ACTIVATE, even though the protocol does not require it, so participants that ignore the locking could create an inconsistent database. The RFC also defines a <code>mupdate://</code> URL scheme, with a server-only form and a form that names a mailbox to FIND.</p>",
-      "plainLanguage": "<p>Once you are let in, you can change anything on the list, so the key to the door must be guarded. Everyone is also trusted to follow the rule of reserving a name before using it.</p>"
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>While no unauthenticated users may make modifications or even perform searches on the database, the specification assumes no protections of any type for authenticated users. All authenticated users have complete access to the database, so it is important to ensure that the accounts making use of the database are well secured. A more secure deployment might have all read-only access go through a slave and only accounts that need write access use the master, which has the disadvantage of a marginally longer time for updates to reach the clients.</p><p>The protocol assumes that all authenticated users are cooperating to maintain atomic operations. All new mailboxes should therefore be RESERVEd before they are ACTIVATEd, even though the protocol does not require it, because a set of participants that do not obey the locking can create an inconsistent database. Reserving the mailbox first is not required in order to perform an activate, because this behaviour simplifies synchronization with the actual location of the mailboxes.</p>",
+      "plainLanguage": "<p>Anyone who is logged in can read and change the whole database, so the accounts that use it have to be well protected. The memo also asks that a mailbox name be taken before it is used, because two servers acting at once can otherwise disagree about who owns it.</p>"
     }
   ],
   "viz": [
     {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE MUPDATE SERVER RESPONSES",
+      "data": {
+        "items": [
+          {
+            "code": "OK",
+            "label": "SUCCESS",
+            "desc": "The operation completed successfully."
+          },
+          {
+            "code": "NO",
+            "label": "DENIED",
+            "desc": "The operation was explicitly denied or otherwise failed."
+          },
+          {
+            "code": "BAD",
+            "label": "UNPARSED",
+            "desc": "The command could not be parsed or understood."
+          },
+          {
+            "code": "BYE",
+            "label": "CLOSING",
+            "desc": "The server has decided to close the connection."
+          },
+          {
+            "code": "RESERVE",
+            "label": "RESERVED",
+            "desc": "The name is no longer available in the namespace."
+          },
+          {
+            "code": "MAILBOX",
+            "label": "ACTIVE",
+            "desc": "The mailbox is ready to be accessed by clients."
+          },
+          {
+            "code": "DELETE",
+            "label": "REMOVED",
+            "desc": "The mailbox no longer exists in the namespace of the database."
+          }
+        ]
+      }
+    },
+    {
       "type": "sequence",
       "anchor": "operation",
       "position": "after",
-      "caption": "CREATING A MAILBOX (FROM THE RFC EXAMPLE)",
+      "caption": "RESERVING AND THEN ACTIVATING A MAILBOX",
       "data": {
         "lanes": [
           {
@@ -116,42 +162,85 @@
           },
           {
             "key": "master",
-            "label": "Master"
+            "label": "Master server"
           }
         ],
         "messages": [
           {
             "from": "client",
             "to": "master",
-            "label": "RESERVE name location",
+            "label": "RESERVE",
             "color": "blue",
-            "note": "Claim the mailbox name."
+            "note": "The mailbox name and its location, so that no one else can take the name."
           },
           {
             "from": "master",
             "to": "client",
-            "label": "OK \"Mailbox Reserved.\"",
-            "color": "green"
-          },
-          {
-            "from": "client",
-            "to": "client",
-            "label": "Local mailbox create",
-            "color": "neutral",
-            "note": "Done on the server that stores the mailbox."
+            "label": "OK",
+            "color": "green",
+            "note": "Mailbox Reserved."
           },
           {
             "from": "client",
             "to": "master",
-            "label": "ACTIVATE name location acl",
+            "label": "ACTIVATE",
             "color": "blue",
-            "note": "Make the mailbox live."
+            "note": "Sent after the local mailbox has been created, with the location and the ACL."
           },
           {
             "from": "master",
             "to": "client",
-            "label": "OK \"Mailbox Activated.\"",
-            "color": "green"
+            "label": "OK",
+            "color": "green",
+            "note": "Mailbox Activated."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "A SLAVE FOLLOWING THE MASTER'S UPDATE STREAM",
+      "data": {
+        "lanes": [
+          {
+            "key": "slave",
+            "label": "Slave server"
+          },
+          {
+            "key": "master",
+            "label": "Master server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "slave",
+            "to": "master",
+            "label": "UPDATE",
+            "color": "blue",
+            "note": "Start an update stream from the master."
+          },
+          {
+            "from": "master",
+            "to": "slave",
+            "label": "MAILBOX AND RESERVE RECORDS",
+            "color": "green",
+            "note": "The current contents of the database, the same as a LIST with no argument."
+          },
+          {
+            "from": "master",
+            "to": "slave",
+            "label": "OK",
+            "color": "green",
+            "note": "Streaming Begins."
+          },
+          {
+            "from": "master",
+            "to": "slave",
+            "label": "RESERVE, MAILBOX OR DELETE",
+            "color": "neutral",
+            "note": "Every change to the master is streamed to the slave within 30 seconds."
           }
         ]
       }
@@ -179,6 +268,11 @@
       "rfc": 2246
     },
     {
+      "number": "[IMAP-URL]",
+      "text": "Newman, C., \"IMAP URL Scheme\", RFC 2192, September 1997.",
+      "rfc": 2192
+    },
+    {
       "number": "[IMAP-ACL]",
       "text": "Myers, J., \"IMAP4 ACL extension\", RFC 2086, January 1997.",
       "rfc": 2086
@@ -187,15 +281,25 @@
       "number": "[POP3]",
       "text": "Myers, J. and M. Rose, \"Post Office Protocol - Version 3\", STD 53, RFC 1939, May 1996.",
       "rfc": 1939
+    },
+    {
+      "number": "[ABNF]",
+      "text": "Crocker, D., Ed. and P. Overell, \"Augmented BNF for Syntax Specifications: ABNF\", RFC 2234, November 1997.",
+      "rfc": 2234
+    },
+    {
+      "number": "[KEYWORDS]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

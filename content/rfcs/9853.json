@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document defines a Return Routability Check (RRC) for DTLS 1.2 and 1.3 when the Connection ID feature is in use. It lets an endpoint confirm that a peer really can be reached at a new network address, for example after a move or rebinding. It updates RFC 9146 and RFC 9147.</p>",
   "plainLanguage": {
-    "summary": "<p>If a friend says they have moved, you send a letter to the new address and wait for a reply. This does that for secure connections to prove the new address really belongs to them.</p>"
+    "summary": "<p>When a secure connection's peer appears at a new address, the receiver has to decide whether to trust it. RFC 9853 defines a test for that: the receiver sends a random number to the new address and waits for the peer to send the same number back. Only then does it start sending to that address. A stronger version also checks the old path, so that an attacker who copies packets to a faster path of its own cannot win.</p>"
   },
   "questions": [
     "dtls return routability check",
@@ -22,38 +22,38 @@
   ],
   "subtitle": "How a DTLS endpoint proves a peer is really reachable at a new address before it starts sending there.",
   "tldr": {
-    "problem": "The DTLS Connection ID lets a connection survive an address change, but nothing checked that the new address was willing to receive traffic. That opens the door to flooding a victim or to an attacker steering the connection.",
-    "mechanism": "The receiver sends an encrypted path_challenge carrying a random 8-byte cookie, and only switches to the new address once the peer echoes the cookie in a path_response.",
-    "outcome": "A spoofed source address fails the check, so the original address binding stays unchanged. An enhanced variant also challenges the old path to resist off-path attackers.",
+    "problem": "A DTLS connection that uses a Connection ID can keep working when the peer's address changes, but that also lets an attacker who spoofs a source address make the receiver send traffic to a victim. The mechanism for confirming that a peer is genuinely reachable at a new address was left undefined.",
+    "mechanism": "RFC 9853 defines a Return Routability Check subprotocol for DTLS 1.2 and 1.3. The receiver sends a path_challenge carrying a fresh random cookie to the new address, and only updates its address binding when a path_response echoes the cookie back. A stronger variant probes the old path first to catch an attacker that copies packets to a path of its own.",
+    "outcome": "The document updates RFC 9146 and RFC 9147, adds a TLS extension, a new content type and a new registry of message types at IANA, and explains the limits: the check does not stop an on-path attacker, and the enhanced check cannot tell a faster attacker path from a genuine routing improvement.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Content type",
+      "label": "TLS content type",
       "value": "return_routability_check (27)"
     },
     {
-      "label": "Extension type",
-      "value": "rrc (61), empty extension_data"
+      "label": "TLS extension type",
+      "value": "61"
     },
     {
-      "label": "Cookie",
+      "label": "Cookie size",
       "value": "8 bytes, 64 bits of entropy"
     },
     {
-      "label": "Message types",
-      "value": "path_challenge 0, path_response 1, path_drop 2"
-    },
-    {
       "label": "Anti-amplification limit",
-      "value": "3 times the data received"
+      "value": "Three times the data received from an unvalidated address"
     },
     {
-      "label": "Default timer T",
-      "value": "3xRTT, or 1 second if RTT is unknown"
+      "label": "Recommended timer",
+      "value": "3xRTT, or 1 second when the RTT is unknown"
+    },
+    {
+      "label": "RRC message types",
+      "value": "path_challenge (0), path_response (1), path_drop (2)"
     }
   ],
-  "today": "<p>RFC 9853 is a Proposed Standard published in March 2026. It updates <a href='/rfc9146'>RFC 9146</a> and <a href='/rfc9147'>RFC 9147</a>, and no later RFC obsoletes or updates it.</p>",
+  "today": "<p>RFC 9853 is a Proposed Standard published in March 2026, and it has not been obsoleted. It updates RFC 9146 and RFC 9147, and IANA has allocated the content type 27, the extension code point 61 and a new TLS RRC Message Types registry for the three message types it defines.</p>",
   "glossary": [
     "connection-id",
     "return-routability-check",
@@ -64,64 +64,68 @@
     "path-validation",
     "replay-protection",
     "udp",
-    "tls-extension"
+    "tls-extension",
+    "dtls",
+    "off-path-attacker",
+    "amplification-attack",
+    "path-mtu"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Gap Left by Connection IDs",
-      "content": "<p>A <strong>Connection ID</strong> (CID) is an identifier in the record layer header of a DTLS datagram. It tells the receiver which security context to use, even when the datagram arrives from a different source address. The CID is specified in <a href='/rfc9146'>RFC 9146</a> for DTLS 1.2 and in <a href='/rfc9147'>RFC 9147</a> for DTLS 1.3.</p><p>RFC 9146 warns that using CID widens the attack surface, giving on-path and off-path attackers a chance at DoS or DDoS. It says what to do when a record with a CID arrives from a new address, but leaves open how to confirm that the new address is willing to receive DTLS records.</p><p>This document fills that gap with a <strong>Return Routability Check</strong> (RRC) subprotocol, inspired by the path validation procedure in <a href='/rfc9000'>RFC 9000</a>. It updates RFC 9146 and RFC 9147. The check can also be used at any time, for example to see whether a peer is still reachable after a quiet period.</p>",
-      "plainLanguage": "<p>Imagine a mail slip that says \"I moved\". Before you start sending packages to the new address, you want proof that the person actually lives there.</p>"
+      "title": "Introduction",
+      "content": "<p>A Connection ID is an identifier carried in the record layer header of a DTLS datagram that gives the receiver extra information for selecting the appropriate security context. The mechanism is specified in <a href='/rfc9146'>RFC 9146</a> for DTLS 1.2 and in <a href='/rfc9147'>RFC 9147</a> for DTLS 1.3.</p><p>Section 6 of RFC 9146 describes how the use of a Connection ID increases the attack surface of DTLS 1.2 and 1.3 by giving both on-path and off-path attackers an opportunity for denial of service. It also describes the steps a DTLS principal must take when it receives a record with a Connection ID whose source address differs from the one currently associated with the connection. The mechanism for making sure the new peer address is willing to receive and process DTLS records is left open. This document defines a Return Routability Check subprotocol for DTLS 1.2 and 1.3, inspired by the path validation procedure in Section 8.2 of <a href='/rfc9000'>RFC 9000</a>, and therefore updates RFC 9146 and RFC 9147.</p><p>The check is performed by the receiving endpoint before the address binding is updated in its session state, so that the endpoint has confidence that the sending peer is really reachable at the source address in the datagram it received. Section 5.1 describes the basic mechanism, which aims to reduce the denial-of-service attack surface. Section 5.2 describes a more advanced mechanism designed to counter off-path attackers that try to place themselves on the path by racing packets that trigger address rebinding at the receiver.</p><p>Apart from its use when a Connection ID address binding is updated, the path validation that RRC offers can be used at any time by either endpoint. For example, an endpoint might use RRC to check that a peer is still reachable at its last known address after a period of quiescence.</p>",
+      "plainLanguage": "<p>A Connection ID lets a receiver pick the right session when a packet comes from a new address, which is what makes it possible for a client behind a changed network address to keep talking to the same server. The cost is that a receiver can be tricked into sending data to an address that cannot receive it. This document defines the missing piece: a way for the receiver to check that the new address really belongs to the peer before it starts using it.</p>"
     },
     {
       "id": "negotiation",
       "number": "3",
       "title": "Negotiating the rrc Extension",
-      "content": "<p>RRC is switched on with the <code>rrc</code> extension, defined only for DTLS 1.2 and 1.3. A client that wants RRC puts the extension in its ClientHello. A server that can do it answers with the extension in its ServerHello. The extension type value is <code>61</code> and its data is empty.</p><p>A client that offers <code>rrc</code> MUST also offer <code>connection_id</code>. If it does not, the server MUST NOT include <code>rrc</code>. A client offering <code>connection_id</code> SHOULD also offer <code>rrc</code>, unless the application has its own address validation mechanism. Neither side may use RRC unless both have exchanged the extension.</p><p>When both CID and RRC are negotiated and a record with a CID arrives from a different source address than the one tied to that CID, the receiver SHOULD run the check. It may instead trigger an application-specific mechanism such as CoAP Echo (<a href='/rfc9175'>RFC 9175</a>).</p>",
-      "plainLanguage": "<p>Both sides have to say \"yes, I know how to do the proof-of-address trick\" when they first meet. If only one says it, they do not use it.</p>"
+      "content": "<p>The use of RRC is negotiated with the <code>rrc</code> extension, which is only defined for DTLS 1.2 and 1.3. On connecting, a client wishing to use RRC includes the extension in its ClientHello. If the server can meet the requirement, it responds with an <code>rrc</code> extension in its ServerHello. The <code>extension_type</code> value is 61 and the <code>extension_data</code> field is empty.</p><p>A client offering the <code>rrc</code> extension must also offer the <code>connection_id</code> extension. If a client includes <code>rrc</code> in its ClientHello but omits <code>connection_id</code>, the server must not include <code>rrc</code> in its ServerHello. A client offering <code>connection_id</code> should also offer <code>rrc</code>, unless the application using DTLS has its own address validation mechanism. Neither side may use RRC unless both have successfully exchanged the extension.</p><p>RRC complements the peer address update procedure of Section 6 of RFC 9146. When both Connection ID and RRC have been negotiated for a session, and a record with a Connection ID is received whose source address differs from the one currently associated with that Connection ID value, the receiver should perform a return routability check, unless an application-specific address validation mechanism can be triggered instead, such as the CoAP Echo mechanism of <a href='/rfc9175'>RFC 9175</a>.</p>",
+      "plainLanguage": "<p>The check is turned on during the handshake, by both sides including a short extension in their hello messages. The extension carries no data. A client that wants the check must also ask for a Connection ID, because the check only matters when the server can accept a packet from a new address. Neither side may use the check unless both asked for it.</p>"
     },
     {
       "id": "message-format",
       "number": "4",
-      "title": "The Three RRC Messages",
-      "content": "<p>RRC adds a new content type, <code>return_routability_check</code>, with value <code>27</code>. It carries three message types: <code>path_challenge</code> (0), <code>path_response</code> (1) and <code>path_drop</code> (2).</p><p>Each message holds a <strong>Cookie</strong>, an 8-byte field with 64 bits of entropy, for example from the cryptographically secure random number generator of the TLS implementation. Every RRC message MUST be authenticated and encrypted with the currently active security context.</p><p>Implementations MUST understand the three defined types and MUST be able to parse and gracefully ignore messages with an unknown <code>msg_type</code>, so future extensions can add more.</p>",
-      "plainLanguage": "<p>There are three little notes: \"prove it\", \"here is the proof\" and \"not that way, use the other road\". Each carries a secret random number so nobody can fake the answer.</p>"
+      "title": "Return Routability Check Messages",
+      "content": "<p>The document defines the <code>return_routability_check</code> content type, with the value 27, to carry RRC messages. The subprotocol has three message types: <code>path_challenge</code>, <code>path_response</code> and <code>path_drop</code>, with the values 0, 1 and 2.</p><p>Each message carries a Cookie, an 8-byte field containing 64 bits of entropy, for example from the cryptographically secure pseudorandom number generator used by the TLS implementation. The <code>return_routability_check</code> message must be authenticated and encrypted using the currently active security context.</p><p>Future extensions to the subprotocol may define new message types. Implementations must be able to parse and understand the three message types defined here, and must be able to parse and gracefully ignore messages with an unknown message type.</p>",
+      "plainLanguage": "<p>Each message carries one thing: a random number of eight bytes. The number is the proof. The peer sends it back unchanged, and only the holder of the session keys can produce a valid message, so the reply shows both that the peer is reachable and that it holds the same session.</p>"
     },
     {
       "id": "procedures",
-      "number": "5",
-      "title": "Basic and Enhanced Path Validation",
-      "content": "<p>When a receiver sees the peer's address change, it MUST stop sending buffered application data to the new address or limit it to the <strong>anti-amplification limit</strong>, which is three times the data received from that unvalidated address. It then starts a check. Which check to use depends mainly on the threat model, and may also depend on implementation complexity, privacy and how fast the path must switch.</p><p>In the <strong>basic</strong> check, the receiver (the initiator) sends a <code>path_challenge</code> with a fresh unpredictable cookie to the newly observed address and starts a timer T. The peer verifies it cryptographically and echoes the cookie in a <code>path_response</code>. If the initiator gets the right cookie back, it updates the peer address binding. If T expires, it does not.</p><p>In the <strong>enhanced</strong> check, the challenge goes to the old, previously valid address. If that path is still preferred, the peer MUST answer with <code>path_response</code>, and the initiator keeps the old address. If the peer has moved on to a different preferred path, it MUST answer with <code>path_drop</code>, and the initiator then runs the basic check on the new address. If T expires, the initiator also falls back to the basic check.</p><p>The algorithms are not designed for nested rebindings. If one happens during validation, the <code>path_response</code> is dropped, validation times out and the address is not updated until new data triggers a new validation.</p>",
-      "plainLanguage": "<p>The basic way is knocking on the new door and waiting for someone to answer. The enhanced way first calls the old phone number to ask, \"Did you really move?\" before trusting the new one.</p>"
+      "number": "5.1",
+      "title": "The Basic Return Routability Check",
+      "content": "<p>A receiver that observes a change of the peer's address must stop sending any buffered application data, or limit the data sent to the unvalidated address to the anti-amplification limit. The anti-amplification limit means three times the amount of data received from an unvalidated address, counting all DTLS records originating from that source address and excluding those that have been discarded. The check then begins.</p><p>The basic check has five steps. The receiver, which is the initiator, creates a <code>path_challenge</code> message and puts an unpredictable cookie into it. The message is sent to the observed new address and a timer T is started. The peer, which is the responder, cryptographically verifies the received <code>path_challenge</code> and replies by echoing the cookie value in a <code>path_response</code> message. When the initiator receives the <code>path_response</code> and verifies that it contains the cookie it sent, it updates the peer address binding. If the timer T expires, the peer address binding is not updated. Once the path validation is complete, any pending send operation is resumed to the bound peer address.</p><p>Section 5.3 sets the rules for the challenge. The initiator may send several <code>path_challenge</code> messages to account for packet loss; each one should go into a different transport packet, the transmission of subsequent challenges should be paced to decrease the chance of loss, and each challenge must contain random data. In the absence of application-specific requirements, the initiator can send one challenge per round-trip time, up to the anti-amplification limit. The initiator may also use the record padding mechanism of DTLS 1.3, and of DTLS 1.2 when a Connection ID is enabled in the sending direction, to pad up to the anti-amplification limit and probe whether the Path MTU of the new path is still acceptable.</p><p>Section 5.4 sets the rules for the answer. The responder must not delay sending an elicited <code>path_response</code> or <code>path_drop</code>, must send exactly one of them for each valid <code>path_challenge</code> received, and must send it to the address the matching challenge came from, so that the path is known to work in both directions. The initiator must silently discard any invalid response or drop it receives. RRC does not account for Path MTU discovery on the reverse path; a responder that wants it should initiate a new path validation procedure.</p><p>Section 5.5 covers the timer. The new path may have a longer round-trip time than the original. Where there is external information about the round-trip time of the active path, T should be 3xRTT. Where there is none, T should be set to 1 second. Profiles for specific deployment environments, such as constrained networks, may specify a different value.</p>",
+      "plainLanguage": "<p>The basic check is five steps. The receiver puts a random number in a challenge and sends it to the new address, then starts a timer. The peer checks that the challenge is genuine and sends the number back. If the number comes back intact and in time, the receiver treats the new address as the peer's address and resumes sending. If the timer runs out first, nothing changes. While the check is running, the receiver limits how much it sends to the new address to three times what it received from that address, so a spoofed address cannot be used to make it send a lot of data.</p>"
     },
     {
-      "id": "requirements",
-      "number": "5.3",
-      "title": "Rules for Challengers, Responders and Timers",
-      "content": "<p>The initiator MAY send several <code>path_challenge</code> messages to cover packet loss. Each SHOULD go in a different transport packet, later ones SHOULD be paced, and each MUST contain random data. Without application-specific needs, it can send one per round-trip time, up to the anti-amplification limit. It MAY also use record padding to test whether the path MTU on the new path is still acceptable.</p><p>The responder MUST NOT delay its answer, MUST send exactly one <code>path_response</code> or <code>path_drop</code> for each valid challenge, and MUST send it to the address the challenge came from, so the path is proven to work in both directions. The initiator MUST silently discard any invalid response.</p><p>For the timer, new paths may have a longer RTT than the old one. When the RTT of the active path is known, implementations SHOULD use T = 3xRTT. Otherwise T SHOULD be 1 second. Deployment profiles MAY choose another value.</p>",
-      "plainLanguage": "<p>When someone asks you to prove it, you must answer right away, once, and back to where the question came from. The asker waits only a little while for the answer.</p>"
+      "id": "algorithms",
+      "number": "5.2",
+      "title": "The Enhanced Return Routability Check",
+      "content": "<p>The enhanced check has five steps of its own. The receiver creates a <code>path_challenge</code> message with an unpredictable cookie. This time the message is sent to the previously valid address, the one that corresponds to the old path, and a timer T is started.</p><p>If the path is still functional, the peer verifies the <code>path_challenge</code> cryptographically, and the action it takes depends on whether the path the message arrived on is still its preferred one. If that path is preferred, the peer must return a <code>path_response</code>. If it is no longer preferred, the peer must return a <code>path_drop</code>; the peer can only know that a path is no longer preferred if it has itself initiated a voluntary path migration. In either case the peer echoes the cookie value in the response.</p><p>The initiator receives the message and verifies that it contains the cookie it sent. On a <code>path_response</code>, the initiator must keep using the previously valid address: no switch to the new path takes place and the peer address binding is not updated. On a <code>path_drop</code>, the initiator must perform a basic return routability check on the observed new address. If the timer T expires, the binding is not updated and the initiator must also perform the basic check on the new address.</p><p>Which of the two checks to use depends on whether the off-path attacker scenario matters. The decision depends mainly on the threat model, but implementation complexity, privacy concerns and the time taken to switch path also bear on it, and the choice may be offered as a configuration option. The algorithms are not designed to handle nested rebindings, that is, a rebinding that occurs while a path is being validated after an earlier rebinding. If that happens, the <code>path_response</code> is dropped, the address validation times out, and the address is not updated; a new path validation starts when new data arrives. In the event of a NAT rebinding, the two ends have different views of the path: the initiator sees a new path while the responder still sees the old one.</p>",
+      "plainLanguage": "<p>The enhanced check probes the old path first instead of the new one. If the peer answers on the old path, the receiver keeps using the old path and the switch does not happen, which is what defeats an attacker who is copying packets to a path of its own. If the peer says the old path is no longer its preferred one, or if nothing comes back at all, the receiver falls back to the basic check on the new address.</p>"
     },
     {
       "id": "operational-considerations",
       "number": "7",
-      "title": "Logging and Middleboxes",
-      "content": "<p>Implementations are strongly advised to log statistics on unsuccessful RRC operations, since they can be security-relevant events. Receiving several responses to one <code>path_challenge</code> is worth logging too, because it could suggest an off-path attack. Frequent path probes may point to an unstable path.</p><p>With DTLS 1.3, the record type is opaque to on-path observers, so RRC messages are immune to middlebox interference. In DTLS 1.2, RRC messages not wrapped in the <code>tls12_cid</code> record show the content type in plain text. For example, this happens server to client when the server negotiated a zero-length CID. A middlebox could then drop challenges and defeat RRC. When that is a concern, enable CID in both directions.</p>",
-      "plainLanguage": "<p>Keep a diary of failed checks, because a pattern of failures can mean someone is up to mischief. In the older version, the notes are written on the outside of the envelope, so a nosy postman could throw them away.</p>"
+      "title": "Operational and Privacy Considerations",
+      "content": "<p>Section 7.1 advises logging. Logging RRC operations at both ends is generally useful, and for security information and event management and troubleshooting purposes it is strongly advised that implementations collect statistics about unsuccessful RRC operations, since they could represent security-relevant events when they coincide with attempts by an attacker to interfere with the end-to-end path. It is also advisable to log instances where multiple responses to a single <code>path_challenge</code> are received, as that could suggest an off-path attack attempt. Frequent path probes may indicate a problem with the stability of the path.</p><p>Section 7.2 covers middlebox interference. Because the record type of a DTLS 1.3 encrypted packet is opaque to on-path observers, RRC messages are immune to middlebox interference when DTLS 1.3 is used. DTLS 1.2 RRC messages that are not wrapped in the <code>tls12_cid</code> record, for instance in the server-to-client direction when the server negotiated a zero-length Connection ID, carry the <code>return_routability_check</code> content type in plain text, which makes them susceptible to interference such as the dropping of <code>path_challenge</code> messages and hinders the RRC functionality altogether. When RRC is used in DTLS 1.2 and middlebox interference is a concern, it is recommended to enable the Connection ID in both directions.</p><p>Section 9 covers privacy. When using DTLS 1.3, peers should avoid using the same Connection ID on multiple network paths, in particular when initiating connection migration or probing a new network path, because an adversary can otherwise correlate the communication across those paths. DTLS 1.3 provides mechanisms to ensure that a new Connection ID can always be used: an endpoint should proactively send a RequestConnectionId message to ask for new Connection IDs as soon as the pool of spare Connection IDs is depleted or goes below a threshold, and a migrating endpoint could include a NewConnectionId message in packets sent on the new path so that the subsequent path validation can use fresh Connection IDs. DTLS 1.2 cannot request new Connection IDs during the lifetime of a session, because there a Connection ID lives as long as the connection. Deployments that use DTLS in multihoming environments should therefore refuse to use Connection IDs with DTLS 1.2 and switch to DTLS 1.3 if the correlation privacy threat is a concern.</p>",
+      "plainLanguage": "<p>Two operational points and one privacy point. Implementations should keep statistics about failed checks, because a burst of them may mean someone is interfering with the path, and should note when one challenge gets more than one answer. With DTLS 1.2 the type of the message is readable on the wire unless a Connection ID is used in both directions, so a middlebox could drop the challenge and break the check; with DTLS 1.3 the message type is hidden. Finally, the same Connection ID should not be used on two different paths, or an observer can tell that the two conversations belong together.</p>"
     },
     {
       "id": "security-considerations",
       "number": "8",
-      "title": "Attackers and Defenses",
-      "content": "<p>The RFC considers two attackers. An <strong>off-path</strong> attacker can observe packets and race copies of them to either peer, winning consistently. An <strong>on-path</strong> attacker can also drop and delay records. Neither can craft records that pass DTLS verification.</p><p>RRC defends against amplification: if an attacker spoofs a victim's address on a packet with a known CID, the endpoint sends only a small <code>path_challenge</code> to the victim instead of a possibly large response. The victim cannot decrypt it or produce a valid <code>path_response</code>, so the original address binding stays unchanged.</p><p>The enhanced check defends against an off-path attacker who forwards copies of genuine packets to move the connection onto a path through the attacker. The receiver challenges the old path. If it is dead, the new path is tried. If it is alive but not preferred, a <code>path_drop</code> leads to a challenge on the new path. If it is alive and preferred, the old path answers and the migration is refused. The RFC admits the defense is imperfect: if the attacker's path is reliably faster, it cannot be told from a real routing improvement.</p><p>RRC does not protect third parties from flooding if the attacker is on-path, because it can redirect the checks to the real peer. Cookies must be freshly generated from a reliable entropy source. If one is reused and anti-replay protection is missing, an attacker could replay an old <code>path_response</code> and mislead the challenger.</p>",
-      "plainLanguage": "<p>A trickster might pretend to be someone else's address to make a server shout at them. The server only whispers a tiny \"is that you?\" first, and the real owner cannot answer, so nothing more is sent.</p>"
+      "title": "Security Considerations and the Attacker Model",
+      "content": "<p>The return routability checks do not protect against flooding by third parties when the attacker is on the path, because the attacker can redirect the checks to the real peer even when the datagrams are cryptographically authenticated. On-path adversaries can, in general, harm connectivity.</p><p>Two classes of attacker are considered, based on those introduced in QUIC. An off-path attacker is not on the original path between the DTLS peers, but it can observe packets on that path and has a faster forwarding path than the peers have, so it can copy observed packets, race the copies to either peer and consistently win the race. An on-path attacker is on the original path and can also drop and delay records at will. Attackers cannot in general craft DTLS records that pass verification, because of the cryptographic protections of the record layer.</p><p>RRC is designed to defend against two attacks. The first is an amplification attack, where an on-path or off-path attacker spoofs the source address of a victim. If the server's response to the spoofed packet is larger than the packet it received, the attacker can use the server as a traffic amplifier towards the victim. The mitigation is that an RRC-capable endpoint, on receiving a packet with a known Connection ID from an address different from the one currently associated with the connection, sends a small <code>path_challenge</code> to the victim host instead of a possibly large response. Since the victim cannot decrypt the challenge and produce a valid <code>path_response</code>, the address validation fails and the original address binding stays unaltered.</p><p>The second is off-path packet forwarding. An off-path attacker that can observe packets might forward copies of genuine packets to the endpoints over a different path. If the copy arrives first it looks like a path change, and any genuine packet is then discarded as a duplicate. If the attacker can keep forwarding packets, it might cause the connection to migrate to a path through the attacker, which puts it on the path and lets it observe or drop all later packets. The attack relies on the attacker's path having the same or better characteristics than the direct path, and it is more effective when few packets are sent or when loss coincides with the attempt.</p><p>The mitigation has three cases. If the old path is dead, the challenge on the old path times out, a <code>path_challenge</code> is sent on the new path, and a <code>path_response</code> there makes the switch legitimate. If the old path is alive but no longer preferred, the peer answers with <code>path_drop</code> on the old path, which makes the receiver challenge the new path and switch when the response arrives. If the old path is alive and preferred, the peer answers with <code>path_response</code> on the old path, the connection is not migrated to the new path, and the attack is thwarted.</p><p>The document notes that this defence is imperfect, but does not consider it a serious problem: if the path through the attacker is reliably faster than the old path despite repeated attempts to use that old path, it is not possible to distinguish an attack from an improvement in routing. Heuristics can improve detection: NAT rebinding is improbable if packets were recently received on the old path, and duplicated packets can be looked for. A change of Connection ID is more likely to indicate an intentional migration than an attack, and changes of Connection ID are supported in DTLS 1.3 but not in DTLS 1.2.</p><p>Finally, if the challenger reuses a cookie that was already used in the same connection and does not implement anti-replay protection, an attacker could replay an earlier <code>path_response</code> carrying the reused cookie and mislead the challenger into switching to a path of the attacker's choosing. To prevent this, RRC cookies must be freshly generated using a reliable source of entropy.</p>",
+      "plainLanguage": "<p>The check defends against two attacks. The first is amplification: an attacker fakes the victim's address, and the server answers with more data than it received, so the victim receives traffic it never asked for. Because the server now sends only a small challenge that the victim cannot answer, the address is never accepted. The second is an attacker that copies packets to a path of its own, hoping the receiver will treat the copied packet as a move to a new address. Probing the old path first catches this, because the real peer answers there. The defence is not perfect: if the attacker's path is reliably faster, the receiver cannot tell an attack from a genuine improvement in routing.</p>"
     },
     {
-      "id": "privacy-considerations",
-      "number": "9",
-      "title": "Privacy and IANA Registrations",
-      "content": "<p>With DTLS 1.3, peers SHOULD avoid using the same CID on several network paths, because an observer could then correlate the traffic across them. DTLS 1.3 can always supply a new CID, using <code>RequestConnectionId</code> and <code>NewConnectionId</code>. DTLS 1.2 cannot request new CIDs during a session, so deployments in multihoming environments that worry about correlation SHOULD refuse CIDs in DTLS 1.2 and use DTLS 1.3.</p><p>IANA allocated content type <code>27</code> for <code>return_routability_check</code>, extension code point <code>61</code> for <code>rrc</code>, and created the \"TLS RRC Message Types\" registry under Expert Review. Values 0 to 2 are the three defined messages, 3 to 253 are unassigned, and 254 to 255 are reserved for private use.</p>",
-      "plainLanguage": "<p>If you always wear the same name tag in every place, people can follow you around. So switch name tags when you change paths, if you can.</p>"
+      "id": "iana-considerations",
+      "number": "10",
+      "title": "IANA Considerations",
+      "content": "<p>IANA has allocated an entry in the TLS ContentType registry for the <code>return_routability_check</code> content type with the value 27, and set the DTLS_OK column to Y with a note that the content type is only applicable to DTLS 1.2 and 1.3. IANA has also allocated the extension code point 61 for the <code>rrc</code> extension in the TLS ExtensionType Values registry, with the extension usable in the ClientHello and ServerHello, marked DTLS-only and not recommended.</p><p>IANA has created the TLS RRC Message Types registry within the Transport Layer Security Parameters registry group, with the registration procedure Expert Review. Each entry carries a value between 0 and 253, a description, a DTLS-Only flag that is set to Y for all initial entries, a Recommended flag, a reference and a comment. The initial contents are <code>path_challenge</code> (0), <code>path_response</code> (1) and <code>path_drop</code> (2), all recommended and all DTLS-only, with 3 to 253 unassigned and 254 to 255 reserved for private use. The document recommends that multiple designated experts be appointed, representing both the transport and the security areas, and that an expert who perceives a conflict of interest defer to the judgment of the others.</p>",
+      "plainLanguage": "<p>The document registers three values with IANA: a new record type for the messages, a new handshake extension used to turn the check on, and a new registry for the message types. The registry starts with the three message types defined here, and its later entries are decided by a panel of experts.</p>"
     }
   ],
   "viz": [
@@ -129,12 +133,12 @@
       "type": "sequence",
       "anchor": "procedures",
       "position": "after",
-      "caption": "BASIC RETURN ROUTABILITY CHECK (RFC 9853, FIGURE 3)",
+      "caption": "The basic return routability check (RFC 9853, Figure 3)",
       "data": {
         "lanes": [
           {
             "key": "client",
-            "label": "Client (new address B)"
+            "label": "Client"
           },
           {
             "key": "server",
@@ -145,30 +149,55 @@
           {
             "from": "client",
             "to": "server",
-            "label": "Application Data (CID=100)",
+            "label": "APPLICATION DATA",
             "color": "neutral",
-            "note": "Arrives from source address B instead of A, so B is unverified."
+            "note": "Sent from a new address, carrying the CID. The server does not yet trust that address."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "path_challenge(cookie)",
+            "label": "PATH CHALLENGE",
             "color": "blue",
-            "note": "Sent to B."
+            "note": "The server sends a challenge to the new address and starts timer T."
           },
           {
             "from": "client",
             "to": "server",
-            "label": "path_response(cookie)",
+            "label": "PATH RESPONSE",
             "color": "green",
-            "note": "Echoes the cookie; address B is now verified."
+            "note": "The client echoes the cookie back to the new address."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "Application Data",
+            "label": "APPLICATION DATA",
             "color": "neutral",
-            "note": "Resumes toward B."
+            "note": "The server now treats the new address as the peer address and resumes sending."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "The return_routability_check message",
+      "data": {
+        "title": "return_routability_check",
+        "bytes": 9,
+        "width": 32,
+        "fields": [
+          {
+            "key": "msg-type",
+            "name": "Message Type",
+            "bits": 8,
+            "desc": "path_challenge (0), path_response (1) or path_drop (2)."
+          },
+          {
+            "key": "cookie",
+            "name": "Cookie",
+            "bits": 64,
+            "desc": "64 bits of entropy, echoed back by the peer."
           }
         ]
       }
@@ -177,24 +206,81 @@
       "type": "opcodes",
       "anchor": "message-format",
       "position": "after",
-      "caption": "RRC MESSAGE TYPES (RFC 9853)",
+      "caption": "The three RRC message types",
       "data": {
         "items": [
           {
             "code": "0",
             "label": "path_challenge",
-            "desc": "Carries a fresh cookie to the address being tested."
+            "desc": "The initiator asks the peer to prove it can receive at the address under test."
           },
           {
             "code": "1",
             "label": "path_response",
-            "desc": "Echoes the cookie; the path is alive and preferred.",
-            "highlight": true
+            "desc": "The peer echoes the cookie, which confirms that the path works."
           },
           {
             "code": "2",
             "label": "path_drop",
-            "desc": "Echoes the cookie; the path is alive but no longer preferred."
+            "desc": "The peer says the path the challenge arrived on is no longer its preferred one."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "The three cases of the enhanced check",
+      "data": {
+        "columns": [
+          "Case",
+          "What the peer does",
+          "Result"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "The old path is dead",
+              "Nothing arrives on the old path, so the challenge there times out",
+              "The receiver challenges the new path, and a response there makes the switch legitimate"
+            ]
+          },
+          {
+            "cells": [
+              "The old path is alive but not preferred",
+              "The peer answers with path_drop on the old path",
+              "The receiver challenges the new path and switches when the response arrives"
+            ]
+          },
+          {
+            "cells": [
+              "The old path is alive and preferred",
+              "The peer answers with path_response on the old path",
+              "The connection stays on the old path, which defeats the attack"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "operational-considerations",
+      "position": "after",
+      "caption": "What operators are advised to do",
+      "data": {
+        "items": [
+          {
+            "title": "Log failures",
+            "text": "Collect statistics about unsuccessful checks, and note when one challenge gets more than one answer."
+          },
+          {
+            "title": "Use a CID in both directions on DTLS 1.2",
+            "text": "Otherwise the message type is readable and a middlebox can drop the challenge."
+          },
+          {
+            "title": "Use fresh Connection IDs on new paths",
+            "text": "Reusing one Connection ID on two paths lets an observer correlate the conversations."
           }
         ]
       }
@@ -217,28 +303,33 @@
       "rfc": 9000
     },
     {
-      "number": "[RFC9175]",
-      "text": "Amsuess, C., Preuss Mattsson, J., and G. Selander, \"Constrained Application Protocol (CoAP): Echo, Request-Tag, and Token Processing\", RFC 9175, February 2022.",
-      "rfc": 9175
-    },
-    {
       "number": "[RFC8446]",
       "text": "Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.3\", RFC 8446, August 2018.",
       "rfc": 8446
     },
     {
-      "number": "[RFC4086]",
-      "text": "Eastlake 3rd, D., Schiller, J., and S. Crocker, \"Randomness Requirements for Security\", BCP 106, RFC 4086, June 2005.",
-      "rfc": 4086
+      "number": "[RFC6347]",
+      "text": "Rescorla, E. and N. Modadugu, \"Datagram Transport Layer Security Version 1.2\", RFC 6347, January 2012.",
+      "rfc": 6347
+    },
+    {
+      "number": "[RFC9175]",
+      "text": "Amsüss, C., Preuß Mattsson, J., and G. Selander, \"Constrained Application Protocol (CoAP): Echo, Request-Tag, and Token Processing\", RFC 9175, January 2022.",
+      "rfc": 9175
+    },
+    {
+      "number": "[RFC8126]",
+      "text": "Cotton, M., Leiba, B., and T. Narten, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 8126, June 2017.",
+      "rfc": 8126
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes the View-based Access Control Model for the SNMP architecture, which controls who can access which management information. It includes a MIB for managing its configuration. It obsoletes RFC 2275 and was replaced by RFC 3415.</p>",
   "plainLanguage": {
-    "summary": "<p>This decides which people may look at, or change, which parts of a device's information, like giving different keys to different workers.</p>"
+    "summary": "<p>This document defines how an SNMP device decides whether a manager may read, change or be told about a given piece of its management data. Managers are put into groups, each group is given three lists of allowed data, one for each kind of operation, and the check is simply whether the object being asked about sits inside the right list. It also gives the tables where an administrator records those lists.</p>"
   },
   "questions": [
     "snmp vacm",
@@ -20,197 +20,292 @@
     "Access Control",
     "Management"
   ],
-  "subtitle": "How an SNMP agent decides who may read, write or be notified about which management data.",
+  "subtitle": "The rule set that decides which part of a device's management data each SNMP user may read, write or be notified about.",
   "tldr": {
-    "problem": "An SNMP entity needs a way to check whether a given principal may read, write or send a particular piece of management information, and to restrict some users to only part of it.",
-    "mechanism": "VACM maps a securityModel and securityName to a group, then uses the group, context, securityModel and securityLevel to find read, write and notify MIB views, and checks whether the requested object is in the selected view.",
-    "outcome": "RFC 2575 obsoleted RFC 2275 and was itself replaced by RFC 3415.",
+    "problem": "The SNMP architecture has an access control subsystem, but it does not say how the decision should be made. Without a model, two implementations could reach different answers about who may read which counter.",
+    "mechanism": "VACM maps a security model and security name to a group, then for each context gives that group a read view, a write view and a notify view. Each view is a set of branches of the management object tree, and the check is whether the requested object instance falls inside the view.",
+    "outcome": "The rules are set out as an explicit procedure with named failure reasons, and the configuration lives in a MIB so it can be managed remotely. RFC 2575 was obsoleted by RFC 3415.",
     "outcomeLabel": "Status today"
   },
   "facts": [
     {
-      "label": "Access views per entry",
-      "value": "3 (read, write, notify)"
+      "label": "Configuration tables",
+      "value": "4: context, security to group, access, view tree family"
+    },
+    {
+      "label": "Views per group and context",
+      "value": "3: read, write and notify"
     },
     {
       "label": "Security levels",
       "value": "noAuthNoPriv, authNoPriv, authPriv"
     },
     {
-      "label": "MIB module",
-      "value": "SNMP-VIEW-BASED-ACM-MIB"
+      "label": "Default context name",
+      "value": "The empty string"
     },
     {
-      "label": "Obsoletes",
-      "value": "RFC 2275"
+      "label": "Initial group",
+      "value": "\"initial\", under security model 3 (USM)"
+    },
+    {
+      "label": "Initial security configurations",
+      "value": "initial-minimum, initial-semi, or initial-no-access"
     }
   ],
-  "today": "<p>RFC 2575 (a Draft Standard) is obsolete: it was replaced by <a href='/rfc3415'>RFC 3415</a>. It had itself obsoleted <a href='/rfc2275'>RFC 2275</a>.</p>",
+  "today": "<p>RFC 2575 is a Draft Standard that was obsoleted by <a href='/rfc3415'>RFC 3415</a>, which now carries the View-based Access Control Model. RFC 2575 had itself obsoleted <a href='/rfc2275'>RFC 2275</a>.</p>",
   "glossary": [
     "snmp",
     "mib",
     "object-identifier",
-    "mib-view"
+    "mib-view",
+    "snmp-context",
+    "view-based-access-control-model",
+    "managed-object",
+    "snmp-engine",
+    "snmp-agent",
+    "mib-module"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Where VACM Fits in SNMP",
-      "content": "<p>The SNMP architecture ([RFC2571]) describes an SNMP engine as a Dispatcher, a Message Processing Subsystem, a Security Subsystem and an <strong>Access Control Subsystem</strong>. The access control subsystem checks whether a specific type of access (read, write or notify) to a particular object instance is allowed.</p><p>This document defines one model for that subsystem, the <strong>View-based Access Control Model</strong> (VACM). The RFC notes that it is not necessarily the only access control model.</p><p>Access control happens when a Command Responder handles requests carrying Read Class and Write Class PDUs, and when a Notification Originator generates notifications. VACM provides services an application can call to check access rights, and it is the application's responsibility to make the proper calls. The access rights live in the engine's Local Configuration Datastore, and a MIB module in the document lets that data be configured remotely.</p>",
-      "plainLanguage": "<p>A device keeps a rulebook about who may see or change what. This document describes one way to write and check that rulebook.</p>"
+      "title": "Where Access Control Fits",
+      "content": "<p>The SNMP architecture describes an SNMP engine as composed of a Dispatcher, a Message Processing Subsystem, a Security Subsystem and an Access Control Subsystem, and applications make use of the services of these subsystems. The reader is expected to have read and understood the architecture and its terminology. The Access Control Subsystem has the responsibility for checking whether a specific type of access, read, write or notify, to a particular object instance is allowed.</p><p>This document defines one specific model of that subsystem, the View-based Access Control Model, and notes that it is not necessarily the only model.</p><p>Access control occurs, implicitly or explicitly, in an SNMP entity when processing SNMP retrieval or modification request messages. A Command Responder application applies access control when it processes requests from a Command Generator, and those requests carry Read Class and Write Class PDUs. Access control also occurs when a notification message is generated by a Notification Originator, and those messages carry Notification Class PDUs. The model defines a set of services that an application can use for checking access rights, and it is the responsibility of the application to make the proper service calls.</p><p>To implement the model, an SNMP entity needs to retain information about access rights and policies. That information is part of the SNMP engine's Local Configuration Datastore. In order to allow the datastore to be remotely configured, portions of it need to be accessible as managed objects, so the document includes the View-based Access Control Model Configuration MIB, which defines those managed object types.</p>",
+      "plainLanguage": "<p>An SNMP device has a subsystem whose only job is to answer one question: is this operation on this piece of data allowed? This RFC is the rulebook for that subsystem. It also defines the tables where an administrator records the rules, so the rules can be changed over the network rather than baked into the device.</p>"
     },
     {
       "id": "concepts",
       "number": "2",
       "title": "Groups, Security Levels and Contexts",
-      "content": "<p>A <strong>group</strong> is a set of zero or more <code>&lt;securityModel, securityName&gt;</code> tuples on whose behalf management objects can be accessed. A group defines the access rights of every securityName in it, and a securityModel plus securityName maps to at most one group. VACM assumes the securityName has already been authenticated and does no authentication of its own.</p><p>The <strong>securityLevel</strong> (<code>noAuthNoPriv</code>, <code>authNoPriv</code> or <code>authPriv</code>) lets a group have different rights at different levels of security. It must be passed in when access is checked.</p><p>An SNMP <strong>context</strong> is a collection of management information accessible by an SNMP entity. An item may exist in more than one context. VACM defines a <code>vacmContextTable</code> that lists the locally available contexts by contextName.</p>",
-      "plainLanguage": "<p>People are put into teams, each team gets different rights depending on how carefully the person proved who they are, and the information is split into separate rooms called contexts.</p>"
+      "content": "<p>A <strong>group</strong> is a set of zero or more securityModel and securityName tuples on whose behalf SNMP management objects can be accessed. A group defines the access rights afforded to all the securityNames which belong to it, and the combination of a securityModel and a securityName maps to at most one group. A group is identified by a groupName. The model assumes that the securityName has already been authenticated as needed and provides no further authentication of its own.</p><p>The <strong>securityLevel</strong> identifies the level of security that will be assumed when checking for access rights. Different access rights for members of a group can be defined for different levels, namely noAuthNoPriv, authNoPriv and authPriv, and the level must be passed as input to the access control module when access rights are checked.</p><p>An <strong>SNMP context</strong> is a collection of management information accessible by an SNMP entity. An item of management information may exist in more than one context, and an SNMP entity potentially has access to many contexts. The model defines a <code>vacmContextTable</code> that lists the locally available contexts by contextName.</p>",
+      "plainLanguage": "<p>Three inputs shape the decision. The group says which managers are treated alike. The security level says how well the request was protected. The context says which collection of data is being asked about. This model assumes the identity has already been checked and does not check it again.</p>"
     },
     {
       "id": "data-model",
       "number": "2.4",
       "title": "MIB Views and View Families",
-      "content": "<p>To limit what a group can see, access to a context goes through a <strong>MIB view</strong>: a specific set of managed object types, and optionally specific instances, within that context. A context will typically have one view covering everything and often others covering subsets.</p><p>Because objects are named by tree-like OBJECT IDENTIFIERs, a view is the union of <strong>view subtrees</strong>, where a subtree is all object instances sharing a common OBJECT IDENTIFIER prefix. To avoid needing very many subtrees, for example to cover one column of every row of a table, a <strong>family of view subtrees</strong> pairs an OBJECT IDENTIFIER (the family name) with a bit string (the family mask). The mask says which sub-identifiers of the name are significant. A family can be included in or excluded from a view.</p><p>For each context, group, securityModel and securityLevel, the access rights are given by three views: a <code>read-view</code> used for Read Class PDUs, a <code>write-view</code> used for Write Class PDUs, and a <code>notify-view</code> used when sending Notification Class PDUs.</p>",
-      "plainLanguage": "<p>Instead of giving someone the whole filing cabinet, you can give them only certain drawers. The mask is a stencil that picks out the same slot in many similar folders at once.</p>"
+      "content": "<p>Access to a context is through a <strong>MIB view</strong>, which details a specific set of managed object types, and optionally the specific instances of object types, within that context. For a given context there will typically always be one MIB view giving access to all the management information in that context, and often other MIB views each containing some subset of it. The access allowed for a group is therefore restricted by specifying its rights in terms of the particular MIB view it can access within each appropriate context.</p><p>Because managed object types and their instances are identified through the tree-like naming structure of object identifiers, it is convenient to define a MIB view as the combination of a set of <strong>view subtrees</strong>, each of which is a subtree within the managed object naming tree. A simple MIB view, such as all the managed objects of the Internet Network Management Framework, can be a single view subtree, while more complicated views, such as everything relevant to one network interface, can be represented by the union of several view subtrees.</p><p>Any set of managed objects can be described by the union of some number of view subtrees, but situations arise that would need a very large number of them. One example is specifying all the columns in one conceptual row of a MIB table, because they appear in separate subtrees, one per column, each with a very similar format. Because the formats are similar, the required set of subtrees can be aggregated into one structure, named a family of view subtrees after the set of subtrees it conceptually represents. A family of view subtrees can either be included or excluded from a MIB view.</p><p>A view subtree is the set of all MIB object instances which have a common object identifier prefix in their names, identified by the object identifier value which is the longest prefix common to all the instances in that subtree. A family of view subtrees pairs an object identifier value, the family name, with a bit string value, the family mask, indicating which sub-identifiers of the family name are significant to the family's definition. A managed object instance belongs to a particular family when its name has at least as many sub-identifiers as the family name, and each sub-identifier of the instance matches the corresponding sub-identifier of the family name whenever the corresponding bit of the family mask is non-zero. When the family mask is all ones, the family is identical to the single view subtree identified by the family name, and a mask shorter than required is implicitly extended with ones, so a family with a zero-length mask always corresponds to a single view subtree.</p>",
+      "plainLanguage": "<p>A view is a list of branches of the tree that names every managed object. To say the group may see the interface counters, you list the branch those counters sit in. When a branch would need listing column by column, a family lets one entry cover several columns at once by naming which parts of the identifier matter.</p>"
     },
     {
-      "id": "procedures",
+      "id": "operation",
       "number": "3",
-      "title": "The isAccessAllowed Procedure",
-      "content": "<p>Applications call an abstract service, <code>isAccessAllowed</code>, with the securityModel, securityName, securityLevel, viewType (read, write or notify), contextName and variableName (the OID of the managed object). It returns a statusInformation value.</p><p>The checks run in order. The <code>vacmContextTable</code> must know the context, otherwise <code>noSuchContext</code> is returned. The <code>vacmSecurityToGroupTable</code> maps securityModel and securityName to a groupName, otherwise <code>noGroupName</code>. The <code>vacmAccessTable</code>, indexed by contextName, groupName, securityModel and securityLevel, must have an entry, otherwise <code>noAccessEntry</code>.</p><p>The entry holds the three views, and the viewType selects one. An empty view name or no configured view gives <code>noSuchView</code>. If the variableName is not in the selected MIB view the result is <code>notInView</code>, and otherwise <code>accessAllowed</code>.</p>",
-      "plainLanguage": "<p>The device asks a series of questions: which room, which team, how well did you prove who you are, and is this item in your allowed list? Any missing answer means no entry.</p>"
+      "title": "The Access Decision",
+      "content": "<p>The access control module is called through a single primitive, <code>isAccessAllowed</code>, taking the security model in use, the security name of the principal who wants access, the level of security, the view type to be checked, the context name containing the variable and the variable name itself. It returns a status that is either success or an error indication.</p><p>The overview describes the decision in six steps. The security model and security name are used as indices into the <code>vacmSecurityToGroupTable</code> to find a single entry that produces a group. The context name, that group, the security model and the security level are then used as indices into the <code>vacmAccessTable</code> to find a single entry containing three MIB views. The view type selects the read, write or notify view from that entry, and the resulting view name is an index into the <code>vacmViewTreeFamilyTable</code>, which selects the entries defining the variable names included in or excluded from the view. Finally the requested variable name is checked to see whether it is in that view, which gives the yes or no answer.</p><p>The processing procedure follows the same order. The <code>vacmContextTable</code> is consulted for the context; if the context is absent, <code>noSuchContext</code> is returned. The <code>vacmSecurityToGroupTable</code> is consulted to map the security model and security name to a group; if the combination is absent, <code>noGroupName</code> is returned. The <code>vacmAccessTable</code> is consulted for the group, context, security model and security level; if that combination is absent, <code>noAccessEntry</code> is returned.</p><p>The view type then selects the read, write or notify view. If the view to be used is the empty view, with a zero-length view name, <code>noSuchView</code> is returned, and the same indication is returned if there is no view configured for the specified view type. If the specified variable name is not in the MIB view, <code>notInView</code> is returned. Otherwise the variable name is in the MIB view and <code>accessAllowed</code> is returned. A failure that is not one of these gives <code>otherError</code>.</p>",
+      "plainLanguage": "<p>The check runs in a fixed order and each step can stop it with a named reason. First look up the context, then the group the caller belongs to, then the access entry for that group, context and security level. From that entry take the list for the kind of operation being done, and look inside it for the object. If it is there, the answer is yes.</p>"
+    },
+    {
+      "id": "management",
+      "number": "4",
+      "title": "The Configuration MIB",
+      "content": "<p>The document defines the SNMP-VIEW-BASED-ACM-MIB, which holds the configuration the model needs. It carries four tables. The <code>vacmContextTable</code> lists the locally available contexts by contextName. The <code>vacmSecurityToGroupTable</code> maps a security model and security name to a group name. The <code>vacmAccessTable</code> holds, for each combination of context name, group name, security model and security level, the three view names for read, write and notify access. The <code>vacmViewTreeFamilyTable</code> holds the entries that define the variable names included in or excluded from each MIB view.</p><p>The MIB also defines a compliance statement, <code>vacmMIBCompliance</code>, and an object group, <code>vacmMIBGroup</code>. Appendix A gives the initial parameters an implementation should be configured with. Three security configurations are possible: <code>initial-minimum-security-configuration</code>, <code>initial-semi-security-configuration</code> and <code>initial-no-access-configuration</code>, the last of which means there is no initial configuration at all. The default context is one entry in the <code>vacmContextTable</code> with a contextName of the empty string, which is created automatically if a default context exists. One entry in the <code>vacmSecurityToGroupTable</code> allows access to the group named <code>initial</code>, with security model 3, which is the User-based Security Model, and a security name of <code>initial</code>. Three entries in the <code>vacmAccessTable</code> then give the initial access rights.</p>",
+      "plainLanguage": "<p>Four tables hold the whole configuration: which contexts exist, which managers belong to which group, what each group may do in each context at each security level, and which branches of the object tree each view covers. Appendix A gives a starter configuration, including one context with an empty name and one group called initial.</p>"
     },
     {
       "id": "security-considerations",
       "number": "7",
       "title": "Security Considerations",
-      "content": "<p>VACM assumes the calling module has already ensured the authentication and privacy that the passed securityLevel implies. When creating or deleting entries in the <code>vacmViewTreeFamilyTable</code>, it is important to follow the sequence recommended in that table's DESCRIPTION clause, otherwise unwanted access may be granted while the entries change.</p><p>The grouping of tuples in the <code>vacmSecurityToGroupTable</code> does not take securityLevel into account, so administrators should use the securityLevel index in the <code>vacmAccessTable</code> to separate <code>noAuthNoPriv</code> from <code>authPriv</code> and <code>authNoPriv</code> access.</p><p>A conformant implementation MUST implement the SNMP-VIEW-BASED-ACM-MIB according to <code>vacmMIBCompliance</code> and SHOULD implement the initial configuration in Appendix A. The MIB's objects control access to all MIB data and may be sensitive, so read and write access to them should be closely controlled.</p>",
-      "plainLanguage": "<p>Change the rulebook in the right order, or someone might briefly get a key they should not have. And keep the rulebook itself locked up, because it controls everything else.</p>"
-    },
-    {
-      "id": "changes",
-      "number": "8",
-      "title": "Changes Since RFC 2275",
-      "content": "<p>RFC 2575 obsoleted <a href='/rfc2275'>RFC 2275</a>. The change log lists mostly clarifications: extra text on when a <code>vacmSecurityToGroupTable</code> entry can be made active, REVISION clauses in the MODULE-IDENTITY, clearer text for the <code>vacmAccessTable</code>, and a DEFVAL clause for <code>vacmAccessContextMatch</code>.</p><p>It also uses the PDU Class terminology instead of RFC 1905 PDU types, and adds section 7.4 on access control to the MIB itself.</p>",
-      "plainLanguage": "<p>This version mostly cleaned up unclear wording and added a note about protecting the rulebook itself.</p>"
+      "content": "<p>The document is meant for use in the SNMP architecture, and the View-based Access Control Model checks access rights to management information based on the contextName, the groupName, the securityModel, the securityLevel, the operation performed on the management information, and the MIB views for read, write or notify access. When the module is called, it is assumed that the calling module has ensured the authentication and privacy aspects specified by the securityLevel being passed.</p><p>Two operational warnings follow. When creating or deleting entries in the <code>vacmViewTreeFamilyTable</code> it is important to do so in the sequence recommended in the DESCRIPTION clause of that table's definition, otherwise unwanted access may be granted while the entries are being changed. And the grouping of securityModel and securityName tuples in the <code>vacmSecurityToGroupTable</code> does not take the securityLevel into account, so it is important that the security administrator uses the securityLevel index in the <code>vacmAccessTable</code> to separate noAuthNoPriv from authPriv and/or authNoPriv access.</p><p>For conformance, an implementation MUST implement the SNMP-VIEW-BASED-ACM-MIB according to the vacmMIBCompliance, and SHOULD implement the initial configuration described in Appendix A. The objects in this MIB control access to all MIB data accessible via the SNMP engine and may be considered sensitive in many environments, so it is important to closely control both read and write access to them using appropriately configured access control models, for example the View-based Access Control Model itself.</p>",
+      "plainLanguage": "<p>Two things can go wrong if the administrator is careless. Changing the list of allowed branches in the wrong order can briefly open up access that was meant to stay closed. And because the grouping of managers ignores the security level, the level must be used to separate weak access from strong access, or a manager that should have had strong protection gets none.</p>"
     }
   ],
   "viz": [
     {
       "type": "compare-table",
-      "anchor": "procedures",
-      "position": "before",
-      "caption": "LOOKUP CHAIN IN THE ACCESS CHECK",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE OUTCOMES OF AN ACCESS CHECK",
       "data": {
         "columns": [
-          "Table",
-          "Looked up by",
-          "Gives"
+          "Outcome",
+          "What it means"
         ],
         "rows": [
           {
             "cells": [
-              "vacmContextTable",
-              "contextName",
-              "Whether the context exists"
+              "accessAllowed",
+              "A MIB view was found and access is granted."
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "notInView",
+              "A MIB view was found but access is denied: the variable is not in the configured view for that type."
             ]
           },
           {
             "cells": [
-              "vacmSecurityToGroupTable",
-              "securityModel, securityName",
-              "groupName"
+              "noSuchView",
+              "No view has been configured for the specified view type."
             ]
           },
           {
             "cells": [
-              "vacmAccessTable",
-              "contextName, groupName, securityModel, securityLevel",
-              "Read, write and notify view names"
+              "noSuchContext",
+              "There is no entry in the context table for the specified context name."
             ]
           },
           {
             "cells": [
-              "vacmViewTreeFamilyTable",
-              "viewName",
-              "Subtrees included in or excluded from the view"
+              "noGroupName",
+              "No entry maps the specified security model and security name to a group."
+            ]
+          },
+          {
+            "cells": [
+              "noAccessEntry",
+              "No entry covers that combination of context, group, security model and security level."
+            ]
+          },
+          {
+            "cells": [
+              "otherError",
+              "An undefined error occurred."
             ]
           }
         ]
       }
     },
     {
-      "type": "opcodes",
-      "anchor": "procedures",
+      "type": "sequence",
+      "anchor": "operation",
       "position": "after",
-      "caption": "RESULTS OF AN ACCESS CHECK",
+      "caption": "ILLUSTRATIVE: HOW AN ACCESS DECISION IS MADE (RFC 2575 SECTION 3)",
       "data": {
-        "items": [
+        "lanes": [
           {
-            "code": "accessAllowed",
-            "label": "Access granted",
-            "desc": "A MIB view was found and the object is in it.",
-            "highlight": true
+            "key": "application",
+            "label": "Application"
           },
           {
-            "code": "notInView",
-            "label": "Denied",
-            "desc": "A view was found but the object is not in it."
+            "key": "access-control",
+            "label": "Access control module"
           },
           {
-            "code": "noSuchView",
-            "label": "No view",
-            "desc": "No view is configured for the requested view type."
+            "key": "config-tables",
+            "label": "Configuration tables"
           },
           {
-            "code": "noSuchContext",
-            "label": "No context",
-            "desc": "No vacmContextTable entry for the contextName."
+            "key": "view-table",
+            "label": "View tree family table"
+          }
+        ],
+        "messages": [
+          {
+            "from": "application",
+            "to": "access-control",
+            "label": "IS ACCESS ALLOWED",
+            "color": "blue",
+            "note": "The application asks whether one operation on one object instance is allowed."
           },
           {
-            "code": "noGroupName",
-            "label": "No group",
-            "desc": "No group configured for the securityModel and securityName."
+            "from": "access-control",
+            "to": "config-tables",
+            "label": "LOOK UP CONTEXT, GROUP, ACCESS ENTRY",
+            "color": "neutral",
+            "note": "Three lookups: the context, the group, and the access entry for that group, context, model and level."
           },
           {
-            "code": "noAccessEntry",
-            "label": "No access entry",
-            "desc": "No vacmAccessTable entry for the combination."
+            "from": "config-tables",
+            "to": "access-control",
+            "label": "VIEW NAME",
+            "color": "neutral",
+            "note": "The access entry names the read, write or notify view to use."
           },
           {
-            "code": "otherError",
-            "label": "Other failure",
-            "desc": "An undefined error occurred."
+            "from": "access-control",
+            "to": "view-table",
+            "label": "IS THE OBJECT IN THE VIEW",
+            "color": "blue",
+            "note": "The view is the set of entries in the view tree family table."
+          },
+          {
+            "from": "view-table",
+            "to": "access-control",
+            "label": "YES OR NO",
+            "color": "green"
+          },
+          {
+            "from": "access-control",
+            "to": "application",
+            "label": "ACCESS ALLOWED OR NOT",
+            "color": "green",
+            "note": "A denial carries the reason: notInView, noSuchView, noSuchContext, noGroupName or noAccessEntry."
           }
         ]
+      }
+    },
+    {
+      "type": "tree",
+      "anchor": "management",
+      "position": "after",
+      "caption": "THE FOUR CONFIGURATION TABLES OF THE SNMP-VIEW-BASED-ACM-MIB",
+      "data": {
+        "root": {
+          "label": "SNMP-VIEW-BASED-ACM-MIB",
+          "children": [
+            {
+              "label": "vacmContextTable",
+              "note": "The contexts available locally, by contextName"
+            },
+            {
+              "label": "vacmSecurityToGroupTable",
+              "note": "Maps a security model and security name to a group"
+            },
+            {
+              "label": "vacmAccessTable",
+              "note": "Per context, group, model and level, the read, write and notify view names"
+            },
+            {
+              "label": "vacmViewTreeFamilyTable",
+              "note": "The entries that define the variable names in or out of each view"
+            }
+          ]
+        }
       }
     }
   ],
   "references": [
     {
       "number": "[RFC2571]",
-      "text": "Harrington, D., Presuhn, R. and B. Wijnen, \"An Architecture for describing SNMP Management Frameworks\", RFC 2571, April 1999.",
+      "text": "Harrington, D., Presuhn, R. and Wijnen, B., \"An Architecture for describing SNMP Management Frameworks\", RFC 2571, April 1999.",
       "rfc": 2571
+    },
+    {
+      "number": "[RFC2572]",
+      "text": "Case, J., Harrington, D., Presuhn, R. and Wijnen, B., \"Message Processing and Dispatching for the Simple Network Management Protocol (SNMP)\", RFC 2572, April 1999.",
+      "rfc": 2572
+    },
+    {
+      "number": "[RFC2574]",
+      "text": "Blumenthal, U. and Wijnen, B., \"User-based Security Model (USM) for version 3 of the Simple Network Management Protocol (SNMPv3)\", RFC 2574, April 1999.",
+      "rfc": 2574
+    },
+    {
+      "number": "[RFC2578]",
+      "text": "McCloghrie, K., Perkins, D. and Schoenwaelder, J., \"Structure of Management Information Version 2 (SMIv2)\", STD 58, RFC 2578, April 1999.",
+      "rfc": 2578
+    },
+    {
+      "number": "[RFC2579]",
+      "text": "McCloghrie, K., Perkins, D. and Schoenwaelder, J., \"Textual Conventions for SMIv2\", STD 58, RFC 2579, April 1999.",
+      "rfc": 2579
     },
     {
       "number": "[RFC2119]",
       "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
       "rfc": 2119
-    },
-    {
-      "number": "[RFC2578]",
-      "text": "McCloghrie, K., Perkins, D. and J. Schoenwaelder, \"Structure of Management Information Version 2 (SMIv2)\", STD 58, RFC 2578, April 1999.",
-      "rfc": 2578
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

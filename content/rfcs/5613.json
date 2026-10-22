@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes a backward-compatible technique for OSPF to exchange arbitrary data between neighbors on a link, called link-local signaling. OSPF packet formats were too rigid for new features, so this adds an extensible block.</p>",
   "plainLanguage": {
-    "summary": "<p>OSPF packets had no spare room for extra notes. This adds a small pocket on the envelope that old readers ignore but new readers can use.</p>"
+    "summary": "<p>OSPF has a fixed set of packet types, each with a fixed layout, so there was nowhere to put information that a new feature wanted to exchange between two neighbouring routers.</p><p>This RFC adds a small optional block at the end of the two packets OSPF already sends while forming an adjacency. Inside the block are numbered triplets, each holding a type, a length and some data. A single bit in the packet header says the block is there, so a router that does not understand it simply ignores it.</p>"
   },
   "questions": [
     "ospf link-local signaling",
@@ -18,154 +18,254 @@
   "tags": [
     "Routing",
     "OSPF",
-    "Extensions"
+    "Link-Local"
   ],
-  "subtitle": "A backward-compatible way to tack extra data onto OSPF Hello and Database Description packets.",
+  "subtitle": "A way for routers on the same link to pass extra information to each other.",
   "tldr": {
-    "problem": "OSPFv2 and OSPFv3 packet formats are fixed and cannot carry new kinds of data between neighbouring routers.",
-    "mechanism": "A router appends an optional block of Type/Length/Value triplets (the LLS block) to Hello and Database Description packets and sets the new L-bit in the Options field to say it is there.",
-    "outcome": "Routers that do not understand LLS ignore the extra block, so new features can be signalled on a link without breaking old routers. This document moves the idea from RFC 4813 (Experimental) to the Standards Track.",
-    "outcomeLabel": "Why it matters"
+    "problem": "OSPF packets have a fixed format, so there was no room for a new feature that needs to exchange arbitrary data between neighbouring routers. A new packet type would have meant more packets on the network and compatibility trouble.",
+    "mechanism": "The RFC adds an optional block of type, length and value triplets to the end of OSPF Hello and Database Description packets. A new bit in the Options field says the block is present, and a checksum covers it.",
+    "outcome": "Neighbours can now exchange small amounts of extra information without changing the protocol or disturbing routers that do not understand it. The block may also be cryptographically authenticated with the same key as the rest of the OSPFv2 packet. The RFC obsoletes the experimental RFC 4813.",
+    "outcomeLabel": "What it adds"
   },
   "facts": [
     {
-      "label": "Carried by",
-      "value": "Hello and Database Description packets only"
+      "label": "LLS block header",
+      "value": "A checksum and a length field, 16 bits each"
     },
     {
-      "label": "Block header",
-      "value": "16-bit Checksum, 16-bit LLS Data Length"
+      "label": "LLS data length unit",
+      "value": "32-bit words"
     },
     {
-      "label": "EOF TLV",
-      "value": "Type 1, 4-byte Value"
+      "label": "Extended Options and Flags value size",
+      "value": "4 bytes"
     },
     {
-      "label": "CA-TLV",
-      "value": "Type 2, OSPFv2 only"
+      "label": "Extended Options and Flags type",
+      "value": "1"
     },
     {
-      "label": "Private TLV types",
-      "value": "32768-65535"
+      "label": "Cryptographic Authentication type",
+      "value": "2"
+    },
+    {
+      "label": "Private use type range",
+      "value": "32768 to 65535"
     }
   ],
-  "today": "<p>RFC 5613 is a Proposed Standard that obsoletes the Experimental <a href='/rfc4813'>RFC 4813</a>, adding OSPFv3 support and requiring private TLVs to use a private enterprise code. No later RFC is recorded as obsoleting or updating it.</p>",
+  "today": "<p>RFC 5613 is a Proposed Standard from August 2009. It obsoletes <a href='/rfc4813'>RFC 4813</a>, bringing the experimental link-local signaling specification onto the Standards Track, and it has not itself been obsoleted or updated.</p>",
   "glossary": [
     "type-length-value",
     "link-state-routing",
     "link-state-advertisement",
     "internet-checksum",
     "replay-protection",
-    "ipsec"
+    "ipsec",
+    "ospf",
+    "link-local-signaling",
+    "tlv-encoding",
+    "mtu",
+    "authentication-method"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why OSPF Needs Link-Local Signaling",
-      "content": "<p>OSPF routers on the same link talk using packets with a fixed, well-defined format. <a href='/rfc2328'>RFC 2328</a> (OSPFv2) and <a href='/rfc5340'>RFC 5340</a> (OSPFv3) leave no room in those formats for new kinds of data. <strong>Link-local signaling</strong> (LLS) is the fix: an optional block of data appended to existing OSPF packets, made of Type/Length/Value (TLV) triplets.</p><p>The RFC considers and sets aside the obvious alternative, a brand new packet type. That would add extra packets to the network and could cause backward compatibility problems. Reusing the standard packet types avoids both.</p>",
-      "plainLanguage": "<p>The old OSPF letters had no space for a postscript. This idea lets a router staple a small extra page to the letter that only newer routers read.</p>"
+      "title": "Why OSPF Needed a Way to Carry Extra Data",
+      "content": "<p>OSPF is a link-state intra-domain routing protocol. Its routers exchange information on a link using packets that follow a well-defined fixed format. That format is not flexible enough to enable new features that need to exchange arbitrary data.</p><p>The document describes a backward-compatible technique to perform link-local signaling, that is, to exchange arbitrary data on a link. One potential way of solving the task could be introducing a new packet type, but that would mean introducing extra packets on the network that may not be desirable and may cause backward compatibility issues. The document therefore describes how to exchange data using standard OSPF packet types.</p><p>The extension applies to both OSPFv2 and OSPFv3. Throughout the document, OSPF is used when the text applies to both, and OSPFv2 or OSPFv3 when the text is protocol specific. The document does not specify how the data transmitted by the mechanism should be interpreted by OSPF routers, and it notes that routers that do not understand LLS may receive these packets, and that changes made because of the block's triplets do not affect basic routing when interacting with those routers.</p>",
+      "plainLanguage": "<p>The rule was that the routing protocol itself must not change. Any new feature has to fit inside the packets OSPF already sends, and a router that has never heard of the feature must carry on working.</p>"
     },
     {
-      "id": "overview",
+      "id": "design",
       "number": "2",
-      "title": "Attaching the LLS Block",
-      "content": "<p>A router adds the LLS block to the end of an OSPF packet, or right after the authentication data when cryptographic authentication is used. The block's length is <em>not</em> counted in the OSPF packet length, but it is counted in the IPv4 or IPv6 packet length.</p><p>The block <code>MAY</code> be attached to Hello and Database Description (DD) packets only. It <code>MUST NOT</code> be attached to any other OSPF packet type, and it must be ignored if received on one.</p><p>The two carriers behave differently. Data in a Hello can be sent at any time, so it suits dynamic signaling, but its delivery is not guaranteed. Data in DD packets is guaranteed to arrive as part of forming an adjacency.</p><p>The RFC does not say how routers should interpret LLS data. Because routers without LLS support just ignore the block, changes driven by LLS TLVs do not affect basic routing when talking to such routers.</p>",
-      "plainLanguage": "<p>The extra page goes only on two kinds of letters, the hello letters and the introduction letters. Hello letters can be sent any time but might get lost. Introduction letters always get through.</p>"
+      "title": "The LLS Data Block and the L-Bit",
+      "content": "<p>To perform link-local signaling, OSPF routers add a special data block to the end of OSPF packets, or right after the authentication data block when cryptographic authentication is used. The length of the LLS block is not included in the length of the OSPF packet, but it is included in the IPv4 or IPv6 packet length.</p><p>The block may be attached to OSPF Hello and Database Description packets. It must not be attached to any other OSPF packet types on generation, and must be ignored on reception.</p><p>The data included in a Hello packet may be used for dynamic signaling, since Hello packets may be sent at any time, but delivery of LLS data in Hello packets is not guaranteed. The data sent with Database Description packets is guaranteed to be delivered as part of the adjacency forming process.</p><p>A new L-bit, where L stands for LLS, is introduced into the OSPF Options field. Routers set it in Hello and Database Description packets to indicate that the packet contains an LLS data block, so the block is only examined if the bit is set. The bit must not be set except in Hello and Database Description packets that contain such a block.</p><p>The block itself begins with a checksum field holding the standard IP checksum for the entire contents of the block, computed after setting the checksum field to zero. If the checksum is incorrect, the OSPF packet must be processed, but the LLS block must be discarded. The 16-bit LLS Data Length field holds the length of the block, including header and payload, in 32-bit words. If the OSPF packet is cryptographically authenticated, the LLS block must also be cryptographically authenticated; in that case the regular checksum is not calculated and is set to zero instead.</p>",
+      "plainLanguage": "<p>The block rides along in the two packets used while an adjacency comes up. The Hello packet is cheap to send at any moment but its contents may be lost, while the database description packet is guaranteed to arrive during the handshake.</p>"
     },
     {
-      "id": "header-format",
-      "number": "3",
-      "title": "The L-bit and the LLS Block Format",
-      "content": "<p>A new <strong>L-bit</strong> in the OSPF Options field tells a receiver that the packet carries an LLS block. The block is only examined if the L-bit is set, and the L-bit <code>MUST NOT</code> be set except in Hello and DD packets that actually contain an LLS block.</p><p>The block starts with a 16-bit <code>Checksum</code> and a 16-bit <code>LLS Data Length</code>, followed by the TLVs. The checksum is the standard IP checksum over the whole block, computed with the checksum field set to 0. If it is wrong, the OSPF packet is still processed but the LLS block is discarded. The length is counted in 32-bit words and includes the header.</p><p>If the OSPF packet is cryptographically authenticated, the LLS block must be authenticated too. In that case the regular checksum is not calculated and is set to 0.</p>",
-      "plainLanguage": "<p>A little flag on the envelope says there is an extra page inside. The extra page begins with a quick check number and a note saying how long it is.</p>"
-    },
-    {
-      "id": "data-model",
-      "number": "4",
-      "title": "TLVs and the Two Defined Types",
-      "content": "<p>Each TLV has a 16-bit <code>Type</code>, a 16-bit <code>Length</code> (the length of the Value in bytes) and a variable <code>Value</code>. TLVs are padded to a 32-bit boundary. The padding is not counted in the TLV Length but is counted in the LLS Data Length. Unrecognized TLV types are ignored.</p><p>The <strong>Extended Options and Flags</strong> (EOF) TLV has type 1 and a 4-byte Value. Its bits have no meaning to the LLS mechanism itself; they may be allocated to announce link-local capabilities or to do boolean signaling. It <code>MUST</code> appear only once in the block. The RFC notes that the out-of-band LSDB resynchronization (<a href='/rfc4811'>RFC 4811</a>) and restart signaling (<a href='/rfc4812'>RFC 4812</a>) specifications use bits in it.</p><p>Type values 32768 to 65535 are for private use. The first four octets of the Value of a private TLV <code>MUST</code> be the private enterprise code, so several vendors' extensions can coexist in one network.</p>",
-      "plainLanguage": "<p>The extra page is a list of small labelled notes. Each note says what kind it is, how long it is, and then gives the message. A router just skips notes it does not know.</p>"
+      "id": "message-format",
+      "number": "2.3",
+      "title": "The Type/Length/Value Triplets",
+      "content": "<p>The contents of an LLS data block are constructed using triplets, each with a Type field, a Length field and a Value field. The Type field contains the TLV identifier, which is unique for each type of TLV. The Length field contains the length of the Value field in bytes. The Value field is variable and contains arbitrary data.</p><p>All TLVs must be 32-bit aligned, with padding if necessary. TLVs are always padded to a 32-bit boundary, but the padding bytes are not included in the TLV Length field, though they are included in the LLS Data Length field in the block header. Unrecognized TLV types are ignored.</p><p>One TLV is defined by this document for announcing capabilities and signalling. The Extended Options and Flags TLV has a Type value of 1 and a Value field of 4 bytes, and it must only appear once in the block. Bits in its value have no meaning to the link-local signaling mechanism itself, but bits may be allocated to announce OSPF link-local capabilities, and bits may also be allocated to perform boolean link-local signaling. Two such bits are assigned: the LSDB Resynchronization bit at 0x00000001 and the Restart Signal bit at 0x00000002.</p><p>LLS type values in the range of 32768 to 65535 are reserved for private use, and the first four octets of the Value field must be the private enterprise code, which allows multiple vendor extensions to coexist in a network. The criteria for allocating LLS TLVs are that LLS should not be used for information that would be better suited to a link-local link state advertisement, that LLS should be confined to signaling between direct neighbours, and that discretion should be used in the volume of information signalled because of the obvious MTU and performance implications.</p>",
+      "plainLanguage": "<p>Inside the block is a list of small numbered records. Each one says what it is, how long it is, and holds the data. A router that meets a record it does not know skips it and carries on.</p>"
     },
     {
       "id": "authentication",
-      "number": "5",
-      "title": "Cryptographic Authentication TLV",
-      "content": "<p>For OSPFv2 only, type 2 defines the <strong>CA-TLV</strong>, used when cryptographic authentication is enabled on the interface. The message digest of the LLS block is computed with the same key and algorithm as the OSPFv2 packet.</p><p>The TLV carries a cryptographic sequence number that prevents simple replay attacks. It <code>MUST</code> match the sequence number in the OSPFv2 packet header Authentication field, or the whole LLS block <code>MUST</code> be ignored. The same applies if authentication fails.</p><p>The CA-TLV must not appear more than once and, when present, must be the last TLV. The digest covers the LLS block up to, but not including, the AuthData field. It does not apply to OSPFv3 and <code>MUST NOT</code> be added to OSPFv3 packets; if found, it is ignored.</p>",
-      "plainLanguage": "<p>To prove the extra page was not tampered with, the router signs it with the same secret stamp it uses on the letter, and writes down the letter's serial number so the two can be matched.</p>"
-    },
-    {
-      "id": "iana-considerations",
-      "number": "6",
-      "title": "IANA Registries and Allocation Rules",
-      "content": "<p>The document reuses the LLS TLV registry created by <a href='/rfc4813'>RFC 4813</a> and points it at this RFC. IANA also allocated the L-bit in the OSPFv2 and OSPFv3 Options registries. TLV type 0 is reserved, 1 is the Extended Options and Flags TLV, 2 is the Cryptographic Authentication TLV, 3 to 32767 are reserved for IANA assignment, and 32768 to 65535 are private use.</p><p>Types 0 to 32767 are allocated through IETF Review, and new TLV types and new EOF bits must be reviewed by a Designated Expert from the routing area. Two EOF bits are assigned: <code>0x00000001</code> for LSDB Resynchronization (LR) and <code>0x00000002</code> for the Restart Signal (RS-bit).</p><p>The allocation criteria are advice to future authors. LLS should not carry information better advertised in a link-local LSA, should stay between direct neighbours, and should be used sparingly because of MTU and performance implications.</p>",
-      "plainLanguage": "<p>There is an official list of note types so that nobody reuses the same number for different things. A few numbers are saved for companies to use privately.</p>"
+      "number": "2.5",
+      "title": "Authenticating the Block",
+      "content": "<p>A special TLV is used for cryptographic authentication of the LLS data block in OSPFv2. This TLV must only be included in the LLS block when cryptographic authentication is enabled on the corresponding interface. The message digest of the LLS block must be calculated using the same key and authentication algorithm as used for the OSPFv2 packet. The cryptographic sequence number is included in the TLV and must be the same as the one in the OSPFv2 authentication data for the LLS block to be considered authentic.</p><p>The TLV holds a Type value of 2, a Length field covering the four bytes of the sequence number and the length of the message digest block, the sequence number itself, and the authentication data. The sequence number is the cryptographic sequence number used to prevent simple replay attacks, and for the LLS block to be considered authentic it must match the sequence number in the OSPFv2 packet header authentication field, which must be present. In the event of a sequence number mismatch or an authentication failure, the whole LLS block must be ignored.</p><p>The TLV must not appear more than once in the block, and when present it must be the last TLV in the block. If it appears more than once, only the first occurrence is processed and any others must be ignored. The authentication data contains the message digest calculated for the LLS data block up to the authentication data field itself, which therefore excludes it.</p><p>The TLV is not applicable to OSPFv3 and must not be added to any OSPFv3 packet; if found on reception it must be ignored.</p>",
+      "plainLanguage": "<p>When the link already uses cryptographic authentication, the extra block is signed with the same key, so a neighbour that receives it can be sure nobody tampered with it. The signing record goes last in the block and carries a counter that must match the one in the packet header.</p>"
     },
     {
       "id": "compatibility",
-      "number": "7",
-      "title": "Compatibility and Security",
-      "content": "<p>The change is compatible with standard OSPF because routers that do not support LLS ignore the data after the OSPF packet or after the cryptographic message digest. The RFC notes implementations were already deployed with software compliant with <a href='/rfc4813'>RFC 4813</a>. It also warns that extra LLS data can lengthen OSPF adjacency bring-up because of added propagation or processing time.</p><p>On security, LLS gives the same level of protection as basic OSPFv2, since its data can use the same cryptographic authentication. For OSPFv3, IPsec AH, ESP or both are applied to the whole OSPFv3 payload including the LLS block.</p>",
-      "plainLanguage": "<p>Old routers simply do not look at the extra page, so nothing breaks. The extra page is protected the same way as the letter it rides on.</p>"
+      "number": "4",
+      "title": "Compatibility with Routers That Do Not Know LLS",
+      "content": "<p>The modifications to the OSPF packet formats are compatible with standard OSPF, because routers that do not support LLS will ignore the LLS data block after the OSPF packet or the cryptographic message digest. As of the writing of this document there were implementations deployed with software compliant to the experimental specification; routers not implementing it ignore the LLS data at the end of the OSPF packet.</p><p>Careful consideration should be given to carrying additional LLS data, as it may affect the OSPF adjacency bring-up time due to additional propagation delay and processing time.</p>",
+      "plainLanguage": "<p>An old router reads the packet, stops at the end of what it understands, and ignores the rest. The cost is a little more work and a slightly slower handshake when the block carries a lot of data.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "5",
+      "title": "Security Considerations",
+      "content": "<p>Security considerations inherited from OSPFv2 are described in the OSPFv2 specification. The technique provides the same level of security as the basic OSPFv2 protocol by allowing LLS data to be authenticated using the same cryptographic authentication that OSPFv2 uses.</p><p>Security considerations inherited from OSPFv3 are described in the OSPFv3 and OSPFv3 authentication documents. OSPFv3 uses IPsec for authentication and encryption. With IPsec, the Authentication Header, the Encapsulating Security Payload, or both are applied to the entire OSPFv3 payload including the LLS block.</p>",
+      "plainLanguage": "<p>The extra data gets the same protection as the rest of the protocol. In OSPFv2 that means the same signing key; in OSPFv3 the whole packet, extra block included, is covered by IPsec.</p>"
     }
   ],
   "viz": [
     {
-      "type": "packet",
-      "anchor": "header-format",
+      "type": "code",
+      "anchor": "design",
       "position": "after",
-      "caption": "LLS DATA BLOCK HEADER (RFC 5613)",
+      "caption": "The LLS data block format, as drawn in the RFC",
       "data": {
-        "title": "LLS data block",
-        "bytes": 4,
-        "width": 32,
-        "fields": [
+        "title": "Format of the LLS data block",
+        "lang": "text",
+        "code": "    0                   1                   2                   3\n    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1\n    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n    |            Checksum           |       LLS Data Length         |\n    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+\n    |                                                               |\n    |                           LLS TLVs                            |\n    .                                                               .\n    .                                                               .\n    .                                                               .\n    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "The parts of a triplet inside the block",
+      "data": {
+        "items": [
           {
-            "key": "checksum",
-            "name": "Checksum",
-            "bits": 16,
-            "desc": "Standard IP checksum over the whole LLS block, computed with this field set to 0."
+            "title": "Type",
+            "text": "The identifier of the triplet, unique for each type."
           },
           {
-            "key": "lls-length",
-            "name": "LLS Data Length",
-            "bits": 16,
-            "desc": "Length of the block including header and payload, in 32-bit words."
+            "title": "Length",
+            "text": "The length of the Value field, in bytes."
+          },
+          {
+            "title": "Value",
+            "text": "Variable, and holds arbitrary data."
+          },
+          {
+            "title": "32-bit alignment",
+            "text": "All triplets must be 32-bit aligned, with padding if necessary."
+          },
+          {
+            "title": "Padding is not counted",
+            "text": "Padding bytes are not included in the Length field, though they are included in the LLS Data Length field."
+          },
+          {
+            "title": "Unknown types are ignored",
+            "text": "Unrecognized triplet types are ignored by the receiver."
           }
         ]
       }
     },
     {
       "type": "opcodes",
-      "anchor": "iana-considerations",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "LLS TLV TYPES (RFC 5613)",
+      "caption": "The triplet types this document assigns",
       "data": {
         "items": [
           {
             "code": "0",
             "label": "Reserved",
-            "desc": "Not assigned."
+            "desc": "Not assigned to anything."
           },
           {
             "code": "1",
             "label": "Extended Options and Flags",
-            "desc": "4-byte Value of capability and signaling bits."
+            "desc": "A 4-byte value carrying link-local capability and signal bits. Must appear only once.",
+            "highlight": true
           },
           {
             "code": "2",
             "label": "Cryptographic Authentication",
-            "desc": "OSPFv2 only; carries sequence number and digest."
+            "desc": "Authenticates the LLS block. Defined for OSPFv2 only."
           },
           {
             "code": "3-32767",
             "label": "Reserved for IANA",
-            "desc": "Allocated through IETF Review."
+            "desc": "Allocated through IETF review."
           },
           {
             "code": "32768-65535",
-            "label": "Private Use",
-            "desc": "Value starts with a private enterprise code."
+            "label": "Private use",
+            "desc": "The first four octets of the value must be the private enterprise code."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "The bits assigned inside the Extended Options and Flags triplet",
+      "data": {
+        "items": [
+          {
+            "code": "0x00000001",
+            "label": "LSDB Resynchronization",
+            "desc": "The link-state database resynchronization bit.",
+            "highlight": true
+          },
+          {
+            "code": "0x00000002",
+            "label": "Restart Signal",
+            "desc": "The restart signal bit."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "The rules for signing the block",
+      "data": {
+        "items": [
+          {
+            "title": "Same key and algorithm",
+            "text": "The message digest of the LLS block must be calculated using the same key and authentication algorithm as the OSPFv2 packet."
+          },
+          {
+            "title": "The sequence number must match",
+            "text": "The cryptographic sequence number in the triplet must be the same as the one in the OSPFv2 packet header authentication field, or the block is not authentic."
+          },
+          {
+            "title": "Mismatch discards the block",
+            "text": "On a sequence number mismatch or an authentication failure, the whole LLS block must be ignored."
+          },
+          {
+            "title": "Last in the block",
+            "text": "The authentication triplet must not appear more than once, and when present it must be the last one in the block."
+          },
+          {
+            "title": "Not for OSPFv3",
+            "text": "It is not applicable to OSPFv3 and must not be added to any OSPFv3 packet; if found on reception it must be ignored."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "compatibility",
+      "position": "after",
+      "caption": "What happens when the neighbour is old",
+      "data": {
+        "items": [
+          {
+            "title": "Old routers skip it",
+            "text": "Routers that do not support LLS ignore the data block after the OSPF packet or the cryptographic message digest."
+          },
+          {
+            "title": "The earlier experiment",
+            "text": "Implementations of the experimental specification were already deployed, and routers without it ignore the LLS data at the end of the packet."
+          },
+          {
+            "title": "Routing is unaffected",
+            "text": "Changes made because of the block do not affect basic routing when interacting with routers that do not understand LLS."
+          },
+          {
+            "title": "It is not free",
+            "text": "Carrying extra LLS data may slow adjacency bring-up because of additional propagation delay and processing time."
           }
         ]
       }
@@ -173,27 +273,27 @@
   ],
   "references": [
     {
-      "number": "[OSPFV2]",
+      "number": "[RFC2328]",
       "text": "Moy, J., \"OSPF Version 2\", STD 54, RFC 2328, April 1998.",
       "rfc": 2328
     },
     {
-      "number": "[OSPFV3]",
+      "number": "[RFC5340]",
       "text": "Coltun, R., Ferguson, D., Moy, J., and A. Lindem, \"OSPF for IPv6\", RFC 5340, July 2008.",
       "rfc": 5340
     },
     {
-      "number": "[OSPFV3AUTH]",
+      "number": "[RFC4552]",
       "text": "Gupta, M. and N. Melam, \"Authentication/Confidentiality for OSPFv3\", RFC 4552, June 2006.",
       "rfc": 4552
     },
     {
-      "number": "[OOB]",
+      "number": "[RFC4811]",
       "text": "Nguyen, L., Roy, A., and A. Zinin, \"OSPF Out-of-Band Link State Database (LSDB) Resynchronization\", RFC 4811, March 2007.",
       "rfc": 4811
     },
     {
-      "number": "[RESTART]",
+      "number": "[RFC4812]",
       "text": "Nguyen, L., Roy, A., and A. Zinin, \"OSPF Restart Signaling\", RFC 4812, March 2007.",
       "rfc": 4812
     },
@@ -201,15 +301,20 @@
       "number": "[RFC4813]",
       "text": "Friedman, B., Nguyen, L., Roy, A., Yeung, D., and A. Zinin, \"OSPF Link-Local Signaling\", RFC 4813, March 2007.",
       "rfc": 4813
+    },
+    {
+      "number": "[RFC5226]",
+      "text": "Narten, T. and H. Alvestrand, \"Guidelines for Writing an IANA Considerations Section in RFCs\", BCP 26, RFC 5226, May 2008.",
+      "rfc": 5226
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-20",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-20"
 }

@@ -15,13 +15,15 @@
   "obsoletes": "RFC 6555",
   "summary": "<p>Hostnames often resolve to several IP addresses, and some addresses or address families may be broken or slow. Happy Eyeballs version 2 lets clients try multiple connections concurrently, with short delays, so users get a working, fast connection quickly. It updates the idea from the original specification.</p>",
   "plainLanguage": {
-    "summary": "<p>If two doors might be locked, you try one, and if it is slow, try the other soon after. You use whichever opens first.</p>"
+    "summary": "<p>When a program connects to a server by name, the name can point to several addresses, and some of them may be broken or slow. Happy Eyeballs version 2 starts several connection attempts a short time apart and keeps the first one that works, so a user does not wait for a slow address to time out.</p>"
   },
   "questions": [
     "what is happy eyeballs",
     "how to choose between ipv4 and ipv6 quickly",
     "what is the happy eyeballs resolution delay",
-    "what is the connection attempt delay in happy eyeballs"
+    "what is the connection attempt delay in happy eyeballs",
+    "how does happy eyeballs sort addresses",
+    "how long does happy eyeballs wait between connection attempts"
   ],
   "tags": [
     "Transport",
@@ -30,9 +32,9 @@
   ],
   "subtitle": "Race connection attempts to IPv6 and IPv4 addresses with short delays so users get a working connection fast.",
   "tldr": {
-    "problem": "A hostname often resolves to several addresses, and some addresses or address families may be blocked, broken or slow, so a client that tries them one at a time can leave users waiting.",
-    "mechanism": "The client sends AAAA and A queries asynchronously, sorts the resulting addresses, interleaves address families and starts connection attempts one after another with short delays, keeping the first to succeed.",
-    "outcome": "It obsoletes the original algorithm description in RFC 6555 and adds DNS handling, multi-address lists, historical data and support for IPv6-only networks with NAT64 and DNS64.",
+    "problem": "A hostname often resolves to several IP addresses, and an address or a whole address family may be blocked, broken or slow, so a client that tries them one at a time leaves users waiting.",
+    "mechanism": "The client sends AAAA and A queries at the same time, sorts the addresses it receives, interleaves the address families and starts connection attempts one after another with short delays, keeping the first attempt that succeeds.",
+    "outcome": "The algorithm obsoletes the original description in RFC 6555 and adds DNS handling, several addresses per family, historical data and support for IPv6-only networks. Its delay values were measured on production devices and are expected to change over time.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -46,22 +48,22 @@
     },
     {
       "label": "Minimum Connection Attempt Delay",
-      "value": "100 milliseconds"
+      "value": "100 milliseconds, never less than 10 milliseconds"
     },
     {
       "label": "Maximum Connection Attempt Delay",
       "value": "2 seconds"
     },
     {
-      "label": "Hard floor between attempts",
-      "value": "10 milliseconds"
+      "label": "First Address Family Count",
+      "value": "1 (2 may be used)"
     },
     {
-      "label": "Obsoletes",
-      "value": "RFC 6555"
+      "label": "Last Resort Local Synthesis Delay",
+      "value": "2 seconds"
     }
   ],
-  "today": "<p>RFC 8305 is a Proposed Standard and obsoletes <a href='/rfc6555'>RFC 6555</a>. The metadata for this unit lists no later RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 8305 is a Proposed Standard published in December 2017. It obsoletes <a href='/rfc6555'>RFC 6555</a>, and no later RFC is recorded as obsoleting or updating it. The RFC states that the approach has been deployed at scale and measured for several years.</p>",
   "glossary": [
     "dns",
     "ipv4",
@@ -72,97 +74,209 @@
     "ttl",
     "happy-eyeballs",
     "dual-stack",
-    "nat64"
+    "nat64",
+    "address-family",
+    "dns64",
+    "round-trip-time"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem and the Idea",
-      "content": "<p>Many protocols use hostnames, and a hostname often resolves to multiple IP addresses with different performance and connectivity. Specific addresses or address families (IPv4 or IPv6) may be blocked, broken or sub-optimal on a network, so a client that attempts several connections in parallel has a chance of connecting more quickly.</p><p>RFC 8305 specifies requirements for algorithms that reduce this user-visible delay and gives an example algorithm called <strong>Happy Eyeballs</strong>, a technique for dual-stack hosts. It obsoletes the original description in <a href='/rfc6555'>RFC 6555</a>, refined now that the approach has been deployed at scale and measured for several years, in the RFC's words. It assumes a host preference for IPv6 over IPv4 and says the recommendations are easy to adapt if the host prefers otherwise.</p>",
-      "plainLanguage": "<p>When a website has more than one way to reach it, some ways may be broken. Happy Eyeballs quietly tries more than one so you do not sit waiting on a broken one.</p>"
+      "title": "Why Connections to a Name Are Slow",
+      "content": "<p>Many protocols on the modern Internet use hostnames, and a hostname often resolves to several IP addresses. Each of those addresses can have different performance and connectivity characteristics. Because specific addresses, or whole address families such as IPv4 or IPv6, may be blocked, broken or sub-optimal on a network, a client that attempts multiple connections in parallel has a chance of establishing a connection more quickly.</p><p>This document specifies requirements for algorithms that reduce the delay the user sees and provides an example algorithm. The method is called the <strong>Happy Eyeballs Connection Setup</strong>. It obsoletes the original description in <a href='/rfc6555'>RFC 6555</a>: now that the approach has been deployed at scale and measured for several years, the algorithm specification could be refined to improve its reliability and general applicability.</p><p>The algorithm has several stages, to avoid delays to the user whenever possible while preferring the use of IPv6. The document covers how to handle DNS queries when starting a connection on a dual-stack client, how to create an ordered list of destination addresses, and how to race the connection attempts.</p>",
+      "plainLanguage": "<p>A server name can point to several addresses, and on some networks one of them, or one whole kind of address, is broken or slow. Starting a single attempt and waiting for it to fail leaves the user waiting. This RFC starts several attempts a short time apart instead.</p>"
     },
     {
       "id": "overview",
       "number": "2",
       "title": "The Four Phases",
-      "content": "<p>The \"Happy Eyeballs Connection Setup\" has four phases: start asynchronous DNS queries, sort the resolved destination addresses, start asynchronous connection attempts, and establish one connection, which cancels all other attempts.</p><p>The goal is to avoid delaying the user whenever possible while still preferring IPv6.</p>",
-      "plainLanguage": "<p>Ask for the addresses, put them in a sensible order, try them one by one with short pauses, and stop as soon as one works.</p>"
+      "content": "<p>The RFC divides connection establishment into four phases: initiation of asynchronous DNS queries (Section 3), sorting of the resolved destination addresses (Section 4), initiation of asynchronous connection attempts (Section 5), and the establishment of one connection, which cancels all other attempts.</p><p>The document assumes that the preference policy for the host destination address favors IPv6 over IPv4. IPv6 has many desirable properties designed to be improvements over IPv4, as described in <a href='/rfc8200'>RFC 8200</a>. If the host is configured to have a different preference, the recommendations in the document can be easily adapted.</p>",
+      "plainLanguage": "<p>Setting up a connection happens in four steps: ask for addresses, put them in order, start trying them, and stop when one works. The method prefers IPv6, and a host that prefers something else can adapt the steps.</p>"
     },
     {
       "id": "resolution",
       "number": "3",
-      "title": "Handling DNS Queries",
-      "content": "<p>A client with both IPv4 and IPv6 connectivity sends both an AAAA query and an A query as close together as possible, AAAA first. It SHOULD NOT wait for both answers: DNS resolution should be asynchronous, and if the platform has no asynchronous DNS API the behaviour can be simulated with two synchronous queries on different threads.</p><p>If a positive AAAA answer arrives first, the first IPv6 attempt starts immediately. If a positive A answer arrives first, the client SHOULD wait a short <strong>Resolution Delay</strong>, recommended at 50 milliseconds, for the AAAA answer so IPv6 keeps its preference. If no usable AAAA answer arrives by then, the client moves on with the IPv4 addresses it has. If the AAAA answer shows up later but before any connection is established, its addresses join the candidate list.</p><p>For DNS servers themselves, queries SHOULD go over IPv6 first; an IPv6 server address that gets no response may be marked penalized. Clients SHOULD NOT impose an explicit limit on the number of configured DNS servers, and if hardware forces one they SHOULD keep at least one address from each family.</p>",
-      "plainLanguage": "<p>You ask two questions at once, \"what is its newer address?\" and \"what is its older address?\". If the older answer comes back first, you wait a tiny moment to see if the newer one follows.</p>"
+      "title": "Asking for Addresses",
+      "content": "<p>A client with both IPv4 and IPv6 connectivity needs to send out both an AAAA and an A DNS query. Both queries SHOULD be made as soon after one another as possible, with the AAAA query made first and immediately followed by the A query.</p><p>Implementations SHOULD NOT wait for both families of answers to return before attempting connection establishment. If one query fails to return or takes significantly longer, waiting for the second address family can significantly delay a connection that the first family could have made. The client SHOULD therefore treat DNS resolution as asynchronous. If the platform has no asynchronous DNS API, the same behavior can be simulated with two separate synchronous queries on different threads, one per address family.</p><p>If a positive AAAA response, a response with at least one valid AAAA record, is received first, the first IPv6 connection attempt is immediately started. If a positive A response is received first because the answers were reordered, the client SHOULD wait a short time for the AAAA response so that preference is given to IPv6; it is common for the AAAA response to follow the A response by a few milliseconds. This wait is the <strong>Resolution Delay</strong>, and the recommended value is 50 milliseconds. A positive AAAA response within that period starts the IPv6 attempt at once. A negative AAAA response, no error and no data, or no AAAA response by the end of the period, means the client SHOULD proceed to sorting and staggered attempts using the IPv4 addresses returned so far. If the AAAA response arrives while those attempts are running, the new IPv6 addresses are added to the candidate list and the attempts continue with them.</p><p>Section 3.1 adds a rule for the DNS servers themselves. When several DNS server addresses are configured for the current network, queries SHOULD be sent over IPv6 first, meaning the address family used to carry the DNS message, not the type of query. An address that gives no response may be marked as penalized, and queries can be sent to other DNS server addresses. Client systems SHOULD NOT have an explicit limit on the number of DNS servers that can be configured; if hardware limitations require one, the client SHOULD use at least one address from each address family.</p>",
+      "plainLanguage": "<p>The client asks for both kinds of address at once, IPv6 first, and does not wait for both answers before it starts connecting. If the IPv4 answer comes back first, it waits 50 milliseconds to give IPv6 a chance. If IPv6 does not answer in that time, the client starts with the addresses it already has.</p>"
     },
     {
-      "id": "algorithms",
+      "id": "addressing",
       "number": "4",
-      "title": "Sorting Addresses",
-      "content": "<p>Before connecting, the client orders the addresses it has from both families. It MUST first sort them using Destination Address Selection from <a href='/rfc6724'>RFC 6724</a>. A stateful client with round-trip time history SHOULD add a rule between rules 8 and 9 preferring lower RTTs, and a client that tracks past use SHOULD add another rule preferring addresses it used before. That helps servers that use the client address during authentication, as with TCP Fast Open and some HTTP cookies. Such history MUST NOT be used across different network interfaces and SHOULD be flushed when the device changes network.</p><p>The client SHOULD then interleave the families: if the first address is IPv6, the first IPv4 address moves to second place. An implementation MAY favour a family by trying more than one of its addresses first; that number is the <strong>First Address Family Count</strong>. Interleaving avoids waiting through a long list of one family when it is impaired. Source address selection is out of scope.</p>",
-      "plainLanguage": "<p>You line up the doors, taking turns between the two kinds, so one broken kind cannot hold you up for long.</p>"
+      "title": "Putting the Addresses in Order",
+      "content": "<p>Before attempting to connect, the client defines the order in which to start the attempts. The ordered list SHOULD involve all addresses from both families received by that point, so that the client gets the racing effect for the entire list and not just for the first IPv4 and first IPv6 addresses.</p><p>The client MUST sort the addresses with Destination Address Selection, from Section 6 of <a href='/rfc6724'>RFC 6724</a>. A client that is stateful and has a history of expected round-trip times SHOULD add a Destination Address Selection rule between rules 8 and 9 that prefers addresses with lower round-trip times. A client that keeps track of the addresses it used in the past SHOULD add another rule, between the round-trip-time rule and rule 9, that prefers used addresses over unused ones. That helps servers that use the client's IP address during authentication, as in TCP Fast Open and some HTTP cookies. This historical data MUST NOT be used across different network interfaces and SHOULD be flushed whenever a device changes the network it is attached to.</p><p>The client SHOULD then interleave the address families: whichever family is first in the sorted list should be followed by an address of the other family. An implementation MAY favor one family more by allowing several addresses of that family to be attempted first, and the number of contiguous addresses of the first family is the <strong>First Address Family Count</strong>. The reason for interleaving is to avoid waiting through a long list of addresses from one family when connectivity over that family is impaired.</p><p>The address selection described here applies only to destination addresses. Source Address Selection, Section 5 of RFC 6724, is performed once per destination address and is out of scope.</p>",
+      "plainLanguage": "<p>The client sorts the addresses it has, then arranges them so that the two kinds alternate. A broken kind therefore cannot hold up the whole list. If it remembers past connections, it can also put addresses it has used before at the front.</p>"
     },
     {
-      "id": "connection-management",
+      "id": "operation",
       "number": "5",
-      "title": "Staggered Connection Attempts",
-      "content": "<p>To avoid unreasonable network load, connection attempts SHOULD NOT start all at once. One attempt starts first, then the others one at a time, and earlier attempts keep running. When one attempt succeeds, generally when the TCP handshake completes, all others SHOULD be cancelled and untried addresses ignored. The resolver SHOULD still process DNS replies for a short time, recommended at 1 second, to fill the cache.</p><p>The wait between attempts is the <strong>Connection Attempt Delay</strong>, with a recommended default of 250 milliseconds. A more nuanced client can aim for the moment the previous attempt sends its second TCP SYN, using the retransmission timer from <a href='/rfc6298'>RFC 6298</a>. The delay MUST have a lower bound: a new attempt MUST NOT start within 10 milliseconds of the previous one, and the recommended Minimum Connection Attempt Delay is 100 milliseconds, to avoid congestion collapse under high packet loss. It SHOULD have an upper bound, with a recommended Maximum Connection Attempt Delay of 2 seconds.</p><p>If DNS answers change during setup, an address removed after its attempt started is left to continue, one removed before is dropped from the list, and an added address is sorted into the not-yet-attempted addresses by the rules above.</p>",
-      "plainLanguage": "<p>You try the first door, and if it has not opened after a short wait you try the second while still pushing on the first. The moment one opens, you stop trying the rest.</p>"
+      "title": "Racing the Connection Attempts",
+      "content": "<p>Once the list of addresses has been constructed, the client attempts connections. Connection attempts SHOULD NOT be made simultaneously, to avoid unreasonable network load. One attempt to a single address is started first, followed by the others in the list, one at a time. Starting a new attempt does not affect previous attempts, so several attempts may occur in parallel.</p><p>Once one attempt succeeds, generally when the TCP handshake completes, all other attempts that have not yet succeeded SHOULD be canceled, and any address not yet attempted SHOULD be ignored. The asynchronous DNS query MAY then be canceled, since new addresses will not be used for this connection. The DNS client resolver SHOULD still process DNS replies from the network for a short period, recommended to be 1 second, because they populate the DNS cache and can be used for subsequent connections.</p><p>The wait before the next attempt is the <strong>Connection Attempt Delay</strong>. A simple implementation uses a fixed delay, and one recommended default is 250 milliseconds. A more nuanced implementation should base its delay on the time when the previous attempt sends its second TCP SYN, following the TCP retransmission timer of <a href='/rfc6298'>RFC 6298</a>, and should only approximate that first retransmission rather than later ones, which are influenced by exponential backoff. Historical round-trip data from other connections to the same host or prefix can also influence the delay.</p><p>The delay MUST have a lower bound: a subsequent connection MUST NOT be started within 10 milliseconds of the previous attempt. The recommended minimum is 100 milliseconds, the <strong>Minimum Connection Attempt Delay</strong>, and that minimum is required to avoid congestion collapse in the presence of high packet-loss rates. The delay SHOULD also have an upper bound, the <strong>Maximum Connection Attempt Delay</strong>, currently recommended as 2 seconds.</p><p>Section 8 collects the values a client may configure: the Resolution Delay at 50 milliseconds, the First Address Family Count at 1, the Connection Attempt Delay at 250 milliseconds, the Minimum Connection Attempt Delay at 100 milliseconds and the Maximum Connection Attempt Delay at 2 seconds. They were determined empirically by measuring the timing of connections on a very wide set of production devices, and were picked to reduce wait times noticed by users while minimizing load on the network. The RFC expects them to change over time as networks evolve, and welcomes implementations that use different values.</p>",
+      "plainLanguage": "<p>The client starts with one address and, if that does not connect within a short wait, starts the next one. The wait is 250 milliseconds by default, and never less than 10 milliseconds, so a network is not flooded with attempts. As soon as one attempt succeeds, the others are dropped.</p>"
     },
     {
       "id": "deployment",
       "number": "7",
       "title": "IPv6-Only Networks with NAT64 and DNS64",
-      "content": "<p>On IPv6-only networks using NAT64 and DNS64, a Happy Eyeballs engine on platforms without 464XLAT SHOULD follow section 7, and only when it detects such a network. A simple heuristic is routable IPv6, no routable IPv4 and a DNS resolver address.</p><ul><li><strong>IPv4 literals:</strong> the engine queries the network for the NAT64 prefix (<a href='/rfc7050'>RFC 7050</a>), synthesizes IPv6 addresses (<a href='/rfc6052'>RFC 6052</a>) and inserts them into the list as if they came from DNS.</li><li><strong>Broken AAAA records:</strong> for hostnames with an A record and an AAAA record that never answers, DNS64 cannot synthesize addresses. After a <strong>Last Resort Local Synthesis Delay</strong>, recommended at 2 seconds from the last attempt, the client queries the A record and synthesizes locally.</li><li><strong>VPNs:</strong> a VPN resolver may return an IPv4-only answer the underlying network cannot reach, so the client resolves the A record with that resolver and synthesizes an IPv6 address locally.</li></ul>",
-      "plainLanguage": "<p>Some networks only speak the new address style. The device has to translate old-style addresses itself, like using a phrasebook when the local language is different.</p>"
+      "content": "<p>Most IPv6 transition protocols are transparent to client devices, but the combined use of NAT64 and DNS64 requires changes in client devices. One option is for the client networking stack to implement 464XLAT, which has the advantage of not requiring changes to user-space software. It does, however, require per-packet translation when an application uses IPv4 literals, and it does not encourage client application software to support native IPv6. On platforms that do not support 464XLAT, the Happy Eyeballs engine SHOULD follow this section to support IPv6-only networks properly. The features described here SHOULD only be enabled when the host detects such a network. A simple heuristic is to check whether the network offers routable IPv6 addressing, does not offer routable IPv4 addressing, and offers a DNS resolver address.</p><p>For IPv4 address literals, Section 7.1 explains that the engine performs NAT64 address synthesis. It queries the network for the NAT64 prefix using the discovery method of <a href='/rfc7050'>RFC 7050</a> and synthesizes an appropriate IPv6 address, or several, with the encoding of <a href='/rfc6052'>RFC 6052</a>. The synthesized addresses are inserted into the list as if they had come from DNS queries, and connection attempts follow the same algorithm.</p><p>Section 7.2 covers hostnames that resolve to valid A records and broken AAAA records, which it defines as AAAA records that contain seemingly valid IPv6 addresses that never reply when contacted on the usual ports. The causes it lists are mistyping the IPv6 address in the DNS zone configuration, routing black holes and service outages. On IPv6-only networks with NAT64 and DNS64 such hostnames do not work, because DNS64 recursive resolvers rely on authoritative name servers sending negative responses for AAAA records in order to synthesize, and they instead pass the broken AAAA record through. The client must then query for the A record and perform local synthesis. To minimize load on DNS servers, that A query is performed only when the client has given up on the AAAA records it first received, using a longer timeout called the <strong>Last Resort Local Synthesis Delay</strong>, recommended to be 2 seconds. The timer starts when the last connection attempt is fired.</p><p>Section 7.3 covers VPNs that handle DNS queries for the device, whether for all queries or a subset such as <code>*.internal.example.com</code>. If an internal hostname resolves to an external IPv4 address, the client ends up with an IPv4 address and no route to it. The company's resolver cannot synthesize, because it does not know the NAT64 prefix of the underlying network, and the network's DNS64 resolver cannot resolve the hostname, because it does not know the company's internal addresses. The client must resolve the A record through the company's resolver and then synthesize an IPv6 address locally, as if the resolved IPv4 address had been provided by the application.</p>",
+      "plainLanguage": "<p>On a network with IPv6 only, a client may still need to reach IPv4 servers. The engine turns IPv4 addresses into IPv6 ones itself, using the network's NAT64 prefix, and starts the attempts as usual. It waits longer before taking that step, so that DNS servers are not loaded with extra queries.</p>"
     },
     {
       "id": "operational-considerations",
-      "number": "8",
-      "title": "Defaults, Limits and Security",
-      "content": "<p>Section 8 lists the configurable values and recommended defaults: Resolution Delay 50 ms, First Address Family Count 1 (2 may be used to favour a family more), Connection Attempt Delay 250 ms, Minimum Connection Attempt Delay 100 ms (never under 10 ms), Maximum Connection Attempt Delay 2 seconds and Last Resort Local Synthesis Delay 2 seconds. The RFC says they were determined empirically from timing on a wide set of production devices, may change over time, and that implementors may use different values without changing the specification.</p><p>Limitations: Happy Eyeballs only acts at the initial handshake, so MTU problems can go unnoticed, and it cannot tell if an application on a chosen server, such as TLS or HTTP, works. It can also hide operational issues, for example an IPv6 failure masked by working IPv4, so operators are advised to monitor all address families externally.</p><p>For security, applications should not rely on a stable hostname-to-address mapping, and Happy Eyeballs may make it more likely that later connections to one hostname use different IP addresses. There are no IANA actions.</p>",
-      "plainLanguage": "<p>The waiting times are sensible guesses from real measurements. Because the trick hides broken doors from visitors, the people who run the building should still check every door.</p>"
+      "number": "9",
+      "title": "Limitations",
+      "content": "<p>Happy Eyeballs handles initial connection failures at the TCP/IP layer, but other failures or performance issues may still affect the connection that is chosen.</p><p>Path maximum transmission unit discovery (Section 9.1): Happy Eyeballs is only active during the initial handshake, and TCP does not pass that handshake, so issues related to the maximum transmission unit can be masked and go unnoticed during Happy Eyeballs. Solving that is out of scope; one solution is Packetization Layer Path MTU Discovery in <a href='/rfc4821'>RFC 4821</a>.</p><p>The application layer (Section 9.2): if DNS returns multiple addresses for different application servers, the application itself may not be operational and functional on all of them. The examples given are Transport Layer Security and HTTP.</p><p>Hiding operational issues (Section 9.3): it has been observed in practice that Happy Eyeballs can hide issues in networks. If a misconfiguration causes IPv6 to consistently fail on a given network while IPv4 is still functional, Happy Eyeballs may impair the operator's ability to notice the issue. The RFC recommends that network operators deploy external means of monitoring to ensure the functionality of all address families.</p>",
+      "plainLanguage": "<p>The method only covers the first handshake. It says nothing about problems that appear later, such as a packet size that does not fit the network, or a server that answers on one address but not another. It also warns that a working IPv4 path can hide a broken IPv6 path, so operators should monitor both kinds separately.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>The RFC notes that applications should not rely on a stable mapping from hostname to address to ensure any security properties, since DNS results may change between queries. Happy Eyeballs may make it more likely that subsequent connections to a single hostname use different IP addresses.</p><p>The document requires no IANA actions.</p>",
+      "plainLanguage": "<p>Because a name can point to different addresses at different times, a program must not treat the address as part of its security check. The method makes such changes more likely, since later connections may use different addresses.</p>"
     }
   ],
   "viz": [
     {
-      "type": "opcodes",
-      "anchor": "operational-considerations",
+      "type": "sequence",
+      "anchor": "overview",
       "position": "after",
-      "caption": "RECOMMENDED DEFAULTS (RFC 8305 SECTION 8)",
+      "caption": "ILLUSTRATIVE, NOT FROM THE RFC: THE FOUR PHASES AS ONE FLOW",
+      "data": {
+        "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
+          {
+            "key": "dns",
+            "label": "DNS resolver"
+          },
+          {
+            "key": "server",
+            "label": "Server"
+          }
+        ],
+        "messages": [
+          {
+            "from": "client",
+            "to": "dns",
+            "label": "AAAA query",
+            "color": "blue",
+            "note": "Sent first and immediately followed by the A query."
+          },
+          {
+            "from": "client",
+            "to": "dns",
+            "label": "A query",
+            "color": "blue"
+          },
+          {
+            "from": "dns",
+            "to": "client",
+            "label": "AAAA response",
+            "color": "green",
+            "note": "A positive response starts the IPv6 attempt at once."
+          },
+          {
+            "from": "dns",
+            "to": "client",
+            "label": "A response",
+            "color": "green",
+            "note": "If this arrives first, the client waits 50 milliseconds for AAAA."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "IPv6 attempt",
+            "color": "neutral",
+            "note": "Started first when the IPv6 address is preferred."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "IPv4 attempt",
+            "color": "neutral",
+            "note": "Started 250 milliseconds later if the first attempt has not succeeded."
+          },
+          {
+            "from": "client",
+            "to": "server",
+            "label": "Attempt that succeeds",
+            "color": "green",
+            "note": "The other attempts are canceled."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "RECOMMENDED CONFIGURATION VALUES (RFC 8305 SECTION 8)",
       "data": {
         "items": [
           {
             "code": "50 ms",
             "label": "Resolution Delay",
-            "desc": "Wait for AAAA after an A answer."
+            "desc": "Wait for an AAAA response after an A response arrives."
           },
           {
             "code": "1",
             "label": "First Address Family Count",
-            "desc": "Addresses of the first family before the other."
+            "desc": "Addresses of the first family to try before the other family; 2 may be used to favor one family more."
           },
           {
             "code": "250 ms",
             "label": "Connection Attempt Delay",
-            "desc": "Gap between attempts without RTT data.",
+            "desc": "Wait between attempts when there is no round-trip data.",
             "highlight": true
           },
           {
             "code": "100 ms",
             "label": "Minimum Connection Attempt Delay",
-            "desc": "Never below 10 milliseconds."
+            "desc": "Shortest recommended wait; a subsequent attempt MUST NOT start within 10 milliseconds."
           },
           {
             "code": "2 s",
             "label": "Maximum Connection Attempt Delay",
-            "desc": "Upper bound on the gap."
+            "desc": "Longest wait between attempts."
           },
           {
             "code": "2 s",
             "label": "Last Resort Local Synthesis Delay",
-            "desc": "Wait before the extra A query."
+            "desc": "Wait after the last attempt before sending the A query on an IPv6-only network."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "WHAT RFC 8305 ADDS TO THE ORIGINAL ALGORITHM",
+      "data": {
+        "columns": [
+          "Aspect",
+          "RFC 6555",
+          "RFC 8305"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Main focus",
+              "Staggering connections to a hostname with an AAAA record and an A record",
+              "The same, plus DNS queries, several addresses per family, DNS updates during the race, historical data and IPv6-only networks"
+            ]
+          },
+          {
+            "cells": [
+              "Compatibility",
+              "The original text",
+              "A simple implementation of this algorithm is still compliant with RFC 6555"
+            ],
+            "self": true
           }
         ]
       }
@@ -185,6 +299,11 @@
       "rfc": 6298
     },
     {
+      "number": "[RFC6052]",
+      "text": "Bao, C., Huitema, C., Bagnulo, M., Boucadair, M., and X. Li, \"IPv6 Addressing of IPv4/IPv6 Translators\", RFC 6052, October 2010.",
+      "rfc": 6052
+    },
+    {
       "number": "[RFC6146]",
       "text": "Bagnulo, M., Matthews, P., and I. van Beijnum, \"Stateful NAT64: Network Address and Protocol Translation from IPv6 Clients to IPv4 Servers\", RFC 6146, April 2011.",
       "rfc": 6146
@@ -200,18 +319,28 @@
       "rfc": 7050
     },
     {
-      "number": "[RFC6052]",
-      "text": "Bao, C., Huitema, C., Bagnulo, M., Boucadair, M., and X. Li, \"IPv6 Addressing of IPv4/IPv6 Translators\", RFC 6052, October 2010.",
-      "rfc": 6052
+      "number": "[RFC6877]",
+      "text": "Mawatari, M., Kawashima, M., and C. Byrne, \"464XLAT: Combination of Stateful and Stateless Translation\", RFC 6877, April 2013.",
+      "rfc": 6877
+    },
+    {
+      "number": "[RFC7413]",
+      "text": "Cheng, Y., Chu, J., Radhakrishnan, S., and A. Jain, \"TCP Fast Open\", RFC 7413, December 2014.",
+      "rfc": 7413
+    },
+    {
+      "number": "[RFC8200]",
+      "text": "Deering, S. and R. Hinden, \"Internet Protocol, Version 6 (IPv6) Specification\", STD 86, RFC 8200, July 2017.",
+      "rfc": 8200
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-19"
 }

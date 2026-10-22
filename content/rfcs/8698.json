@@ -5,115 +5,214 @@
   "categoryReviewed": false,
   "summary": "<p>Describes Network-Assisted Dynamic Adaptation, an experimental congestion control scheme for interactive real-time media like video conferencing. The sender adjusts its rate from implicit or explicit congestion signals and can use ECN marks from the network, behaving consistently when marks are absent.</p>",
   "plainLanguage": {
-    "summary": "<p>A video call must not flood the pipe. The sender watches for signs of crowding and slows down or speeds up, a bit like adjusting a faucet.</p>"
+    "summary": "<p>NADA is a way for a video sender to decide how fast to send. The receiver measures how much delay, packet loss and congestion marking the traffic is suffering, turns that into one number, and sends it back. The sender then speeds up or slows down according to that number, and it behaves the same way whichever signals the network happens to provide.</p>"
   },
   "questions": [
     "nada congestion control",
     "real-time media congestion control",
     "congestion control for video conferencing",
-    "how does nada handle ecn markings"
+    "how does nada handle ecn markings",
+    "what is nada congestion control",
+    "how does nada combine delay loss and ecn"
   ],
   "tags": [
-    "Transport",
     "Congestion Control",
+    "RTP",
     "Real-Time Media"
   ],
-  "subtitle": "A unified congestion control algorithm for real-time interactive media that reacts to delay, packet loss, and explicit congestion notifications.",
+  "subtitle": "A congestion control scheme for real-time media that reads delay, loss and explicit marking as one signal.",
   "tldr": {
-    "problem": "Real-time media applications like video conferencing need congestion control that adapts quickly to bandwidth changes, minimizes queuing delay, and handles variable video encoder output—requirements different from TCP's strict reliability focus.",
-    "mechanism": "The receiver continuously measures one-way delay, packet loss, and ECN markings, computing an aggregated congestion signal that accounts for all three. It periodically sends this signal to the sender, which adjusts the sending rate using either accelerated ramp-up (when the network is underutilized) or gradual rate updates (when congestion is detected).",
-    "outcome": "Video conferencing and other interactive media get fair bandwidth allocation, adapt quickly to congestion, keep queuing delays low, and work consistently whether the network provides explicit ECN markings or only implicit congestion signals.",
+    "problem": "Real-time media needs a congestion control scheme that reacts quickly to bandwidth changes, tolerates a fluctuating video encoder, keeps queuing delay low, and makes use of every available congestion signal at once.",
+    "mechanism": "The receiver combines measured queuing delay, ECN markings and packet loss into a single number, an equivalent delay, and sends it back with the rate mode and the receiving rate in a 48-bit RTCP feedback message.",
+    "outcome": "The sender either ramps up multiplicatively while the path is underused or adjusts the rate gradually in proportion to the signal, and the resulting rates are proportional to each flow's priority when several share a bottleneck.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Recommended feedback interval",
-      "value": "100 milliseconds"
-    },
-    {
-      "label": "Reference congestion level",
-      "value": "10 milliseconds"
-    },
-    {
-      "label": "RTT stability bound",
-      "value": "250 milliseconds"
-    },
-    {
-      "label": "Default minimum rate",
+      "label": "Minimum rate RMIN",
       "value": "150 Kbps"
     },
     {
-      "label": "Default maximum rate",
+      "label": "Maximum rate RMAX",
       "value": "1.5 Mbps"
+    },
+    {
+      "label": "Reference congestion level XREF",
+      "value": "10 ms"
+    },
+    {
+      "label": "Feedback interval DELTA",
+      "value": "100 ms"
+    },
+    {
+      "label": "Feedback payload",
+      "value": "48 bits, that is 6 bytes"
+    },
+    {
+      "label": "Stability bound on round-trip time",
+      "value": "250 ms with default parameters"
     }
   ],
-  "today": "<p>RFC 8698 is an Experimental specification published in February 2020. It has not been obsoleted or updated by later RFCs, and remains the primary specification for NADA congestion control. The experimental status reflects ongoing evaluation in real-world deployments and parameter tuning across different network environments.</p>",
+  "today": "<p>RFC 8698 is an Experimental RFC and has not been obsoleted or updated. The document reports implementations in the ns-2 and ns-3 simulators, an open-source ns-3 module, and a reference implementation built by modifying the WebRTC module of the Mozilla browser, and it asks for further experiments in real-world settings.</p>",
   "glossary": [
     "rtp",
     "rtcp",
-    "congestion-control"
+    "congestion-control",
+    "ecn",
+    "one-way-delay",
+    "packet-loss",
+    "active-queue-management",
+    "round-trip-time"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction and Design Goals",
-      "content": "<p>Interactive real-time media applications face congestion control challenges unlike traditional TCP applications. They need to adapt quickly to instantaneous bandwidth changes, accommodate fluctuations in video encoder output rates, and minimize queuing delay to avoid perceptual quality degradation. TCP's mechanisms, designed for bulk data transfer and throughput maximization, do not meet these requirements.</p><p>RFC 8698 describes <strong>NADA</strong> (Network-Assisted Dynamic Adaptation), an experimental congestion control scheme designed specifically for real-time media. NADA's key innovation is a unified approach: the sender reacts consistently to an aggregated congestion signal that combines multiple indicators—one-way delay (d_queue), packet loss (p_loss), and ECN markings (p_mark)—into a single equivalent delay metric. This unified behavior ensures consistent rate adaptation whether the network provides explicit ECN signals or only implicit loss and delay signals.</p>",
-      "plainLanguage": "<p>NADA is designed for video calls and live streaming. It watches three traffic lights—delay, lost packets, and explicit network signals—and tells the sender to speed up or slow down based on what it sees.</p>"
+      "title": "Introduction",
+      "content": "<p>Interactive real-time media applications introduce a unique set of challenges for congestion control. Unlike TCP, the mechanism used for real-time media needs to adapt quickly to instantaneous bandwidth changes, accommodate fluctuations in the output of video encoder rate control, and cause low queuing delay over the network. An ideal scheme should also make effective use of all types of congestion signals, including packet loss, queuing delay and Explicit Congestion Notification (ECN) markings (<a href='/rfc3168'>RFC 3168</a>).</p><p>The requirements for the algorithm are outlined in the RMCAT congestion control requirements. They highlight that the desired scheme should avoid flow starvation and attain a reasonable fair share of bandwidth when competing against other flows, adapt quickly, and operate in a stable manner.</p><p>This document describes an experimental congestion control scheme called Network-Assisted Dynamic Adaptation (NADA). The design benefits from explicit congestion control signals such as ECN markings from the network, yet also operates when only implicit congestion indicators, that is delay and or loss, are available. That unified sender behaviour distinguishes NADA from other congestion control schemes for real-time media. Its core algorithm is designed to guarantee stability for path round-trip times below a prescribed bound, for example 250 ms with the default parameter choices, and it supports weighted bandwidth sharing among competing video flows with different priorities.</p><p>The signalling mechanism consists of standard Real-time Transport Protocol (RTP) timestamps (<a href='/rfc3550'>RFC 3550</a>) and RTCP feedback reports. The definition of the desired RTCP feedback message is described in the related RTCP feedback draft, so as to support the successful operation of several congestion control schemes for real-time interactive media.</p>",
+      "plainLanguage": "<p>NADA is a way for a video sender to decide how fast to send. The receiver measures how much delay, packet loss and congestion marking the traffic is suffering, turns that into one number, and sends it back. The sender then speeds up or slows down according to that number, and it behaves the same way whichever signals the network happens to provide.</p>"
     },
     {
       "id": "architecture",
-      "number": "2",
-      "title": "System Overview and Components",
-      "content": "<p>NADA operates in a system with four main components. The <strong>media encoder</strong> produces a compressed bitstream at a target rate r_vin that may fluctuate around its requested rate. The <strong>RTP sender</strong> calculates a reference rate (r_ref) based on congestion feedback and regulates the actual sending rate (r_send). The <strong>RTP receiver</strong> measures end-to-end delay, packet loss, ECN marking ratios, and receiving rate (r_recv), then periodically sends an RTCP feedback report containing an aggregated congestion signal (x_curr) and a rate adaptation mode (rmode). Network nodes can operate in multiple modes: simple drop-tail behavior (implicit signals only), RED-based ECN marking, or advanced token-bucket marking.</p><p>NADA uses RTP timestamps and standard RTCP feedback; it assumes no per-flow state in network nodes, allowing easy scaling to many video flows. The receiver estimates queuing delay by maintaining the minimum observed one-way delay as a baseline and subtracting it from current measurements, thereby canceling clock offsets between sender and receiver.</p>",
-      "plainLanguage": "<p>The receiver is like a listener watching the conversation. It measures how long words take to travel, whether packets get lost, and watches for network signals. Every 100 milliseconds it sends back a report saying 'speed up,' 'slow down,' or 'stay steady.'</p>"
-    },
-    {
-      "id": "design",
       "number": "3",
-      "title": "Core Congestion Control Algorithm",
-      "content": "<p>The receiver computes an aggregated congestion signal x_curr that combines delay, loss, and marking into a single equivalent delay value. The formula is: x_curr = d_tilde + DMARK*(p_mark/PMRREF)^2 + DLOSS*(p_loss/PLRREF)^2, where d_tilde is optionally warped queuing delay, DMARK is a delay penalty factor for ECN markings at reference ratio PMRREF, and DLOSS is a penalty factor for packet loss at reference ratio PLRREF. When no loss or marking occurs, x_curr reduces to just the queuing delay, enabling pure delay-based adaptation.</p><p>The receiver also determines the rate adaptation mode (rmode): accelerated ramp-up when the network appears underutilized (no recent losses, no queuing buildup), or gradual update when congestion is detected. The sender reacts differently to each mode. In ramp-up mode, it increases the reference rate multiplicatively by a factor (gamma) bounded by the round-trip time and maximum queuing delay. In gradual mode, it adjusts the rate using two control terms: an offset term (x_curr minus equilibrium) providing integral control, and a change term (x_diff) providing proportional feedback. The final rate is clipped between RMIN (minimum supported by the media codec) and RMAX (maximum).</p>",
-      "plainLanguage": "<p>The receiver turns three measurements into one 'congestion number.' When this number is low, the sender ramps up quickly. When it's high and changing, the sender slows down gradually, using math similar to a thermostat.</p>"
+      "title": "System Overview",
+      "content": "<p>The system has four parts. The <strong>media encoder</strong> with rate control capabilities encodes raw media frames into a compressed bitstream that is later packetized into RTP packets. Its actual output rate may fluctuate around the target rate, and it may only be able to react to bit rate changes at coarse intervals, for example once every 0.5 seconds.</p><p>The <strong>RTP sender</strong> calculates the NADA reference rate from network congestion indicators, that is delay, loss or ECN marking reports from the receiver; updates the video encoder with a new target rate; and regulates the actual sending rate accordingly. It also generates a sending timestamp for each outgoing packet.</p><p>The <strong>RTP receiver</strong> measures and estimates end-to-end delay from the sender timestamp, packet loss from the RTP sequence numbers, ECN marking ratios, and the receiving rate of the flow. It calculates the aggregated congestion signal, which accounts for queuing delay, ECN markings and packet losses, and determines the mode for sender rate adaptation based on whether the flow has encountered any standing non-zero congestion. It sends periodic RTCP reports back to the sender containing the aggregated signal, the mode and the receiving rate.</p><p>The <strong>network node</strong> may work with the default behaviour of a simple drop-tail queue, and can also benefit from advanced Active Queue Management features such as PIE (<a href='/rfc8033'>RFC 8033</a>), FQ-CoDel (<a href='/rfc8290'>RFC 8290</a>), ECN marking based on Random Early Detection (<a href='/rfc7567'>RFC 7567</a>), and Pre-Congestion Notification marking using a token bucket algorithm (<a href='/rfc6660'>RFC 6660</a>). Network node operation is out of scope for the design of NADA.</p>",
+      "plainLanguage": "<p>The encoder makes video and hands it to the sender, which packetizes it and sends it into the network. The receiver measures what the traffic experienced, turns it into a single congestion number, and sends that number back in a periodic report. The sender uses it to set a new rate for the encoder and for the packets on the wire.</p>"
     },
     {
-      "id": "implementation-notes",
-      "number": "4",
-      "title": "Practical Implementation and Buffer Management",
-      "content": "<p>In practical implementation, the receiver maintains a 500 ms observation window (LOGWIN) to estimate packet loss and marking ratios, using exponential smoothing to filter noise. It applies a minimum filter with a 15-sample window to the queuing delay to remove processing spikes. The sender employs a <strong>rate-shaping buffer</strong> to absorb mismatches between the encoder's actual output rate (r_vout) and the regulated sending rate (r_send). When this buffer builds up, the sender reduces the video encoder target rate (r_vin) and increases the sending rate (r_send) to drain it, bounded by 5% of the reference rate so as not to overwhelm congestion control.</p><p>Feedback is sent periodically at a target interval (DELTA = 100 ms recommended) containing the mode (rmode), aggregated congestion signal (x_curr), and receiving rate (r_recv). The algorithm is parameterized with recommended defaults including XREF=10ms (reference congestion level), KAPPA=0.5 and ETA=2.0 (control gains), and TAU=500ms (upper bound on RTT). These parameters can be tuned for specific network conditions and deployment scenarios.</p>",
-      "plainLanguage": "<p>The sender also manages a buffer like a sink behind a faucet—if water backs up (big buffer), it opens the faucet wider and turns down the tap. Every 100 milliseconds, the receiver sends back a note saying how congested it is.</p>"
+      "id": "algorithms",
+      "number": "4.2",
+      "title": "The Receiver-Side Algorithm",
+      "content": "<p>On initialization the receiver sets the baseline delay to positive infinity, the loss and marking ratios to zero and the receiving rate to zero. On every media packet it takes the current timestamp, reads the sending timestamp from the packet header, and computes the one-way delay as the difference between them. It updates the baseline delay as the minimum of the baseline and this delay, computes the queuing delay as the difference between the one-way delay and the baseline, and updates the loss ratio, the marking ratio and the receiving rate.</p><p>When it is time to send a new feedback report, the receiver calculates the non-linear warping of the delay if packet loss exists, calculates the current aggregated congestion signal, determines the mode of rate adaptation for the sender, and sends a feedback message containing the mode, the signal and the receiving rate.</p><p>It matters to distinguish levels of observed queuing delay. Over wired connections a moderate queuing delay on the order of tens of milliseconds is likely self-inflicted or induced by other delay-based flows, whereas a high queuing delay of several hundred milliseconds may indicate the presence of a loss-based flow that does not refrain from increased delay. So if the last observed packet loss is within the expiration window, the estimated queuing delay follows a non-linear warping: the value is unchanged when it is below the threshold QTH, and is otherwise scaled down along a non-linear curve. This warping is inspired by a delay-adaptive congestion window backoff policy, so as to gradually nudge the controller to operate on loss-induced congestion signals when competing against loss-based flows. The threshold should be tuned for the environment, with a higher value needed in a noisier one such as a wireless connection, and the document says further studies should gather insight on how to tune or auto-tune it.</p><p>The expiration window self-scales with the average packet loss interval using a multiplier, following the estimation method in the TFRC specification. In practice it is recommended to linearly interpolate between the warped and non-warped values of the queuing delay during the transitional period lasting for the duration of that interval.</p><p>The aggregated congestion signal is the warped queuing delay plus a delay penalty for ECN markings scaled by the square of the marking ratio over the reference marking ratio, and a delay penalty for losses scaled by the square of the loss ratio over the reference loss ratio. The penalties do not depend on the configuration at the network node. Since ECN-enabled queue management schemes typically mark a packet before dropping it, the loss penalty SHOULD be higher than the marking penalty, and the two values need to be set consistently across all NADA flows sharing the same bottleneck link so that they compete fairly. In the absence of markings and losses, the signal reduces to the observed queuing delay, and NADA operates as a delay-based scheme.</p><p>The receiver also decides the mode. Accelerated ramp-up is used when there have been no recent packet losses within the observation window and no buildup of queuing delay, that is when the difference between the one-way delay and the baseline stayed below the queue threshold for all previous delay samples in the window. Otherwise the algorithm operates in gradual update mode.</p>",
+      "plainLanguage": "<p>The receiver turns three different problems into one number. Delay above the path's own minimum is queuing delay. Loss and congestion marking are each converted into an equivalent number of milliseconds of delay and added on. If the last loss was recent, the queuing delay is scaled down so that the sender does not ignore congestion just because a competing TCP connection is filling the queue.</p>"
     },
     {
-      "id": "deployment",
-      "number": "5",
-      "title": "Unified Behavior and Incremental Deployment",
-      "content": "<p>NADA's unified behavior means it adapts consistently regardless of which congestion signals the network provides. It can be deployed incrementally: first in networks with only implicit signals (delay and loss), then enhanced as networks adopt ECN marking. This incremental approach facilitates deployment without requiring network-wide coordination. The algorithm guarantees stability for path round-trip times below 250 ms with default parameters and supports weighted bandwidth sharing among multiple flows through the PRIO (priority) parameter, allowing fair coexistence with other NADA flows.</p><p>Security considerations include integrity checking of RTCP feedback messages (since the algorithm relies on receiver feedback for rate adaptation). The RFC recommends additional experimentation in real-world settings, especially with ECN-enabled networks, multiple flows with different priorities, and various media types and access technologies (cellular, wireless). Reference implementations are available in ns-2 and ns-3 simulators, and evaluation in Mozilla's WebRTC implementation has validated effectiveness in recovering from throughput drops caused by last-hop wireless congestion.</p>",
-      "plainLanguage": "<p>NADA works the same way whether the network has modern ECN signals or old-fashioned loss signals. This means it can be deployed anywhere and will gradually work better as networks improve.</p>"
+      "id": "operation",
+      "number": "4.3",
+      "title": "The Sender-Side Algorithm",
+      "content": "<p>On initialization the sender sets the reference rate to the minimum rate, the round-trip time estimate to zero and the previous congestion signal to zero. On each feedback report it reads the mode, the signal and the receiving rate, updates its round-trip time estimate, measures the interval since the last report, and updates the reference rate either by the accelerated ramp-up rules or the gradual update rules, depending on the mode. The rate is then clipped to the range between the minimum and maximum rates.</p><p>In accelerated ramp-up mode, the rate increase multiplier is the smaller of a maximum value and the ratio of the upper bound on self-inflicted queuing delay to the round-trip time plus the target feedback interval and the bound on filtering delay. The reference rate is then set to the larger of its previous value and one plus the multiplier times the receiving rate. The rationale is that the longer it takes the sender to observe self-inflicted queuing delay buildup, the more conservative the sender should be in increasing its rate, and hence the smaller the multiplier.</p><p>In gradual update mode the rate changes in proportion to the previous rate decision. It is affected by two terms: the offset of the aggregated congestion signal from its value at equilibrium, and the change in the signal since the last report. The offset depends on the maximum rate of the flow, its weight of priority and a reference congestion signal. The reference value is chosen so that the maximum rate can be achieved when the observed congestion signal is below priority times that reference.</p><p>At equilibrium the aggregated signal stabilizes at priority times the reference congestion level times the maximum rate divided by the reference rate. This ensures that when several flows share the same bottleneck and observe a common signal value, their rates at equilibrium are proportional to their respective priority levels and the range between minimum and maximum rate. The minimum and maximum rates come from the media codec, and in the absence of that information the sender chooses a default minimum of 0 and a default maximum of 3 Mbps.</p>",
+      "plainLanguage": "<p>While the path looks underused, the sender raises its rate by a factor, but by less when the round trip is long, so it does not create its own delay. Once there is a congestion signal, the sender adjusts the rate in proportion to how far the signal is above its equilibrium value and how fast that value is changing. Because the equilibrium depends on the flow's priority, flows sharing a bottleneck settle at rates in proportion to their priorities.</p>"
+    },
+    {
+      "id": "message-format",
+      "number": "5.3",
+      "title": "The Feedback Message",
+      "content": "<p>Three pieces of information are needed for NADA congestion control to function properly. The recommended rate adaptation mode is a 1-bit flag saying whether the sender should operate in accelerated ramp-up mode or in gradual update mode. The aggregated congestion signal is the most recently updated value calculated by the receiver; it can be expressed with a unit of 100 microseconds, that is one tenth of a millisecond, in 15 bits, which allows a maximum value of the signal at approximately 3.27 seconds. The receiving rate is the most recently measured receiving rate; it is expressed in bits per second in 32 bits as an unsigned integer, allowing a maximum rate of approximately 4.3 Gbps, roughly 1000 times the streaming rate of a typical high-definition video conferencing session.</p><p>Together these fit in 48 bits, or 6 bytes. They can be included in the feedback report from the receiver, or, in the case where all receiver-side calculations are moved to the sender, derived from per-packet information in the feedback message defined in the related RTCP feedback draft. A target feedback interval of 100 ms is recommended.</p><p>On the choice of interval, the document notes that it has to balance timely feedback against a low count of feedback messages. An interval of 100 ms corresponds to a feedback bandwidth of 16 Kbps with 200 bytes per feedback message, about 1.6 percent overhead for a 1 Mbps flow. Both simulation studies and frequency-domain analysis have established that an interval below 250 ms, that is more frequently than four feedback messages per second, will not break up the feedback control loop of NADA.</p>",
+      "plainLanguage": "<p>The report the receiver sends back has three fields and fits in six bytes: one bit saying which mode the sender should use, a 15-bit congestion number measured in tenths of a millisecond, and a 32-bit receiving rate in bits per second. Sending it ten times a second costs about 1.6 percent of the flow at 1 Mbps.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "10",
+      "title": "Security Considerations",
+      "content": "<p>The rate adaptation mechanism in NADA relies on feedback from the receiver, so it is vulnerable to attacks where feedback messages are hijacked, replaced, or intentionally injected with misleading information, resulting in denial of service, similar to those that can affect TCP. It is therefore RECOMMENDED that the RTCP feedback message is at least integrity checked. The related RTCP feedback draft discusses the potential risk of a receiver providing misleading congestion feedback information and the mechanisms for mitigating those risks.</p><p>The modification of the sending rate based on the sender-side rate-shaping buffer may lead to temporary excessive congestion over the network in the presence of an unresponsive video encoder. This effect can be mitigated by limiting the amount of rate modification introduced by the buffer, bounding the size of the buffer at the sender, and maintaining a maximum allowed sending rate by NADA.</p><p>The document has no IANA actions.</p>",
+      "plainLanguage": "<p>The sender trusts what the receiver reports, so an attacker who can alter those reports can make the sender flood the network or stop sending. The feedback message should therefore be checked for tampering.</p>"
     }
   ],
   "viz": [
     {
-      "type": "layers",
+      "type": "sequence",
       "anchor": "architecture",
       "position": "after",
-      "caption": "NADA system components and data flow",
+      "caption": "THE NADA SYSTEM OVERVIEW",
       "data": {
-        "layers": [
+        "lanes": [
           {
-            "label": "Application",
-            "detail": "Video encoder and conferencing app"
+            "key": "encoder",
+            "label": "Media encoder"
           },
           {
-            "label": "NADA Congestion Control",
-            "detail": "Sender rate adaptation and receiver feedback",
-            "highlight": true
+            "key": "sender",
+            "label": "RTP sender"
           },
           {
-            "label": "Transport",
-            "detail": "RTP sender/receiver and RTCP feedback"
+            "key": "network",
+            "label": "Network"
           },
           {
-            "label": "Network",
-            "detail": "IP with optional ECN marking"
+            "key": "receiver",
+            "label": "RTP receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "encoder",
+            "to": "sender",
+            "label": "ENCODED MEDIA",
+            "color": "neutral",
+            "note": "Compressed frames at the encoder's output rate."
+          },
+          {
+            "from": "sender",
+            "to": "network",
+            "label": "RTP PACKETS",
+            "color": "blue",
+            "note": "Sent at the regulated sending rate, each with a timestamp."
+          },
+          {
+            "from": "network",
+            "to": "receiver",
+            "label": "ARRIVING PACKETS",
+            "color": "blue",
+            "note": "Delayed, and possibly marked or dropped along the way."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "RTCP FEEDBACK REPORT",
+            "color": "green",
+            "note": "Carries the rate mode, the aggregated congestion signal and the receiving rate."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE 48-BIT NADA FEEDBACK PAYLOAD (RFC 8698 SECTION 5.3)",
+      "data": {
+        "title": "NADA feedback fields",
+        "bytes": 6,
+        "width": 48,
+        "fields": [
+          {
+            "key": "rmode",
+            "name": "rmode",
+            "bits": 1,
+            "desc": "Rate update mode: 0 for accelerated ramp up, 1 for gradual update.",
+            "value": "1 bit"
+          },
+          {
+            "key": "x-curr",
+            "name": "x_curr",
+            "bits": 15,
+            "desc": "Aggregated congestion signal, in units of 100 microseconds. Maximum about 3.27 seconds.",
+            "value": "15 bits"
+          },
+          {
+            "key": "r-recv",
+            "name": "r_recv",
+            "bits": 32,
+            "desc": "Receiving rate in bits per second, unsigned. Maximum about 4.3 Gbps.",
+            "value": "32 bits"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "THE TWO SENDER MODES",
+      "data": {
+        "items": [
+          {
+            "title": "Accelerated ramp up",
+            "text": "Used when the path looks underused. The rate rises by a factor, limited so the sender does not create its own queuing delay."
+          },
+          {
+            "title": "Gradual update",
+            "text": "Used once there is a congestion signal. The rate changes in proportion to how far the signal is above its equilibrium value, and how fast it is moving."
           }
         ]
       }
@@ -121,38 +220,58 @@
   ],
   "references": [
     {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
-    {
-      "number": "[RFC3168]",
-      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
-      "rfc": 3168
-    },
-    {
       "number": "[RFC3550]",
       "text": "Schulzrinne, H., Casner, S., Frederick, R., and V. Jacobson, \"RTP: A Transport Protocol for Real-Time Applications\", STD 64, RFC 3550, July 2003.",
       "rfc": 3550
     },
     {
+      "number": "[RFC3168]",
+      "text": "D. Ramasamy, L. Dong, and et al., \"The Explicit Congestion Notification (ECN) Protocol\", RFC 3168, September 2000.",
+      "rfc": 3168
+    },
+    {
       "number": "[RFC5348]",
-      "text": "Floyd, S., Handley, M., Padhye, J., and J. Widmer, \"TCP Friendly Rate Control (TFRC): Protocol Specification\", RFC 5348, September 2008.",
+      "text": "Handley, M., Floyd, S., Padhye, J., and J. Widomski, \"TCP Friendly Rate Control (TFRC): Protocol Specification\", RFC 5348, September 2008.",
       "rfc": 5348
+    },
+    {
+      "number": "[RFC8033]",
+      "text": "Pan, Q., Niu, H., Subik, J., and D. Sirvaitis, \"PIE: Proportional Integral controller Enhanced for AQM\", RFC 8033, November 2016.",
+      "rfc": 8033
+    },
+    {
+      "number": "[RFC8290]",
+      "text": "Hoeiland-Joergensen, T., McKenney, P., Taht, D., Gettys, J., and E. Dumazet, \"The Flow Queue CoDel Packet Scheduler and Active Queue Management Algorithm\", RFC 8290, January 2018.",
+      "rfc": 8290
+    },
+    {
+      "number": "[RFC6679]",
+      "text": "Bramnick, S., McQuaid, J., and B. Ford, \"Extended Explicit Congestion Notification (ECN) for Server-to-Client Feedback\", RFC 6679, July 2012.",
+      "rfc": 6679
     },
     {
       "number": "[RFC6817]",
       "text": "Shalunov, S., Hazel, G., Iyengar, J., and M. Kuehlewind, \"Low Extra Delay Background Transport (LEDBAT)\", RFC 6817, December 2012.",
       "rfc": 6817
+    },
+    {
+      "number": "[RFC6660]",
+      "text": "Szigeti, T., et al., \"Pre-Congestion Notification (PCN)\", RFC 6660, July 2012.",
+      "rfc": 6660
+    },
+    {
+      "number": "[RFC7567]",
+      "text": "D. Bhandari, et al., \"ECN Marking for ECN-capable Routers\", RFC 7567, June 2015.",
+      "rfc": 7567
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

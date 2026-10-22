@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document updates RFC 768 (UDP) by describing where UDP options live, how they are written, and what they mean. The options go in spare space after the UDP data but before the end of the IP datagram.</p>",
   "plainLanguage": {
-    "summary": "<p>A parcel often has spare room in the box. UDP can now put little notes in that spare room without disturbing the main contents.</p>"
+    "summary": "<p>UDP is a bare transport: a header with two port numbers, a length and a checksum, and nothing else. This document gives UDP a small area for extra options, placed after the user's data and before the end of the IP packet, which is possible because UDP states its own length. Options let UDP carry out fragmentation, measure round-trip time and, later, authenticate or encrypt. A receiver that does not understand them ignores them and sees the same message as before.</p>"
   },
   "questions": [
     "udp options",
@@ -22,38 +22,38 @@
   ],
   "subtitle": "How UDP gets room for header options, by using the spare bytes after the user data.",
   "tldr": {
-    "problem": "TCP, SCTP and DCCP have space for transport options, but UDP's header has none, so features such as fragmentation or path MTU probing cannot be added cleanly.",
-    "mechanism": "Because UDP has its own Length field, any bytes in the IP datagram after the UDP user data (the surplus area) can hold a checksum and a list of type-length-value options.",
-    "outcome": "RFC 9868 updates RFC 768 to define that area and a set of options, designed so legacy receivers simply ignore them and still get the user data.",
+    "problem": "UDP has no room for header options, so anything a transport protocol needs to carry beyond the ports and a checksum has to be invented from scratch or squeezed into the user data, where legacy software will mangle it.",
+    "mechanism": "RFC 9868 uses the space between the end of the UDP user data and the end of the IP datagram, which exists because UDP carries its own length field. That surplus area holds a 16-bit option checksum followed by type, length and value options, with rules that keep old receivers working unchanged.",
+    "outcome": "The document updates RFC 768, defines eight options every implementation must support, including UDP-level fragmentation and reassembly, and reserves room for authentication, encryption and compression options that later documents will define. The default is that a legacy receiver sees exactly what it saw before.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Option Checksum size",
-      "value": "2 bytes"
+      "label": "UDP header size",
+      "value": "8 bytes"
     },
     {
-      "label": "Must-support option kinds",
-      "value": "0 to 7"
+      "label": "Option Checksum size",
+      "value": "16 bits"
+    },
+    {
+      "label": "Must-support options",
+      "value": "EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES"
     },
     {
       "label": "Minimum MRDS size",
-      "value": "2,926 bytes (IPv4), 2,886 bytes (IPv6)"
+      "value": "2,926 bytes for IPv4, 2,886 bytes for IPv6"
     },
     {
-      "label": "Minimum MRDS segs",
+      "label": "Minimum MRDS fragments",
       "value": "2"
     },
     {
-      "label": "Default reassembly timeout",
+      "label": "Reassembly timeout",
       "value": "No more than 2 minutes"
-    },
-    {
-      "label": "FRAG Identification",
-      "value": "32 bits"
     }
   ],
-  "today": "<p>RFC 9868 is a Proposed Standard published in October 2025. It updates <a href='/rfc768'>RFC 768</a> and is not obsoleted by any later RFC. One use it describes, path MTU probing, is specified in <a href='/rfc9869'>RFC 9869</a>.</p>",
+  "today": "<p>RFC 9868 is a Proposed Standard published in October 2025, and it has not been obsoleted. It updates RFC 768 to define the surplus area and to extend the UDP API, and IANA has created a User Datagram Protocol registry group holding the UDP Option Kind Numbers registry. The companion document that uses these options for path MTU discovery is <a href='/rfc9869'>RFC 9869</a>.</p>",
   "glossary": [
     "udp",
     "tag-length-value",
@@ -65,90 +65,114 @@
     "path-mtu-discovery",
     "datagram",
     "stateless-protocol",
-    "port-number"
+    "port-number",
+    "ip-datagram",
+    "path-mtu",
+    "tlv",
+    "crc32c",
+    "udp-lite",
+    "ipsec"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why UDP Needs Options",
-      "content": "<p>Transport protocols grow by adding header options. TCP, the Stream Control Transmission Protocol (SCTP) and the Datagram Congestion Control Protocol (DCCP) all have room for them, but <a href='/rfc768'>RFC 768</a> (UDP) does not. RFC 9868 updates RFC 768 to give UDP <strong>transport options</strong>, with a generic syntax and meaning for a stateless, unreliable message protocol.</p><p>The trick is that UDP, unlike TCP, SCTP or DCCP, carries its own length field, separate from the IP length. The RFC says the real reason for that field is unknown, but it makes it possible to tell the UDP user data apart from whatever else the IP datagram carries. The RFC names uses such as fragmentation and reassembly, path MTU probing and, in future, authentication and encryption of the payload while still protecting the UDP header. Extensions do not apply to UDP-Lite.</p>",
-      "plainLanguage": "<p>TCP has a place on its envelope for extra instructions, but UDP's envelope does not. This document finds a clever spot to write them anyway.</p>"
+      "title": "Introduction",
+      "content": "<p>Transport protocols use options to extend their capabilities. TCP, the Stream Control Transmission Protocol and the Datagram Congestion Control Protocol include space for them, but UDP currently does not. This document updates <a href='/rfc768'>RFC 768</a> with an extension to UDP that provides space for transport options, including their generic syntax and semantics, for use in UDP's stateless, unreliable message protocol. The details of the impact on RFC 768 are given in Section 21, and the extension does not apply to UDP-Lite, which is discussed in Section 17.</p><p>Many protocols include a fixed header and an area for options that varies from packet to packet. These options let a protocol be extended for use in particular environments or in ways unforeseen by the original designers; the TCP options for maximum segment size, window scale, timestamp and authentication are examples. Header options are used both in stateful protocols, where they can help extend the way state is managed, and in stateless protocols, where their effect is often limited to individual packets but can have an aggregate effect on a sequence of packets as well.</p><p>UDP is one of the most popular protocols that lacks space for header options. The UDP header was intended to be a minimal addition to IP, providing only port numbers and a checksum for error detection. UDP Options are possible because UDP includes its own length field, separate from that of the IP header, while other transport protocols infer the transport payload length from the IP datagram length. Internet historians have suggested a number of possible reasons why the design of UDP includes this field, such as supporting multiple UDP packets within the same IP datagram, or indicating the length of the UDP user data as distinct from zero padding required for systems that cannot write an arbitrary number of bytes of data. The real reason remains unknown. Regardless, the field presents an opportunity to tell the UDP user data apart from the implied transport payload length, which this document leverages to support a trailer options field.</p>",
+      "plainLanguage": "<p>UDP today is a header with two port numbers, a length and a checksum, and no way to carry anything else. This document adds a place for extra information without changing the header: the space between the end of the user's data and the end of the IP packet. That space is available because UDP states its own length, and it is otherwise unused by UDP today.</p>"
     },
     {
-      "id": "concepts",
-      "number": "2",
-      "title": "The Surplus Area",
-      "content": "<p>Normally the UDP Length field and the size of the IP transport payload agree. When UDP Length is smaller, the leftover bytes after the UDP user data form the <strong>surplus area</strong>. RFC 9868 redefines the Length field as a \"trailer options offset\" and uses the surplus area for UDP Options. It can start at any byte offset, and it works even when the user data is empty (a UDP Length of 8), as long as there is room for the options.</p><p>The area starts with a 2-byte <strong>Option Checksum (OCS)</strong>, aligned to the first 2-byte boundary relative to the start of the IP datagram, with zero bytes added before it if needed. The alignment bytes MUST be zero; if not, all options MUST be ignored and the surplus area silently discarded. The rest of the area is a list of options, which can end early with an End of Options List (EOL) option followed by zeros.</p><div class='callout callout-info'><p>The same idea applies to IPv4 and IPv6. For IPv4 the bound is based on Total Length and IHL; for IPv6, on Payload Length minus extension headers.</p></div>",
-      "plainLanguage": "<p>Imagine writing a letter that fits on half the page. The empty half is still part of the page, so you can use it for a note that readers who stop at the end of the letter never see.</p>"
+      "id": "design",
+      "number": "6",
+      "title": "Design Principles",
+      "content": "<p>The options are built on six principles, each of which is an observation about existing behaviour of UDP that the document does not change, or a lesson learned from other protocol designs.</p><p>First, UDP is stateless and the options do not change that. Any state required is managed by the application or by a layer or library on its behalf; reassembly of fragments is the only limited exception where the document introduces a notion of state to UDP. Second, UDP is unidirectional and the options do not change that either: responses to options are initiated by the application or by a layer on its behalf, so a mechanism that requires bidirectionality has to be defined in a separate document. Third, the options have no length limit separate from that of the UDP packet itself, because past experience with other protocols confirms that static length limits will always need to be exceeded. Fourth, the options are not intended to replace or replicate other protocols such as NTP or ICMP. Fifth, the option mechanism and the options themselves are a framework rather than a protocol: options can be defined even when the details are not sufficient to specify a complete protocol, as with the Request and Response options, whose protocol is specified elsewhere or left undefined. Sixth, the mechanism and the options default to the same behaviour a legacy receiver would experience. Even when option checksums, authentication or decryption fail, all received packets, with the exception of UDP fragments, are passed, possibly with an empty data payload, to the user application. It is always the user's or application's obligation to override that default explicitly.</p>",
+      "plainLanguage": "<p>Six rules shape the design. UDP keeps its stateless and one-way nature; options do not create a connection. Options have no length cap of their own. They do not re-implement other protocols. They are a framework, so some options are defined here and the protocol that uses them is defined elsewhere. And by default a receiver behaves exactly as an old one would: if a check fails, the data still reaches the application unless someone configures it otherwise.</p>"
     },
     {
-      "id": "message-format",
-      "number": "3",
-      "title": "Checksum and Option Format",
-      "content": "<p>The OCS is an Internet checksum over the surplus area, including the surplus area's length. Its main job is to detect nonstandard uses of that area and accidental errors, not attacks. Computed this way, it also cancels the effect on the UDP checksum of errant middleboxes that wrongly cover the whole IP payload. The OCS MUST be non-zero when the UDP checksum is non-zero, and implementations MUST default to using it. If the OCS fails, all options MUST be ignored, but UDP user data validated by a correct UDP checksum is still delivered by default.</p><p>Each option starts with a one-byte <code>Kind</code> and a one-byte <code>Length</code> that counts the whole option. Only <code>NOP</code> and <code>EOL</code> are a single byte. A Length of 255 switches to an extended format with a 16-bit Extended Length. Options of 254 bytes or less MUST use the default format and options larger than 254 MUST use the extended one. Options are processed in the order they appear.</p>",
-      "plainLanguage": "<p>Each note starts with a label saying what kind it is and how long it is, so the reader can skip a note it does not understand. A small check number at the front tells you if the whole notes area got smudged.</p>"
+      "id": "data-model",
+      "number": "7",
+      "title": "Where the Options Live",
+      "content": "<p>The UDP transport header includes demultiplexing and service identification through the port numbers, an error detection checksum, and a field that indicates the UDP datagram length including the UDP header. That length field is typically redundant with the size of the maximum space available as a transport protocol payload, as determined by the IP header, and the UDP option area is created when the UDP Length indicates a smaller transport payload than the IP header implies.</p><p>For IPv4, the IP Total Length field gives the total IP datagram length including the IP header, and the size of the IP options is indicated in the IP header, in 4-byte words, as the Internet Header Length. The upper bound for UDP Length when the Protocol field is 17 is UDP_Length &lt;= IPv4_Total_Length - IPv4_IHL * 4, reduced by the sum of the lengths of any shim headers that precede the UDP header. For IPv6, the IP Payload Length field gives the transport payload after the base header, which includes the extension headers and the space available for the transport protocol, so the upper bound is UDP_Length &lt;= IPv6_Payload_Length - the sum of the extension header lengths. The space available for the UDP packet is what this document calls the IP transport payload.</p><p>Because the UDP Length is usually redundant with the IP header, there is an opportunity to use the UDP Length field to break the IP transport payload into two areas: the UDP user data, and a surplus area that follows it. The surplus area is where the options live. It can commence at any valid byte offset, so it need not be 16-bit or 32-bit aligned; in effect the UDP Length field becomes a trailer options offset.</p>",
+      "plainLanguage": "<p>The IP header tells the receiver how much space the packet has; the UDP header tells it how much of that space is user data. When the UDP length is shorter than the IP header implies, the leftover bytes form the surplus area, and that is where options go. A sender can put the options at any byte offset, so the area does not have to be neatly aligned.</p>"
+    },
+    {
+      "id": "encoding",
+      "number": "9",
+      "title": "The Option Checksum",
+      "content": "<p>The Option Checksum, the OCS, is a conventional Internet checksum that detects errors in the surplus area, which the UDP checksum does not otherwise cover. It is a 16-bit checksum aligned to the first 2-byte boundary, preceded by zeroes for padding if needed. It is computed over the surplus area and includes the length of the surplus area as an unsigned 16-bit value, so that the one's complement sum of the surplus area is zero. The OCS is half-word aligned to avoid the need for byte-swapping in its implementation.</p><p>The primary purpose of the OCS is to detect existing nonstandard uses of that area and accidental errors. It is not intended to detect attacks, and it neither prevents future nonstandard uses of the surplus area nor enables shared use with mechanisms that do not comply with UDP Options. The design does, however, enable traversal of errant middleboxes that incorrectly compute the UDP checksum over the entire IP payload rather than only the UDP header and UDP payload. Because the OCS is computed over the surplus area and its length and then inverted, it negates the effect that incorrectly including the surplus has on the UDP checksum, so when the OCS is non-zero the UDP checksum is the same in either case.</p><p>The OCS must be non-zero when the UDP checksum is non-zero. When the UDP checksum is zero, the OCS may be unused and is then indicated by a zero OCS value. Implementations must default to using the OCS as a non-zero value, and users overriding that default take the risk of not detecting nonstandard uses of the option area. If the receiver's validation of the OCS fails, all options must be ignored and the surplus area silently discarded. UDP user data that is validated by a correct UDP checksum must by default still be delivered to the application layer, unless the endpoints have negotiated otherwise for that socket pair.</p>",
+      "plainLanguage": "<p>The surplus area gets its own checksum, because the UDP checksum stops at the end of the user data and would not notice damage in the options. It is a standard 16-bit checksum over that area, padded so it starts on an even byte boundary. A useful side effect is that it cancels out the effect of a middlebox that wrongly checksums the whole IP payload, so such packets still pass. If the check fails, the options are thrown away but the data still reaches the application, exactly as before.</p>"
     },
     {
       "id": "options",
-      "number": "4",
+      "number": "10",
+      "title": "The Option Format and the Kind Space",
+      "content": "<p>Options are a minimum of two bytes long, except for the one-byte No Operation and End of Options List options. Each option has a one-byte Kind field, named after the corresponding TCP field, and a Length field giving the length in bytes of the entire option, including the Kind and Length bytes. A Length of 255 indicates the extended format, in which a 16-bit Extended Length field in network standard byte order follows. Any option whose length is 254 or less must use the default format, and any option whose length is larger than 254 must use the extended format. Options must be interpreted in the order in which they occur in the surplus area. An option length smaller than the minimum for its kind is an error, which calls into question the remainder of the surplus area, so all options must be silently discarded. Options whose length would run past the end of the IP payload must also be treated as a malformed surplus area.</p><p>Kinds 0 to 191 are SAFE options, which do not interfere with the use of UDP user data by legacy endpoints or when the option is unsupported. Kinds 192 to 255 are UNSAFE options, which might interfere with use by legacy receiving endpoints, for example an option that alters the UDP data payload. The kinds defined here are 0 for End of Options List, 1 for No Operation, 2 for Additional Payload Checksum, 3 for Fragmentation, 4 for Maximum Datagram Size, 5 for Maximum Reassembled Datagram Size, 6 for Request, 7 for Response, 8 for Timestamp, 9 reserved for Authentication, 127 for RFC 3692-style experiments, 192 for UNSAFE Compression, 193 for UNSAFE Encryption and 254 for UNSAFE experiments. Kinds 10 to 126 and 194 to 253 are unassigned and assignable by IANA, while 128 to 191 and 255 are reserved.</p><p>An endpoint supporting UDP Options must support the options marked as must-support: EOL, NOP, APC, FRAG, MDS, MRDS, REQ and RES. All other SAFE options may be implemented, and their use should be determined either out of band or negotiated. Receivers must silently ignore unknown or malformed SAFE options, in the same way a legacy receiver would ignore all options; a malformed FRAG option is the exception and must be treated as an unsupported UNSAFE option. When UNSAFE options are present, the UDP user data must be empty and any transport payload must be contained in a FRAG option, and a receiver that sees an unsupported option in the UNSAFE range must terminate all option processing and silently drop all options in that datagram. Except for FRAG, NOP, EXP and UEXP, no option should occur more than once in a datagram; if one does, only the first instance is interpreted.</p>",
+      "plainLanguage": "<p>Each option starts with a one-byte type number and a one-byte length, followed by its contents, in the same shape as TCP options. The type number decides whether the option is safe to ignore. Safe options, numbered up to 191, never change the user data, so a receiver that does not understand them ignores them and delivers the data as usual. Unsafe options, numbered 192 and above, may change the data, so they are only allowed inside a fragmentation option, where a legacy receiver sees an empty packet rather than something it misreads. Eight options are marked as ones every implementation must support.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "11",
       "title": "The Defined Options",
-      "content": "<p>Kinds 0 to 191 are <strong>SAFE</strong> options: they can be ignored without changing the meaning of the user data. Kinds 192 to 255 are <strong>UNSAFE</strong> options, which may change or signal a change in the user data. Eight options are \"must-support\": EOL, NOP, APC, FRAG, MDS, MRDS, REQ and RES. All endpoints supporting UDP Options MUST recognize and be able to generate them. New options are not eligible for that status.</p><ul><li><strong>EOL (0)</strong> ends the list; all bytes after it MUST be zero. <strong>NOP (1)</strong> is a one-byte alignment pad, and packets SHOULD NOT use more than seven in a row.</li><li><strong>APC (2)</strong> carries a 32-bit CRC32c of the user data, a stronger check than the UDP checksum. A failure is reported to the application but the data is still delivered.</li><li><strong>MDS (4)</strong> hints at the largest datagram the sender of the option can receive without IP fragmentation. It MUST NOT be used to limit transmissions. <strong>MRDS (5)</strong> gives the largest reassembled datagram and how many fragments can be reassembled.</li><li><strong>REQ (6)</strong> and <strong>RES (7)</strong> carry a 4-byte token. The upper layer decides whether and when to answer a REQ with a RES; UDP Options never do so automatically.</li><li><strong>TIME (8)</strong> carries two 4-byte timestamps (TSval and TSecr) modeled on TCP timestamps, usable for round-trip time estimates. Zero is never a valid time value.</li><li><strong>AUTH (9)</strong>, <strong>UCMP (192)</strong> and <strong>UENC (193)</strong> are only reserved for future authentication, compression and encryption options. <strong>EXP (127)</strong> and <strong>UEXP (254)</strong> are for experiments, using a 16-bit experiment ID.</li></ul><p>Other than FRAG, NOP, EXP and UEXP, an option SHOULD NOT appear more than once in a datagram. Receivers MUST interpret only the first instance. Must-support options other than NOP and EOL MUST come before other SAFE options. Unknown or malformed SAFE options are silently ignored.</p>",
-      "plainLanguage": "<p>There is a menu of notes you can attach, such as a fingerprint of the message, a request for a reply, or a time stamp. A few are required of everyone, and the rest are optional extras. Some are only reserved for the future.</p>"
+      "content": "<p>The End of Options List option, kind 0, indicates that there are no more options, so the sender does not need to pad the area with No Operation options. When the options do not consume the entire surplus area, the last option that is not a NOP must be EOL, and all bytes after it must be set to zero on transmit. The No Operation option, kind 1, is a one-byte placeholder for padding, used to align multi-byte options on 16-bit, 32-bit or 64-bit boundaries. Packets should not use more than seven consecutive NOPs, and receivers that persistently see more than that should log the event as a potential denial-of-service indicator.</p><p>The Additional Payload Checksum option, kind 2, carries a 32-bit CRC32c of the conventional UDP user data payload only, excluding the IP pseudoheader, the UDP header and the surplus area. It is not an alternative to the UDP checksum, which covers the pseudoheader and the header, and not a supplement to the OCS, which covers the surplus area; its purpose is to detect user data errors that the UDP checksum might not detect. A packet whose APC does not match should be passed to the application with an indication of the failure, and, like all SAFE options, it must be silently ignored when it fails unless the receiver has been configured otherwise.</p><p>The Fragmentation option, kind 3, supports UDP fragmentation and reassembly, for messages larger than the IP Effective MTU for Receiving. It includes a copy of the same UDP transport ports in each fragment, enabling them to traverse stateless network address and port translation devices, in contrast to the behaviour of IP fragments. Its design resembles that of the IPv6 Fragmentation Header, except that the UDP variant uses a 16-bit offset measured in bytes, rather than IPv6's 13-bit fragment offset measured in 8-byte units. Non-terminal fragments use a 10-byte form with a fragment start field, a 32-bit identification and a 16-bit fragment offset; the terminal fragment uses a 12-byte form that adds a pointer to where the reassembled datagram's own surplus area begins. Endpoints must be capable of fragmenting and reassembling at least two fragments, each of a size that fits within the standard Ethernet MTU of 1,500 bytes. The default reassembly expiration timeout should be no more than 2 minutes, and reassembly expiry must not generate an ICMP error.</p><p>The Maximum Datagram Size option, kind 4, is a 16-bit hint at the largest UDP packet or fragment an endpoint believes can be received without IP fragmentation. It does not indicate a known path MTU and must not be used to limit transmissions. The Maximum Reassembled Datagram Size option, kind 5, is a 16-bit indicator of the largest reassembled UDP datagram that can be received, including the UDP header and any per-datagram options, with an 8-bit indication of how many UDP fragments can be reassembled. Endpoints must support a local MRDS size of at least 2,926 bytes for IPv4 and 2,886 bytes for IPv6, and a fragment count of at least 2. A sender that has received no MRDS option must assume those minimum values.</p><p>The Request option, kind 6, and the Response option, kind 7, provide UDP packet-level acknowledgements as a capability for upper layers; the four-byte token has no internal structure or meaning. UDP itself never answers a request automatically: the request is delivered to the upper layer, which decides whether and when to issue a response, and the token in a response must be one that was received in a request. The Timestamp option, kind 8, exchanges two four-byte timestamp fields in the manner of the TCP Timestamp option, so that an application can estimate the round-trip time. The values are monotonic and non-decreasing except at rollover, and must not use zero, because zero indicates that a value was not echoed. The Authentication option, kind 9, is reserved for UDP authentication mechanisms and is expected to cover the UDP user data and the options, with possible additional coverage of the IP pseudoheader and the UDP header. The Experimental option, kind 127, is allocated for experiments and carries a 16-bit Experimental ID registered with IANA.</p><p>The UNSAFE options are reserved rather than defined: kind 192 for compression, kind 193 for encryption, and kind 254 for UNSAFE experiments. The encryption option is expected to provide all the services of the Authentication option and, in addition, to encrypt the UDP user data and some later options.</p>",
+      "plainLanguage": "<p>The options defined here cover the housekeeping a transport protocol usually needs. Two one-byte options mark the end of the list and pad it for alignment. One carries a second checksum over the user data. One lets UDP split a message across several IP packets and put it back together, repeating the port numbers so the pieces can pass through network address translation. Two give a size hint, one for a single packet and one for a reassembled message. Two carry a four-byte token for request and response at the packet level, and one carries timestamps for round-trip time. Three kinds are left reserved for authentication, encryption and compression, to be defined in later documents.</p>"
     },
     {
-      "id": "data-transfer",
-      "number": "5",
-      "title": "Fragmentation and UNSAFE Options",
-      "content": "<p>The <strong>FRAG</strong> option (Kind 3) lets UDP split a message larger than the IP path allows into UDP fragments. Unlike IP fragments, every UDP fragment carries the same UDP ports, so it can pass stateless NATs. Each fragment has zero-length user data (UDP Length of 8); the fragment data sits in the surplus area after the options. Legacy receivers therefore see only empty UDP packets.</p><p>FRAG has two forms. The 10-byte form (Len=10) is for non-terminal fragments, and the 12-byte form (Len=12) marks the final fragment and adds a pointer (RDOS) to where the original datagram's options begin. A single unfragmented message may also use the 12-byte form with a Frag. Offset of zero. The 32-bit Identification field, together with the addresses and ports, identifies the original datagram and MUST be unique over the reassembly timeout.</p><p>Receivers MUST NOT let fragments overlap; if they do, reassembly is abandoned and no ICMP error is sent. The default reassembly timeout SHOULD be no more than 2 minutes, and expiry MUST NOT generate an ICMP error. Individual fragments MUST NOT be forwarded to the user. Endpoints MUST be able to handle at least two fragments, each fitting in a standard Ethernet MTU of 1,500 bytes.</p><p>UNSAFE options are only allowed inside fragments. Hiding the payload in the fragment area means a receiver that does not understand an UNSAFE option silently drops the data, instead of misreading it.</p>",
-      "plainLanguage": "<p>If a parcel is too big for the mailbox, you cut it into labeled pieces, each in its own envelope with the same address. The receiver puts them back together. Anyone who does not know the trick just sees empty envelopes.</p>"
-    },
-    {
-      "id": "procedures",
-      "number": "6",
-      "title": "Receiver Processing and the API",
-      "content": "<p>The design goal is that an options-aware receiver behaves like a legacy one unless told otherwise. If the UDP checksum fails, the packet is dropped. If it passes or is zero and the OCS fails, the user data is delivered and the options are ignored. If the OCS passes, the options are parsed and the user data is delivered whether or not each option is supported or succeeds. The sender decides which options to add; the receiver decides which to handle.</p><p>The API is extended so an application can require certain options on a receive port (packets lacking them MUST be silently dropped and SHOULD be logged), discard all packets with options, see the options received with each datagram, and choose options, a minimum datagram length and a maximum fragment size when sending. FRAG, NOP and EOL are not passed to the user. The default for dropping all packets with options MUST be to process them normally.</p><p>New options must follow rules: they MUST NOT be defined as must-implement, MUST NOT depend on the content of other options, MUST NOT declare their order relative to others, and MUST NOT be modified in transit. All options MUST say whether they can be used per fragment.</p>",
-      "plainLanguage": "<p>By default the mail carrier still hands over your letter even if the little note on the back is smudged. Only if you tell the carrier a note is required will it refuse letters without a proper one.</p>"
-    },
-    {
-      "id": "compatibility",
-      "number": "7",
-      "title": "Legacy Devices and UDP-Lite",
-      "content": "<p>RFC 768 never forbade a UDP Length smaller than the IP payload. The RFC reports that no known systems use that gap for UDP, and says the OCS gives stronger protection against accidental matches than a static magic number. It states that UDP Options have been tested as interoperable with Linux, macOS and Windows Cygwin and worked through NAT devices; these systems delivered only the user data and silently discarded the surplus area.</p><p>It also notes caveats: one reported embedded device passes the entire IP datagram to the application, and the Alcatel-Lucent \"Brick\" Intrusion Detection System by default reports a mismatch between UDP and IP lengths as an attack, while other firewalls such as Check Point use a relaxed check by default. UDP-Lite cannot carry UDP Options because its Length field already marks the checksum coverage boundary. UDP Options also cannot work when UDP has no independent length, such as UDP Length of zero for IPv6 jumbograms, or when UDP is proxied over HTTP.</p>",
-      "plainLanguage": "<p>Older mail machines should just read the letter and ignore the back of the page. The authors tried it on several common systems and it worked, though a few strict guards might mistake the extra space for a trick.</p>"
+      "id": "implementation-notes",
+      "number": "14",
+      "title": "Inclusion, Processing and Legacy Behaviour",
+      "content": "<p>Senders may add any option, as configured by the API. All must-support options must be processed by receivers if present, options that are not must-support may be ignored by receivers, and all options must be processed in the order encountered in the options area. Unless configuration settings direct otherwise, all options except the UNSAFE ones must result in the UDP user data being passed to the upper layer, regardless of whether all options are processed, are supported, or succeed.</p><p>On receipt, the receiver checks the packet in a fixed order. If the UDP checksum fails, the whole packet is silently dropped. If it passes or is zero, and the option checksum fails while the UDP checksum was non-zero, the user data is delivered but the options are ignored, which is required to emulate legacy behaviour. If the option checksum passes, or both checksums are zero, the user data is delivered after the remaining options have been parsed and processed, regardless of whether each is supported or succeeds. In summary, if an option is not required by the receiver, packets missing it are accepted; if it is required and missing or incorrectly formed, the packet is silently dropped; and if the packet is accepted, the option is passed with it through the API, except for FRAG, NOP and EOL, which are handled inside option processing.</p><p>The API is extended in three ways. The method for creating receive ports is extended to include per-packet and per-fragment receive options that are required or omitted as indicated by the application, with datagrams not containing required options silently dropped and logged, and with a setting to discard all packets containing UDP Options, whose default is to process them normally. The receive function reports the per-packet options and their processing status for both the packet and the fragment set, except for FRAG, NOP and EOL. The send function indicates the options to add, which apply to individual fragments rather than to the packet before fragmentation, a minimum datagram length so that the options list ends in EOL and the remaining space is zero-filled, and a maximum fragment size.</p><p>Section 21 records the two updates to RFC 768: the document defines the meaning of the IP payload area beyond the UDP Length but within the IP Length as the surplus area used for UDP Options, and it extends the UDP API to support the use of UDP Options.</p><p>On legacy devices, the document notes that it has always been permissible for the UDP Length to be inconsistent with the IP transport payload length, and that there are no known systems using that inconsistency for UDP. UDP Options have been tested as interoperable with Linux, macOS and Windows Cygwin and worked through NAT devices, which delivered only the user data indicated by the UDP Length field and silently discarded the surplus area. The document also notes that UDP Options cannot be supported when a UDP packet has no independent UDP Length, for instance when UDP Length is zero in IPv6 or when UDP is proxied over HTTP, and that UDP-Lite cannot support them because its entire payload is already defined as user data.</p>",
+      "plainLanguage": "<p>Adding an option never obliges the receiver to do anything. The sender decides what to put in, the receiver decides what to act on, and by default the user data is delivered even when an option is unknown, unsupported or failed its check. Only when a receiver has explicitly required an option does a packet that lacks it get dropped. The socket interface is extended so that an application can ask for certain options, can see which options arrived and whether they worked, and can say what to put in when sending.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "8",
+      "number": "25",
       "title": "Security Considerations",
-      "content": "<p>The RFC compares UDP Options to TCP options: they add a control channel that can be abused if unprotected. DTLS does not protect the UDP header or the new options, just as TLS does not protect TCP options. Transport security is meant to come from the reserved AUTH and UENC options (when defined) or from IPsec. Options are visible on the path unless encrypted, and the RFC chose not to require encryption because the key infrastructure does not exist in many deployments.</p><p>Option parsing is serial, so an attacker could add many unknown options. Implementations SHOULD limit work on excessive or repeated options, and the rule that must-support options come first and appear once limits the impact. Of the must-support options, only REQ can make the upper layer send a response without user transmission. Implementations SHOULD limit pending fragments and reassembly space, and SHOULD NOT share reassembly limits across sockets. The RFC also notes that some middleboxes may strip options or drop such packets, in which case UDP Options do not function on that path.</p>",
-      "plainLanguage": "<p>Notes on the back of a letter can be read by anyone handling it, and a prankster could stuff in lots of junk notes. So receivers are told to stay calm, set limits and not trust the notes unless they are properly sealed.</p>"
+      "content": "<p>An application that considers UDP Options to adversely affect its security need not enable them, and their use does not impact security in a substantially different way than TCP options: both enable the use of a control channel that has the potential for abuse. UDP Options are not covered by DTLS. Neither TLS nor DTLS protects the transport layer; both operate as a shim layer solely on the user data of transport packets, protecting only their contents. Just as TLS does not protect the TCP header or its options, DTLS does not protect the UDP header or the new options introduced by this document. Transport security is provided in TCP by the TCP Authentication Option, and in UDP would come from the Authentication option and the UNSAFE Encryption option when they are defined, or from IP security, which protects transport headers as payload.</p><p>Options expose information to on-path attackers unless they are encrypted, so application protocol designers are expected to ensure that information in options is not used with the assumption of privacy, and designers using secure payload contents such as DTLS are expected to be aware that options add information that is not inside the UDP payload and is therefore not protected by the same mechanism. Implementations concerned about the use of options as a covert channel may limit the use of some or all options, and should return options in an order not related to their sequence in the received packet.</p><p>Options create new potential opportunities for denial of service attacks, notably through the use of fragmentation, because they cause additional work at the receiver. Implementations concerned about large numbers of options, whether implemented or unknown, or excessive sequences of valid repeating options such as NOPs, should detect them and limit the resources they use, for example through silent packet drops, and should log such responses. Because required options come first and at most once each, their denial-of-service impact is limited. Implementations concerned about this risk may implement only the required options and should limit the processing of TLVs, in number of non-padding options, total length, or both; the number of non-zero TLVs allowed must be at least as many as the number of concurrent options supported, plus a few to account for unexpected unknown options.</p><p>UDP fragmentation introduces its own set of concerns, which can be handled in a manner similar to IP reassembly or TCP segment reordering. Implementations concerned about the risk should implement limits on the number of pending fragments, and it can be useful to assume a reasonable minimum fragment size, for example that non-terminal fragments are never smaller than 500 bytes.</p><p>On middleboxes, some operate as UDP relays, forwarding data between a UDP socket and another transport socket by modifying the IP or UDP headers without properly acting as a protocol endpoint. Such a middlebox might strip the options before forwarding the packet, in which case the application functions as it would against a remote endpoint that does not support UDP Options. The document also reports that packets containing UDP Options do not traverse certain Internet paths, most likely because the options were stripped, for instance by resetting the IP Length to correspond to the UDP Length, or because such packets were dropped.</p>",
+      "plainLanguage": "<p>Options are visible to anyone on the path, because neither TLS nor DTLS protects the transport header, only the data. An application that treats the contents of an option as private needs to encrypt it, and the encryption option does not exist yet. Options also give an attacker more work to do, so implementations are advised to limit how many options they will parse and how many fragments they will hold at once. Finally, a relay that rewrites the headers may drop the options, and some paths drop such packets outright.</p>"
     }
   ],
   "viz": [
     {
-      "type": "layers",
-      "anchor": "concepts",
+      "type": "code",
+      "anchor": "data-model",
       "position": "after",
-      "caption": "WHERE THE SURPLUS AREA SITS IN AN IP DATAGRAM (RFC 9868)",
+      "caption": "The surplus area in the IP transport payload (RFC 9868, Figure 3)",
       "data": {
-        "layers": [
+        "title": "IP transport payload vs UDP Length",
+        "lang": "text",
+        "code": "IP transport payload\n<------------------------------------------------>\n+--------+---------+----------------------+------------------+\n| IP Hdr | UDP Hdr |     UDP user data    |   surplus area   |\n+--------+---------+----------------------+------------------+\n<------------------------------>\n                       UDP Length"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "design",
+      "position": "after",
+      "caption": "The six design principles",
+      "data": {
+        "items": [
           {
-            "label": "IP header",
-            "detail": "Its length fields set the IP transport payload"
+            "title": "UDP stays stateless",
+            "text": "Options create no connection state; reassembly of fragments is the only limited exception."
           },
           {
-            "label": "UDP header",
-            "detail": "Includes the UDP Length field"
+            "title": "UDP stays unidirectional",
+            "text": "Responses to an option come from the application, not from UDP itself."
           },
           {
-            "label": "UDP user data",
-            "detail": "Ends where UDP Length points"
+            "title": "No separate length limit",
+            "text": "Options are as long as the UDP packet allows."
           },
           {
-            "label": "Surplus area",
-            "detail": "OCS followed by the UDP Options",
-            "highlight": true
+            "title": "Not a replacement for other protocols",
+            "text": "Options do not re-implement NTP or ICMP."
+          },
+          {
+            "title": "A framework, not a protocol",
+            "text": "Some options are defined here while the protocol that uses them is specified elsewhere."
+          },
+          {
+            "title": "Legacy behaviour by default",
+            "text": "Even when a check fails, the user data is still delivered unless configured otherwise."
           }
         ]
       }
@@ -157,90 +181,89 @@
       "type": "opcodes",
       "anchor": "options",
       "position": "after",
-      "caption": "UDP OPTION KIND NUMBERS (RFC 9868, TABLE 1)",
+      "caption": "The UDP option kinds defined in RFC 9868",
       "data": {
         "items": [
           {
             "code": "0",
             "label": "EOL",
-            "desc": "End of Options List; must-support."
+            "desc": "End of Options List; marks the end of the option list."
           },
           {
             "code": "1",
             "label": "NOP",
-            "desc": "No Operation; one-byte alignment pad; must-support."
+            "desc": "One-byte placeholder used to align later options."
           },
           {
             "code": "2",
             "label": "APC",
-            "desc": "Additional Payload Checksum, Length 6; must-support."
+            "desc": "A 32-bit CRC of the UDP user data."
           },
           {
             "code": "3",
             "label": "FRAG",
-            "desc": "Fragmentation, Length 10 or 12; must-support.",
-            "highlight": true
+            "desc": "UDP fragmentation and reassembly."
           },
           {
             "code": "4",
             "label": "MDS",
-            "desc": "Maximum Datagram Size, Length 4; must-support."
+            "desc": "A hint at the largest UDP packet the receiver can take."
           },
           {
             "code": "5",
             "label": "MRDS",
-            "desc": "Maximum Reassembled Datagram Size, Length 5; must-support."
+            "desc": "The largest reassembled datagram the receiver can take."
           },
           {
             "code": "6",
             "label": "REQ",
-            "desc": "Request, Length 6; must-support."
+            "desc": "A packet-level echo request carrying a token."
           },
           {
             "code": "7",
             "label": "RES",
-            "desc": "Response, Length 6; must-support."
+            "desc": "A packet-level echo response echoing the token."
           },
           {
             "code": "8",
             "label": "TIME",
-            "desc": "Timestamp, Length 10."
+            "desc": "Two timestamps for round-trip time estimation."
           },
           {
             "code": "9",
             "label": "AUTH",
-            "desc": "Reserved for Authentication."
+            "desc": "Reserved for authentication mechanisms."
           },
           {
             "code": "127",
             "label": "EXP",
-            "desc": "RFC 3692-style experiments."
+            "desc": "Reserved for RFC 3692-style experiments."
           },
           {
             "code": "192",
             "label": "UCMP",
-            "desc": "Reserved for UNSAFE Compression."
+            "desc": "Reserved for UNSAFE compression."
           },
           {
             "code": "193",
             "label": "UENC",
-            "desc": "Reserved for UNSAFE Encryption."
+            "desc": "Reserved for UNSAFE encryption."
           },
           {
             "code": "254",
             "label": "UEXP",
-            "desc": "RFC 3692-style UNSAFE experiments."
+            "desc": "Reserved for UNSAFE experiments."
           }
         ]
       }
     },
     {
       "type": "packet",
-      "anchor": "data-transfer",
+      "anchor": "operation",
       "position": "after",
-      "caption": "NON-TERMINAL FRAG OPTION, 10 BYTES (RFC 9868, FIGURE 10)",
+      "caption": "The Fragmentation option, non-terminal form (RFC 9868, Figure 10)",
       "data": {
-        "title": "FRAG option (non-terminal fragment)",
+        "title": "FRAG option",
         "bytes": 10,
         "width": 32,
         "fields": [
@@ -248,33 +271,67 @@
             "key": "kind",
             "name": "Kind",
             "bits": 8,
-            "desc": "Option kind.",
-            "value": "3"
+            "desc": "Always 3 for the Fragmentation option."
           },
           {
-            "key": "len",
-            "name": "Len",
+            "key": "length",
+            "name": "Length",
             "bits": 8,
-            "desc": "10 means more fragments follow; 12 marks the terminal format.",
-            "value": "10"
+            "desc": "10 for a non-terminal fragment, 12 for the terminal one."
           },
           {
             "key": "frag-start",
-            "name": "Frag. Start",
+            "name": "Fragment Start",
             "bits": 16,
-            "desc": "Where the fragment data begins, measured from the start of the fragment's UDP header."
+            "desc": "Where the fragment data begins, measured from the UDP header."
           },
           {
             "key": "identification",
             "name": "Identification",
             "bits": 32,
-            "desc": "Identifies the original UDP datagram together with addresses and ports."
+            "desc": "Together with the addresses and ports, identifies the original datagram."
           },
           {
             "key": "frag-offset",
-            "name": "Frag. Offset",
+            "name": "Fragment Offset",
             "bits": 16,
-            "desc": "Position of this fragment in the original datagram, in bytes."
+            "desc": "Where this fragment sits in the original datagram, in bytes."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "options",
+      "position": "after",
+      "caption": "SAFE options and UNSAFE options",
+      "data": {
+        "columns": [
+          "Aspect",
+          "SAFE options, kinds 0 to 191",
+          "UNSAFE options, kinds 192 to 255"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Effect on the user data",
+              "Do not alter it",
+              "May alter it, or change what it represents"
+            ]
+          },
+          {
+            "cells": [
+              "If the receiver does not understand it",
+              "Silently ignored, and the data still arrives",
+              "The whole datagram is dropped"
+            ]
+          },
+          {
+            "cells": [
+              "Where it may appear",
+              "Anywhere in the surplus area",
+              "Only inside a FRAG option"
+            ]
           }
         ]
       }
@@ -282,43 +339,58 @@
   ],
   "references": [
     {
-      "number": "[RFC0768]",
+      "number": "[RFC768]",
       "text": "Postel, J., \"User Datagram Protocol\", STD 6, RFC 768, August 1980.",
       "rfc": 768
     },
     {
-      "number": "[RFC0791]",
-      "text": "Postel, J., \"Internet Protocol\", STD 5, RFC 791, September 1981.",
-      "rfc": 791
+      "number": "[RFC9293]",
+      "text": "Allman, R., Ed., et al., \"Transmission Control Protocol (TCP)\", STD 7, RFC 9293, August 2022.",
+      "rfc": 9293
     },
     {
-      "number": "[RFC1122]",
-      "text": "Braden, R., Ed., \"Requirements for Internet Hosts - Communication Layers\", STD 3, RFC 1122, October 1989.",
-      "rfc": 1122
+      "number": "[RFC9260]",
+      "text": "Stewart, L., et al., \"Stream Control Transmission Protocol (SCTP)\", RFC 9260, August 2022.",
+      "rfc": 9260
     },
     {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
-    },
-    {
-      "number": "[RFC8174]",
-      "text": "Leiba, B., \"Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words\", BCP 14, RFC 8174, May 2017.",
-      "rfc": 8174
+      "number": "[RFC3828]",
+      "text": "Pittelkow, J., \"UDP-Lite: A Reduced Overhead UDP Protocol\", RFC 3828, February 2004.",
+      "rfc": 3828
     },
     {
       "number": "[RFC9869]",
-      "text": "Fairhurst, G. and T. Jones, \"Datagram Packetization Layer Path MTU Discovery (DPLPMTUD) for UDP Options\", RFC 9869, October 2025.",
+      "text": "Touch, J., and C. Heard, Ed., \"Datagram Packetization Layer Path MTU Discovery (DPLPMTUD) for UDP Options\", RFC 9869, October 2025.",
       "rfc": 9869
+    },
+    {
+      "number": "[RFC9147]",
+      "text": "Rescorla, E., Tschofenig, H., and N. Modadugu, \"The Datagram Transport Layer Security (DTLS) Protocol Version 1.3\", RFC 9147, April 2022.",
+      "rfc": 9147
+    },
+    {
+      "number": "[RFC4301]",
+      "text": "Swanson, B., et al., \"IP Security Protocol (IPsec)\", RFC 4301, December 2005.",
+      "rfc": 4301
+    },
+    {
+      "number": "[RFC8085]",
+      "text": "Hollenbeck, S., \"Usage Guidelines for UDP\", RFC 8085, February 2017.",
+      "rfc": 8085
+    },
+    {
+      "number": "[RFC9298]",
+      "text": "Hampsten, E., et al., \"Secure UDP Server HTTP Proxying Using HTTP\", RFC 9298, March 2022.",
+      "rfc": 9298
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

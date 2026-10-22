@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document defines how to run Bidirectional Forwarding Detection (BFD) on Link Aggregation Group (LAG) interfaces. It runs an independent Asynchronous mode BFD session on every LAG member link, so each member link can be checked for continuity.</p>",
   "plainLanguage": {
-    "summary": "<p>Several cables are bundled together like one fat pipe. This has each cable send its own little hello checks so a broken one is noticed quickly.</p>"
+    "summary": "<p>Several cables are bundled together and presented to the network as one link, so that the network keeps working when one cable fails. Finding out which cable has failed is usually left to the protocol that manages the bundle. This RFC adds a second way to find out: a small liveness check, called BFD, running separately on every cable in the bundle. Each check is independent, and a cable is taken out of use as soon as its check fails.</p>"
   },
   "questions": [
     "bfd on link aggregation",
@@ -20,12 +20,12 @@
     "BFD",
     "Link Aggregation"
   ],
-  "subtitle": "Run a tiny BFD session on every cable in a link bundle so a dead member is spotted fast and pulled out of use.",
+  "subtitle": "Run a separate BFD session on every cable in a link bundle, so a failed member is noticed quickly and pulled out of use.",
   "tldr": {
-    "problem": "A Link Aggregation Group (LAG) bundles several physical links into one logical link, but LACP is the only per-member failure check, and a single BFD session over the bundle cannot guarantee detection of a failed member link.",
-    "mechanism": "Run an independent Asynchronous mode BFD session, called a micro-BFD session, on every LAG member link, sent over IP/UDP to the new destination port 6784. A member link is used for load balancing only while its micro-BFD sessions are Up.",
-    "outcome": "Failures of individual member links are found faster than with LACP, also without LACP, and the check can cover parts of Layer 3 forwarding.",
-    "outcomeLabel": "Why it matters"
+    "problem": "A link aggregation group combines several physical links into one logical link, so a single failed cable is normally hidden from the rest of the network. The Link Aggregation Control Protocol can detect a failed member, but it is slower, and a bundle configured without it has no member-level detection at all.",
+    "mechanism": "The RFC runs an independent Asynchronous mode BFD session on every member link, one for each address family in use, each with its own discriminators and its own state machine. The sessions use a dedicated UDP destination port, 6784, and on Ethernet member links a dedicated multicast MAC address.",
+    "outcome": "A dead member link is noticed within the BFD detection time and removed from the load-balancing table, so the rest of the bundle keeps working. The load balancer also refuses to use a member link until its sessions are up, which closes a blind spot for the layer 3 protocols that see only the bundle.",
+    "outcomeLabel": "What it adds"
   },
   "facts": [
     {
@@ -33,7 +33,7 @@
       "value": "6784"
     },
     {
-      "label": "Destination MAC",
+      "label": "Destination MAC address",
       "value": "01-00-5E-90-00-01"
     },
     {
@@ -43,9 +43,13 @@
     {
       "label": "Sessions per member link",
       "value": "One per enabled address family"
+    },
+    {
+      "label": "Address families",
+      "value": "IPv4 and IPv6"
     }
   ],
-  "today": "<p>RFC 7130 is a Proposed Standard, and no later RFC obsoletes or updates it according to the unit metadata. It builds on <a href='/rfc5880'>RFC 5880</a> and <a href='/rfc5881'>RFC 5881</a>.</p>",
+  "today": "<p>RFC 7130 is a Proposed Standard published in February 2014, and the unit metadata lists no document that obsoletes or updates it. IANA has assigned the dedicated MAC address 01-00-5E-90-00-01 and the UDP port 6784 for BFD on link aggregation group interfaces, and both registry entries now point at this document.</p>",
   "glossary": [
     "link-aggregation-group",
     "load-balancing",
@@ -53,100 +57,84 @@
     "multicast",
     "tcp-udp-port",
     "ethernet",
-    "udp"
+    "udp",
+    "bfd",
+    "bundle",
+    "ip-address"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why BFD on Each Member Link",
-      "content": "<p><strong>Bidirectional Forwarding Detection</strong> (BFD, <a href='/rfc5880'>RFC 5880</a>) detects faults in the bidirectional path between two forwarding engines, with potentially very low latency. A <strong>Link Aggregation Group</strong> (LAG, from IEEE 802.1AX) combines multiple physical links into one logical link for more bandwidth and resiliency.</p><p>LACP is used today to detect failures per member link. The RFC argues that BFD would give (1) faster detection, (2) detection in the absence of LACP, and (3) a way to verify that each member link can forward L3 packets. A single BFD session over the whole aggregation could not guarantee detection of a physical member link failure.</p><p>The goal is to verify continuity of every member link, which corresponds to section 7.3 of <a href='/rfc5882'>RFC 5882</a>. Operators who already use BFD over IP or MPLS can reuse one common failure detection mechanism.</p>",
-      "plainLanguage": "<p>If one of several bundled cables breaks, you want to find out quickly, and checking each cable on its own is the only sure way.</p>"
+      "title": "Why Check Every Member Link",
+      "content": "<p>The Bidirectional Forwarding Detection (BFD) protocol of <a href='/rfc5880'>RFC 5880</a> provides a mechanism to detect faults in the bidirectional path between two forwarding engines, including interfaces, data links and, to the extent possible, the forwarding engines themselves, with potentially very low latency. BFD also provides a fast mechanism for detecting communication failures on any data links, and the protocol can run over any media and at any protocol layer.</p><p>LAG, as defined in IEEE 802.1AX, provides mechanisms to combine multiple physical links into a single logical link. The logical link gives higher bandwidth and better resiliency, because if one of the physical member links fails, the aggregate logical link can continue to forward traffic over the remaining operational member links.</p><p>Currently the Link Aggregation Control Protocol (LACP) is used to detect failures on a per-physical-member basis. Using BFD for failure detection would give faster detection, would give detection in the absence of LACP, and would be able to verify the ability of each member link to forward layer 3 packets. Running a single BFD session over the aggregation, without internal knowledge of the member links, would make it impossible for BFD to guarantee detection of the physical member link failures.</p><p>The goal is therefore to verify link continuity for every member link, which corresponds to Section 7.3 of <a href='/rfc5882'>RFC 5882</a>. The approach is to run an Asynchronous mode BFD session over each LAG member link, and to make BFD control whether the member link should be part of the layer 2 load-balancing table of the LAG interface, whether or not LACP is in use. The document describes how to establish an Asynchronous mode BFD session per physical LAG member link of the LAG interface.</p><p>There are native Ethernet mechanisms for detecting failures, 802.1ax and 802.3ah, that could be used for LAG, but the solution defined here enables operators who have already deployed BFD over other technologies, such as IP or MPLS, to use a common failure detection mechanism.</p>",
+      "plainLanguage": "<p>BFD is a liveness check between two routers. Each side sends small packets at a fixed rate, and if the other side stops answering, the path is declared broken, usually much faster than the routing protocol would notice.</p><p>On a bundle of cables, one BFD session for the whole bundle would only tell you that the bundle is broken. Running a separate session on each cable tells you which cable is broken, so the bundle can keep running on the others. The check also works when the bundle is not managed by the link aggregation protocol at all.</p>"
     },
     {
-      "id": "concepts",
+      "id": "design",
       "number": "2",
-      "title": "Micro-BFD Sessions",
-      "content": "<p>The RFC calls the per-member-link sessions <strong>micro-BFD sessions</strong>. Only Asynchronous mode is considered. The BFD echo function is outside the scope. At least one system MUST take the Active role, possibly both.</p><p>The sessions are independent. Each has its own unique local discriminator, its own state variables and its own state machine. Timer values MAY differ, even within one aggregation, although the same values are expected.</p><p>A single micro-BFD session per enabled address family runs on each member link. Two sessions MAY exist per link, one IPv4 and one IPv6. If an address family is used on one member link, it MUST be used on all member links of that LAG. Negotiation MUST follow <a href='/rfc5880'>RFC 5880</a> and <a href='/rfc5881'>RFC 5881</a>.</p>",
-      "plainLanguage": "<p>Each cable gets its own pen pal. The pen pals do not share notes, and each one keeps its own count of whether the other side is still writing back.</p>"
+      "title": "Micro-BFD Sessions on Every Member Link",
+      "content": "<p>The mechanism defined for fast detection of a LAG member link failure is to run Asynchronous mode BFD sessions on every LAG member link. The document calls these per-member-link BFD sessions <strong>micro-BFD sessions</strong>.</p><p>Member link micro-BFD sessions, when using IP/UDP encapsulation, can use IPv4 or IPv6 addresses. Two micro-BFD sessions MAY exist per member link, one for each address family. When an address family is used on one member link, then it MUST be used on all member links of that LAG.</p><p>A single micro-BFD session for every enabled address family runs on each member link of the LAG, and the negotiation of each session MUST follow the same procedures as in <a href='/rfc5880'>RFC 5880</a> and <a href='/rfc5881'>RFC 5881</a>. Only Asynchronous mode BFD is considered; the BFD echo function is out of scope. At least one system MUST take the Active role, possibly both.</p><p>The micro-BFD sessions on the member links are independent BFD sessions. They use their own unique local discriminator values, maintain their own set of state variables, and have their own independent state machines. Timer values MAY differ between them, even among sessions belonging to the same aggregation, although it is expected that sessions belonging to the same aggregation will use the same timer values.</p>",
+      "plainLanguage": "<p>Each cable in the bundle gets its own BFD session, and each session is a complete session of its own: its own identifier, its own state, its own timers. Two sessions may exist on one cable, one for IPv4 and one for IPv6, but if a bundle uses an address family on one cable it has to use it on all of them.</p><p>Only the plain Asynchronous mode is used here. The echo function, where a packet is sent back to its own sender, is not covered.</p>"
     },
     {
       "id": "message-format",
-      "number": "3",
-      "title": "Encapsulation and Demultiplexing",
-      "content": "<p>Micro-BFD control packets are IP/UDP encapsulated as in <a href='/rfc5881'>RFC 5881</a>, but use the new UDP destination port <code>6784</code>. The new port removes the ambiguity between BFD over LAG and BFD over single-hop IP, for example when one side is configured with micro-BFD sessions and the other treats the LAG as a single interface. These procedures MUST be used for port 6784 and MUST NOT be used for other ports. Control packets use a destination IP address configured on the peer and reachable via the LAG.</p><p>A received packet is demultiplexed solely on the Your Discriminator field if it is nonzero. For initial Down packets it MAY be zero, and then demultiplexing MUST use a combination of other fields that includes the member link interface and the destination UDP port. If the field is nonzero and a session is found, the packet MUST have arrived on the interface associated with that session. This amends section 6.8.6 of <a href='/rfc5880'>RFC 5880</a>.</p>",
-      "plainLanguage": "<p>The little checks use their own special mailbox number so they are never mixed up with ordinary checks. The receiver also makes sure each note arrived on the right cable.</p>"
-    },
-    {
-      "id": "addressing",
-      "number": "4",
-      "title": "Ethernet Details",
-      "content": "<p>On Ethernet member links the destination MAC is the dedicated multicast address <code>01-00-5E-90-00-01</code>, as the immediate next hop. It MUST be used for the initial packets in the Down/AdminDown and Init states, and for the first <code>bfd.DetectMult</code> packets after the session goes Up. After that, the source MAC from the received packets MAY be used instead. All implementations MUST be able to send and receive Up state packets with the dedicated MAC, and those supporting both options need a way to control the behaviour.</p><p>The source MAC SHOULD be the MAC address of the transmitting member link. This reduces the use of extra MAC addresses and the resources needed on the receiving hardware. Packets SHOULD be sent untagged. Within IEEE 802.1q or 802.qinq they may be untagged or carry a VLAN tag of zero (802.1p priority tagged), and implementations MUST be able to receive both.</p>",
-      "plainLanguage": "<p>The checks are sent to a special shared address at first, and once things are going well they can use the other side's own address instead.</p>"
+      "number": "2.2",
+      "title": "Telling the Sessions Apart",
+      "content": "<p>The demultiplexing of a received BFD packet is based solely on the Your Discriminator field when that field is nonzero. For the initial Down BFD packets of a session, this value MAY be zero, and in that case demultiplexing MUST be based on some combination of other fields that MUST include the interface information of the member link and the destination UDP port of the received packet.</p><p>The reception procedure of Section 6.8.6 of <a href='/rfc5880'>RFC 5880</a> is amended for micro-BFD sessions: if the Your Discriminator field is nonzero and a micro-BFD session is found, the interface on which the BFD control packet arrived MUST correspond to the interface associated with that session. Without that rule, a packet arriving on one member link could be answered by the session belonging to another.</p><p>The BFD control packets for each micro-BFD session are IP/UDP encapsulated as defined in <a href='/rfc5881'>RFC 5881</a>, but with a new UDP destination port, 6784. The new port removes the ambiguity between BFD over LAG packets and BFD over single-hop IP, which would otherwise arise, for example, from configuring a LAG with micro-BFD sessions on one side and a <a href='/rfc5881'>RFC 5881</a> BFD session for the LAG as a single interface on the other side. The procedures in this document MUST be used for BFD messages addressed to port 6784 and MUST NOT be used for other ports assigned to other BFD modes.</p><p>Control packets use a destination IP address that is configured on the peer system and can be reached through the LAG interface. Implementations may range from explicitly configuring IP addresses for the BFD sessions to out-of-band methods for learning the destination IP address; the details are outside the scope of the document.</p>",
+      "plainLanguage": "<p>Each session is normally matched to its packets by the identifier the far end puts in every packet. The very first packets of a session, sent before the far end knows the identifier, carry no identifier, so they are matched by the cable they arrived on and the port number they were sent to.</p><p>All these sessions use one port of their own, 6784, so that a micro-BFD packet cannot be mistaken for an ordinary single-hop BFD packet. That matters when one end of a bundle is configured the two different ways.</p>"
     },
     {
       "id": "operation",
-      "number": "5",
-      "title": "Interaction With LAG and Failure Handling",
-      "content": "<p>Micro-BFD sessions MUST be requested when a member link is in the Distributing or Standby state, and deleted when it is in neither. BFD controls whether the load-balancing algorithm may pick a member link: even if LACP considers the link ready, it MUST NOT be used until all its micro-BFD sessions are Up. If a session goes down, the link MUST be taken out of the LAG load-balancing tables.</p><p>With separate IPv4 and IPv6 load-balancing tables, an implementation MAY act on the session with the matching address family alone, for example removing the link only from the IPv4 table when only the IPv4 session fails. Removing it from both is also allowed and is an implementation detail. BFD packets themselves MAY be sent and received via the Aggregator's MAC service interface regardless of session state.</p><p>L3 protocols such as OSPF treat the LAG as one bigger interface. They learn of micro-session failures only through the effect on the load-balancing table and any decision by the interface or LAG managing module to shut down the LAG. An active test is for L3 protocols to request a single BFD session per LAG.</p>",
-      "plainLanguage": "<p>A cable only gets traffic if it keeps answering its check. If it goes quiet, it is taken off the list until it answers again.</p>"
+      "number": "2.3",
+      "title": "Details on Ethernet Member Links",
+      "content": "<p>On Ethernet-based LAG member links, the destination Media Access Control (MAC) address is the dedicated multicast MAC address 01-00-5E-90-00-01, which is to be the immediate next hop. This dedicated MAC address MUST be used for the initial BFD packets of a micro-BFD session when it is in the Down, AdminDown and Init states. When a micro-BFD session is changing into the Up state, the first bfd.DetectMult packets in the Up state MUST be sent with the dedicated MAC. For BFD packets in the Up state following the first bfd.DetectMult packets, the source MAC address from the received BFD packets for the session MAY be used instead of the dedicated MAC.</p><p>All implementations MUST be able to send and receive BFD packets in the Up state using the dedicated MAC address. Implementations that support sending Up packets with both the dedicated and the received MAC address need to offer means to control the behaviour. On Ethernet-based LAG member links, the source MAC SHOULD be the MAC address of the member link transmitting the packet. The dedicated address helps to reduce the number of additional MAC addresses, which reduces the resources needed on the Ethernet hardware of the receiving member link.</p><p>Micro-BFD packets SHOULD always be sent untagged. When the LAG operates in the context of IEEE 802.1q or IEEE 802.qinq, the micro-BFD packets may either be untagged or sent with a VLAN tag of Zero, that is 802.1p priority tagged. Implementations compliant with this standard MUST be able to receive both untagged and 802.1p priority tagged micro-BFD packets.</p>",
+      "plainLanguage": "<p>On a bundle of Ethernet cables, the packets are addressed to one multicast MAC address reserved for this purpose, so that every member link can be addressed with the same destination address without needing an address of its own. That saves resources on the receiving hardware.</p><p>The packets are normally sent without a VLAN tag. Inside a tagged network they may be sent with a tag of zero, which marks the priority but not the network, and any implementation has to be able to receive both forms.</p>"
     },
     {
-      "id": "operational-considerations",
-      "number": "6",
-      "title": "Provisioning Considerations",
-      "content": "<p>The appendix advises that if BFD is enabled on a member link that is already active, BFD state should not influence load balancing until the session reaches Up. If BFD is removed while a session is Up, it should move to AdminDown and try to tell the peer. If either side is AdminDown, the system should not report a failure or remove the link from forwarding, with or without LACP.</p><p>An implementation may offer a configurable timeout after which a session must have reached Up or the link is taken out of forwarding, so a LAG does not stay forever in an inconsistent state. The timeout must be possible to turn off.</p><p>If only one device runs micro-BFD on a link and sees it as Down, the two devices disagree about the link, likely causing traffic loss. Another protocol used to bootstrap BFD can detect such mismatches, but such mechanisms are outside this document.</p>",
-      "plainLanguage": "<p>Turning the checks on or off should never accidentally break a working cable. Both ends need to agree that the game is being played.</p>"
+      "id": "procedures",
+      "number": "3",
+      "title": "How BFD and the Bundle Interact",
+      "content": "<p>The micro-BFD sessions for a particular LAG member link MUST be requested when the member link state is either Distributing or Standby, and the sessions MUST be deleted when the member link is in neither of those states any more.</p><p>BFD is used to control whether the load-balancing algorithm is able to select a particular LAG member link. In other words, even when LACP is used and considers the member link ready to forward traffic, the member link MUST NOT be used by the load balancer until all the micro-BFD sessions of that member link are in the Up state.</p><p>Where an implementation has separate load-balancing tables for IPv4 and IPv6, and both an IPv4 and an IPv6 micro-BFD session exist for a member link, the implementation MAY enable the member link in the load-balancing algorithm based on the BFD session with the matching address family alone.</p><p>There is one exception, for the BFD packets themselves. Implementations MAY receive and transmit BFD packets through the Aggregator's MAC service interface, independently of the session state.</p>",
+      "plainLanguage": "<p>A member link's BFD sessions exist only while that link is one of the ones the bundle is using. The rule that matters is the second one: the load balancer must leave a member link out of its table until that link's BFD session has come up, even if the link aggregation protocol considers the link ready.</p><p>The BFD packets themselves are exempt, so that a session can start and finish even when the link is not yet carrying traffic.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "4",
+      "title": "BFD on Member Links and Layer 3 Protocols",
+      "content": "<p>The mechanism described in the document is likely to be used by modules that manage interfaces or LAGs, and so manage the member links of a LAG. Typical layer 3 protocols such as OSPF have no insight into the LAG and treat it as one bigger interface. The signalling from the micro sessions to the layer 3 protocols is therefore done indirectly, through the effect of the micro-BFD sessions on the load-balancing table and through the interface and LAG managing module's potential decision to shut down the LAG.</p><p>An active method of testing the impact of the micro-BFD sessions is for the layer 3 protocols to request a single BFD session per LAG.</p>",
+      "plainLanguage": "<p>The routing protocols above the bundle do not know that the bundle is made of several cables. They see one interface. So the information from the per-cable checks reaches them indirectly: a cable that fails is taken out of the load-balancing table, and the module that manages the bundle may decide to shut the whole bundle down.</p><p>A way to check that this indirect signalling works is to ask the routing protocol for one ordinary BFD session on the bundle as a whole.</p>"
+    },
+    {
+      "id": "error-handling",
+      "number": "5",
+      "title": "Detecting a Member Link Failure",
+      "content": "<p>When a micro-BFD session goes down, that member link MUST be taken out of the LAG load-balancing table.</p><p>Where an implementation has separate load-balancing tables for IPv4 and IPv6, and both an IPv4 and an IPv6 micro-BFD session exist for a member link, the implementation MAY remove the member link only from the load-balancing table that matches the address family of the failing BFD session. For example, if the IPv4 micro-BFD session fails but the IPv6 micro-BFD session stays Up, the member link MAY be removed from only the IPv4 load balancing table, and the link MAY remain in the IPv6 load-balancing table. Alternatively, the member link may be removed from both tables. This decision is an implementation detail.</p><p>The appendix of the document adds further operational detail. If the feature were provisioned on an aggregated link member after the link was already active within a LAG, the BFD session state should not influence the load-balancing algorithm until the session reaches the Up state, so that enabling the LAG and enabling BFD on it has no impact on the forwarding service. If the feature were deprovisioned while the session was in the Up state, BFD should move to the AdminDown state and attempt to tell the peer. If the local or the remote state of a session is AdminDown, the system should not indicate a connectivity failure to any client and should not remove the member link from forwarding, and this is independent of the use of LACP.</p><p>Where traffic is forwarded across a link while the corresponding micro-BFD session is not in the Up state, an implementation may use a configurable timeout after which the session must have reached the Up state, otherwise the link is taken out of forwarding, and the configuration must allow that timeout to be turned off. The timeout ensures that a LAG does not stay for ever in an inconsistent state where forwarding occurs on a link with no confirmation from the micro-BFD session that the link is healthy.</p><p>The appendix ends with a warning about a mismatch: if one device is not operating a micro-BFD session on a link while the other is, and the second perceives the session to be Down, the two devices have a different view of the status of the link, which would likely lead to traffic loss across the LAG. Another protocol can be used to bootstrap BFD to detect such a mismatched configuration, since the side that is not configured can send a rejection error, but such bootstrapping mechanisms are outside the scope of the document.</p>",
+      "plainLanguage": "<p>When a session fails, the cable comes out of the load-balancing table at once. If a bundle keeps separate tables for the two address families, a cable may be removed from one table and kept in the other, or removed from both; that is an implementation choice.</p><p>Two operational cautions are given. A session that is deliberately shut down, on either end, should not be treated as a failure, and should not take the cable out of use. And if the two ends are configured differently, one running the session and the other not, they will disagree about the state of the cable, which is likely to cost traffic.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
-      "title": "Security and IANA",
-      "content": "<p>The RFC introduces no additional security issues, and the security mechanisms of <a href='/rfc5880'>RFC 5880</a> apply.</p><p>IANA assigned the dedicated MAC address <code>01-00-5E-90-00-01</code> and UDP port <code>6784</code> for BFD on LAG interfaces, and changed the references to this RFC. The port registry now shows the assignee as IESG and the contact as the BFD chairs.</p>",
-      "plainLanguage": "<p>It adds no new locks of its own and uses the ones BFD already has. It also got its own official address and mailbox number.</p>"
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The document introduces no additional security issues, and the security mechanisms defined in <a href='/rfc5880'>RFC 5880</a> apply to it.</p>",
+      "plainLanguage": "<p>The document adds no security rules of its own: the security mechanisms that BFD already defines apply here unchanged.</p>"
     }
   ],
   "viz": [
     {
-      "type": "key-grid",
-      "anchor": "message-format",
-      "position": "after",
-      "caption": "WHAT IS SPECIAL ABOUT MICRO-BFD ON THE WIRE",
-      "data": {
-        "items": [
-          {
-            "title": "UDP port 6784",
-            "text": "New destination port, separate from single-hop BFD."
-          },
-          {
-            "title": "MAC 01-00-5E-90-00-01",
-            "text": "Dedicated multicast destination MAC address."
-          },
-          {
-            "title": "Untagged",
-            "text": "Sent untagged; a VLAN tag of zero must also be accepted."
-          },
-          {
-            "title": "Per-link session",
-            "text": "Own discriminator, state variables and state machine."
-          }
-        ]
-      }
-    },
-    {
       "type": "layers",
-      "anchor": "operation",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "WHERE MICRO-BFD SITS (ILLUSTRATIVE, NOT FROM THE RFC)",
+      "caption": "WHERE THE PER-MEMBER CHECKS SIT IN THE STACK",
       "data": {
         "layers": [
           {
-            "label": "L3 protocols",
-            "detail": "Such as OSPF; see the LAG as one interface"
+            "label": "Routing protocols",
+            "detail": "See the bundle as one interface"
           },
           {
             "label": "LAG interface",
-            "detail": "Load-balancing table decides which links carry traffic"
+            "detail": "The logical link made from the member links"
           },
           {
             "label": "Micro-BFD sessions",
@@ -155,13 +143,114 @@
           },
           {
             "label": "Member links",
-            "detail": "Physical Ethernet links in the LAG"
+            "detail": "The physical links in the bundle"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "ONE SESSION FOR THE BUNDLE, OR ONE FOR EACH MEMBER LINK",
+      "data": {
+        "columns": [
+          "Aspect",
+          "One session over the bundle",
+          "One micro-BFD session per member link"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "What a failure tells you",
+              "That the bundle as a whole is not forwarding",
+              "Which member link has failed"
+            ]
+          },
+          {
+            "cells": [
+              "Needs knowledge of the member links",
+              "No",
+              "Yes"
+            ]
+          },
+          {
+            "cells": [
+              "Works without LACP",
+              "Yes",
+              "Yes"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "design",
+      "position": "after",
+      "caption": "ILLUSTRATIVE: EACH MEMBER LINK CARRIES ITS OWN SESSION",
+      "data": {
+        "lanes": [
+          {
+            "key": "system-a",
+            "label": "System A"
+          },
+          {
+            "key": "system-b",
+            "label": "System B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "system-a",
+            "to": "system-b",
+            "label": "BFD session on member link 1",
+            "color": "blue",
+            "note": "An independent session with its own discriminators and state machine."
+          },
+          {
+            "from": "system-b",
+            "to": "system-a",
+            "label": "BFD session on member link 2",
+            "color": "green",
+            "note": "A separate session, on a separate member link, with its own timers."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "THE FIXED VALUES THAT MARK A PACKET AS PART OF THIS",
+      "data": {
+        "items": [
+          {
+            "title": "UDP destination port",
+            "text": "6784, so that these packets cannot be confused with single-hop BFD."
+          },
+          {
+            "title": "Destination MAC address",
+            "text": "The dedicated multicast address 01-00-5E-90-00-01 on Ethernet member links."
+          },
+          {
+            "title": "Tagging",
+            "text": "Sent untagged, or with a VLAN tag of zero where the bundle is tagged."
+          },
+          {
+            "title": "Interface check",
+            "text": "A packet must arrive on the member link that the session belongs to."
           }
         ]
       }
     }
   ],
   "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
     {
       "number": "[RFC5880]",
       "text": "Katz, D. and D. Ward, \"Bidirectional Forwarding Detection (BFD)\", RFC 5880, June 2010.",
@@ -181,19 +270,15 @@
       "number": "[RFC7042]",
       "text": "Eastlake, D. and J. Abley, \"IANA Considerations and IETF Protocol and Documentation Usage for IEEE 802 Parameters\", BCP 141, RFC 7042, October 2013.",
       "rfc": 7042
-    },
-    {
-      "number": "[IEEE802.1AX]",
-      "text": "IEEE Std. 802.1AX, \"IEEE Standard for Local and metropolitan area networks - Link Aggregation\", November 2008."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Provides an experimental update to TCP for traffic where the sending rate is limited by the application and not by congestion. It lets a sender restart quickly after such a quiet period while still reacting properly to congestion.</p>",
   "plainLanguage": {
-    "summary": "<p>If you stop talking for a bit, you should not have to start whispering again. This lets TCP pick up at a sensible volume.</p>"
+    "summary": "<p>TCP's congestion window decides how much data a sender may have in flight. When an application has nothing to send, the window should not keep growing, but standard TCP lets it. This document keeps a recently used window for a while and then trims it back if it turns out to be too large.</p>"
   },
   "questions": [
     "what is tcp for rate-limited traffic",
@@ -21,16 +21,12 @@
   ],
   "subtitle": "How a TCP sender that is not using its full congestion window can keep a recent window safely, without growing a stale one.",
   "tldr": {
-    "problem": "Applications that send in bursts or with idle gaps leave the TCP congestion window larger than what they actually use, so the window no longer reflects the path. Standard TCP resets it after idle, and the earlier fix, RFC 2861, was too conservative and little used.",
-    "mechanism": "The sender measures how much data the network acknowledged in recent round-trip times (pipeACK). If that is less than half of cwnd it enters a non-validated phase, keeps cwnd frozen for up to five minutes, and cuts it sharply on congestion.",
-    "outcome": "RFC 7661 is an Experimental update that obsoletes RFC 2861, which it reclassifies as Historic. It is classified Experimental pending experience with deployed implementations.",
+    "problem": "When an application sends more slowly than its congestion window allows, standard TCP lets the window grow far beyond what the path was really carrying, which wastes capacity and can cause congestion.",
+    "mechanism": "The method measures how much data the network acknowledged in one round-trip time and compares it with half the window, keeping a recently used window while the sender is rate-limited but resetting it if congestion appears.",
+    "outcome": "It is an Experimental document that obsoletes RFC 2861 and reclassifies that document from Experimental to Historic, because the earlier method was too conservative for applications that vary their sending rate.",
     "outcomeLabel": "Status today"
   },
   "facts": [
-    {
-      "label": "Non-validated threshold",
-      "value": "pipeACK < 1/2 cwnd"
-    },
     {
       "label": "pipeACK Sampling Period",
       "value": "Max(3*RTT, 1 second)"
@@ -40,99 +36,204 @@
       "value": "SHOULD NOT exceed five minutes"
     },
     {
-      "label": "Minimum cwnd after loss",
-      "value": "1 MSS"
+      "label": "Validated threshold",
+      "value": "pipeACK >= (1/2)*cwnd"
     },
     {
-      "label": "Category",
+      "label": "Window at end of loss recovery",
+      "value": "cwnd = (Max(pipeACK,LossFlightSize) - R)/2"
+    },
+    {
+      "label": "Minimum window after loss",
+      "value": "1 TCP Maximum Segment Size"
+    },
+    {
+      "label": "Status",
       "value": "Experimental"
     }
   ],
-  "today": "<p>RFC 7661 is an Experimental specification that obsoletes <a href='/rfc2861'>RFC 2861</a>, which it reclassifies as Historic. It is classified Experimental pending experience with deployed implementations, and the unit metadata lists no later RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 7661 is an Experimental document and has not itself been obsoleted or updated. It obsoletes RFC 2861, whose status it changes from Experimental to Historic, because the earlier congestion window validation method was found to be too conservative for applications that vary their sending rate.</p>",
   "glossary": [
     "tcp",
     "congestion-control",
     "congestion-window",
     "application-limited",
-    "retransmission"
+    "retransmission",
+    "round-trip-time",
+    "slow-start",
+    "nagle-algorithm",
+    "retransmission-timeout",
+    "selective-acknowledgment",
+    "mss"
   ],
   "sections": [
     {
       "id": "motivation",
       "number": "1",
-      "title": "Why Rate-Limited TCP Needs Help",
-      "content": "<p>TCP's <strong>congestion window</strong> (<code>cwnd</code>) caps how much unacknowledged data a flow may have in the network. A bulk transfer always has data to send, so its <code>cwnd</code> tracks what the path can carry. A <strong>rate-limited</strong> application, such as web browsing, adaptive streaming, query/response protocols or live video, is sometimes idle or sends less than <code>cwnd</code> allows.</p><p>In that case standard TCP does not restrict growth of <code>cwnd</code>, so it can grow far beyond the current sending rate and stop reflecting the state of the path. Using such an invalid <code>cwnd</code> may reduce application performance or contribute to congestion. Standard TCP also says a sender SHOULD set <code>cwnd</code> to no more than the Restart Window after an idle interval longer than the retransmission timeout, and the RFC notes that implementations did not always do this.</p><p>The stated goals include leaving bulk senders unchanged, reducing latency for applications that change rate, avoiding a large non-validated <code>cwnd</code>, and removing the incentive to send \"padding\" data just to keep a big window.</p>",
-      "plainLanguage": "<p>Imagine you ran fast for a while, then sat down for a long time. Your legs would not still be ready to sprint. TCP needs a way to notice when its \"sprint speed\" is out of date.</p>"
+      "title": "Why Rate-Limited Traffic Upsets TCP",
+      "content": "<p>TCP is used for traffic with a wide range of application behaviours. The congestion window, <strong>cwnd</strong>, controls the maximum number of unacknowledged packets or bytes a flow may have in the network at any time, a value known as the FlightSize. A bulk application always has data ready, so the rate at which it sends is limited by the receiver's advertised window and by cwnd, and the FlightSize of a bulk flow grows with the cwnd and tracks the volume of data acknowledged in the last round-trip time.</p><p>A rate-limited application is different. It has periods when the sender is idle, or able to send only at a rate below what cwnd allows. The volume of data in flight can then change significantly from one round-trip time to the next and can be much less than cwnd, so the FlightSize can significantly exceed the recently used capacity.</p><p>Standard TCP tells a sender to set cwnd to no more than the Restart Window before it begins transmitting if it has not sent data for longer than the retransmission timeout. The document notes that this behaviour was not always observed in implementations, and that experiments confirm it is still the case. Congestion Window Validation in <a href='/rfc2861'>RFC 2861</a> introduced the term <strong>application-limited period</strong> for the time when the sender sends less than the congestion or receiver windows allow, and described a method to support applications that vary their transmission rate. Many Internet applications behave this way, including web browsing, HTTP-based adaptive streaming, query and response protocols, network file sharing, and live video transmission, and many of them avoid long-lived persistent connections for exactly this reason, using a succession of short transfers or UDP instead.</p><p>Standard TCP imposes no additional restriction on the growth of cwnd when a sender cannot send at the maximum rate the window allows, so a rate-limited sender may grow a cwnd far beyond the current transmit rate. Such an invalid cwnd can reduce application performance and can significantly contribute to network congestion. The goals of the update are not to change the behaviour of a bulk sender that fully uses its window, to coexist with standard TCP and with other flows using the updated method, to reduce transfer latency for applications that change rate over short intervals, to avoid growing a large non-validated cwnd that has not recently been used, to remove the incentive for padding a stream just to keep a large window, and to give applications a reason to use long-lived connections rather than a succession of short-lived flows.</p>",
+      "plainLanguage": "<p>TCP keeps a note of how much data may be in flight at once. If an application has nothing to send, that note can keep growing even though the network never carried that much. The document wants to keep the note useful without letting it run away.</p>"
     },
     {
       "id": "history",
       "number": "2",
-      "title": "What Went Wrong with RFC 2861",
-      "content": "<p><a href='/rfc2861'>RFC 2861</a> defined Congestion Window Validation (CWV), which decayed <code>cwnd</code> after an idle period and treated \"application-limited\" and \"idle\" cases differently. In practice the two cases were hard to tell apart, and performance was unpredictable for variable-rate traffic. CWV had been implemented in some mainstream operating systems as the default behaviour.</p><p>It only helped when the idle period was shorter than several retransmission timeouts, because after that standard TCP resets <code>cwnd</code> anyway. Some systems and applications instead used non-standard methods or sent dummy \"padding\" data, which wastes network capacity.</p><p>The RFC concludes that CWV had the correct motivation but the wrong approach, and was too conservative for many common rate-limited applications. So this document treats all rate-limited traffic uniformly, whether idle or merely slow, and reclassifies RFC 2861 from Experimental to Historic.</p>",
-      "plainLanguage": "<p>The old rule tried to be careful but was so cautious that people either ignored it or sent useless filler to dodge it. The new rule is simpler and treats \"quiet\" and \"slow\" the same way.</p>"
+      "title": "Why the Earlier Method Was Retired",
+      "content": "<p>RFC 2861 described a simple modification to the TCP congestion control algorithm that decayed the cwnd after a transition to a sufficiently long idle period, using the slow-start threshold to save information about the previous value of the congestion window. This relaxed the standard TCP behaviour for an idle session, and also modified behaviour when a sender transmitted at a rate below what cwnd allowed.</p><p>The earlier document proposed two sets of responses, one after an application-limited period and one after an idle period. In practice, telling the two conditions apart was found to be problematic in real networks. The approach gave predictable performance for long on-off periods, much longer than one round-trip time, or for slowly varying rate-based traffic, but performance could be unpredictable for variable-rate traffic, and it depended both on whether an accurate round-trip time had been obtained and on the pattern of the application traffic relative to the measured round-trip time.</p><p>Many applications can and often do vary their transmission over a wide range of rates, and with the earlier method such applications often experienced varying performance, which made it hard for application developers to predict TCP latency even on a path with stable network characteristics. The document argues that classifying application behaviour as application-limited or idle is problematic and inappropriate, and so it treats all rate-limited traffic uniformly.</p><p>The method was implemented as the default behaviour in some mainstream operating systems, and analysis has shown that a sender using it can use available capacity on a shared path after an idle period, which can benefit variable-rate applications over long delay paths compared with the slow-start restart of standard TCP. But it would only benefit an application if the idle period were shorter than several retransmission timeout intervals, since beyond that the behaviour matches standard TCP, which resets cwnd to the TCP Restart Window.</p><p>Some operating systems supported non-standard methods instead, and applications resorted to padding streams, sending dummy data to keep their sending rate up. Padding does give good evidence that the path can sustain the offered rate, but it consumes network capacity and reduces the opportunity for congestion-free statistical multiplexing, which matters for variable-rate flows. The conclusion reached was that the earlier method had the correct motivation but the wrong approach: it benefited the network by reducing the probability of congestion, but its behaviour was too conservative for common rate-limited applications and it was unclear whether applications actually used it on the general Internet.</p>",
+      "plainLanguage": "<p>The earlier method tried to tell apart two cases, an application that pauses and one that sends slowly. In real networks that distinction proved unreliable, so the behaviour became unpredictable for the applications that vary their rate most. This document stops drawing the distinction.</p>"
     },
     {
-      "id": "concepts",
+      "id": "terminology",
       "number": "3",
-      "title": "Validated and Non-Validated Phases",
-      "content": "<p>The method adds a sender-side-only state. A new variable, <strong>pipeACK</strong>, measures the volume of data acknowledged by the network over a Round-Trip Time. Unlike <code>FlightSize</code>, which is data outstanding right now, pipeACK looks at data actually acknowledged. A sample should be taken at least once per RTT when the sender has unacknowledged segments, and the variable takes the maximum sample over the pipeACK Sampling Period, defined as <code>Max(3*RTT, 1 second)</code>.</p><ul><li><strong>Validated phase:</strong> pipeACK is at least half of <code>cwnd</code>, or pipeACK is undefined (at connection start or just after loss recovery). Standard methods apply.</li><li><strong>Non-validated phase:</strong> pipeACK is less than half of <code>cwnd</code>. The window rests on an earlier measurement and has not been used recently.</li></ul><p>The threshold of one half comes from slow-start, where a sender may double its <code>FlightSize</code> each RTT. The pipeACK variable MUST NOT be updated during Fast Recovery, and the method RECOMMENDS enabling SACK and the loss recovery of <a href='/rfc6675'>RFC 6675</a>.</p>",
-      "plainLanguage": "<p>TCP keeps a score of how much it really got through lately. If it used less than half of what it thinks it is allowed, it says, \"my number might be stale,\" and becomes more careful.</p>"
-    },
-    {
-      "id": "algorithms",
-      "number": "4",
-      "title": "Behaviour in the Non-Validated Phase",
-      "content": "<p>A sender MUST enter the non-validated phase when pipeACK falls below half of <code>cwnd</code>. It preserves <code>cwnd</code>: a sender that is <strong>cwnd-limited</strong> MAY grow it the standard way, while one that is not MUST NOT increase it on ACKs. The sender leaves the phase when pipeACK rises above half of <code>cwnd</code>, when it sees congestion, or when the RTO expires.</p><p>On a packet drop the sender MUST record <code>LossFlightSize</code> and set <code>cwnd = Max(pipeACK, LossFlightSize)/2</code> for recovery. At the end of recovery it MUST set <code>cwnd = (Max(pipeACK, LossFlightSize) - R)/2</code>, where R is the data successfully retransmitted during recovery. The result MUST NOT fall below 1 MSS, and pipeACK is then reset to undefined.</p><p>The sender SHOULD also control burst size, for example by pacing out <code>cwnd</code> over its RTT estimate, so that many segments are not sent back to back at line rate.</p><p>The <strong>non-validated period</strong> (NVP) SHOULD NOT exceed five minutes. If a sender is still in the phase after the NVP, it MUST set <code>ssthresh = max(ssthresh, 3*cwnd/4)</code> and then reduce <code>cwnd</code> to no more than <code>max((1/2)*cwnd, IW)</code>, where IW is the initial window.</p>",
-      "plainLanguage": "<p>While TCP is unsure, it does not speed up. If something goes wrong, it slows down a lot. And if it waits too long, it halves its speed so it does not blast the network when it wakes up.</p>"
+      "title": "The Terms the Method Introduces",
+      "content": "<p>The document assumes familiarity with the terminology of TCP congestion control and adds a handful of terms. A flow is <strong>cwnd-limited</strong> when it has sent the maximum number of segments permitted by cwnd and the application uses the allowed sending rate. A <strong>pipeACK sample</strong> is a measure of the volume of data acknowledged by the network within a round-trip time. The <strong>pipeACK variable</strong> measures the available capacity using the set of pipeACK samples. The <strong>pipeACK Sampling Period</strong> is the maximum period that a measured pipeACK sample may influence the pipeACK variable.</p><p>A <strong>rate-limited</strong> flow is one that does not consume more than one half of cwnd and hence operates in the non-validated phase; this includes periods when the application is idle and periods when it chooses to send at less than the maximum rate permitted by cwnd. The <strong>non-validated phase</strong> is the phase in which cwnd reflects a previous measurement of the available path capacity. The <strong>non-validated period</strong> is the maximum period for which cwnd is preserved in that phase. The <strong>validated phase</strong> is the phase in which cwnd reflects a current estimate of the available path capacity.</p>",
+      "plainLanguage": "<p>The new words describe two things: how much the network actually acknowledged in the last round trip, and whether the window still matches that. A window that has not been checked recently is called non-validated.</p>"
     },
     {
       "id": "design",
+      "number": "4",
+      "title": "The New Congestion Window Validation Method",
+      "content": "<p>The method is a sender-side-only change to TCP congestion control. It creates a new protocol state, and the sender must determine when the window is validated or non-validated to control entry and exit from that state. It does not differentiate between a sender that has become idle and one that is sending below the rate cwnd allows.</p><p>A sender starts a connection in the validated phase and initialises the pipeACK variable to the undefined value, which inhibits its use in cwnd calculations. To estimate the validated capacity of a path, the sender introduces pipeACK, which differs from FlightSize in that it is evaluated over a window of acknowledged data rather than reflecting the amount of data outstanding. A pipeACK sample is measured by the volume of data acknowledged by the network over the period of a measured round-trip time. The sender should take at least one sample per round-trip time when it has unacknowledged segments. The pipeACK variable may consider multiple samples over the pipeACK Sampling Period but must not exceed the highest value within that period, which the document defines as Max(3*RTT, 1 second). When no measurements are available, the variable is set to the undefined value, which inhibits entering the non-validated phase. The variable must not be updated during TCP Fast Recovery, and the document recommends the SACK option and the recovery method of <a href='/rfc6675'>RFC 6675</a>.</p><p>The two phases are defined by a comparison. The sender is in the <strong>validated phase</strong> when pipeACK is at least half of cwnd, or when pipeACK is undefined, which is the normal phase in which the standard methods increase cwnd. It is in the <strong>non-validated phase</strong> when pipeACK is less than half of cwnd, meaning the window is based on a previous measurement whose use has not been validated within the pipeACK Sampling Period. The threshold of one half was chosen because a sender in slow-start is permitted to double its FlightSize from one round-trip time to the next, so a sender whose FlightSize is below half of cwnd must be treated as non-validated and needs additional mechanisms.</p><p>On entering the non-validated phase the sender preserves cwnd: it only increases after fully using the window in this phase, and otherwise the window neither grows nor reduces. The phase ends when the sender transmits enough data that pipeACK exceeds half of cwnd, or when it sees an indication of congestion. After a fixed period, the non-validated period, the sender adjusts cwnd. That period should not exceed five minutes. While in the phase, a sender that is cwnd-limited may use the standard method to increase cwnd, but one that is not cwnd-limited must not increase it on receipt of ACKs, so it avoids growing a window it has not recently used. If congestion is detected the sender must exit the phase, reducing cwnd as specified. If the retransmission timeout expires the sender must also exit the phase and resume the standard TCP RTO mechanism. A sender with pipeACK above half of cwnd should enter the validated phase, which releases it from the constraints on cwnd growth.</p><p><strong>Response to congestion.</strong> Receiving congestion feedback in the non-validated phase is read as a sign that it was wrong to use the preserved window, so the sender must reduce the rate quickly. Because the window has no validated value, a new one is selected from the utilised rate. On detecting a packet drop the sender records the current FlightSize in LossFlightSize and calculates a safe window for loss recovery as <code>cwnd = (Max(pipeACK,LossFlightSize))/2</code>. At the end of the recovery phase the sender must reset the window with <code>cwnd = (Max(pipeACK,LossFlightSize) - R)/2</code>, where R is the volume of data successfully retransmitted during recovery. The result must not be reduced below one TCP Maximum Segment Size. After loss recovery the sender must re-initialise pipeACK to the undefined value, so standard TCP methods apply until a new sample can be taken, and ssthresh is adjusted by the standard method.</p><p><strong>Burst control.</strong> Congestion control lets a sender accumulate a window that allows a burst of segments up to the difference between the FlightSize and cwnd, and such bursts can hurt other flows sharing a bottleneck or cause congestion where buffering is limited. The document recommends that a sender in the non-validated phase control the maximum burst size, for example by pacing the window out over its estimate of the round-trip time, without recommending any specific method.</p><p><strong>End of the period.</strong> If the application stays in the non-validated phase for longer than the non-validated period, and the sender then exits the phase, it must update ssthresh to max(ssthresh, 3*cwnd/4), recording that the present rate was safely sustained, and then update cwnd to not greater than max((1/2)*cwnd, IW), where IW is the appropriate TCP initial window. These adjustments put the sender into slow-start, and halve the window relative to the preserved value.</p>",
+      "plainLanguage": "<p>The sender watches how much the network acknowledges over one round trip and compares that with half its window. If the two roughly match, the window is trusted. If the acknowledged amount is much smaller, the window is kept but not allowed to grow, and it is trimmed back when the sender next sends. Any sign of congestion brings the window down at once.</p>"
+    },
+    {
+      "id": "parameters",
       "number": "5",
-      "title": "Choosing Five Minutes",
-      "content": "<p>The RFC explains that there is no ideal time to keep a preserved <code>cwnd</code>. Five minutes was chosen as a compromise: longer than the idle intervals of common applications, but not much longer than the period for which the capacity of an Internet path is commonly stable. Wired network capacity is usually stable for several minutes.</p><p>The RFC admits cases where throughput varies faster, such as wireless links, where rates may fluctuate over a few seconds. Senders on such paths may see more congestion with the new method. It also notes that TCP's default user timeout is five minutes, so reusing that interval may simplify some implementations.</p>",
-      "plainLanguage": "<p>Five minutes is like saying a seat at the table stays yours for a short while. Long enough for a quick break, but not so long that the situation has probably changed.</p>"
+      "title": "Choosing a Safe Period to Keep the Window",
+      "content": "<p>Limiting the period during which cwnd may be preserved avoids the side effects that come with keeping it unnecessarily high for an arbitrary period, which was part of the problem the earlier method tried to address. The period a sender may safely preserve cwnd is a function of how long a network path is expected to sustain the capacity the window reflects, and there is no ideal choice.</p><p>Five minutes was chosen. It is a compromise that is longer than the idle intervals of common applications but not much longer than the period for which the capacity of an Internet path may commonly be regarded as stable. The capacity of wired networks is usually relatively stable over several minutes, and that stability increases with capacity, which suggests cwnd may be preserved for at least a few minutes.</p><p>There are cases where TCP throughput varies significantly over less than five minutes. Wireless topologies are an example, where rate variations may fluctuate on the order of a few seconds as a consequence of medium access protocol instabilities, and mobility changes may also affect TCP performance over short time scales. Senders that observe such rapid changes may experience increased congestion with the new method, although such variation would likely also affect TCP behaviour when supporting interactive and bulk applications. Routing algorithms may change the path a transport uses, which can disrupt the round-trip time measurement and change the capacity available, but the document assumes such path changes do not usually occur frequently compared with a time frame of a few minutes.</p><p>Simulation studies suggest that for many practical applications the performance using this value will not be significantly different from that observed with a non-standard method that does not reset cwnd after an idle period. Other TCP sender mechanisms have used a five-minute timer, so reusing the same interval could simplify some implementations, and TCP defines a default user timeout of five minutes, which is how long transmitted data may remain unacknowledged before a connection is forcefully closed.</p>",
+      "plainLanguage": "<p>The window is kept for at most five minutes. That is long enough for most applications to be briefly busy, and short enough that a path whose capacity has changed is not trusted for long.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
       "title": "Security Considerations",
-      "content": "<p>The section is brief. General security considerations for TCP congestion control are in <a href='/rfc5681'>RFC 5681</a>, and because this document updates one aspect of those procedures, those considerations also apply to the algorithm.</p>",
-      "plainLanguage": "<p>The new rules are a small change to an existing set of rules, so the same safety advice as before still applies.</p>"
+      "content": "<p>The general security considerations concerning TCP congestion control are discussed in <a href='/rfc5681'>RFC 5681</a>. This document describes an algorithm that updates one aspect of the congestion control procedures, so the considerations described in that document apply to this algorithm as well. The document adds nothing beyond that.</p>",
+      "plainLanguage": "<p>The document says only that the usual TCP congestion control security considerations apply, because the change touches one part of the congestion control procedures.</p>"
     }
   ],
   "viz": [
     {
-      "type": "compare-table",
-      "anchor": "concepts",
+      "type": "state-machine",
+      "anchor": "design",
       "position": "after",
-      "caption": "THE TWO PHASES (RFC 7661)",
+      "caption": "The two sender phases and the transitions between them",
+      "data": {
+        "states": [
+          {
+            "key": "validated",
+            "label": "VALIDATED",
+            "initial": true
+          },
+          {
+            "key": "non-validated",
+            "label": "NON-VALIDATED"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "validated",
+            "to": "non-validated",
+            "label": "pipeACK < (1/2)*cwnd"
+          },
+          {
+            "from": "non-validated",
+            "to": "validated",
+            "label": "pipeACK > (1/2)*cwnd"
+          },
+          {
+            "from": "non-validated",
+            "to": "validated",
+            "label": "congestion detected: exit and reduce cwnd"
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "motivation",
+      "position": "after",
+      "caption": "Bulk transfer and rate-limited traffic compared",
       "data": {
         "columns": [
-          "Phase",
-          "Condition",
-          "Window behaviour"
+          "Aspect",
+          "Bulk transfer",
+          "Rate-limited application"
         ],
         "rows": [
           {
             "cells": [
-              "Validated",
-              "pipeACK >= 1/2 cwnd, or undefined",
-              "Standard TCP methods increase cwnd"
+              "Data to send",
+              "Always available to transmit.",
+              "Sometimes idle, or unable to send at the rate the window allows."
             ]
           },
           {
             "cells": [
-              "Non-validated",
-              "pipeACK < 1/2 cwnd",
-              "cwnd preserved; grows only if cwnd-limited"
-            ],
-            "self": true
+              "What limits the send rate",
+              "The receiver advertised window and the congestion window.",
+              "The application itself."
+            ]
+          },
+          {
+            "cells": [
+              "FlightSize",
+              "Grows with cwnd and tracks the volume acknowledged in the last round-trip time.",
+              "Can change significantly from one round-trip time to another and be much less than cwnd."
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "terminology",
+      "position": "after",
+      "caption": "The new terms introduced in Section 3",
+      "data": {
+        "items": [
+          {
+            "title": "pipeACK sample",
+            "text": "A measure of the volume of data acknowledged by the network within a round-trip time."
+          },
+          {
+            "title": "pipeACK variable",
+            "text": "The variable that measures the available capacity using the set of pipeACK samples."
+          },
+          {
+            "title": "pipeACK Sampling Period",
+            "text": "The maximum period that a measured pipeACK sample may influence the pipeACK variable."
+          },
+          {
+            "title": "Validated phase",
+            "text": "The phase in which cwnd reflects a current estimate of the available path capacity."
+          },
+          {
+            "title": "Non-validated phase",
+            "text": "The phase in which cwnd reflects a previous measurement of the available path capacity."
+          },
+          {
+            "title": "Non-validated period",
+            "text": "The maximum period for which cwnd is preserved in the non-validated phase."
           }
         ]
       }
     }
   ],
   "references": [
+    {
+      "number": "[RFC793]",
+      "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
+      "rfc": 793
+    },
+    {
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
     {
       "number": "[RFC2861]",
       "text": "Handley, M., Padhye, J., and S. Floyd, \"TCP Congestion Window Validation\", RFC 2861, June 2000.",
@@ -144,28 +245,28 @@
       "rfc": 5681
     },
     {
+      "number": "[RFC6298]",
+      "text": "Paxson, V., Allman, M., Chu, J., and M. Sargent, \"Computing TCP's Retransmission Timer\", RFC 6298, June 2011.",
+      "rfc": 6298
+    },
+    {
       "number": "[RFC6675]",
       "text": "Blanton, E., et al., \"A Conservative Loss Recovery Algorithm Based on Selective Acknowledgment (SACK) for TCP\", RFC 6675, August 2012.",
       "rfc": 6675
     },
     {
-      "number": "[RFC6298]",
-      "text": "Paxson, V., et al., \"Computing TCP's Retransmission Timer\", RFC 6298, June 2011.",
-      "rfc": 6298
-    },
-    {
-      "number": "[RFC2018]",
-      "text": "Mathis, M., et al., \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
-      "rfc": 2018
+      "number": "[RFC7230]",
+      "text": "Fielding, R., Ed. and J. Reschke, Ed., \"Hypertext Transfer Protocol (HTTP/1.1): Message Syntax and Routing\", RFC 7230, June 2014.",
+      "rfc": 7230
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>OSPFv3 used IPsec as its only way to authenticate protocol packets, unlike OSPFv2, IS-IS, RIP, and RIPng. This document adds an authentication trailer mechanism for OSPFv3.</p>",
   "plainLanguage": {
-    "summary": "<p>A routing protocol could only check IDs through one special machine. This lets it attach an ID check directly to its messages instead.</p>"
+    "summary": "<p>OSPFv3, the routing protocol used with IPv6, had no way to prove that a routing update really came from a neighbour. It relied on IPsec, which is awkward to set up and offered no defence against replayed packets. RFC 7166 adds an authentication trailer: a small block appended to each routing packet holding a keyed hash and a sequence number.</p>"
   },
   "questions": [
     "ospfv3 authentication trailer",
@@ -45,7 +45,7 @@
       "value": "HMAC-SHA-256"
     },
     {
-      "label": "AT-bit value in Options registry",
+      "label": "AT-bit value in the Options registry",
       "value": "0x000400"
     },
     {
@@ -53,7 +53,7 @@
       "value": "At least 128 pseudorandom bits"
     }
   ],
-  "today": "<p>RFC 7166 is a Standards Track document that obsoletes <a href='/rfc6506'>RFC 6506</a>, and the unit metadata lists no RFC that obsoletes or updates it. Per its IANA section, registry references that pointed to RFC 6506 now point to this document.</p>",
+  "today": "<p>RFC 7166 is a Standards Track document published in March 2014. It obsoletes <a href='/rfc6506'>RFC 6506</a>, and no later RFC is recorded as obsoleting or updating it, so its rules for the OSPFv3 Authentication Trailer remain the current ones.</p>",
   "glossary": [
     "ipsec",
     "hmac",
@@ -62,64 +62,68 @@
     "sequence-number",
     "security-association",
     "man-in-the-middle",
-    "router-id"
+    "router-id",
+    "ospf",
+    "ospf-area",
+    "sha-1",
+    "message-digest"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why OSPFv3 Needs Its Own Authentication",
-      "content": "<p>Unlike OSPFv2, OSPFv3 has no AuType or Authentication fields in its headers. It relies on the IPsec protocols AH and ESP for integrity, authentication and confidentiality, as described in <a href='/rfc4552'>RFC 4552</a>. In some environments, for example Mobile Ad Hoc Networks, IPsec is difficult to configure and maintain.</p><p>The reason for manual keys is that OSPFv3 adjacencies are formed one-to-many, while most key management mechanisms assume one-to-one communication. With manual keying, RFC 4552 provides no protection against replay attacks, which leaves several vulnerabilities discussed in <a href='/rfc6039'>RFC 6039</a>. It is also hard for routers to spot and prioritize packet types such as Hello when they are wrapped in ESP-NULL.</p><p>This document defines a mechanism that works much like the OSPFv2 one in <a href='/rfc5709'>RFC 5709</a> and solves both problems. It obsoletes <a href='/rfc6506'>RFC 6506</a> and makes seven changes, including explicit omission of the LLS block checksum, removal of advice to use an expired key, a corrected key preparation step, per packet type sequence number checking, and guidance for a backward-compatible transition mode.</p>",
-      "plainLanguage": "<p>The old way to sign routing messages needed a complicated sealed envelope that is hard to set up. This gives each message a simple signature that is easy to check.</p>"
+      "title": "Introduction",
+      "content": "<p>Unlike OSPF version 2, OSPF for IPv6 does not include the AuType and Authentication fields in its headers for authenticating protocol packets. Instead, OSPFv3 relies on the IPsec Authentication Header and Encapsulating Security Payload to provide integrity, authentication and optionally confidentiality. RFC 4552 describes how the IPv6 AH and ESP extension headers can be used for that.</p><p>However, there are some environments, such as mobile ad hoc networks, where IPsec is difficult to configure and maintain, so the mechanism cannot be used there. RFC 4552 also discusses at length the reasoning behind manually configured keys rather than an automated key management protocol such as IKEv2. The primary problem is the lack of a suitable key management mechanism, because OSPFv3 adjacencies are formed on a one-to-many basis and most key management mechanisms are designed for a one-to-one communication model. This forces the administrator to use manually configured security associations and cryptographic keys.</p><p>On replay protection, RFC 4552 states that complete replay protection is not possible with manual keying, so the proposed solution will not protect against replay attacks. Since there is no replay protection, a number of vulnerabilities in OSPFv3 have been discussed in RFC 6039. Techniques exist to identify ESP-NULL packets, but they are generally not implemented in the data planes of OSPFv3 routers, which makes it very difficult to examine OSPFv3 packets and prioritize some packet types over others.</p><p>This document defines a mechanism that works similarly to OSPFv2 authentication to provide authentication to OSPFv3 packets, and solves the problems related to replay protection and deterministically disambiguating different OSPFv3 packets. It adds support for the Secure Hash Algorithms in the US NIST Secure Hash Standard, which include SHA-1, SHA-224, SHA-256, SHA-384 and SHA-512, using the Hashed Message Authentication Code mode defined in NIST FIPS 198-1.</p>",
+      "plainLanguage": "<p>OSPFv3 could only be protected with IPsec, which is hard to configure and does not stop old packets being replayed. This RFC adds a simpler option: a keyed hash and a counter carried in every routing packet.</p>"
     },
     {
-      "id": "design",
+      "id": "overview",
       "number": "2",
-      "title": "The Authentication Trailer",
-      "content": "<p>To authenticate without IPsec, OSPFv3 routers append a data block, the <strong>Authentication Trailer</strong> (AT), to the end of the packet. Its length is not counted in the OSPFv3 packet length but is counted in the IPv6 payload length. If a Link-Local Signaling (LLS) block is present, as signaled by the L-bit in the Options field of Hello and Database Description packets, the LLS block sits before the trailer and is included in the digest.</p><p>A new <strong>AT-bit</strong> in the OSPFv3 Options field tells neighbors that the packets on the link include a trailer. Routers MUST set it in Hello and Database Description packets, and other packet types use the setting remembered in the neighbor data structure.</p><p>Two details differ from OSPFv2. The OSPFv3 header checksum and the LLS block checksum are neither calculated nor verified. And the IPv6 source address is covered by the digest. OSPFv3 learns the source address from Hello packets, so without this a man-in-the-middle could change it.</p>",
-      "plainLanguage": "<p>Each message gets a signed tag stapled to its end. A flag at the front tells the receiver to look for the tag.</p>"
+      "title": "Proposed Solution",
+      "content": "<p>To perform non-IPsec cryptographic authentication, OSPFv3 routers append a special data block, the Authentication Trailer, to the end of the OSPFv3 packets. The length of the Authentication Trailer is not included in the length of the OSPFv3 packet but is included in the IPv6 payload length.</p><p>The presence of the Link-Local Signaling block is determined by the L-bit in the OSPFv3 Options field in Hello and Database Description packets. If present, the LLS data block is included along with the OSPFv3 packet in the cryptographic authentication computation.</p><p>RFC 6506 introduced the AT-bit, where AT stands for Authentication Trailer, into the OSPFv3 Options field. OSPFv3 routers MUST set the AT-bit in Hello and Database Description packets to indicate that all the packets on that link will include an Authentication Trailer. For other packet types the setting from Hello and Database Description is preserved in the neighbor data structure, and packet types with no Options field use the setting from the neighbor data structure to decide whether a trailer is expected.</p><p>The way the authentication data is carried is very similar to OSPFv2. The only difference is that information in addition to the message digest is included, and that additional information is included in the message digest computation and is therefore protected by the authentication. Consistent with OSPFv2 and Link-Local Signaling cryptographic authentication, checksum calculation and verification are omitted for both the OSPFv3 header checksum and the LLS data block when this mechanism is used.</p><p>OSPFv3 always uses the Router ID to identify neighbours, while the IPv6 source address is learned from Hello packets and copied into the neighbor data structure. OSPFv3 is therefore susceptible to man-in-the-middle attacks in which the IPv6 source address is modified. To thwart such attacks the IPv6 source address is included in the message digest calculation and protected by OSPFv3 authentication.</p>",
+      "plainLanguage": "<p>The trailer sits at the end of the routing packet, after any link-local signalling block. A bit in the packet header says a trailer is there, and the source address of the packet is covered by the hash so it cannot be swapped in transit.</p>"
     },
     {
       "id": "key-management",
       "number": "3",
-      "title": "Security Associations and Keys",
-      "content": "<p>An OSPFv3 <strong>Security Association</strong> (SA) is a set of parameters shared between legitimate speakers. It has a 16-bit SA ID chosen by the operator, an authentication algorithm, an authentication key, and four times: KeyStartAccept, KeyStartGenerate, KeyStopGenerate and KeyStopAccept. The algorithm is never sent on the wire. The receiver finds the SA from the SA ID in the packet.</p><p>The four times allow smooth key changes. KeyStartAccept SHOULD be less than KeyStartGenerate, and KeyStopGenerate SHOULD be less than KeyStopAccept. A new key's KeyStartGenerate MUST be less than or equal to the old key's KeyStopGenerate. Unspecified start times default to 0 and unspecified stop times to infinity.</p><p>Key storage SHOULD survive restarts. If the last key on an interface expires, the operator SHOULD be told and the packet MUST NOT be sent unauthenticated.</p>",
-      "plainLanguage": "<p>Each router keeps a numbered keyring with dates saying when each key may be used, so the keys can be swapped without the network falling apart.</p>"
+      "title": "The OSPFv3 Security Association",
+      "content": "<p>An OSPFv3 security association contains a set of parameters shared between any two legitimate OSPFv3 speakers. The parameters are the security association identifier, the authentication algorithm, the authentication key and four times that describe the key's lifetime.</p><p>The SA ID is a 16-bit unsigned integer used to uniquely identify a security association, manually configured by the network operator. The receiver determines the active association by looking at the SA ID field in the incoming packet, and the sender selects an association and puts the matching key ID into the packet. If several valid and active associations exist for an interface, the sender may use any of them. Using SA IDs makes changing keys while maintaining protocol operation convenient, because each SA ID specifies an authentication algorithm and a key. Normally an implementation would let the operator configure a set of keys in a key chain, with each key having a fixed lifetime.</p><p>The authentication algorithm is never sent in clear text over the wire, so the implementer chooses an implementation-specific representation. The algorithms supported are HMAC-SHA-1, HMAC-SHA-256, HMAC-SHA-384 and HMAC-SHA-512. The authentication key is the cryptographic authentication key associated with the association, and its length is variable and depends on the algorithm.</p><p>KeyStartAccept is the time at which the router will accept packets created with the association, and KeyStartGenerate the time at which it will begin using it to generate packets. KeyStopGenerate is the time at which it will stop generating with it, and KeyStopAccept the time at which it will stop accepting packets generated with it. To achieve smooth key transition, KeyStartAccept SHOULD be less than KeyStartGenerate, and KeyStopGenerate SHOULD be less than KeyStopAccept. Unspecified times default to 0 for the start times and to infinity for the stop times. When a new key replaces an old one, the KeyStartGenerate time for the new key MUST be less than or equal to the KeyStopGenerate time of the old key. Key storage SHOULD persist across a system restart, and if the last key associated with an interface expires the operator SHOULD be notified and the packet MUST NOT be transmitted unauthenticated.</p>",
+      "plainLanguage": "<p>Each link has an agreement about which key and which hash to use, identified by a number in the packet. The four times let an operator roll from one key to the next without dropping packets.</p>"
     },
     {
       "id": "header-format",
       "number": "4.1",
-      "title": "The Trailer Format",
-      "content": "<p>The trailer starts with a 16-octet fixed part followed by the variable-length digest. <strong>Authentication Type</strong> is 16 bits: 0 is reserved and 1 means HMAC cryptographic authentication. <strong>Auth Data Len</strong> is the total trailer length in octets, fixed header plus digest. <strong>Reserved</strong> SHOULD be 0 when sending and MUST be ignored on receipt. The <strong>SA ID</strong> maps to the algorithm and key. Receivers should not guess the algorithm from the digest size, since later algorithms may share the same size.</p><p>The <strong>Cryptographic Sequence Number</strong> is 64 bits and strictly increasing. It MUST be incremented for every packet sent. On receipt it MUST be greater than the number in the last accepted packet of the same OSPFv3 packet type from that neighbor, or the packet is treated as a replay and dropped. The check is per type because prioritization can reorder packets of different types.</p><p>Routers MUST preserve the strictly increasing property across cold restarts. One suggested method is to use the high-order 32 bits as a boot or wrap count. If the 64-bit number could ever wrap, all keys MUST be reset first.</p>",
-      "plainLanguage": "<p>The tag has a number that goes up with every message. If a message arrives with an old number, the router knows someone is replaying a copy and throws it away.</p>"
+      "title": "The Authentication Trailer",
+      "content": "<p>The trailer appended to the OSPFv3 packet carries a 16-bit Authentication Type, a 16-bit Auth Data Len, a 16-bit Reserved field, a 16-bit Security Association ID, a 64-bit Cryptographic Sequence Number and the variable-length Authentication Data.</p><p>Two values are defined for the Authentication Type: 0 is reserved and 1 means HMAC cryptographic authentication. The Auth Data Len is the length in octets of the trailer, including both the 16-octet fixed header and the variable-length message digest. The Reserved field SHOULD be set to 0 when sending and MUST be ignored when receiving. The SA ID maps to the algorithm and secret key used to create the digest; the HMAC output size should not be used as an implicit hint, because additional algorithms with the same output size may be defined in the future.</p><p>The cryptographic sequence number is a 64-bit strictly increasing number used to guard against replay attacks. It MUST be incremented for every OSPFv3 packet sent, and on reception it MUST be greater than the sequence number in the last accepted packet of the same type from the sending neighbour, otherwise the packet is a replay and is dropped. Packets of different types may arrive out of order if they are prioritised as recommended in RFC 4222. Routers MUST use available mechanisms to preserve the strictly increasing property for the deployed life of the router, including cold restarts, for example by using the high-order 32 bits as a wrap or boot count that is incremented whenever the router loses its sequence number state.</p><p>If the lower-order 32 bits wrap, the higher-order 32 bits should be incremented and saved in non-volatile storage. If the router is deployed long enough that the whole 64-bit number could wrap, all keys MUST be reset to avoid the possibility of replay attacks, and the higher-order sequence number can then be reset to 0 and saved.</p>",
+      "plainLanguage": "<p>The trailer names the key that was used, carries a counter that must always go up, and holds the hash itself. A packet whose counter is not higher than the last one from that neighbour is thrown away as a replay.</p>"
     },
     {
-      "id": "algorithms",
-      "number": "4.3",
-      "title": "Algorithms and the Digest",
-      "content": "<p>The digest uses HMAC with the SHA family. Implementations MUST support HMAC-SHA-256, SHOULD support HMAC-SHA-1, and MAY support HMAC-SHA-384 and HMAC-SHA-512. HMAC-SHA-256 MUST be the default.</p><p>The key is first prepared. The authentication key K gets the two-octet OSPFv3 Cryptographic Protocol ID appended, giving Ks, to prevent cross-protocol replay between protocols that share keys. Ks is then padded with zeros or hashed so the working key Ko is exactly L octets long, where L is the hash length.</p><p>The digest field is first filled with <strong>Apad</strong>, which holds the IPv6 source address followed by repeats of the value <code>0x878FE1F3</code>. The inner hash is H(Ko XOR Ipad || OSPFv3 packet), where the packet includes any LLS block and the trailer. The outer hash is H(Ko XOR Opad || First-Hash), and the result becomes the authentication data. Ipad is <code>0x36</code> and Opad is <code>0x5c</code>, each repeated B times.</p>",
-      "plainLanguage": "<p>The router mixes the message with a secret key through a scrambling machine twice. Only someone who knows the key can get the same scrambled result.</p>"
+      "id": "cryptography",
+      "number": "4.5",
+      "title": "Cryptographic Aspects",
+      "content": "<p>The specification uses the nomenclature of FIPS 198-1. H is the specific hashing algorithm, K is the authentication key from the security association, and Ks is a protocol-specific authentication key obtained by appending the two-octet OSPFv3 cryptographic protocol ID to K. Ko is the cryptographic key used with the hash algorithm, B is the block size of H measured in octets rather than bits, and L is the length of the hash measured in octets rather than bits. Opad is the value 0x5c repeated B times, Ipad is 0x36 repeated B times, and Apad has the same length as the hash output, its first 16 octets containing the IPv6 source address followed by 0x878FE1F3 repeated (L-16)/4 times, which means the hash output is always at least 16 octets long.</p><p>In the first step the protocol ID is appended to K to give Ks, and in this application Ko is always L octets long. If Ks is L octets long, Ko equals Ks. If Ks is longer, Ko is set to H(Ks). If Ks is shorter, Ko is Ks with zeros appended so that it is L octets long. The RFC explains that keys greater than L octets do not significantly increase the function strength.</p><p>In the second step the Authentication Data field is filled with Apad and a first hash, the inner hash, is computed as <code>H(Ko XOR Ipad || OSPFv3 Packet)</code>, with Ko padded with zeros to the length of Ipad. The OSPFv3 packet in that expression includes the optional LLS data block and the Authentication Trailer itself.</p><p>In the third step the second hash, the outer hash, is computed as <code>H(Ko XOR Opad || First-Hash)</code>. In the fourth step the resulting second hash becomes the authentication data sent in the trailer, and its length is always the message digest size of the hash function in use. Using a hash with a larger output therefore also increases the size of the packet on the wire. To prevent cross-protocol replay attacks for protocols sharing common keys, the two-octet OSPFv3 cryptographic protocol ID is appended to the authentication key before use, and other protocols using this scheme MUST similarly append their own protocol IDs.</p>",
+      "plainLanguage": "<p>The digest is computed in two rounds, the same way HMAC works everywhere else. The one extra step is that the router's IPv6 source address is mixed in, so a packet cannot be replayed from a different address.</p>"
     },
     {
-      "id": "procedures",
+      "id": "operation",
       "number": "4.6",
-      "title": "Verifying a Received Packet",
-      "content": "<p>A router learns that a trailer is used from the AT-bit in Hello and Database Description packets. It finds the trailer after the OSPFv3 packet, and after the LLS block if the L-bit says there is one. Routers MUST at least check the L-bit and use the LLS length to find the trailer.</p><p>If the trailer is configured on a link, Hello and Database Description packets with the AT-bit clear are dropped. A packet is also dropped if its SA is not found or is outside its accept times, or if its sequence number is less than or equal to the last one from that neighbor for the same packet type. A replay SHOULD be logged.</p><p>The router saves the received digest, puts Apad into the field, recomputes the digest and compares. A mismatch means the packet MUST be discarded and an error event SHOULD be logged. After success, the router MUST store the 64-bit sequence number for that packet type from the neighbor.</p>",
-      "plainLanguage": "<p>The receiver checks the flag, finds the tag, makes sure the number is new, and redoes the scrambling. If its answer does not match the tag, the message is thrown away.</p>"
+      "title": "Message Verification",
+      "content": "<p>A router determines that OSPFv3 is using an Authentication Trailer by examining the AT-bit in the Options field of the Hello and Database Description packets. The trailer is reached using the OSPFv3 packet header length, and, if an LLS data block is present, using the LLS data block length. Routers supporting this specification MUST minimally support examining the L-bit and using the LLS length to reach the trailer, and it is RECOMMENDED that they fully support Link-Local Signaling.</p><p>If the trailer is configured for a link, Hello and Database Description packets with the AT-bit clear will be dropped, and all packet types will be dropped if the IPv6 header length is too short to hold a trailer. The receiving interface's security association is located using the SA ID in the received trailer. If it is not found, or is not valid for reception, the packet is dropped.</p><p>If the cryptographic sequence number is less than or equal to the last sequence number in the last packet of the same type successfully received from the neighbour, the packet MUST be dropped and an error event SHOULD be logged. Before any processing, an implementation saves the value of the Authentication Data field, then sets that field with Apad and computes the authentication data. The calculated value is compared with the received one; if they do not match the packet MUST be discarded and an error event SHOULD be logged. After the packet has been successfully authenticated, implementations MUST store the 64-bit sequence number for each packet type received from the neighbour, for replay checking of later packets.</p>",
+      "plainLanguage": "<p>On arrival the router finds the trailer, looks up the key by its number, throws the packet away if the counter is stale, and then recomputes the hash and compares it with the one that arrived.</p>"
     },
     {
       "id": "migration",
       "number": "5",
-      "title": "Migration and Compatibility",
-      "content": "<p>All routers on a link SHOULD move to authentication at the same time. A mismatch in SA ID, Authentication Type or digest prevents an adjacency from forming. Splitting a multi-access link using different Interface Instance IDs is possible but needs at least one router that peers with both groups. That gives sub-optimal routing and extra complexity.</p><p>A router MAY offer a <strong>transition mode</strong> that includes the trailer in transmitted packets but does not verify received ones. In this mode it sets the AT-bit, still calculates the header and LLS checksums so routers without authentication do not drop the packets, authenticates packets that carry the AT-bit or come from a neighbor that previously did, and accepts packets without the AT-bit as coming from unauthenticated routers, validating their checksums.</p>",
-      "plainLanguage": "<p>It is best if everyone starts signing their messages on the same day. If not, there is a temporary mode where a router signs its messages but still reads unsigned ones.</p>"
+      "title": "Migration and Backward Compatibility",
+      "content": "<p>All OSPFv3 routers participating on a link SHOULD be migrated to OSPFv3 authentication at the same time. As with OSPFv2 authentication, a mismatch in the SA ID, authentication type or message digest will result in failure to form an adjacency.</p><p>For multi-access links, communities of routers could be migrated using different interface instance IDs, but at least one router would need to form adjacencies with both the routers including and not including the Authentication Trailer. That results in sub-optimal routing as well as added complexity, and it is only recommended where authentication is wanted on the link and migrating every router at the same time is not feasible.</p><p>In support of uninterrupted deployment, a router implementing this specification MAY implement a transition mode where it includes the Authentication Trailer in transmitted packets but does not verify it in received packets. Such a router sets the AT-bit in the Options field of transmitted Hello and Database Description packets, and routers without authentication configured ignore the trailer and the bit. It also calculates and sets the OSPFv3 header checksum and the LLS data block checksum in transmitted packets so they are not dropped by routers without authentication configured. It authenticates received packets that have the AT-bit set or come from a neighbour that previously set it, and it also accepts packets without the AT-bit, assuming they come from routers without authentication configured; those packets are not authenticated, and their checksums are validated.</p>",
+      "plainLanguage": "<p>You cannot switch a whole link over at once without breaking it, so a router can be put into a temporary mode where it adds the trailer but does not check the one it receives.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
       "title": "Security Considerations",
-      "content": "<p>The mechanism does not provide confidentiality, because a routing protocol carries nothing that must be kept secret. It authenticates that a packet came from a router that has access to the authentication key, not which specific router sent it. The RFC says it addresses all the issues identified in RFC 6039 and RFC 6506.</p><p>Keys SHOULD be long and random, and it is RECOMMENDED that they incorporate at least 128 pseudorandom bits. Management systems SHOULD accept hexadecimal key input. Networks that use transition mode may be exposed to unauthenticated data during the transition. The RFC says plainly that the mechanism is not perfect and does not need to be, but that it significantly raises the effort needed to attack OSPFv3.</p>",
-      "plainLanguage": "<p>The signature proves a message came from someone with the secret key, but it does not hide the message. Pick long, random secrets so nobody can guess them.</p>"
+      "content": "<p>This document proposes extensions to OSPFv3 that make it more secure than OSPFv3 as defined in RFC 5340. It does not provide confidentiality, as a routing protocol contains information that does not need to be kept secret, but it does provide means to authenticate the sender of packets that are of interest. It addresses all the security issues identified in RFC 6039 and RFC 6506.</p><p>The authentication method is not used to authenticate the specific originator of a packet, but to confirm that the packet was indeed issued by a router that has access to the authentication key. Deployments SHOULD use sufficiently long and random values for the key so that guessing and other cryptographic attacks on it are not feasible, and it is RECOMMENDED that keys incorporate at least 128 pseudorandom bits. In support of these recommendations, management systems SHOULD support hexadecimal input of authentication keys.</p><p>Deployments that support a transitionary state but interoperate with routers that do not support this authentication method may be exposed to unauthenticated data during the transition period. The mechanism is not perfect and does not need to be perfect. Instead it represents a significant increase in the effort required for an adversary to attack OSPFv3, while not causing undue implementation, deployment or operational complexity. RFC 4552 is referred to for additional considerations on manual keying.</p>",
+      "plainLanguage": "<p>The scheme proves a packet came from a router that holds the shared key, not which router it was. The key should be long and random, and during a transition period some packets may go unchecked.</p>"
     }
   ],
   "viz": [
@@ -127,96 +131,123 @@
       "type": "packet",
       "anchor": "header-format",
       "position": "after",
-      "caption": "FIXED PART OF THE AUTHENTICATION TRAILER (RFC 7166)",
+      "caption": "THE AUTHENTICATION TRAILER AS DRAWN IN FIGURE 3, SHOWN FOR HMAC-SHA-256",
       "data": {
-        "title": "Authentication Trailer, 16-octet fixed part",
-        "bytes": 16,
+        "title": "OSPFv3 Authentication Trailer",
         "width": 32,
         "fields": [
           {
             "key": "auth-type",
             "name": "Authentication Type",
             "bits": 16,
-            "desc": "0 is reserved; 1 means HMAC cryptographic authentication."
+            "desc": "0 is reserved and 1 means HMAC cryptographic authentication.",
+            "value": "1"
           },
           {
-            "key": "auth-len",
+            "key": "auth-data-len",
             "name": "Auth Data Len",
             "bits": 16,
-            "desc": "Length of the whole trailer in octets, fixed header plus digest."
+            "desc": "Length in octets of the trailer, including the 16-octet fixed header and the digest."
           },
           {
             "key": "reserved",
             "name": "Reserved",
             "bits": 16,
-            "desc": "SHOULD be 0 on send; MUST be ignored on receipt."
+            "desc": "Set to 0 when sending and ignored when receiving."
           },
           {
             "key": "sa-id",
             "name": "Security Association ID",
             "bits": 16,
-            "desc": "Maps to the authentication algorithm and key."
+            "desc": "Selects the authentication algorithm and the secret key used for the digest."
           },
           {
-            "key": "seq-high",
-            "name": "Cryptographic Sequence Number (High-Order 32 Bits)",
+            "key": "sequence-high",
+            "name": "Cryptographic Sequence Number, high-order bits",
             "bits": 32,
-            "desc": "High half of the 64-bit strictly increasing sequence number."
+            "desc": "Used as a wrap or boot count when the low-order 32 bits wrap."
           },
           {
-            "key": "seq-low",
-            "name": "Cryptographic Sequence Number (Low-Order 32 Bits)",
+            "key": "sequence-low",
+            "name": "Cryptographic Sequence Number, low-order bits",
             "bits": 32,
-            "desc": "Low half of the sequence number."
+            "desc": "Strictly increasing counter used to detect replayed packets."
+          },
+          {
+            "key": "auth-data",
+            "name": "Authentication Data",
+            "bits": 256,
+            "desc": "The digest. Its length is always the digest size of the hash in use: 20 octets for SHA-1, 32 for SHA-256, 48 for SHA-384 and 64 for SHA-512."
           }
         ]
       }
     },
     {
       "type": "compare-table",
-      "anchor": "algorithms",
+      "anchor": "cryptography",
       "position": "after",
-      "caption": "HASH SIZES AND SUPPORT REQUIREMENTS (SECTIONS 4.3 AND 4.5)",
+      "caption": "DIGEST LENGTHS AND HASH BLOCK SIZES FOR THE FOUR SUPPORTED ALGORITHMS",
       "data": {
         "columns": [
           "Algorithm",
-          "Block size B (octets)",
-          "Digest length (octets)",
-          "Support"
+          "Digest length",
+          "Block size B in octets"
         ],
         "rows": [
           {
             "cells": [
               "HMAC-SHA-1",
-              "64",
-              "20",
-              "SHOULD"
+              "20 octets",
+              "64"
             ]
           },
           {
             "cells": [
               "HMAC-SHA-256",
-              "64",
-              "32",
-              "MUST (default)"
+              "32 octets",
+              "64"
             ],
             "self": true
           },
           {
             "cells": [
               "HMAC-SHA-384",
-              "128",
-              "48",
-              "MAY"
+              "48 octets",
+              "128"
             ]
           },
           {
             "cells": [
               "HMAC-SHA-512",
-              "128",
-              "64",
-              "MAY"
+              "64 octets",
+              "128"
             ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "THE OSPFv3 AUTHENTICATION TYPES REGISTRY",
+      "data": {
+        "items": [
+          {
+            "code": "0",
+            "label": "RESERVED",
+            "desc": "Not used."
+          },
+          {
+            "code": "1",
+            "label": "HMAC CRYPTOGRAPHIC AUTHENTICATION",
+            "desc": "The only type defined by this document.",
+            "highlight": true
+          },
+          {
+            "code": "2-65535",
+            "label": "UNASSIGNED",
+            "desc": "Available for future authentication types."
           }
         ]
       }
@@ -252,15 +283,20 @@
       "number": "[RFC6506]",
       "text": "Bhatia, M., Manral, V., and A. Lindem, \"Supporting Authentication Trailer for OSPFv3\", RFC 6506, February 2012.",
       "rfc": 6506
+    },
+    {
+      "number": "[RFC2328]",
+      "text": "Johnstone, V. and Stewart, J., \"OSPF Version 2\", RFC 2328, April 1998.",
+      "rfc": 2328
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-20",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-20"
 }

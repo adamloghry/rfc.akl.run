@@ -5,25 +5,26 @@
   "categoryReviewed": false,
   "summary": "<p>Describes a way for a TLS server to resume sessions without keeping per-client state. The server packs the session state into an encrypted ticket and hands it to the client, which presents it later to resume. It obsoletes RFC 4507 and was itself replaced by RFC 8446 and RFC 9846.</p>",
   "plainLanguage": {
-    "summary": "<p>Instead of the shop remembering you, it gives you a sealed note to bring back next time. That saves the shop from keeping files on every customer.</p>"
+    "summary": "<p>Normally, when a TLS client comes back to the same server, the server looks up the session it remembered last time and reuses the keys. This RFC removes the looking up. The server writes the session state into a small encrypted and signed ticket, hands it to the client, and forgets it. The client sends the ticket back next time, and the server rebuilds the session from the ticket alone.</p>"
   },
   "questions": [
     "what are tls session tickets",
     "how does tls session resumption work",
     "stateless tls resumption",
     "what is the sessionticket extension",
-    "what is in a tls session ticket"
+    "what is in a tls session ticket",
+    "what is stateless tls resumption"
   ],
   "tags": [
     "TLS",
     "Session Resumption",
     "Security"
   ],
-  "subtitle": "The server seals the session state into a ticket and hands it to the client, so it does not have to remember anyone.",
+  "subtitle": "A way for a TLS client to resume a session without the server keeping any state about it.",
   "tldr": {
-    "problem": "A TLS server that resumes sessions normally has to keep per-client session state, which is costly for servers with many users, long caches, load balancing or little memory.",
-    "mechanism": "The server encrypts and integrity-protects the session state into a ticket using a key only it knows, sends it in a NewSessionTicket handshake message, and the client later presents it in a SessionTicket extension in the ClientHello.",
-    "outcome": "RFC 5077 obsoleted RFC 4507 to fix an encoding error, and it has since been replaced by RFC 8446 and RFC 9846.",
+    "problem": "Resuming a TLS session normally means the server keeps a record of every client session, which costs memory on a busy server and stops requests being spread across a pool of servers.",
+    "mechanism": "The server packs the session state into a ticket, encrypts and authenticates it with a key only it holds, and gives the ticket to the client. When the client wants to resume, it sends the ticket back and the server rebuilds the session from it.",
+    "outcome": "The server keeps no per-client state, so any server in a pool can resume any session, and servers with little memory can still support resumption. RFC 5077 was obsoleted by RFC 8446 and RFC 9846.",
     "outcomeLabel": "Status today"
   },
   "facts": [
@@ -36,23 +37,23 @@
       "value": "4"
     },
     {
-      "label": "Recommended encryption key",
-      "value": "128-bit AES in CBC mode"
+      "label": "AES key size",
+      "value": "128 bits"
     },
     {
-      "label": "Recommended MAC",
-      "value": "HMAC-SHA-256 with a 256-bit key"
+      "label": "HMAC key size",
+      "value": "256 bits"
     },
     {
-      "label": "Ticket key_name and iv",
-      "value": "16 bytes each"
+      "label": "Ticket MAC length",
+      "value": "32 octets"
     },
     {
-      "label": "Ticket MAC field",
-      "value": "32 bytes"
+      "label": "Session identifier lifetime in RFC 4346",
+      "value": "24 hours"
     }
   ],
-  "today": "<p>RFC 5077 is obsoleted by <a href='/rfc8446'>RFC 8446</a> and <a href='/rfc9846'>RFC 9846</a>, and it was updated by <a href='/rfc8447'>RFC 8447</a>. It obsoleted <a href='/rfc4507'>RFC 4507</a>.</p>",
+  "today": "<p>RFC 5077 is a Proposed Standard that was obsoleted by <a href='/rfc8446'>RFC 8446</a> and <a href='/rfc9846'>RFC 9846</a>. It was updated by <a href='/rfc8447'>RFC 8447</a>.</p>",
   "glossary": [
     "tls",
     "session-ticket",
@@ -61,162 +62,183 @@
     "hmac",
     "cipher-suite",
     "session-identifier",
-    "ticket"
+    "ticket",
+    "session-resumption",
+    "aes",
+    "sha-256",
+    "pre-shared-key"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Resuming TLS Without Server State",
-      "content": "<p>This RFC defines a way to resume a TLS session without session-specific state at the server. It works with any ciphersuite and applies to TLS 1.0 (<a href='/rfc2246'>RFC 2246</a>) and TLS 1.1 (<a href='/rfc4346'>RFC 4346</a>). It builds on the TLS extensions of <a href='/rfc4366'>RFC 4366</a> and adds one new message type.</p><p>The RFC lists four situations where this helps: servers that handle many transactions from different users, servers that want to cache sessions for a long time, the ability to load balance requests across servers, and embedded servers with little memory.</p><p>The term <strong>ticket</strong> means a cryptographically protected data structure that the server creates and later consumes to rebuild session state. The RFC obsoletes <a href='/rfc4507'>RFC 4507</a> to correct an encoding error that made that specification differ from deployed implementations.</p>",
-      "plainLanguage": "<p>The server does not have to keep a notebook about every visitor. It writes the notes on a locked slip and lets the visitor carry it.</p>"
+      "title": "Why Resume Without Server State",
+      "content": "<p>The document defines a way to resume a Transport Layer Security session without requiring session-specific state at the TLS server. The mechanism may be used with any TLS ciphersuite, applies to both TLS 1.0 and TLS 1.1, makes use of the TLS extensions defined in RFC 4366, and defines a new TLS message type.</p><p>The RFC lists the situations where this is useful: servers that handle a large number of transactions from different users, servers that desire to cache sessions for a long time, the ability to load balance requests across servers, and embedded servers with little memory.</p><p>Within the document, a ticket refers to a cryptographically protected data structure that is created and consumed by the server to rebuild session-specific state.</p><p>The document also obsoletes RFC 4507 to correct an error in the encoding that caused the specification to differ from deployed implementations. At the time of writing there were no known implementations that followed the encoding specified in RFC 4507, and the update aligns the document with currently deployed implementations.</p>",
+      "plainLanguage": "<p>The problem is memory and reach. A server that remembers every session has to keep a table, and a client that comes back to a different server in a pool cannot be resumed at all. Handing the client a sealed envelope removes both problems.</p>"
     },
     {
-      "id": "operation",
-      "number": "2",
-      "title": "How Tickets Are Issued and Used",
-      "content": "<p>A client signals support by including a <code>SessionTicket</code> extension in its ClientHello. The extension is empty if the client has no ticket yet. If the server wants to use the mechanism, it replies with an empty <code>SessionTicket</code> extension in the ServerHello and later sends a <code>NewSessionTicket</code> handshake message, before the ChangeCipherSpec and after verifying the client's Finished message. The ticket holds session state such as the ciphersuite and master secret, encrypted and integrity-protected with a key known only to the server.</p><p>The client caches the ticket with the master secret and other parameters. To resume, it puts the ticket in the <code>SessionTicket</code> extension of the ClientHello. The server decrypts it, checks it, and resumes using the state inside. On success it may also renew the ticket. If the server cannot or does not want to honor the ticket, it falls back to a full handshake, and it may still issue a new ticket afterwards. If a ticket is accepted but the handshake fails, the client SHOULD delete the ticket.</p><p>The client MUST NOT treat a new ticket as valid until it has verified the server's Finished message, and the server MUST NOT assume the client received an updated ticket until it verifies the client's Finished message.</p>",
-      "plainLanguage": "<p>The first visit gives you a sealed note. Next time you show the note and skip the long chat. If the note does not work, you just do the long chat again.</p>"
+      "id": "overview",
+      "number": "3.1",
+      "title": "How the Ticket Mechanism Works",
+      "content": "<p>The client indicates that it supports the mechanism by including a SessionTicket TLS extension in the ClientHello message. The extension is empty if the client does not already possess a ticket for the server. The server sends an empty SessionTicket extension to indicate that it will send a new session ticket using the NewSessionTicket handshake message.</p><p>If the server wants to use the mechanism, it stores its session state, such as the ciphersuite and master secret, in a ticket that is encrypted and integrity-protected by a key known only to the server. The ticket is distributed to the client using the NewSessionTicket handshake message, which is sent during the TLS handshake before the ChangeCipherSpec message, after the server has successfully verified the client's Finished message.</p><p>The client caches this ticket along with the master secret and other parameters associated with the current session. When the client wishes to resume the session it includes the ticket in the SessionTicket extension within the ClientHello message. The server then decrypts the received ticket, verifies the ticket's validity, retrieves the session state from the contents of the ticket, and uses this state to resume the session. If the server successfully verifies the client's ticket it may renew the ticket by including a NewSessionTicket handshake message after the ServerHello. If the server cannot or does not want to honour the ticket, it can initiate a full handshake with the client. In the case where the server does not wish to issue a new ticket, it completes the handshake without including a SessionTicket extension or a NewSessionTicket handshake message.</p><p>The interaction with the TLS Session ID is also set out. A server planning to issue a session ticket to a client that does not present one SHOULD include an empty Session ID in the ServerHello, and if it rejects the ticket and falls back to the full handshake it may include a non-empty Session ID to indicate its support for stateful session resumption. A client that receives a session ticket discards any Session ID sent in the ServerHello. When presenting a ticket the client MAY generate and include a Session ID in the ClientHello, and if the server accepts the ticket and the Session ID is not empty it MUST respond with the same Session ID, which lets the client tell a resumption from a fallback. The server MUST NOT rely on the Session ID having a particular value when validating the ticket, and if a ticket is presented the server MUST NOT attempt to use the Session ID for stateful session resumption.</p>",
+      "plainLanguage": "<p>The client offers a ticket in its hello. The server opens it, checks that it is genuine, and rebuilds the session from what is inside. The client keeps the ticket and offers it again next time. If the server cannot use the ticket, nothing breaks: it just runs a full handshake as usual.</p>"
     },
     {
       "id": "message-format",
-      "number": "3",
-      "title": "The Extension and the NewSessionTicket Message",
-      "content": "<p>The <code>SessionTicket</code> extension has been assigned the number 35, and its <code>extension_data</code> holds the ticket. A client with no ticket that can accept one MUST send a zero-length ticket. A client that cannot accept one MUST NOT include the extension, unless it is sending a non-empty ticket obtained by some other means. The server MUST send the extension in the ServerHello if it wishes to issue a ticket, and MUST NOT send it if it did not receive one.</p><p>The <code>NewSessionTicket</code> handshake message has been assigned the number 4. It carries a <code>ticket_lifetime_hint</code>, a 32-bit unsigned integer in network byte order giving seconds relative to when the ticket is received, and the opaque <code>ticket</code>. A value of zero means the lifetime is unspecified. The client SHOULD delete the ticket when the time expires, and a server MAY treat a ticket as valid for a shorter or longer time than the hint. The message is included in the hash used for the Finished messages.</p><p>For the Session ID, a server planning to issue a ticket SHOULD send an empty one. If the client presents a ticket and a non-empty Session ID, an accepting server MUST echo that same Session ID, which lets the client tell resumption from a full handshake.</p>",
-      "plainLanguage": "<p>The note comes with a label that says how long to keep it. The label is only a hint, so the shop may accept it for a shorter or longer time.</p>"
+      "number": "3.2",
+      "title": "The Extension and the New Message",
+      "content": "<p>The SessionTicket TLS extension is based on the extension mechanism of RFC 4366. The format of the ticket is an opaque structure used to carry session-specific state information, and the extension may be sent in the ClientHello and the ServerHello.</p><p>If the client possesses a ticket that it wants to use to resume a session, it includes the ticket in the SessionTicket extension in the ClientHello. If the client does not have a ticket and is prepared to receive one in the NewSessionTicket handshake message, it MUST include a zero-length ticket in the extension. If the client is not prepared to receive a ticket that way, it MUST NOT include a SessionTicket extension unless it is sending a non-empty ticket it received through some other means from the server. The server uses a zero-length SessionTicket extension to say that it will send a new ticket, and the server MUST send this extension in the ServerHello if it wishes to issue a new ticket, and MUST NOT send it if it did not receive one in the ClientHello. If the server fails to verify the ticket, it falls back to performing a full handshake, and if the ticket is accepted but the handshake fails the client SHOULD delete the ticket. The SessionTicket extension has been assigned the number 35.</p><p>The <strong>NewSessionTicket</strong> handshake message is sent by the server during the TLS handshake before the ChangeCipherSpec message. It MUST be sent if the server included a SessionTicket extension in the ServerHello, and MUST NOT be sent if it did not. It is included in the hash used to create and verify the Finished message. In the case of a full handshake, the server MUST verify the client's Finished message before sending the ticket, and the client MUST NOT treat the ticket as valid until it has verified the server's Finished message.</p><p>The message has been assigned the number 4. Its <code>ticket_lifetime_hint</code> field holds a hint from the server about how long the ticket should be stored, expressed in seconds as a 32-bit unsigned integer in network byte order relative to when the ticket is received. A value of zero is reserved to mean the lifetime is unspecified. A client SHOULD delete the ticket and associated state when the time expires, and MAY delete it earlier based on local policy, while a server MAY treat a ticket as valid for a shorter or longer period than the hint states.</p>",
+      "plainLanguage": "<p>Two new pieces are added to TLS: a numbered extension carrying the ticket, and a new handshake message by which the server hands over a ticket. The ticket is bound into the handshake's integrity check, so a client cannot be tricked into accepting one, and the ticket carries a suggested expiry time.</p>"
     },
     {
-      "id": "design",
+      "id": "encoding",
       "number": "4",
       "title": "The Recommended Ticket Format",
-      "content": "<p>The ticket is opaque to the client, so its structure does not affect interoperability and implementations may diverge, as long as they take security seriously. Clients MUST NOT examine the ticket assuming it follows this document.</p><p>The recommended design uses two server keys: a 128-bit key for AES in CBC mode and a 256-bit key for HMAC-SHA-256. The ticket is made of a 16-byte <code>key_name</code> that identifies the key set, a 16-byte <code>iv</code>, the <code>encrypted_state</code>, and a 32-byte <code>mac</code> computed over the key name, IV, the 2-octet length of the encrypted state and the state itself.</p><p>The encrypted state is a <code>StatePlaintext</code> holding the protocol version, ciphersuite, compression method, a 48-byte master secret, a <code>ClientIdentity</code> and a timestamp used to expire tickets. The identity type is anonymous, certificate-based or pre-shared key.</p>",
-      "plainLanguage": "<p>The sealed note has a label saying which lock was used, a scrambled message, and a stamp that shows nobody tampered with it.</p>"
+      "content": "<p>The RFC describes a recommended format and protection for the ticket. The ticket is opaque to the client, so the structure is not subject to interoperability concerns and implementations may diverge from it, but if they do they must take security concerns seriously, and clients MUST NOT examine the ticket under the assumption that it complies with the document.</p><p>The server uses two different keys: one 128-bit key for Advanced Encryption Standard in Cipher Block Chaining mode encryption, and one 256-bit key for HMAC-SHA-256. The ticket holds a key name of 16 octets, an initialisation vector of 16 octets, the encrypted state, and a 32-octet message authentication code. The key name identifies a particular set of keys used to protect the ticket and enables the server to recognise tickets it has issued; it should be randomly generated to avoid collisions between servers, and one possibility is to generate new random keys and key name every time the server is started.</p><p>The state information in the encrypted state is encrypted using 128-bit AES in CBC mode with the given initialisation vector. The message authentication code is calculated using HMAC-SHA-256 over the key name, the initialisation vector, the length of the encrypted state field and its contents.</p><p>The structure <code>StatePlaintext</code> stores the TLS session state including the master secret. The timestamp within it allows the TLS server to expire tickets. To cover the authentication and key exchange protocols provided by TLS, a <code>ClientIdentity</code> structure contains the authentication type used in the initial exchange, with values anonymous, certificate_based or psk; in the certificate-based case a certificate list is included so that the server can inspect attributes within those certificates and offer the same capabilities for authentication and authorization as in the original session. A specific implementation might choose to store a subset of this information or additional information, and other authentication mechanisms, such as Kerberos, would require different client identity data.</p>",
+      "plainLanguage": "<p>The recommended ticket has four parts: a name saying which key was used, a random starting value for the encryption, the encrypted session state, and a checksum over everything. Inside the encrypted part sit the protocol and cipher chosen, the master secret, when the ticket was made, and enough about how the client proved its identity for the server to check that again.</p>"
     },
     {
       "id": "security-considerations",
       "number": "5",
       "title": "Security Considerations",
-      "content": "<p>Tickets must be authenticated and encrypted to prevent modification or eavesdropping. A stolen ticket does not help an attacker resume a session because it is encrypted and the attacker lacks the key, but the server MUST use strong encryption and integrity protection. A forged or altered ticket is not possible if a strong integrity algorithm such as keyed HMAC-SHA-256 is used.</p><p>The <code>key_name</code> lets a server cheaply reject tickets it did not issue, and verification should be lightweight to limit denial of service. For keys, the RFC recommends secure generation, at least 128 bits of strength, no other use, regular changes, and a change if the format or algorithms change. The server controls ticket lifetime, which may be longer than the 24-hour lifetime recommended in RFC 4346.</p><p>On privacy, ticket contents are confidentiality protected, but an on-path observer who sees the same ticket in multiple handshakes may link them, so unlinkability is not necessarily provided.</p>",
-      "plainLanguage": "<p>A stolen note is useless without the shop's key, but if you wave the same note around many times, someone watching can tell it is the same visitor.</p>"
-    },
-    {
-      "id": "changes",
-      "number": "6",
-      "title": "Changes from RFC 4507",
-      "content": "<p>RFC 4507 had an encoding error that produced two length fields, one for the extension contents and one for the ticket. The RFC removes the redundant field to match what implementations actually send. For a 256-byte ticket, the extension is now type 35, a length of 256 for the ticket, then the ticket. The RFC states there were no known implementations that followed the old encoding.</p><p>The encoding of an empty extension was ambiguous in RFC 4507. Servers wanting to support old clients should answer an empty extension encoded the same way as received. Other clarifications cover issuing no new ticket on resumption, the lifetime being relative to receipt, the NewSessionTicket message being in the Finished hash, the Session ID interaction, a recommendation of SHA-256, and extra data in <code>StatePlaintext</code>.</p>",
-      "plainLanguage": "<p>The first edition printed the length twice by mistake. This version fixes it to match how everyone was already doing it.</p>"
+      "content": "<p>Tickets must be authenticated and encrypted to prevent modification or eavesdropping by an attacker, and implementations should take care to ensure that processing tickets does not increase the chance of a denial of service.</p><p>On invalidating sessions, the TLS specification requires that sessions be invalidated when errors occur. In the analysis within the cited paper, failure to invalidate sessions does not pose a security risk, because the TLS handshake uses a non-reversible function to derive keys for a session, so information about one session does not provide an advantage to attack the master secret or a different session. If a session invalidation scheme is used, the implementation should verify the integrity of the ticket before using its contents to invalidate a session, so that an attacker cannot invalidate a chosen session.</p><p>On stolen tickets, an eavesdropper or man-in-the-middle may obtain the ticket and attempt to use it, but since the ticket is encrypted and the attacker does not know the secret key, a stolen ticket does not help. A TLS server MUST use strong encryption and integrity protection for the ticket to prevent an attacker from using a brute force mechanism to obtain the ticket's contents. On forged tickets, a malicious user could forge or alter a ticket in order to resume a session, extend its lifetime, impersonate another user, or gain additional privileges, and this attack is not possible if the ticket is protected using a strong integrity protection algorithm such as a keyed HMAC-SHA-256.</p><p>On denial of service, the key_name field helps the server efficiently reject tickets it did not issue, but an adversary could store or generate a large number of tickets to send for verification, so the verification of the ticket should be lightweight, for example using efficient symmetric key cryptographic algorithms.</p><p>On key management, the keys should be generated securely following the randomness recommendations of RFC 4086, the keys and cryptographic protection algorithms should be at least 128 bits in strength, the keys should not be used for any purpose other than generating and verifying tickets, and they should be changed regularly and also whenever the ticket format or the protection algorithms change. On lifetime, the TLS server controls the lifetime of the ticket and determines the acceptable lifetime based on the operational and security requirements of its environment, and the ticket lifetime may be longer than the 24-hour lifetime recommended in RFC 4346.</p><p>The RFC also records that the mechanism mandates confidentiality protection of the ticket content to avoid leakage of user-relevant information, and that an on-path adversary may observe multiple TLS handshakes using the same ticket and conclude that they belong to the same communication endpoints.</p>",
+      "plainLanguage": "<p>The ticket is as good as the keys protecting it, so the rules are strict: strong encryption, a keyed checksum, and keys that are used for nothing else and are changed regularly. A stolen ticket is useless because the attacker cannot read it, and a forged one is rejected by the checksum. The one thing to watch is the cost of checking tickets, because an attacker can send a flood of them.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "operation",
+      "anchor": "overview",
       "position": "after",
-      "caption": "ABBREVIATED HANDSHAKE USING A NEW SESSION TICKET (RFC 5077, FIGURE 2)",
+      "caption": "ILLUSTRATIVE: THE ABBREVIATED HANDSHAKE (RFC 5077 FIGURE 2)",
       "data": {
         "lanes": [
           {
             "key": "client",
-            "label": "Client"
+            "label": "TLS client"
           },
           {
             "key": "server",
-            "label": "Server"
+            "label": "TLS server"
           }
         ],
         "messages": [
           {
             "from": "client",
             "to": "server",
-            "label": "ClientHello (SessionTicket extension)",
+            "label": "CLIENT HELLO WITH TICKET",
             "color": "blue",
-            "note": "Carries the ticket the client cached earlier."
+            "note": "The client offers the ticket it cached from the previous session."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "ServerHello (empty SessionTicket extension)",
+            "label": "SERVER HELLO",
+            "color": "neutral",
+            "note": "The server opens the ticket, checks it, and rebuilds the session from it."
+          },
+          {
+            "from": "server",
+            "to": "client",
+            "label": "NEW SESSION TICKET",
             "color": "green",
-            "note": "Signals a new ticket will follow."
+            "note": "The server may renew the ticket. If it cannot use the one offered, it falls back to a full handshake instead."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "NewSessionTicket",
+            "label": "FINISHED",
             "color": "green"
-          },
-          {
-            "from": "server",
-            "to": "client",
-            "label": "[ChangeCipherSpec] Finished",
-            "color": "green"
-          },
-          {
-            "from": "client",
-            "to": "server",
-            "label": "[ChangeCipherSpec] Finished",
-            "color": "blue"
-          },
-          {
-            "from": "client",
-            "to": "server",
-            "label": "Application Data",
-            "color": "neutral"
           }
         ]
       }
     },
     {
       "type": "code",
-      "anchor": "design",
+      "anchor": "encoding",
       "position": "after",
-      "caption": "RECOMMENDED TICKET STRUCTURE (RFC 5077, SECTION 4)",
+      "caption": "THE RECOMMENDED TICKET STRUCTURE (RFC 5077 SECTION 4)",
       "data": {
         "title": "ticket",
         "lang": "text",
         "code": "struct {\n    opaque key_name[16];\n    opaque iv[16];\n    opaque encrypted_state<0..2^16-1>;\n    opaque mac[32];\n} ticket;"
       }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "THE FIVE SECURITY CONCERNS THE RFC RAISES",
+      "data": {
+        "items": [
+          {
+            "title": "Stolen tickets",
+            "text": "A stolen ticket does not help an attacker, because it is encrypted with a key only the server holds."
+          },
+          {
+            "title": "Forged tickets",
+            "text": "A forged or altered ticket is rejected as long as the integrity protection is strong, such as a keyed HMAC-SHA-256."
+          },
+          {
+            "title": "Denial of service",
+            "text": "Checking a ticket must be cheap, and the key name lets the server drop tickets it never issued."
+          },
+          {
+            "title": "Key management",
+            "text": "Generate the keys securely, keep them at least 128 bits strong, use them for nothing else, and change them regularly."
+          },
+          {
+            "title": "Lifetime",
+            "text": "The server sets the lifetime, which may be longer than the 24-hour lifetime recommended for session identifiers."
+          }
+        ]
+      }
     }
   ],
   "references": [
     {
-      "number": "[RFC4507]",
-      "text": "Salowey, J., Zhou, H., Eronen, P., and H. Tschofenig, \"Transport Layer Security (TLS) Session Resumption without Server-Side State\", RFC 4507, May 2006.",
-      "rfc": 4507
+      "number": "[RFC2246]",
+      "text": "Dierks, T. and Allen, C., \"The TLS Protocol Version 1.0\", RFC 2246, January 1999.",
+      "rfc": 2246
     },
     {
       "number": "[RFC4346]",
-      "text": "Dierks, T. and E. Rescorla, \"The Transport Layer Security (TLS) Protocol Version 1.1\", RFC 4346, April 2006.",
+      "text": "Dierks, T. and Rescorla, E., \"The Transport Layer Security (TLS) Protocol Version 1.1\", RFC 4346, April 2006.",
       "rfc": 4346
     },
     {
       "number": "[RFC4366]",
-      "text": "Blake-Wilson, S., Nystrom, M., Hopwood, D., Mikkelsen, J., and T. Wright, \"Transport Layer Security (TLS) Extensions\", RFC 4366, April 2006.",
+      "text": "Blake-Wilson, S., Nystrom, M., Hopwood, D., Mikkelsen, J. and Wright, T., \"Transport Layer Security (TLS) Extensions\", RFC 4366, April 2006.",
       "rfc": 4366
     },
     {
-      "number": "[RFC2246]",
-      "text": "Dierks, T. and C. Allen, \"The TLS Protocol Version 1.0\", RFC 2246, January 1999.",
-      "rfc": 2246
+      "number": "[RFC4507]",
+      "text": "Salowey, J., Zhou, H., Eronen, P. and Tschofenig, H., \"Transport Layer Security (TLS) Session Resumption without Server-Side State\", RFC 4507, May 2006.",
+      "rfc": 4507
     },
     {
-      "number": "[RFC4279]",
-      "text": "Eronen, P. and H. Tschofenig, \"Pre-Shared Key Ciphersuites for Transport Layer Security (TLS)\", RFC 4279, December 2005.",
-      "rfc": 4279
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     },
     {
       "number": "[RFC4634]",
-      "text": "Eastlake, D. and T. Hansen, \"US Secure Hash Algorithms (SHA and HMAC-SHA)\", RFC 4634, July 2006.",
+      "text": "Eastlake, D. and Hansen, T., \"US Secure Hash Algorithms (SHA and HMAC-SHA)\", RFC 4634, July 2006.",
       "rfc": 4634
+    },
+    {
+      "number": "[RFC4086]",
+      "text": "Eastlake, D., Schiller, J. and Crocker, S., \"Randomness Requirements for Security\", BCP 106, RFC 4086, June 2005.",
+      "rfc": 4086
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>CoDel is a general framework for controlling excess delay from bufferbloat. It has an estimator, a setpoint and a control loop, and needs no configuration in normal Internet deployments. This document is Experimental, not a standard.</p>",
   "plainLanguage": {
-    "summary": "<p>When too many people queue at a door, waiting gets long. CoDel notices a line that stays too long and gently turns people away so it shrinks.</p>"
+    "summary": "<p>CoDel is a way for a router to keep network delay low when a link is busy. It watches how long each packet waits in the router's buffer and, when the wait does not clear by itself, it drops a few packets to push the queue back down. It needs no tuning, so it can be turned on by default.</p>"
   },
   "questions": [
     "what is codel",
@@ -20,79 +20,169 @@
   ],
   "subtitle": "Active queue management that controls delay without configuration.",
   "tldr": {
-    "problem": "Network buffers fill with too many packets, creating persistent delays (bufferbloat) that hurt interactive applications and throughput.",
-    "mechanism": "CoDel detects when packets are spending too long in queue by tracking the minimum sojourn time, then drops packets when delay exceeds a target, using a feedback control loop to find the right drop rate.",
-    "outcome": "Latency drops from seconds to milliseconds while maintaining link utilization, with no knobs to tune: the defaults work across all normal Internet speeds and round-trip times.",
+    "problem": "Router buffers have grown so large that a full link turns into seconds of waiting time, the problem known as bufferbloat, and earlier queue management schemes were hard to configure and often made things worse.",
+    "mechanism": "CoDel watches how long packets have been sitting in the buffer, keeps the smallest such time over the last round trip, and drops packets slowly and increasingly often while that minimum stays above a target of 5 milliseconds.",
+    "outcome": "Only two numbers need setting, an interval of 100 milliseconds and a target of 5 milliseconds, so the scheme can run without any operator tuning. The RFC is Experimental and reports no known security exposures.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Default target delay",
-      "value": "5 ms"
+      "label": "TARGET",
+      "value": "5 ms, that is 5% of INTERVAL"
     },
     {
-      "label": "Default interval",
+      "label": "INTERVAL",
       "value": "100 ms"
     },
     {
-      "label": "Target setpoint",
-      "value": "5% of round-trip time"
+      "label": "Target setpoint range",
+      "value": "5% to 10% of the connection RTT"
     },
     {
       "label": "Initial drop spacing",
-      "value": "INTERVAL milliseconds"
+      "value": "Equal to INTERVAL"
+    },
+    {
+      "label": "Control law",
+      "value": "Next drop time = t + INTERVAL / sqrt(count)"
+    },
+    {
+      "label": "Pseudocode maximum packet size",
+      "value": "512 bytes, SHOULD use the interface MTU"
     }
   ],
-  "today": "<p>RFC 8289 is Experimental. CoDel has been implemented in the Linux kernel and is widely deployed in routers and switches. It is often paired with fair queuing (fq_codel) to combat bufferbloat and improve latency for interactive applications.</p>",
+  "today": "<p>RFC 8289 is an Experimental RFC and has not been obsoleted or updated. The document notes that CoDel was first published in 2012 and has been implemented in the Linux kernel.</p>",
   "glossary": [
     "bufferbloat",
     "active-queue-management",
     "congestion-control",
-    "round-trip-time"
+    "round-trip-time",
+    "tail-drop",
+    "ecn",
+    "mtu",
+    "bandwidth-delay-product",
+    "goodput"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Bufferbloat Problem",
-      "content": "<p>Network routers and switches buffer packets to absorb bursts of traffic. But as memory density grew, buffers got so large they filled up with packets during congestion, adding seconds of delay to every round-trip. This is <strong>bufferbloat</strong>. A moment of congestion that should cause a tiny queue instead fills a massive buffer, and packets sit waiting for milliseconds or seconds. Even applications sensitive to delay (video calls, online games) suffer because they have to compete with the huge queue.</p><p>The solution is not smaller buffers: when legitimate bursts arrive, a buffer absorbs them and lets the link stay full. The real problem is <strong>standing queues</strong> that persist beyond the time needed for a burst to drain, called \"bad\" queue. It adds only delay, not usefulness. Good queue (transient bursts) is necessary; bad queue (persistent standing delays) should be eliminated.</p>",
-      "plainLanguage": "<p>A bufferbloat queue is like a line where new people keep arriving faster than they can leave. The wait keeps growing. You need to notice when the line is too long and stop letting new people join until it shrinks.</p>"
+      "title": "The Problem with Big Buffers",
+      "content": "<p>The problem of a persistently full buffer has been discussed in the IETF community since the early 1980s (<a href='/rfc896'>RFC 896</a>), and the IRTF End-to-End Research Group called for the deployment of Active Queue Management (AQM) to solve it in 1998 (<a href='/rfc2309'>RFC 2309</a>). Despite that awareness, the problem has only got worse, as growth in memory density fuelled an exponential increase in buffer pool size. Efforts to deploy AQM have been frustrated by difficult configuration and a negative impact on network utilization. This bufferbloat problem has become increasingly important throughout the Internet, particularly at the consumer edge, where large video transfers mix with time-critical voice and gaming traffic.</p><p>An effective AQM remediates bufferbloat at a bottleneck while doing no harm at hops where buffers are not bloated. The document is careful about a common misconception: network buffers exist to absorb the packet bursts that occur naturally in statistically multiplexed networks. Buffers helpfully absorb queues created by reasonable behavior, such as short-term mismatches in traffic arrival and departure rates, transport conversation startup transients, and changes in the number of conversations sharing a link. Other, less useful behaviors also fill buffers, and their effects are not benign.</p><p>CoDel was designed to meet a set of goals: make AQM parameterless for normal operation, with no knobs for operators, users or implementers to adjust; distinguish good queue from bad queue and treat them differently, keeping delay low while permitting necessary bursts; control delay while being insensitive, or nearly so, to round-trip delays, link rates and traffic loads; adapt to dynamically changing link rates with no negative impact on utilization; and allow a simple and efficient implementation, from low-end access points and home routers up to high-end router hardware.</p><p>CoDel has five major differences from prior AQMs: it uses the local queue minimum to track congestion, an efficient single state variable representation of that statistic, packet sojourn time as the observed datum rather than packets, bytes or rates, a mathematically determined setpoint derived from maximizing network power, and a modern state-space controller.</p>",
+      "plainLanguage": "<p>Router buffers hold packets while they wait for a link to send them. When a buffer is much bigger than the traffic needs, packets wait far longer than they should, and the whole network feels slow even though the link is not full. This RFC describes CoDel, a way to keep that delay low with no settings to tune.</p>"
     },
     {
-      "id": "section-1",
-      "number": "2",
-      "title": "Measuring Queue Delay",
-      "content": "<p>CoDel's estimator watches the <strong>sojourn time</strong> of each packet: the time it spends in the queue from arrival to departure. By tracking the <strong>minimum sojourn time</strong> over an interval (INTERVAL = 100 milliseconds), CoDel can tell if a persistent queue exists. If at least one packet recently passed through with zero or near-zero delay, the queue is empty or nearly empty, indicating no standing queue. If all packets are delayed, a standing queue persists.</p><p>This approach is robust because it ignores temporary bursts. A sudden spike in arrivals is absorbed by the buffer and drains within a round-trip time, showing low minimum sojourn time. But if the minimum sojourn time stays high for an entire INTERVAL, packets are stuck, not bursting.</p>",
-      "plainLanguage": "<p>Watch how long each person waits in the line. If anyone waits almost zero time, the line is healthy. If everyone waits a long time, the line is stuck.</p>"
-    },
-    {
-      "id": "section-2",
+      "id": "concepts",
       "number": "3",
-      "title": "Choosing the Target Delay",
-      "content": "<p>CoDel needs to know what delay is acceptable. The target is set to <strong>5% of the round-trip time</strong> (RTT), with a default of 5 milliseconds for normal terrestrial networks. This value comes from network power optimization: Kleinrock's analysis shows that the operating point that balances throughput against delay is achieved when the queue delay is about 5-10% of the RTT. At 5%, TCP and other congestion-controlled protocols get nearly full link utilization while keeping delay minimal.</p><p>For example, with a 100 millisecond RTT, the target is 5 milliseconds. If a packet sojourn time exceeds this target for longer than 100 milliseconds (INTERVAL), CoDel enters drop state. The interval is chosen to be large enough that legitimate bursts drain but small enough that standing queues are detected quickly.</p>",
-      "plainLanguage": "<p>Set the target wait time to 5 milliseconds (for normal networks). If people are waiting longer than that for more than 100 milliseconds straight, something is wrong.</p>"
+      "title": "Good Queue and Bad Queue",
+      "content": "<p>To control a queue, three components are needed: an estimator to work out what the queue is doing, a target setpoint to know what is wanted, and a control loop to move one to the other.</p><p>The distinction between good and bad queue comes from the bandwidth-delay product, sometimes called pipe size, which is the bottleneck's bandwidth multiplied by the round-trip delay between sender and receiver. It is the amount of data that has to be in transit between two hosts to keep the bottleneck link at full utilization. Consider a long-lived TCP connection with a 25-packet window sending over a path whose bandwidth-delay product is 20 packets. After an initial burst the connection settles into a 5-packet standing queue, because the window is larger than the pipe. Nothing about the sending rate can be inferred from the queue size, and any queue other than a transient burst only creates delay.</p><p>That 5-packet standing queue contributes nothing but delay, so it is clearly bad queue. But a buffer at a bottleneck that is much slower than the link feeding it might need to hold 20 packets temporarily to keep the bottleneck busy. The burst should drain completely, to zero or one packet, within a round-trip time. That transient queue is good queue, because it lets the connection keep its packets in flight and keeps the bottleneck link fully utilized. In terms of delay, the good queue goes away in about a round-trip time while the bad queue hangs around for longer.</p><p>The same example shows why queue length is a poor signal. Nothing can be inferred about the sending rate from the queue size. A queue of 5 packets with a 25-packet window and a queue of 10 packets with a 30-packet window both mean the same thing, and with a 20-packet window there is no queue at all, with the same sending rate. The sender needs to reduce the number of packets in flight, not the sending rate.</p>",
+      "plainLanguage": "<p>Some delay is useful: a burst of packets needs somewhere to wait, and that delay clears within a round trip. Delay that never clears is just waiting, and it is the delay CoDel is designed to remove.</p>"
     },
     {
-      "id": "section-3",
-      "number": "4",
-      "title": "The Drop-Rate Control Loop",
-      "content": "<p>Once CoDel detects a standing queue (sojourn time above target for INTERVAL), it enters drop state and starts dropping packets. The key challenge is finding the right drop rate without knowing how many flows share the link or how they respond to loss.</p><p>CoDel uses a <strong>stochastic gradient</strong> approach: drop slowly at first (one packet per round-trip time), then increase the drop rate if the queue persists. The next drop time is computed as <code>INTERVAL / sqrt(count)</code>, where count is the number of drops since entering drop state. This formula, derived from the inverse square-root relationship between TCP throughput and drop probability, adjusts the drop rate so that throughput changes linearly instead of chaotically. If the queue is large and persistent, the drop count climbs and drops happen more frequently. As soon as the sojourn time drops below target, CoDel exits drop state and stops dropping.</p>",
-      "plainLanguage": "<p>When the line is too long, start turning people away slowly. If the line is still too long, turn away more. When the line gets shorter, stop. The faster you increase rejections, the faster the line shrinks.</p>"
+      "id": "algorithms",
+      "number": "3.1",
+      "title": "The Estimator and the Local Minimum Sojourn Time",
+      "content": "<p>Queue length has been widely used as an indicator of congestion, but it is sensitive to how and when the length is observed, and it is often confused with the sending rate. A high-speed arrival link feeding a buffer serviced at a much lower rate can build a queue that disperses completely before a round-trip time has elapsed. What should be controlled is not the queue length but the excess delay packets experience because of a persistent or standing queue, which means the packet sojourn time in the buffer is exactly what to track. Sojourn time allows queue management to be independent of link rate, gives superior performance to the use of buffer size, and is directly related to user-visible performance.</p><p>Sojourn time also handles multiple queues well. In a link shared by two queues of different priority, the high-priority queue may hold many packets but empties quickly, so each packet's sojourn time is small. The other queue may hold fewer packets but their sojourn times include the waiting time for the high-priority packets. Sojourn time is therefore a good sample of the congestion each separate queue is experiencing, and it is independent of the number of queues or the service discipline used.</p><p>Averages are a poor way to separate good queue from bad queue. The average queue for a burst that disperses every round trip is one-half the burst size, and the average sojourn time is one-half the time it takes to clear the burst, so the average would indicate a persistent queue where there is none. Instead the document recommends tracking the minimum sojourn time. If there is one packet with a zero sojourn time, there is no persistent queue.</p><p>To stop the minimum going stale, it must have been experienced recently, in an interval related to the time the largest expected burst takes to drain. Conservatively, that interval SHOULD be at least a round-trip time, to avoid falsely detecting a persistent queue, and not much more than a round-trip time, to avoid delay in detecting one. This suggests using the maximum round-trip time of all connections sharing the buffer.</p><p>The key insight that makes the local minimum efficient is that it is sufficient to keep a single state variable that says how long the minimum has been above or below the target, rather than retaining all the local values. The minimum packet sojourn can only decrease when a packet is dequeued, so all the work of CoDel can take place when packets are dequeued for transmission, and no locks are needed in the implementation. The minimum is the only statistic with this property.</p>",
+      "plainLanguage": "<p>CoDel measures how long each packet waited in the buffer and keeps track of the smallest such time seen over the last round trip. If that smallest time is above the target, the queue is standing still instead of draining.</p>"
     },
     {
-      "id": "deployment",
-      "number": "5",
-      "title": "Implementation and Variants",
-      "content": "<p>CoDel requires only two parameters: TARGET (default 5 ms) and INTERVAL (default 100 ms). These defaults work across the normal Internet without adjustment. A router or switch can ship with CoDel enabled and no configuration knobs.</p><p>CoDel is most useful with a partner algorithm, <strong>fair queuing</strong>, implemented together as <strong>fq_codel</strong> (RFC 8290). Fair queuing splits traffic into separate queues per flow, allowing CoDel to manage each queue independently. This prevents one large bulk transfer from monopolizing the queue and ensures interactive traffic gets low latency.</p><p>The algorithm has been adapted for other environments. In data centers where round-trip times are microseconds instead of milliseconds, the target and interval are scaled down proportionally. Instead of dropping packets, CoDel can mark them with Explicit Congestion Notification (ECN), allowing endpoints to react without losing data. A non-starvation rule prevents drops when less than one MTU of data remains in the buffer, protecting very-low-bandwidth links.</p>",
-      "plainLanguage": "<p>CoDel ships ready to use, no setup needed. You can add fair queuing to split traffic fairly. In data centers, use the same logic but with much smaller times. Instead of dropping, you can mark packets to ask senders to slow down.</p>"
+      "id": "design",
+      "number": "3.3",
+      "title": "The Control Loop",
+      "content": "<p>A queue is not a linear system, and an AQM operates at the point of maximum non-linearity, where the output link bandwidth saturates so that increased demand creates delay rather than higher utilization. Output queues are also not time invariant, since traffic is a mix of connections that start and stop at arbitrary times and range from open-loop UDP audio and video to closed-loop congestion-avoiding TCP. Because queueing systems match none of the prerequisites for a classical controller, the document uses a modern state-space controller with two states, no persistent queue and has persistent queue. Since Internet traffic mixtures change rapidly and unpredictably, a noise- and error-tolerant adaptation algorithm such as a stochastic gradient is a good choice. Since there is essentially no information in the amount of persistent queue, the adaptation is driven by how long it has persisted.</p><p>The controller does not know the number, duration or kind of conversations creating its queue, so it has to learn the appropriate response. Dropping at too high a rate is likely to have a catastrophic effect on throughput when few conversations are active. Dropping at a low rate, less than one packet per round-trip time, and then increasing the drop rate slowly until the persistent queue goes below the target is unlikely to overdrop and is guaranteed eventually to dissipate the persistent queue. This stochastic gradient learning procedure is the core of CoDel's control loop: a drop always reduces the instantaneous queue, so an increasing drop rate always moves the system down toward no persistent queue, regardless of the traffic mix.</p><p>The next drop time is decreased in inverse proportion to the square root of the number of drops since the drop state was entered, using the well-known non-linear relationship of drop rate to throughput to get a linear change in throughput. Because the best rate to start dropping is slightly more than one packet per round trip, the initial drop rate can be derived from the estimator's interval. The initial drop spacing SHOULD be set to the estimator's interval.</p><p>Using the minimum statistic lets the controller be placed in the dequeue routine with the estimator. The control signal, the drop, can be sent at the first sign of bad queue, as indicated by the sojourn time, and the controller can stop acting as soon as the sojourn time falls below the target. Dropping at dequeue has both implementation and control advantages.</p>",
+      "plainLanguage": "<p>When CoDel sees a standing queue it drops one packet, then waits, then drops another, and drops more often as long as the queue stays standing. Because every drop makes the queue smaller, this slowly walks the queue back down.</p>"
+    },
+    {
+      "id": "parameters",
+      "number": "4.3",
+      "title": "Setting TARGET and INTERVAL",
+      "content": "<p>CoDel uses two key variables: TARGET, the controller's target setpoint, and INTERVAL, the estimator's interval. The only setting CoDel requires is INTERVAL, and since 100 ms satisfies the definition for normal Internet usage, CoDel can be parameterless for consumer use.</p><p>The setpoint is derived from the work of Kleinrock, whose power metric is the ratio of a normalized throughput to a normalized delay. The analysis shows that the best operating point is near the right edge of the flat top of the power curve, and since the round-trip time in the model is a conservative upper bound, a target of 0.1 of the round trip risks pushing shorter connections over the knee. A more conservative target of 0.05 of the round trip offers a good utilization against delay trade-off while leaving enough headroom to work with a large variation in real round-trip times. The ideal range for the permitted standing queue is therefore between 5% and 10% of the connection's round-trip time. Simulation with values in that range, using target values between 1 and 20 milliseconds for round-trip times from 30 to 500 ms and link bandwidths from 64 Kbps to 100 Mbps, gave results consistent with the mathematics.</p><p>For devices on the open Internet, INTERVAL SHOULD have a value of 100 ms, and TARGET SHOULD be set to 5 ms. An INTERVAL of 100 ms works well across round-trip times from 10 ms to 1 second, with excellent performance in the range from 10 ms to 300 ms. The initial drop spacing is also set to the INTERVAL. These settings let a device such as a small WiFi router be sold without any values being adjustable. Below a TARGET of 5 ms, utilization suffers for some conditions and traffic loads; above 5 ms there was very little or no improvement in utilization.</p><p>CoDel does not drop a packet when the drop would leave the queue empty or with fewer than a Maximum Transmission Unit worth of bytes in the buffer, so it adapts to very low bandwidth links. The MTU size can be set adaptively to the largest packet seen so far or read from the interface driver.</p><p>CoDel is also useful in environments with very different characteristics, such as switches used as a cluster interconnect in a data center, where round-trip latencies are typically under 100 microseconds and bandwidths are 1 to 40 Gbps. A CoDel configured for that environment, with TARGET and INTERVAL in the microsecond rather than millisecond range, can minimize drops or Explicit Congestion Notification marks while keeping throughput high and latency low. Devices that allow CoDel to be configured SHOULD default to the Internet-appropriate values.</p>",
+      "plainLanguage": "<p>CoDel has only two numbers to set. TARGET is the delay it allows, 5 milliseconds, and INTERVAL is how long it watches, 100 milliseconds. For most links those values are right and nobody has to change them.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "7",
+      "title": "Security Considerations",
+      "content": "<p>The document describes an active queue management algorithm for implementation in networked devices, and states that there are no known security exposures associated with CoDel at this time.</p><p>The document requires no actions by IANA, and it encourages experimentation with the recommended values of TARGET and INTERVAL for Internet settings.</p>",
+      "plainLanguage": "<p>The document states that no security weaknesses in CoDel are known. It also asks IANA for no registry entries.</p>"
     }
   ],
-  "viz": [],
+  "viz": [
+    {
+      "type": "key-grid",
+      "anchor": "concepts",
+      "position": "after",
+      "caption": "THE THREE BUILDING BLOCKS OF A QUEUE CONTROLLER",
+      "data": {
+        "items": [
+          {
+            "title": "Estimator",
+            "text": "Works out what the queue is doing, and detects when a good queue turns into a bad one."
+          },
+          {
+            "title": "Target setpoint",
+            "text": "The value the controller wants the queue to reach, here 5 milliseconds."
+          },
+          {
+            "title": "Control loop",
+            "text": "The method that moves the queue from where it is to the target."
+          }
+        ]
+      }
+    },
+    {
+      "type": "state-machine",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THE TWO STATES OF THE CODEL CONTROLLER",
+      "data": {
+        "states": [
+          {
+            "key": "no-persistent-queue",
+            "label": "No persistent queue",
+            "initial": true
+          },
+          {
+            "key": "has-persistent-queue",
+            "label": "Has persistent queue"
+          }
+        ],
+        "transitions": [
+          {
+            "from": "no-persistent-queue",
+            "to": "has-persistent-queue",
+            "label": "Minimum sojourn time above TARGET for INTERVAL: drop a packet and schedule the next drop."
+          },
+          {
+            "from": "has-persistent-queue",
+            "to": "no-persistent-queue",
+            "label": "Minimum sojourn time falls below TARGET: cancel the next drop."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "design",
+      "position": "before",
+      "caption": "THE CONTROL LAW FROM SECTION 5.6",
+      "data": {
+        "title": "Scheduling the next drop",
+        "lang": "text",
+        "code": "time_t codel_queue_t::control_law(time_t t, uint32_t count)\n{\n    return t + INTERVAL / sqrt(count);\n}"
+      }
+    }
+  ],
   "references": [
     {
-      "number": "[RFC5681]",
-      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
-      "rfc": 5681
+      "number": "[RFC2309]",
+      "text": "Braden, B., Clark, D., Crowcroft, J., Davie, B., Deering, S., Estrin, D., Floyd, S., Jacobson, V., Minshall, G., Partridge, C., Peterson, L., Ramakrishnan, K., Shenker, S., Wroclawski, J., and L. Zhang, \"Recommendations on Queue Management and Congestion Avoidance in the Internet\", RFC 2309, April 1998.",
+      "rfc": 2309
+    },
+    {
+      "number": "[RFC896]",
+      "text": "Nagle, J., \"Congestion Control in IP/TCP Internetworks\", RFC 896, January 1984.",
+      "rfc": 896
     },
     {
       "number": "[RFC8290]",
@@ -100,26 +190,34 @@
       "rfc": 8290
     },
     {
-      "number": "[RFC2309]",
-      "text": "Braden, B., Clark, D., Crowcroft, J., et al., \"Recommendations on Queue Management and Congestion Avoidance in the Internet\", RFC 2309, April 1998.",
-      "rfc": 2309
+      "number": "[RFC5681]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[KLEIN81]",
+      "text": "Kleinrock, L. and R. Gail, \"An Invariant Property of Computer Network Power\", Proceedings of the International Conference on Communications, June 1981."
+    },
+    {
+      "number": "[MACTCP1997]",
+      "text": "Mathis, M., Semke, J., Mahdavi, J., and T. Ott, \"The Macroscopic Behavior of the TCP Congestion Avoidance Algorithm\", ACM SIGCOMM Computer Communications Review, Volume 27, Issue 3, July 1997."
     },
     {
       "number": "[CODEL2012]",
       "text": "Nichols, K. and V. Jacobson, \"Controlling Queue Delay\", ACM Queue, Volume 10, Issue 5, May 2012."
     },
     {
-      "number": "[KLEIN81]",
-      "text": "Kleinrock, L. and R. Gail, \"An Invariant Property of Computer Network Power\", Proceedings of the International Conference on Communications, June 1981."
+      "number": "[REDL1998]",
+      "text": "Nichols, K., Jacobson, V., and K. Poduri, \"RED in a Different Light\", Technical Report, Cisco Systems, September 1999."
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

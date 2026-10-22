@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines Shim6, a layer 3 shim that provides locator agility below the transport protocols. It gives IPv6 multihoming with failover and load sharing, without needing a site to have provider-independent address prefixes in the global routing system.</p>",
   "plainLanguage": {
-    "summary": "<p>A site connected through two providers has two addresses. This note adds a layer that lets conversations switch between them if one fails.</p>"
+    "summary": "<p>A site that connects to the Internet through two providers has two sets of IPv6 addresses, and each set only works when that provider's link works. This document defines a way for the computers at the site to notice a broken link and move an existing conversation to the other provider's addresses, without the application or the transport protocol noticing anything.</p>"
   },
   "questions": [
     "what is shim6",
@@ -20,12 +20,12 @@
     "Multihoming",
     "Shim Layer"
   ],
-  "subtitle": "A host-based layer that lets IPv6 conversations switch to another address when a provider link fails, without a provider-independent prefix.",
+  "subtitle": "A layer 3 shim that lets IPv6 conversations switch to another address when a provider link fails, without a provider-independent prefix.",
   "tldr": {
     "problem": "A site with several IPv6 provider-allocated prefixes wants established communication to survive an outage on one connection, without a provider-independent prefix announced in the global routing table.",
     "mechanism": "Hosts set up a ULID-pair context with a peer using a four-message exchange. When the working address pair fails, a shim layer below the transport protocols swaps in another locator pair and tags packets with a Context Tag so the receiver can restore the original addresses.",
-    "outcome": "Upper layers keep seeing the same addresses while packets travel over different paths. The work is done in individual hosts, not site-wide, and the RFC leaves failure detection to RFC 5534.",
-    "outcomeLabel": "How it works"
+    "outcome": "Upper layers keep seeing the same addresses while packets travel over different paths, so TCP connections and UDP streams survive a link failure.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
@@ -41,11 +41,11 @@
       "value": "32 bits"
     },
     {
-      "label": "Payload Extension header",
+      "label": "Payload Extension header size",
       "value": "8 octets"
     },
     {
-      "label": "Max signaling packet",
+      "label": "Maximum signaling packet size",
       "value": "1280 bytes"
     },
     {
@@ -53,7 +53,7 @@
       "value": "I1_RETRIES_MAX = 4"
     }
   ],
-  "today": "<p>RFC 5533 is a Proposed Standard, and the metadata lists no RFC that obsoletes or updates it. Failure detection and locator pair exploration are defined in <a href='/rfc5534'>RFC 5534</a> and the address bindings in <a href='/rfc5535'>RFC 5535</a>.</p>",
+  "today": "<p>RFC 5533 is a Proposed Standard and the metadata records no obsoleting or updating document, so it remains the specification of the Shim6 layer 3 multihoming shim for IPv6. The reachability detection and locator exploration mechanisms it depends on are specified separately in <a href='/rfc5534'>RFC 5534</a>.</p>",
   "glossary": [
     "locator",
     "multihoming",
@@ -61,65 +61,102 @@
     "extension-header",
     "nonce",
     "ipsec",
-    "middlebox"
+    "middlebox",
+    "locator-identifier-separation",
+    "cga",
+    "cryptographically-generated-address"
   ],
   "sections": [
     {
       "id": "motivation",
       "number": "1",
-      "title": "The Multihoming Goal",
-      "content": "<p>RFC 5533 defines <strong>Shim6</strong>, a layer 3 shim that provides locator agility below the transport protocols. It gives IPv6 multihoming with failover and load-sharing, without assuming that a multihomed site has a provider-independent prefix in the global IPv6 routing table. Hosts in a site with several provider-allocated prefixes use Shim6 to set up state with peers, so they can later fail over to a different locator pair if the original one stops working.</p><p>The goals include preserving established communication such as TCP connections and UDP streams, having minimal impact on upper layers, and not requiring an extra round trip up front: ULP traffic flows as normal and shim state is set up after some packets have been exchanged. The RFC uses the term <em>load spreading</em> rather than load balancing, since load may be spread unevenly.</p><p>Explicit non-goals: making communication survive a renumbering event, solving host mobility, and creating a new identifier name space. Shim6 processing happens in individual hosts, not through site-wide mechanisms.</p>",
-      "plainLanguage": "<p>If a family has two roads into their house, a helper makes sure a visit can switch roads if one gets blocked. The helper lives in each computer, not in the neighborhood.</p>"
+      "title": "Why a Host Needs More Than One Address",
+      "content": "<p>This document describes a layer 3 shim approach and protocol for providing locator agility below the transport protocols, so that multihoming can be provided for IPv6 with failover and load-sharing properties, without assuming that a multihomed site will have a provider-independent IPv6 address announced in the global IPv6 routing table. The hosts in a site that has multiple provider-allocated IPv6 address prefixes use the Shim6 protocol to set up state with peer hosts, so that the state can later be used to failover to a different locator pair should the original one stop working.</p><p>Shim6 is a site-multihoming solution in the sense that it allows existing communication to continue when a site with multiple connections to the Internet experiences an outage on a subset of those connections, or further upstream. However, Shim6 processing is performed in individual hosts rather than through site-wide mechanisms.</p><p>The goals are to preserve established communications in the presence of certain classes of failures, for example TCP connections and UDP streams; to have minimal impact on upper-layer protocols; to address the security threats in <a href='/rfc4218'>RFC 4218</a> through a combination of the HBA and CGA approach specified in <a href='/rfc5535'>RFC 5535</a> and the techniques in this document; not to require an extra roundtrip up front to set up shim-specific state; and to take advantage of multiple locators for load spreading. Because load may be spread unevenly, the document uses the term load spreading rather than load balancing.</p><p>Several things are explicitly out of scope. The problem being solved is site multihoming with the ability to have the set of site prefixes change over time, but it is not to make communication survive a renumbering event in which all the locators of a host change at once, and it is not to solve host mobility. The document also does not try to provide a new network-level or transport-level identifier name space distinct from the current IP address name space.</p>",
+      "plainLanguage": "<p>A site with two providers has two sets of addresses, and each set stops working when that provider's link fails. The goal here is that a conversation already in progress keeps going on the other provider's addresses. The protocol does not promise that the site survives being renumbered all at once, and it does not give applications a new kind of address to use; it reuses the IPv6 addresses a host already has.</p>"
     },
     {
       "id": "concepts",
       "number": "2",
-      "title": "Locators, ULIDs and Contexts",
-      "content": "<p>Shim6 splits the two jobs of an IPv6 address. A <strong>locator</strong> is the address as the network uses it for routing and forwarding. An <strong>upper-layer identifier</strong> (<strong>ULID</strong>) is the address the upper layer uses, for example in pseudo-header checksums and connection identification. No new name space is created: the ULID is just the locator picked at initial contact, chosen with default address selection from RFC 3484.</p><p>The shim keeps a <strong>ULID-pair context</strong> per pair of ULIDs, roughly per peer host and independent of individual connections. Each end allocates a <strong>Context Tag</strong>, a 47-bit number, so that received control messages and payload headers can be matched to the context. A context also holds the peer's locator list, the current locator pair and timers. Each end has its own current locator pair, and the two may differ.</p><p><strong>Context forking</strong> lets a Shim6-aware upper layer use more than one locator pair for the same ULID pair. A forked context gets a non-zero 32-bit <strong>Forked Instance Identifier</strong> (FII); the default context has FII zero.</p>",
-      "plainLanguage": "<p>Your name tag stays the same all day, but you may enter the building through different doors. The name tag is the ULID and the doors are locators. A ticket number, the Context Tag, shows which conversation a message belongs to.</p>"
+      "title": "Locators, Identifiers and Contexts",
+      "content": "<p>The document separates two jobs that an IP address normally does at once. A <strong>locator</strong> is an IP-layer topological name for an interface or a set of interfaces, 128 bits, and locators are what travel in the IP address fields as packets cross the network. An <strong>upper-layer identifier</strong> (ULID) is an IP address selected for communication with a peer to be used by the upper-layer protocol; it is used for pseudo-header checksum computation and connection identification in the ULP. Different sets of communication to a host, for example different connections, might use different ULIDs in order to enable load spreading. Since the ULID is just one of the IP locators of the node, there is no need for a separate name space and allocation mechanism.</p><p>The shim maintains state called a <strong>ULID-pair context</strong> per ULID pair, so that this state applies to all upper-layer connections between that pair. The context is identified by a Context Tag for each direction of the communication, and also by a ULID pair and a Forked Instance Identifier. Each end allocates its own Context Tag, and once the context is established most Shim6 control messages contain the Context Tag that the receiver of the message allocated. The Context Tag is a 47-bit number, the largest that fits in an 8-octet extension header, while preserving one bit to tell the Shim6 signaling messages apart from the Shim6 header included in data packets.</p><p>Each end of the context has a current locator pair used to send packets to the peer, and the two ends may use different current locator pairs. At the sending end the shim uses the ULID pair passed down from the upper layer to find the context, so normally a host has at most one context for a ULID pair; that is the default context. <strong>Context forking</strong> is a mechanism that lets upper layers aware of multiple locators use separate contexts for the same ULID pair, so that different communication can use different locator pairs. A forked context is assigned a non-zero Forked Instance Identifier, while the default context has FII zero. The Forked Instance Identifier is a 32-bit identifier with no semantics other than being part of the tuple that identifies the context.</p>",
+      "plainLanguage": "<p>An IPv6 address does two jobs at once: it says where to send the packet, and it names the other end. Shim6 splits them. The name the application uses is called the upper-layer identifier, and the address in the packet header is called the locator. The shim keeps a record, the context, for each pair of names, and that record is found using a context tag that each side picks.</p>"
     },
     {
       "id": "architecture",
-      "number": "3",
-      "title": "Where the Shim Sits",
-      "content": "<p>The shim is inside the IP layer, below the upper-layer protocols. It sits between the IP endpoint sub-layer, which handles fragmentation, reassembly and destination options, and the IP routing sub-layer, which picks the next hop and interface. Putting fragmentation above the shim keeps reassembly robust if fragments take different paths with different source locators.</p><p>The sender maps ULIDs to locators and the receiver maps them back, so upper layers see packets that appear to use ULIDs end to end. As a result there is no impact on pseudo-header checksums or connection identification. The RFC suggests thinking of it as header compression: the ULIDs are not carried once state is set up, and a Context Tag tells the receiver which context to use to restore them.</p><p>IP multicast is deliberately left out. Multicast routing needs a topologically correct source address for the RPF check, so multicast upper layers operate directly on locators and do not use the shim.</p>",
-      "plainLanguage": "<p>It is like a translator standing between your letter and the post office. You write the same address on every letter, and the translator swaps in a working address on the envelope. At the other end the translator swaps it back.</p>"
+      "number": "1.6",
+      "title": "Where the Shim Sits in the Stack",
+      "content": "<p>The proposal uses a multihoming shim layer within the IP layer, below the upper-layer protocols, in order to provide upper-layer independence. The shim layer behaves as if it is associated with an extension header, placed after any routing-related headers such as hop-by-hop options. When the locator pair is the ULID pair there is no data that needs to be carried in an extension header, so none is needed in that case.</p><p>Layering the fragmentation header above the multihoming shim makes reassembly robust in the case of broken multi-path routing that results in using different paths, and therefore potentially different source locators, for different fragments. The shim layer is therefore placed between the IP endpoint sublayer, which handles fragmentation and reassembly, and the IP routing sublayer, which selects the next hop and interface for sending packets.</p><p>Applications and upper-layer protocols use ULIDs that the Shim6 layer maps to and from different locators. The mapping is performed consistently at the sender and the receiver, so that upper layers see packets that appear to be sent using ULIDs from end to end, even though the packets travel through the network with locators in the IP address fields. The result is that there is no impact on the upper layers, and in particular no impact on pseudo-header checksums and connection identification. Conceptually the approach can be viewed as if both ULIDs and locators are present in every packet, with a header-compression mechanism removing the need to carry the ULIDs once the compression state has been established, and a compression tag in the data packets indicating the correct context to use for decompression when the locator pair in the packet is insufficient to uniquely identify the context.</p>",
+      "plainLanguage": "<p>The shim sits just above the part of IP that picks the next hop, and just below the part that handles fragmentation. That position keeps reassembly working even if different fragments of one packet take different routes. Because the shim swaps the addresses back before handing the packet up, the transport protocol sees exactly the addresses it started with, so checksums and connection lookups are unaffected.</p>"
     },
     {
       "id": "operation",
       "number": "4",
-      "title": "From Initial Contact to Failover",
-      "content": "<p>At <strong>initial contact</strong> there is no shim action. Later, a heuristic on one or both hosts decides the overhead is worthwhile, for instance after more than 50 packets or a timer expiring during active exchange, and starts context establishment. If it fails, the initiator concludes the other end does not support Shim6 and carries on normally. While the ULID pair is also the locator pair, ULP packets carry no Shim6 header.</p><p>When something fails, one or both ends probe alternate locator pairs until one works, then switch. After a switch the sender rewrites the addresses and adds a Shim6 Payload Extension header holding the receiver's Context Tag. If the original ULIDs become the active pair again, the header is no longer needed. A host that knows a locator is unusable, such as an interface that went down, can tell its peer, and preferences can also be signalled with a Locator Preferences option.</p><p>State can be garbage collected without coordinating with the peer. A recovery message reports missing context, which handles both premature cleanup and a peer crash. Detection of failure and the search for a working pair are specified in RFC 5534, and this document only reserves its message types.</p>",
-      "plainLanguage": "<p>Everything works normally until a road is blocked. Then the helper tries the other roads, finds one that works, and puts a small tag on each letter so the other side knows which conversation it belongs to.</p>"
+      "title": "The Protocol in Phases",
+      "content": "<p>The protocol operates in several phases over time. An application on host A decides to contact an application on host B, and the upper layer on A starts sending packets. This is the initial contact. Assuming the addresses chosen by default address selection work, there is no action by the shim at this point, and any context establishment can be deferred until later.</p><p>Then some heuristic on A or B, or both, decides that it is worth paying the Shim6 overhead to make the communication robust against locator failures. The heuristic might be that more than 50 packets have been sent or received, or that a timer expired while packets were being exchanged. This makes the shim initiate the four-message context-establishment exchange. As a result both A and B know a list of locators for each other. If the exchange fails, the initiator learns that the other end does not support Shim6 and continues with standard behaviour.</p><p>Communication then continues without any change for the upper-layer packets. In particular, there are no Shim6 extension headers added, because the ULID pair is the same as the locator pair. At some point something fails, and either there is advice from the upper layer or the shim's reachability detection discovers a problem. One or both ends then probe the different alternate locator pairs until a working pair is found, and switch to using that locator pair.</p><p>Once a working alternative locator pair has been found, the shim rewrites the packets on transmit and tags them with the Shim6 Payload Extension header, which carries the receiver's Context Tag. The receiver uses the Context Tag to find the context state, which tells it which addresses to place in the IPv6 header before passing the packet up to the upper layer. From the perspective of the upper layer, the packet passes unmodified end to end, even though the IP routing infrastructure sends it to a different locator. The shim then monitors the new locator pair as it monitored the original one, so that later failures can be detected. A host may also know for certain that one of its own locators has stopped working, for example because the interface has gone down or an address has become invalid, and can signal its peer that trying that address is no longer recommended.</p>",
+      "plainLanguage": "<p>The protocol starts by doing nothing at all: the conversation is established normally. Only once a lot of packets have flowed, or a timer has run out, do the two hosts exchange their lists of addresses. That way short conversations never pay the cost. When something breaks, the two ends try the alternative address combinations until one works, and from then on the packets carry a tag so the far end can put the original addresses back before the application sees them.</p>"
+    },
+    {
+      "id": "state-machine",
+      "number": "7.3",
+      "title": "Establishing a Context",
+      "content": "<p>The normal context establishment consists of a four-message exchange in the order I1, R1, I2, R2. Both ends start in an idle state. The initiator sends I1 and moves to I1-SENT; the responder answers with R1 while staying idle; the initiator sends I2 and moves to I2-SENT; the responder answers with R2 and both ends are established. The message names are borrowed from the Host Identity Protocol.</p><p>When both ends try to set up a context for the same ULID pair at the same time, their I1 messages might cross in flight and result in an immediate R2 message. A host that has received an I1 and sent an R1 has no state to remember this, so it might send an I1 itself, and then one end is sending an I1 while the other is sending an I2.</p><p>R1bis and I2bis messages are defined to recover a context after it has been lost. An R1bis message is sent when a Shim6 control or Shim6 Payload Extension header arrives and there is no matching context state at the receiver; when such a message is received, the context is re-created using the I2bis and R2 messages. The peers' lists of locators are normally exchanged as part of the context-establishment exchange, but the set of locators might be dynamic, so there are Update Request and Update Acknowledgement messages as well as a Locator List option. A Locator Preferences option in the Update Request message lets a host say that some of its locators are no longer usable, for instance because of a locally visible failure.</p>",
+      "plainLanguage": "<p>Setting up the record takes four messages: the first host asks, the second answers, the first confirms, and the second confirms back. If both sides start at once their first messages cross, and the protocol has a rule for that. If one side has lost the record, for example after a reboot, it asks for it to be rebuilt with two extra message types.</p>"
+    },
+    {
+      "id": "packet-format",
+      "number": "5.2",
+      "title": "The Shim6 Payload Extension Header",
+      "content": "<p>The Shim6 Payload Extension header is used to carry upper-layer packets where the receiver must replace the content of the Source and/or Destination fields in the IPv6 header before passing the packet to the upper layer. It is therefore required when the locator pair that is used is not the same as the ULID pair. Its Next Header field carries the payload that follows, its Hdr Ext Len is 0 because the header is 8 octets, and the P bit is set to one to distinguish this header from the Shim6 control messages. The Receiver Context Tag is a 47-bit unsigned integer allocated by the receiver to identify the context.</p><p>The first 17 bits of the Shim6 header are common to the Shim6 Payload Extension header and to the control messages: a Next Header field, an 8-bit Hdr Ext Len giving the length of the Shim6 header in 8-octet units, not including the first 8 octets, and the P bit. Shim6 signaling packets may not be larger than 1280 bytes, including the IPv6 header and any intermediate headers between the IPv6 header and the Shim6 header. One way to meet that requirement is to omit part of the locator address information if including it would make the packet larger than 1280 bytes; another is to divide the information across different Shim6 messages. An implementation may impose administrative restrictions to avoid excessively large Shim6 packets, such as a limitation on the number of locators to be used.</p>",
+      "plainLanguage": "<p>Once the hosts are using different addresses from the ones the application expects, every packet needs a small extra header. It is 8 bytes long and carries one number: the tag the receiver gave for this conversation. The receiver looks the tag up, puts the original addresses back, and passes the packet on.</p>"
     },
     {
       "id": "message-format",
-      "number": "5",
-      "title": "Shim6 Messages and Headers",
-      "content": "<p>All Shim6 messages use IP protocol number <code>140</code> and are structured as an IPv6 extension header, so one protocol number has to be allowed through firewalls. The first 17 bits are common: Next Header, Hdr Ext Len and a <code>P</code> bit. <code>P</code> is one for the Payload Extension header and zero for control messages. Signaling packets may not exceed 1280 bytes including the IPv6 header.</p><p>The <strong>Payload Extension header</strong> is 8 octets: Next Header, Hdr Ext Len of 0, the <code>P</code> bit set to one, and a 47-bit Receiver Context Tag. Control messages add a 7-bit Type, a checksum and type-specific fields. Their Next Header is normally NO_NXT_HDR (59), and the checksum has no pseudo-header, which provides locator agility without changing the checksum. Type codes 0-63 do not trigger R1bis on a missing context, while 64-127 do.</p><p>Options follow the fixed fields. The defined options include Responder Validator, Locator List, Locator Preferences, CGA Parameter Data Structure, CGA Signature, ULID Pair, Forked Instance Identifier and Keepalive Timeout.</p>",
-      "plainLanguage": "<p>Each Shim6 message has a small header at the front, like a label on a parcel. A one-bit flag says whether the parcel carries ordinary data or a note between the two helpers.</p>"
-    },
-    {
-      "id": "connection-management",
-      "number": "6",
-      "title": "Setting Up and Recovering a Context",
-      "content": "<p>A context is normally established with a four-message exchange: <code>I1</code> and <code>R1</code>, then <code>I2</code> and <code>R2</code>. The responder keeps no state after I1; the R1 carries a Responder Validator and nonce that the initiator must return in I2. Each end allocates a Context Tag and shares its locator set. The tag MUST be unique among a host's contexts, and if an implementation structures tags, at least 30 bits MUST be unstructured random bits.</p><p>Crossing I1 messages from both sides are answered with an immediate R2. To recover a lost context, an <code>R1bis</code> is sent when a Shim6 control or payload header arrives with no matching context, and the peer answers with <code>I2bis</code>, followed by R2. Retransmission timers use binary exponential backoff randomized between 0.5 and 1.5 times the nominal value. I1 is retried up to <code>I1_RETRIES_MAX</code> (4) times with a 4-second timeout, after which the host assumes the peer lacks Shim6 and may remember that for at most one minute.</p><p>Locators must be verified. A host checks that a locator is bound to the ULID using HBA or CGA, and before using a locator as a destination it MUST also confirm the ULID is present there through a reachability probe. Update Request and Update Acknowledgement messages change the locator list later. ICMP errors that Shim6 can act on, such as Destination Unreachable codes 0, 1, 2, 3, 5 and 6, are handled by the shim; others, such as Packet Too Big, go to the upper layer.</p>",
-      "plainLanguage": "<p>Two helpers introduce themselves in four short steps and swap lists of their addresses. The first one to speak does not make the other remember anything until it proves it is real.</p>"
+      "number": "5.3",
+      "title": "Shim6 Control Messages and Options",
+      "content": "<p>All Shim6 messages are carried using a new IP protocol number, 140. The messages have a common header with some fixed fields followed by type-specific fields. They are structured as an IPv6 extension header, since the Shim6 Payload Extension header is used to carry upper-layer packets after a locator switch, and so that a single protocol number needs to be allowed through firewalls for Shim6 to work across them.</p><p>The common Shim6 control message header carries a Next Header field normally set to NO_NXT_HDR (59), an Hdr Ext Len field, the P bit set to zero to distinguish it from the payload header, a 7-bit Type field, a single bit S set to zero that lets Shim6 and HIP share a header format while still being told apart, and a 16-bit checksum. The checksum is the 16-bit one's complement of the one's complement sum of the entire Shim6 header message. When there is a payload following the Shim6 header, the payload is not included in the checksum. Unlike protocols such as ICMPv6, there is no pseudo-header part in the checksum, which provides locator agility without having to change the checksum. Type codes 0 to 63 will not trigger an R1bis message on a missing context, while codes 64 to 127 will.</p><p>The Shim6 Options registry holds the Responder Validator, the Locator List, the Locator Preferences, the CGA Parameter Data Structure, the CGA Signature, the ULID Pair, the Forked Instance Identifier and the Keepalive Timeout Option. The Shim6 Error Code registry includes an unknown Shim6 message type, a critical option not recognized, a locator verification method failed, a Locator List generation number out of sync, and an error in the number of locators. The Shim6 Verification Method registry has CGA with value 1 and HBA with value 2.</p>",
+      "plainLanguage": "<p>The control messages all share one header shape and one protocol number, so a firewall only needs to allow one thing. A type number says which message it is, from the four setup messages through to keepalives and error reports. Options carry the pieces that vary, such as the list of addresses and the preferences among them.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
-      "title": "Security and IPsec",
-      "content": "<p>Redirection attacks are addressed with <strong>Hash-Based Addresses</strong> (HBA) or <strong>Cryptographically Generated Addresses</strong> (CGA), which bind the alternative locators to the original address. With CGA, RSA keys used for generation MUST be at least 1024 bits. Third-party flooding is prevented by requiring a successful reachability probe and reply before a new locator is used as a destination.</p><p>The first message creates no state on the responder, so a three-way exchange is needed before state is created, which limits memory-exhaustion attacks. Nonces defend against replay and off-path interference, and every control message after establishment carries the Context Tag, so an attacker generally needs to be on the path to spoof one. The RFC lists residual threats, including R1bis abuse and guessing of the 47-bit tag.</p><p>When the locator pair differs from the ULID pair, Shim6 behaves conceptually like a tunnel with a compressed inner header, so interaction with IPsec resembles IPsec with tunnels, and IPsec can be seen as applied both above and below the shim. Middle-boxes that check upper-layer validity using the IPv6 header addresses may fail on Shim6 payload packets, and the RFC recommends they not drop such packets.</p>",
-      "plainLanguage": "<p>Only the true owner of an address can prove that a new address belongs to the same conversation, and the helper checks that first. A secret ticket number makes it hard for a stranger to butt in.</p>"
+      "number": "16",
+      "title": "Security Considerations",
+      "content": "<p>The document satisfies the concerns specified in <a href='/rfc4218'>RFC 4218</a> in several ways. The HBA and CGA techniques for verifying the locators prevent an attacker from redirecting the packet stream somewhere else. The HBA mechanism relies on generating all the addresses of a multihomed host as an unalterable set of intrinsically bound IPv6 addresses, known as an HBA set, so that addresses incorporate a cryptographic one-way hash of the available prefix set in the interface identifier part, and any peer can efficiently verify that alternative addresses proposed for continuing the communication are bound to the initial address. In a CGA-based approach, the address used as the ULID contains a hash of a public key in its interface identifier, which binds the ULID securely to the key pair and lets each peer use the corresponding private key to sign the shim messages that carry locator set information. Either mechanism provides time-shifted attack protection. The minimum acceptable key length for RSA keys used in the generation of CGAs MUST be at least 1024 bits.</p><p>Third party flooding attacks are prevented by requiring a Shim6 peer to perform a successful reachability probe and reply exchange before accepting a new locator for use as a packet destination. The first message does not create any state on the responder, so a state-based denial-of-service attack at least requires the attacker to consume its own resources. The context-establishment messages use nonces to prevent replay attacks and to prevent off-path attackers from interfering with the establishment. Every control message past the context establishment carries the Context Tag assigned to that context, so an attacker has to discover that tag before it can spoof a control message, and such discovery probably requires the attacker to be on the path in order to sniff the value.</p><p>The residual threats are set out in the document. An attacker that arrives late on the path can use the R1bis message to cause a peer to re-create the context and then observe the exchange. An attacker present on the path to find the Context Tags can generate an R1bis message after moving off the path, though it needs a source locator that belongs to the context. It might be possible for an attacker to try random 47-bit Context Tags; for payload packets the effects would be similar to an attacker sending packets with a spoofed source address, and for control packets the correct Context Tag alone is not enough, since additional information such as nonces and proper source addresses are required. When the Shim6 Payload Extension header is used, an attacker that can guess the 47-bit random Context Tag can inject packets into the context with any source locator. However, the attacker also needs a context where the upper-layer checksum is correct after the receiver replaces the locators with the ULIDs, and with protocols such as TCP the port numbers and sequence numbers must match an existing connection. If IPsec is applied, the issue goes away completely.</p>",
+      "plainLanguage": "<p>Three things protect the protocol: the addresses themselves are built so that a peer can check they belong together, a new address is only used after a probe confirms it works, and every message after setup carries a secret tag that an attacker would have to sniff off the path to forge. The document is honest about what is left over: an attacker who guesses the tag could inject a packet, but it would also have to pass the transport protocol's own checks, and IPsec removes the problem entirely.</p>"
     }
   ],
   "viz": [
     {
-      "type": "sequence",
-      "anchor": "connection-management",
+      "type": "layers",
+      "anchor": "architecture",
       "position": "after",
-      "caption": "NORMAL CONTEXT ESTABLISHMENT (RFC 5533)",
+      "caption": "Where the Shim6 layer sits in the IP stack",
+      "data": {
+        "layers": [
+          {
+            "label": "Transport protocols",
+            "detail": "TCP, UDP and other upper layers."
+          },
+          {
+            "label": "IP endpoint sub-layer",
+            "detail": "Fragmentation and reassembly, destination options."
+          },
+          {
+            "label": "Shim6 shim layer",
+            "detail": "Maps upper-layer identifiers to locators.",
+            "highlight": true
+          },
+          {
+            "label": "IP routing sub-layer",
+            "detail": "Selects the next hop and interface."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "The four-message context establishment exchange",
       "data": {
         "lanes": [
           {
@@ -137,37 +174,37 @@
             "to": "responder",
             "label": "I1",
             "color": "blue",
-            "note": "Initiator is now in I1-SENT."
+            "note": "First establishment message; carries the initiator Context Tag and a nonce."
           },
           {
             "from": "responder",
             "to": "initiator",
             "label": "R1",
             "color": "green",
-            "note": "No state is kept for the initiator."
+            "note": "First reply; the responder creates no state yet."
           },
           {
             "from": "initiator",
             "to": "responder",
             "label": "I2",
             "color": "blue",
-            "note": "Initiator is now in I2-SENT."
+            "note": "Second establishment message, carrying the locator list."
           },
           {
             "from": "responder",
             "to": "initiator",
             "label": "R2",
             "color": "green",
-            "note": "Both ends reach ESTABLISHED."
+            "note": "Second reply; both ends are now established."
           }
         ]
       }
     },
     {
       "type": "packet",
-      "anchor": "message-format",
+      "anchor": "packet-format",
       "position": "after",
-      "caption": "SHIM6 PAYLOAD EXTENSION HEADER (RFC 5533)",
+      "caption": "THE SHIM6 PAYLOAD EXTENSION HEADER (RFC 5533)",
       "data": {
         "title": "Shim6 Payload Extension header",
         "bytes": 8,
@@ -187,44 +224,16 @@
             "value": "0"
           },
           {
-            "key": "p",
-            "name": "P",
+            "key": "p-bit",
+            "name": "P bit",
             "bits": 1,
-            "desc": "Set to one to distinguish payload headers from control messages.",
-            "value": "1"
+            "desc": "Set to one, to distinguish this from the Shim6 control messages."
           },
           {
             "key": "context-tag",
             "name": "Receiver Context Tag",
             "bits": 47,
-            "desc": "Allocated by the receiver to identify the context."
-          }
-        ]
-      }
-    },
-    {
-      "type": "layers",
-      "anchor": "architecture",
-      "position": "after",
-      "caption": "SHIM6 PLACEMENT IN THE IP LAYER (RFC 5533)",
-      "data": {
-        "layers": [
-          {
-            "label": "Transport protocols",
-            "detail": "Use ULIDs and see no change"
-          },
-          {
-            "label": "IP endpoint sub-layer",
-            "detail": "Fragmentation/reassembly and destination options"
-          },
-          {
-            "label": "Shim6 shim layer",
-            "detail": "Maps ULIDs to and from locators",
-            "highlight": true
-          },
-          {
-            "label": "IP routing sub-layer",
-            "detail": "Selects next hop and interface"
+            "desc": "A 47-bit unsigned integer allocated by the receiver to identify the context, used to find the state that says which addresses to restore."
           }
         ]
       }
@@ -233,7 +242,7 @@
       "type": "opcodes",
       "anchor": "message-format",
       "position": "after",
-      "caption": "SHIM6 CONTROL MESSAGE TYPES (RFC 5533)",
+      "caption": "The Shim6 message types",
       "data": {
         "items": [
           {
@@ -269,27 +278,57 @@
           {
             "code": "64",
             "label": "Update Request",
-            "desc": "Changes locator list or preferences."
+            "desc": "Carries a new locator list or new locator preferences."
           },
           {
             "code": "65",
             "label": "Update Acknowledgement",
-            "desc": "Acknowledges an Update Request."
+            "desc": "Answers an Update Request."
           },
           {
             "code": "66",
             "label": "Keepalive",
-            "desc": "Format and rules are in RFC 5534."
+            "desc": "Used by the Forced Bidirectional Communication mechanism."
           },
           {
             "code": "67",
             "label": "Probe Message",
-            "desc": "Format and rules are in RFC 5534."
+            "desc": "Used to find a working locator pair after a failure."
           },
           {
             "code": "68",
             "label": "Error Message",
-            "desc": "Reports an error."
+            "desc": "Reports a problem with a Shim6 message."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "security-considerations",
+      "position": "after",
+      "caption": "The techniques that protect the protocol",
+      "data": {
+        "items": [
+          {
+            "title": "Address binding",
+            "text": "HBA or CGA lets a peer check that the alternative addresses offered really belong to the same host."
+          },
+          {
+            "title": "Probe before use",
+            "text": "A reachability probe and reply must succeed before a new locator is used as a destination."
+          },
+          {
+            "title": "No state on the first message",
+            "text": "The first message creates nothing on the responder, so a state-exhaustion attack costs the attacker its own resources."
+          },
+          {
+            "title": "Nonces",
+            "text": "The setup messages carry nonces, which stop replay and stop off-path attackers interfering."
+          },
+          {
+            "title": "Context Tag",
+            "text": "Every control message carries the context tag, so an attacker has to sniff the path to forge one."
           }
         ]
       }
@@ -327,6 +366,11 @@
       "rfc": 3582
     },
     {
+      "number": "[13]",
+      "text": "Eastlake, D., Schiller, J., and S. Crocker, \"Randomness Requirements for Security\", BCP 106, RFC 4086, June 2005.",
+      "rfc": 4086
+    },
+    {
       "number": "[15]",
       "text": "Nordmark, E. and T. Li, \"Threats Relating to IPv6 Multihoming Solutions\", RFC 4218, October 2005.",
       "rfc": 4218
@@ -340,10 +384,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

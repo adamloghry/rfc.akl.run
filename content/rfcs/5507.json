@@ -5,125 +5,269 @@
   "categoryReviewed": false,
   "summary": "<p>Discusses how to extend the DNS with new data for a new application. It lists different mechanisms and concludes that a new resource record type is the best solution, rather than overloading the TXT record, which discussions too often favor.</p>",
   "plainLanguage": {
-    "summary": "<p>If you want to store a new kind of information, you can stuff it into a general box or make a new labeled box. This note says making a new labeled box is usually the better idea.</p>"
+    "summary": "<p>This memo compares the ways to store new kinds of data in the DNS. It finds that the TXT record, which most discussions reach for, causes two kinds of trouble, and recommends defining a new type of DNS record instead.</p>"
   },
   "questions": [
     "should i use txt records for new dns data",
     "how to extend dns with new data types",
     "why is a new dns record type better than using txt records",
     "what are the problems with dns subtyping",
-    "how big can dns messages be"
+    "how big can dns messages be",
+    "what is dns subtyping"
   ],
   "tags": [
     "DNS",
     "Design",
     "Architecture"
   ],
-  "subtitle": "Why a new resource record type is the best way to add data to the DNS.",
+  "subtitle": "Why a new DNS record type beats stuffing application data into TXT records.",
   "tldr": {
-    "problem": "When applications need to store new kinds of data in the DNS, designers often choose to reuse the TXT record type because it accepts any text. However, TXT records lack defined structure, create collision risks, can cause messages to exceed packet size limits, and complicate DNSSEC signing.",
-    "mechanism": "The document evaluates five extension mechanisms: selectors inside existing record data, prefixes in domain names, suffixes in domain names, new DNS classes, and new resource record types. It explains the trade-offs of each approach.",
-    "outcome": "Despite historical difficulties with new record types, modern DNS infrastructure now handles them well. Creating a new resource record type is cleaner than reusing TXT records and avoids most of the problems associated with alternative extension mechanisms.",
-    "outcomeLabel": "Best practice"
+    "problem": "An application that wants to store its own data in the DNS has several ways to do it, and discussions usually settle on the TXT record because it accepts any text.",
+    "mechanism": "The memo compares five extension mechanisms, explains what each one costs, and shows that the two real problems with TXT records are the absence of any semantics that stops two applications from colliding, and the space that verbose text takes in a DNS message.",
+    "outcome": "The recommendation is to use the resource record type mechanism built for the purpose, and to treat the obvious choice of TXT records for arbitrary names as almost certainly the worst option.",
+    "outcomeLabel": "The advice"
   },
   "facts": [
     {
-      "label": "Number of evaluated extension mechanisms",
+      "label": "Extension mechanisms compared",
       "value": "Five"
     },
     {
-      "label": "Maximum DNS message size over UDP",
-      "value": "512 octets (before EDNS0)"
+      "label": "Base UDP DNS message limit",
+      "value": "512 octets"
     },
     {
-      "label": "Resource record type field size",
-      "value": "16 bits (65536 possible values)"
+      "label": "Resource record type code space",
+      "value": "16 bits"
+    },
+    {
+      "label": "Cost of TCP fallback",
+      "value": "Roughly triples the traffic load"
+    },
+    {
+      "label": "Wildcard position rule",
+      "value": "The asterisk must be the leftmost label"
     }
   ],
-  "today": "<p>RFC 5507 is Informational and provides guidance for DNS extension design. It has not been obsoleted. Modern DNS deployments follow its recommendation to use new resource record types rather than overloading TXT records.</p>",
+  "today": "<p>RFC 5507 is an Informational memo published by the Internet Architecture Board in April 2009, and it has not been obsoleted or updated. It records a design recommendation rather than a protocol: use the resource record type mechanism for new data, and avoid using TXT records to carry arbitrary application data.</p>",
   "glossary": [
     "dns",
     "resource-record",
     "rrset",
-    "dnssec"
+    "dnssec",
+    "dns-txt-record",
+    "edns0",
+    "domain-name-space"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The DNS Extension Problem",
-      "content": "<p>The DNS stores many categories of data: infrastructure records (NS, SOA), address mappings (A, AAAA, PTR), mail routing (MX), and application-specific records (SRV, NAPTR). When designing a new application, developers must decide how to store its data in the DNS while minimizing impact on existing applications and keeping DNS messages small enough to fit in UDP packets.</p><p>A DNS query consists of three parts: an owner (or name), a resource record class, and a resource record type. The challenge is to ensure precise selection of what data to return so that applications get only what they need. Historically, different applications have extended the DNS in different ways (MX as a new type, SRV using prefixes, NAPTR using subtyping), leading to inconsistent approaches.</p>",
-      "plainLanguage": "<p>The DNS needs to store all kinds of information for different applications. When you invent a new application, you have to decide how to add its data to the DNS without breaking the existing system.</p>"
+      "title": "Introduction",
+      "content": "<p>The DNS stores data in resource records, and different kinds of data use different record types. NS and SOA records hold the data the DNS needs about itself, A, AAAA and PTR records map names to addresses, MX records carry mail routing, and generic types such as SRV and NAPTR carry information for several applications.</p><p>When an application needs to store new data in the DNS, the goal is to let a client query for exactly the data it wants, while limiting the effect on existing applications and the number of extra bytes sent to the client. A DNS query is a triple of owner name, class and type, and the choice of extension mechanism decides how precisely that triple can select the data.</p><p>The memo notes that the methods used over the years have been inconsistent. MX was created as a new type, SRV uses a prefixing scheme, and NAPTR puts selection data inside the record data. Its purpose is to clarify the implications of each method, both for the applications that use them and for the rest of the DNS.</p>",
+      "plainLanguage": "<p>When a new application wants to store its own data in the DNS, someone has to pick a mechanism for it. This memo compares five mechanisms and recommends one: a new type of DNS record.</p>"
     },
     {
-      "id": "section-1",
+      "id": "background",
       "number": "2",
-      "title": "Five Extension Mechanisms and Their Trade-Offs",
-      "content": "<p><strong>Selectors inside RDATA (subtyping):</strong> Multiple applications share one record type and distinguish their data using selectors inside the record data (as in NAPTR and the old KEY record). The disadvantage is that a client must fetch the entire RRSet and parse it to find the relevant records. This increases message size and risk of UDP packet overflow, forcing fallback to TCP, which increases server load.</p><p><strong>Prefix in domain name:</strong> Add an application-specific prefix to the domain name (as in SRV records with '_service._proto'). This allows separate RRSets for each application but has problems with DNS wildcards, which only work when '*' is the leftmost label. Prefixes also require separate zone management if the data belongs in a different zone from related data.</p><p><strong>Suffix in domain name:</strong> Create a parallel tree with a suffix (e.g., 'example.com' and 'example.com._bar'). This minimizes RRSet size but creates synchronization and update authorization issues since data for a single entity is split across two different zones administered separately.</p><p><strong>New DNS class:</strong> In theory, new classes (like HS for Hesiod) could distinguish data types, but this is impractical. Classes are tied to the delegation tree, so changing classes may cross administrative boundaries unpredictably. Only the IN class has ever seen widespread deployment.</p><p><strong>New resource record type:</strong> Create a new record type designed specifically for the application's data. This was historically difficult due to infrastructure limitations, but modern DNS now handles unknown record types well (per RFC 3597). It cleanly separates different applications' data into distinct RRSets.</p>",
-      "plainLanguage": "<p>You can add data by (1) mixing it with other data in the same box and using labels to sort it, (2) changing the name to put it in a different box, (3) using a different naming branch, (4) creating a whole different filing system, or (5) just making a new labeled box. Each approach has problems except the last one.</p>"
+      "title": "How the DNS Selects and Carries Data",
+      "content": "<p>Every record matching the owner, class and type triple of a query belongs to the same resource record set, and the whole set is returned to the client. Splitting a set is a protocol violation, because it can create coherency problems with the DNS caching mechanism.</p><p>Almost all DNS traffic runs over UDP, and the base DNS specification limits a DNS message over UDP to 512 octets. EDNS0, defined in <a href='/rfc2671'>RFC 2671</a>, lets a client signal that it can accept larger responses, but deployment is not universal, in part because some firewalls block fragmented UDP packets or EDNS0 itself. If a response does not fit in a single packet, the name server returns a truncated response and the client may retry over TCP. Queries over TCP are not subject to the length limit, but TCP imposes significantly higher per-query overhead on name servers than UDP, and deployed firewall policies often block DNS over TCP anyway.</p><p>These limits matter for extension design because a mechanism that returns a larger set of records raises the chance of truncation, and a fallback to TCP adds load to the name server. A UDP-based DNS query is idempotent, while a TCP-based one requires the server to keep connection state and roughly triples the traffic load.</p>",
+      "plainLanguage": "<p>A DNS query names one owner, one class and one type, and the server returns every record that matches. Responses are small, so a mechanism that piles many records under one name risks answers too big to send in a single packet.</p>"
     },
     {
-      "id": "section-2",
+      "id": "design",
       "number": "3",
-      "title": "Why TXT Records Are Problematic",
-      "content": "<p>The TXT record appears attractive because it accepts arbitrary text with no predefined structure. However, this flexibility creates serious problems. First, TXT records lack <strong>semantic collision prevention</strong>: applications create their own syntax and structure within TXT records, making it impossible to reliably distinguish one application's records from another's. A parser encountering unexpected TXT record data may misinterpret it.</p><p>Second, TXT records create <strong>size problems</strong>. Verbose text encodings of application data are inefficient compared to binary formats. When an entire RRSet must be returned together (as required by DNS caching), size can grow rapidly, increasing the risk of UDP packet overflow and forcing TCP fallback. This substantially increases load on servers since TCP requires the server to maintain connection state.</p><p>Third, combinations of TXT records with naming modifications (prefixes or suffixes) still lack a standardized subtype field, making collisions likely. Any attempt to impose standardization now is too late given decades of existing TXT record uses.</p>",
-      "plainLanguage": "<p>TXT records are like blank paper: you can write anything, but then two people might write incompatible things on different papers and cause confusion. Plus, if you stuff too much data in TXT records, the DNS message gets too big to send.</p>"
+      "title": "Five Ways to Extend the DNS",
+      "content": "<p>The DNS is intended to be extensible, and the memo examines five ways to extend it.</p><p><strong>Selectors inside the record data, which the memo calls subtyping.</strong> Several applications share one record type and each puts a selector inside the record data to mark its own records; NAPTR and the original DNSSEC KEY record are examples. The weakness is that a client cannot ask for only its own records. It has to fetch the whole set and select from it. Because DNSSEC signatures operate on complete record sets, changing one record forces the whole set to be signed again, and a larger set is more likely to need a TCP retry.</p><p><strong>A prefix added to the owner name.</strong> A prefix such as <code>_mail</code> produces a different name and therefore a different record set. It conflicts with wildcards, because a DNS wildcard only works with the asterisk as the leftmost label, as in <code>*.example.com.</code>, so a name like <code>_mail.*.example.com.</code> cannot be served by a wildcard record. Records in two different zones may also be administered by different organisations and signed with different DNSSEC keys.</p><p><strong>A suffix added to the owner name.</strong> A suffix gives the smallest possible record set, because the query name can be set exactly to the data wanted. The cost is a parallel tree inside the IN class, with no technical mechanism to ensure that the delegation for <code>example.com</code> and <code>example.com._bar</code> goes to the same organisation, and with the data for one entity split across two zones. The DNAME record of <a href='/rfc2672'>RFC 2672</a> is offered as a way to solve the administrative problem.</p><p><strong>A new class.</strong> Only the IN class has ever seen widespread deployment, and the administrative overhead of another class would almost certainly be prohibitive. The delegation tree is tied to a specific class, so a query that crosses a class boundary may reach different name servers. The MIT Hesiod system used a HS class, but only at the scale of a single institution, with an administrative requirement that the IN and HS delegation trees be identical; its use for non-sensitive data was later replaced by LDAP, defined in <a href='/rfc4511'>RFC 4511</a>.</p><p><strong>A new resource record type.</strong> Four parties have to handle a new type: the primary master that loads the zone, the slave server that receives a zone transfer, the caching resolver that stores the records, and the application that asks for them. Historically this was hard, because server software could not parse unknown types and firewalls dropped queries carrying them. Today there is a requirement that DNS software handle unknown types, and the generic encoding in <a href='/rfc3597'>RFC 3597</a> covers the loading case. Support remains a problem for relatively old provisioning software and for corporate environments that transfer zone data by other means.</p>",
+      "plainLanguage": "<p>There are five ways to store new data in the DNS: mix it with other data and label each record, change the name by adding a prefix or a suffix, use a separate class, or define a new type of record. The memo lists what goes wrong with each one.</p>"
     },
     {
-      "id": "section-3",
+      "id": "naming",
       "number": "4",
-      "title": "Benefits of a New Resource Record Type",
-      "content": "<p>A new resource record type provides several advantages. It creates <strong>clear semantics</strong>: the type definition specifies exactly what the data means and how it is structured, eliminating collision risk. Clients can query for exactly what they want, getting a precise RRSet without unwanted data.</p><p>It enables <strong>compact binary representation</strong> tailored to the application's needs, reducing message size and the risk of UDP overflow. It allows <strong>DNSSEC signing</strong> to operate cleanly on the specific RRSet rather than signing a large mixed set of data from multiple applications.</p><p>The historical concern that adding new record types is difficult has been addressed. Modern investigations show that deployed DNS software widely supports RFC 3597 (generic handling of unknown record types). The approval process for new types has also improved (RFC 5395), making the effort more predictable. While provisioning tools may require updates to support new record types, this is a minor difference compared to the problems with alternative approaches.</p>",
-      "plainLanguage": "<p>A new record type is like creating a labeled box just for one kind of document. The label prevents confusion, you can pack things efficiently, and everyone knows what goes where.</p>"
+      "title": "Zone Boundaries Are Invisible to Applications",
+      "content": "<p>The DNS name space is a hierarchy in the sense that names are built from labels, but it does not follow or imply an administrative hierarchy. Data attached to a node in the tree is not valid for the whole subtree, and a zone boundary is an administrative division rather than a marker an application can rely on.</p><p>The memo argues against what it calls tree climbing, where an application that gets no positive answer retries the query with the leftmost label stripped off, repeatedly, until the root is reached. The DNS was built as a query-response tool with no search capability, so adding such a search mechanism puts extra burden on the infrastructure, in the worst case on top-level and root name servers. A query for information in a domain outside the control of the intended entity may also return incorrect results and put security at risk, and finding the exact policy boundary is impossible without an explicit marker, which does not exist today. Software can sometimes detect a zone boundary by looking for an SOA record, but some registries run at the second level, such as CO.UK, and other registry boundaries cannot be identified without knowledge outside the DNS.</p><p>The consequence for applications is that the DNS does not support inheritance. An MX record set at a top-level domain is not valid for any subdomain of that domain.</p>",
+      "plainLanguage": "<p>A name in the DNS sits in a tree, but the tree says nothing about who is in charge of it. An application should not hunt for data by walking up the tree until something answers, because the DNS has no search feature and the top-level servers would carry the cost.</p>"
     },
     {
-      "id": "summary",
+      "id": "discussion",
       "number": "5",
-      "title": "Recommendation",
-      "content": "<p>While there is no magic solution for painlessly adding data to the DNS, the document concludes that creating a new resource record type, following RFC 5395, is the preferred approach in most cases. The most obvious approach of using TXT records for arbitrary application data is almost certainly the worst option, particularly because of the problems with lack of semantics and message size. Protocol designers should not be deterred by historical difficulties but should use the resource record type mechanism designed precisely for this purpose.</p>",
-      "plainLanguage": "<p>When you need to store new data in the DNS, make a new record type. It is the cleanest solution and the infrastructure now supports it.</p>"
+      "title": "Why a New Resource Record Type Is Preferred",
+      "content": "<p>Most extensions end up in the IN class, because the class mechanism is not a practical option and most users of the system do not even realise it exists. Among the existing types in that class, almost all have well-defined semantics that do not match a new application's needs. That leaves the TXT record, whose data is free-form text with no existing semantics to get in the way.</p><p>TXT fails for two reasons. The first is that nothing in the record prevents a collision with another application's use of it, and there is not even a standard selector field in which to store a subtype; <a href='/rfc1464'>RFC 1464</a> tried to define one and was not a success. Each application ends up with its own syntax inside the record, so a parser cannot reliably tell one application's data from another's. The memo's view is that a TXT record is in effect a local container record that means only what its producer says it means. That is fine for people, or for a private agreement between producer and consumer, but it breaks down for a standardised protocol where the two sides have no prior relationship.</p><p>The second reason is space. DNS traffic has very many clients and relatively few servers, so path MTU discovery schemes do little good and there is a strong incentive to keep messages short enough to fit in one UDP datagram. Verbose text encodings waste that space, and subtyping produces larger record sets than necessary. If the data is so large that it cannot fit comfortably in the DNS whatever the encoding, the memo's advice is to move it somewhere else and use the DNS as a pointer to it, as NAPTR does.</p><p>Against that, the memo re-examines the objection that new record types are hard to add. Support for unknown types, defined in <a href='/rfc3597'>RFC 3597</a>, is now widespread on the public Internet, and the approval process in <a href='/rfc5395'>RFC 5395</a> makes the effort needed for a new type more predictable. Provisioning the data remains the most difficult part, but that problem exists to some degree with any new form of data in the DNS, whatever the format, the record type or the naming scheme. The conclusion is that the best solution is still the resource record type mechanism designed for the purpose, and that using TXT records for arbitrary names is almost certainly the worst option. The memo also names the one real limit of the mechanism: the type field is a 16-bit value, so the registry of types is a limited resource, and the trade-offs might have to change if extension of the DNS by new types brings that registry close to completion.</p>",
+      "plainLanguage": "<p>Free-form text records look like the easy choice, and they cause two problems. Two applications can pick the same name for different things, and text takes more room than a purpose-built format. A new record type avoids both, and DNS software now handles types it does not know.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>DNS record sets can be signed using DNSSEC, and DNSSEC is almost certainly necessary for any application mechanism that stores authorisation data in the DNS. Signatures significantly increase the size of the messages transported, which makes the message size problems described earlier more serious than they might at first appear.</p><p>New record types can create two kinds of problem. In DNS software, a type that is not handled according to <a href='/rfc3597'>RFC 3597</a> might trigger bugs and other bad behaviour, though software that old is insecure enough to deserve an update for other reasons in any case. In applications and provisioning software, the change is to understand the structure of the new data format, whichever mechanism was chosen; basic support for retrieving arbitrary record types has been a requirement since 1989.</p><p>The memo advises any new protocol that proposes to store data in the DNS to make authorisation decisions to use DNSSEC and also to encourage upgrades to DNS server software recent enough not to be riddled with well-known exploitable bugs.</p>",
+      "plainLanguage": "<p>Signing DNS data with DNSSEC makes responses bigger, so the size limits bite harder. Any protocol that stores authorisation decisions in the DNS should also insist on DNS software that is not old enough to be full of known bugs.</p>"
     }
   ],
-  "viz": [],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "THE FIVE EXTENSION MECHANISMS AND WHAT EACH COSTS",
+      "data": {
+        "columns": [
+          "Mechanism",
+          "How it selects data",
+          "Main problem"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Selector inside record data",
+              "The client fetches the whole set and picks its own records",
+              "Bigger sets, more re-signing, more TCP retries"
+            ]
+          },
+          {
+            "cells": [
+              "Prefix on the owner name",
+              "A different name gives a different set",
+              "Does not work with wildcards; records can sit in another zone"
+            ]
+          },
+          {
+            "cells": [
+              "Suffix on the owner name",
+              "The query name is set exactly, so the set stays small",
+              "Creates a parallel tree and splits data across two zones"
+            ]
+          },
+          {
+            "cells": [
+              "New class",
+              "The class field separates kinds of data",
+              "Only the IN class is deployed; delegation is tied to one class"
+            ]
+          },
+          {
+            "cells": [
+              "New record type",
+              "The type field selects the data exactly",
+              "Four parties must handle a type they do not know"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "discussion",
+      "position": "after",
+      "caption": "TXT RECORDS AGAINST A NEW RECORD TYPE",
+      "data": {
+        "columns": [
+          "Question",
+          "Reuse TXT records",
+          "Define a new record type"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Can a client ask for only its own data?",
+              "No, it receives the whole set",
+              "Yes, the type is part of the query"
+            ]
+          },
+          {
+            "cells": [
+              "Can two applications collide?",
+              "Yes, nothing stops it",
+              "No, each type has its own semantics"
+            ]
+          },
+          {
+            "cells": [
+              "How compact is the data?",
+              "Free-form text, often verbose",
+              "A format designed for the data"
+            ]
+          },
+          {
+            "cells": [
+              "What happens when data changes?",
+              "The whole set is re-signed",
+              "Only the set of that type is re-signed"
+            ]
+          }
+        ]
+      }
+    }
+  ],
   "references": [
     {
-      "number": "[1]",
+      "number": "[RFC1035]",
       "text": "Mockapetris, P., \"Domain names - implementation and specification\", STD 13, RFC 1035, November 1987.",
       "rfc": 1035
     },
     {
-      "number": "[2]",
-      "text": "Gustafsson, A., \"Handling of Unknown DNS Resource Record (RR) Types\", RFC 3597, September 2003.",
-      "rfc": 3597
+      "number": "[RFC1123]",
+      "text": "Braden, R., \"Requirements for Internet Hosts - Application and Support\", STD 3, RFC 1123, October 1989.",
+      "rfc": 1123
     },
     {
-      "number": "[3]",
-      "text": "Eastlake, D., \"Domain Name System (DNS) IANA Considerations\", BCP 42, RFC 5395, November 2008.",
-      "rfc": 5395
+      "number": "[RFC1464]",
+      "text": "Rosenbaum, R., \"Using the Domain Name System To Store Arbitrary String Attributes\", RFC 1464, May 1993.",
+      "rfc": 1464
     },
     {
-      "number": "[4]",
+      "number": "[RFC2181]",
+      "text": "Elz, R. and R. Bush, \"Clarifications to the DNS Specification\", RFC 2181, July 1997.",
+      "rfc": 2181
+    },
+    {
+      "number": "[RFC2671]",
       "text": "Vixie, P., \"Extension Mechanisms for DNS (EDNS0)\", RFC 2671, August 1999.",
       "rfc": 2671
     },
     {
-      "number": "[5]",
+      "number": "[RFC2672]",
+      "text": "Crawford, M., \"Non-Terminal DNS Name Redirection\", RFC 2672, August 1999.",
+      "rfc": 2672
+    },
+    {
+      "number": "[RFC3597]",
+      "text": "Gustafsson, A., \"Handling of Unknown DNS Resource Record (RR) Types\", RFC 3597, September 2003.",
+      "rfc": 3597
+    },
+    {
+      "number": "[RFC3761]",
       "text": "Faltstrom, P. and M. Mealling, \"The E.164 to Uniform Resource Identifiers (URI) Dynamic Delegation Discovery System (DDDS) Application (ENUM)\", RFC 3761, April 2004.",
       "rfc": 3761
     },
     {
-      "number": "[6]",
+      "number": "[RFC4511]",
+      "text": "Sermersheim, J., \"Lightweight Directory Access Protocol (LDAP): The Protocol\", RFC 4511, June 2006.",
+      "rfc": 4511
+    },
+    {
+      "number": "[RFC4592]",
       "text": "Lewis, E., \"The Role of Wildcards in the Domain Name System\", RFC 4592, July 2006.",
       "rfc": 4592
+    },
+    {
+      "number": "[RFC4871]",
+      "text": "Allman, E., Callas, J., Delany, M., Libbey, M., Fenton, J., and M. Thomas, \"DomainKeys Identified Mail (DKIM) Signatures\", RFC 4871, May 2007.",
+      "rfc": 4871
+    },
+    {
+      "number": "[RFC5395]",
+      "text": "Eastlake, D., \"Domain Name System (DNS) IANA Considerations\", BCP 42, RFC 5395, November 2008.",
+      "rfc": 5395
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

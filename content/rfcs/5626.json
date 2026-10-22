@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines mechanisms for SIP user agents behind firewalls and NATs to keep client-initiated connections open so proxies can deliver requests to them. It helps handle networks where the server cannot open a connection to the client.</p>",
   "plainLanguage": {
-    "summary": "<p>If you are behind a locked gate, no one can knock. So you open a line to them and keep it open, and they talk through it.</p>"
+    "summary": "<p>RFC 5626 lets a SIP user agent behind a NAT or firewall receive requests over connections it opened itself. It defines registration, flow tracking, keep-alives and recovery when a connection fails.</p>"
   },
   "questions": [
     "sip outbound",
@@ -20,40 +20,36 @@
     "NAT Traversal",
     "Signaling"
   ],
-  "subtitle": "How SIP phones behind NATs and firewalls keep connections to their servers open so calls can reach them.",
+  "subtitle": "How SIP user agents keep client-opened flows available for incoming calls through NATs and firewalls.",
   "tldr": {
-    "problem": "SIP servers normally open connections to User Agents to deliver requests, but firewalls, NATs and TLS server-certificate rules often make that impossible.",
-    "mechanism": "The User Agent registers over connections it opens itself, tagging each with an instance-id and a reg-id, and keeps them alive with CRLF pings over TCP or STUN over UDP. Proxies send incoming requests back down those same flows.",
-    "outcome": "A UA can register over several flows at once for reliability, and servers can route to it without connecting inward. RFC 5626 updates RFC 3261 and RFC 3327.",
+    "problem": "A SIP proxy may need to open a connection or send a datagram to a user agent, but NATs, firewalls and TLS certificate constraints can prevent inbound connections.",
+    "mechanism": "The user agent opens flows to outbound proxies and registers each one with an instance ID and reg-id. Keep-alives maintain and test the flows; proxies route later requests over the same flows.",
+    "outcome": "A user agent can register over multiple flows for reliability and recover a failed flow with backoff. RFC 5626 updates RFC 3261 and RFC 3327.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Pong timeout (CRLF)",
+      "label": "Recommended maximum proxy URIs",
+      "value": "Up to 4"
+    },
+    {
+      "label": "CRLF pong timeout",
       "value": "10 seconds"
     },
     {
-      "label": "STUN default interval",
+      "label": "Default STUN interval",
       "value": "24 to 29 seconds"
     },
     {
-      "label": "Flow failed response",
-      "value": "430"
+      "label": "Default maximum retry backoff",
+      "value": "1800 seconds"
     },
     {
-      "label": "First hop lacks outbound",
-      "value": "439"
-    },
-    {
-      "label": "Backoff maximum",
-      "value": "1800 seconds by default"
-    },
-    {
-      "label": "Outbound proxy set",
-      "value": "At least 2 URIs, up to 4"
+      "label": "New SIP response codes",
+      "value": "430 and 439"
     }
   ],
-  "today": "<p>RFC 5626 is a Proposed Standard, and the unit metadata lists no RFC that obsoletes or updates it. It itself updates <a href='/rfc3261'>RFC 3261</a> and <a href='/rfc3327'>RFC 3327</a>.</p>",
+  "today": "<p>RFC 5626 is a Proposed Standard published in October 2009. It updates <a href='/rfc3261'>RFC 3261</a> and <a href='/rfc3327'>RFC 3327</a>; the batch metadata lists no later RFC that obsoletes or updates RFC 5626.</p>",
   "glossary": [
     "sip",
     "sip-user-agent",
@@ -64,50 +60,65 @@
     "tcp",
     "udp",
     "uuid",
-    "keep-alive"
+    "keep-alive",
+    "stun"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem and the Key Idea",
-      "content": "<p>Many SIP deployments have User Agents (UAs) that can connect out to a registrar or proxy, but cannot be reached by connections in the reverse direction. The most likely cause is a NAT or firewall that only allows outgoing connections. Another is TLS: phones and PCs rarely have a stable DNS name suitable for a certificate, but they can still act as TLS clients and open outbound connections to a server that authenticates with its certificate.</p><p>The key idea is that when a UA sends a REGISTER or a dialog-forming request, the proxy can later reuse the same network <strong>flow</strong> (a UDP datagram pair, a TCP connection or similar) to forward incoming requests to that UA. Since the UA must then keep a flow alive, the RFC adds detection of flow failure, registration over multiple flows, and two keep-alive schemes.</p>",
-      "plainLanguage": "<p>The phone makes the call to the server first, and then the server answers back along the same line instead of trying to call the phone.</p>"
+      "title": "Why SIP Uses Client-Initiated Connections",
+      "content": "<p>Many SIP user agents can open a connection to a registrar or proxy but cannot accept a connection initiated from outside. NATs and firewalls commonly restrict incoming connections. A device may also lack a stable DNS name suitable for a TLS server certificate, even though it can open a TLS connection as a client.</p><p>RFC 5626 lets a proxy deliver requests over a network flow that the user agent established. It defines how user agents register those flows, keep them active and detect failures. Multiple simultaneous flows can reduce the effect of a failed connection.</p>",
+      "plainLanguage": "<p>A phone may be able to contact its SIP server but not accept a new connection from it. This extension lets the server send requests back over the phone's existing connection.</p>"
     },
     {
       "id": "concepts",
-      "number": "3",
-      "title": "Instance IDs, Reg-IDs and Flows",
-      "content": "<p>Each UA has a unique <strong>instance-id</strong>, a URN (the RFC says a UUID URN SHOULD be used) that MUST persist across power cycles and MUST NOT change when the device moves networks. It travels in the <code>+sip.instance</code> Contact parameter.</p><p>Each registration over a different flow also carries a <code>reg-id</code> Contact parameter, unique among that instance's registrations for the AOR. The sequence of reg-id values MUST be the same after every reboot so that new registrations collide with and replace the old ones. The registrar uses the instance-id to see that several bindings belong to one UA, and the reg-id to tell a new flow from a refreshed or replaced one.</p><p>A UA is configured with an <strong>outbound-proxy-set</strong>. It MUST support sets of at least two URIs and SHOULD support up to four, and MUST send REGISTER requests to at least two of them when the set has more than one. Each REGISTER uses a unique Call-ID and includes <code>outbound</code> and <code>path</code> option tags in Supported.</p>",
-      "plainLanguage": "<p>Your phone has a name tag that never changes, and a numbered ticket for each line it opens. If it reboots, it reuses the same tickets, so the server swaps old lines for new ones.</p>"
+      "number": "2.1",
+      "title": "Instance IDs, Registration IDs and Flows",
+      "content": "<p>A flow is a transport association identified by both hosts' addresses and ports and by the transport protocol. Each user-agent instance has a persistent <code>instance-id</code>, carried in the <code>+sip.instance</code> Contact parameter. The identifier must stay the same across power cycles and network changes.</p><p>Each registration over a different flow has its own <code>reg-id</code>. The registrar uses the instance ID to associate registrations with one device and the reg-id to distinguish its flows. A user agent's outbound-proxy-set contains the proxy URIs it will try to keep reachable.</p>",
+      "plainLanguage": "<p>The instance ID identifies the user-agent device across restarts. A separate reg-id identifies each flow that the device registers.</p>"
     },
     {
       "id": "procedures",
-      "number": "4",
-      "title": "Registering and Routing Over Flows",
-      "content": "<p>The UA examines successful registration responses for the <code>outbound</code> option tag in a Require header. If it is present, the registrar (and any edge proxy that needed to take part) supports the specification, and the UA starts keep-alives. If the first hop does not support outbound, a 439 (First Hop Lacks Outbound Support) response may come back, and the UA MAY retry without outbound or through another proxy.</p><p>An <strong>edge proxy</strong> that is the first hop MUST insert itself in a Path header with a <strong>flow token</strong> that is unique to the flow, or reject the request, and MUST add the <code>ob</code> URI parameter. The token can be any value that identifies the flow, recovers it and cannot be forged. The RFC gives a stateless example using a secret key and an HMAC-SHA1-80 over the flow's addresses and ports. If a token has been tampered with the proxy SHOULD answer 403; if the flow is gone it SHOULD answer 430 (Flow Failed).</p><p>The <strong>registrar</strong> binds an AOR to the combination of instance-id and reg-id, stores the Contact, its parameters and any Path values, and includes <code>outbound</code> in Require in its response. An <strong>authoritative proxy</strong> MUST NOT put more than one contact with the same AOR and instance-id in the target set at once. After a 430 it SHOULD try another contact with the same instance-id but a different reg-id.</p>",
-      "plainLanguage": "<p>The first helper outside the gate writes a secret note saying which line leads to the phone. Later, the note tells it which line to use, and nobody can fake the note.</p>"
+      "number": "4.2",
+      "title": "Registering Flows with Proxies",
+      "content": "<p>A user agent must support an outbound-proxy-set containing at least two URIs and should support up to four. If the set contains more than one URI, it must register through at least two proxies. Each registration includes the outbound and path option tags in Supported, a persistent instance ID and a reg-id distinct from the other flows for that instance and address of record.</p><p>A successful response that requires the outbound option indicates that the registrar and any required edge proxy support the mechanism. An edge proxy that is the first hop places a flow token in a Path header and adds the <code>ob</code> URI parameter. The token identifies the flow and lets the proxy recover it when a later request arrives.</p><p>The registrar stores the contact, instance ID, reg-id, Path values and the flow information. An authoritative proxy sends incoming requests over one registered flow. It must not target multiple contacts for the same instance at once; after a 430 Flow Failed response, it should try a different reg-id for that instance.</p>",
+      "plainLanguage": "<p>The device registers each connection it opens, and the registrar records which device and flow it represents. A flow token lets an edge proxy direct later requests back through the correct connection.</p>"
     },
     {
       "id": "connection-management",
-      "number": "5",
-      "title": "Keep-Alives and Flow Failure",
-      "content": "<p>Keep-alives refresh NAT and firewall bindings and let the UA detect that a flow has died. There are two kinds. Over connection-oriented transports such as TCP or SCTP the UA sends a double CRLF as a \"ping\" and the server replies with a single CRLF \"pong\". If no pong arrives within 10 seconds the flow is treated as failed. Over connectionless transports such as UDP the UA sends STUN Binding Requests on the same flow. The proxy or registrar acts as a limited STUN server on its SIP UDP port and its Binding Response MUST include XOR-MAPPED-ADDRESS. A STUN failure, or a change in that address, counts as flow failure.</p><p>If a successful registration response carries a <code>Flow-Timer</code> header, the UA MUST send keep-alives at least that often, and SHOULD randomize them between 80% and 100% of the value. Without it, the CRLF defaults are an upper bound of 120 seconds (lower bound 95) where battery is no concern and 840 seconds (lower bound 672) where it is. For STUN the default is a random 24 to 29 seconds.</p><p>A node MUST NOT send STUN to a next hop unless it has explicit indication that the hop supports this specification.</p>",
-      "plainLanguage": "<p>It is like saying \"Still there?\" down the phone every so often, and waiting for \"Yes\". If nobody says yes, the line is dead and you dial again.</p>"
+      "number": "4.4",
+      "title": "Keep-Alives for TCP and UDP",
+      "content": "<p>Keep-alives refresh NAT or firewall state and help the user agent detect a failed flow. For connection-oriented transports such as TCP or SCTP, the user agent sends a double CRLF ping and waits for a single CRLF pong. If no pong arrives within <code>10 seconds</code>, the user agent must treat the flow as failed.</p><p>For UDP, the user agent sends STUN Binding Requests over the same flow as SIP. The response must include XOR-MAPPED-ADDRESS. A STUN error, no response after seven retransmissions, or a changed mapped address means the flow has failed. Without a Flow-Timer header, the recommended random interval is 24 to 29 seconds for STUN.</p><p>If the registration response contains Flow-Timer, the user agent must send keep-alives at least that often. The recommended interval varies randomly between 80% and 100% of the timer value.</p>",
+      "plainLanguage": "<p>The user agent periodically checks that its connection still works. TCP uses CRLF messages; UDP uses STUN messages, which can also reveal a changed network address.</p>"
     },
     {
       "id": "error-handling",
-      "number": "6",
-      "title": "Flow Recovery and Backoff",
-      "content": "<p>When a flow fails, the UA forms a new one and each new registration MUST reuse the reg-id of the registration it replaces. To avoid the <strong>avalanche restart</strong> problem, where many UAs reconnect at once after a server fails, retries are delayed. The upper-bound wait is <code>W = min(max-time, base-time * 2^consecutive-failures)</code>. The base-time defaults to 30 seconds if all flows to the outbound proxy set have failed and 90 seconds if at least one has not, and max-time defaults to 1800 seconds. The UA actually waits a uniform random time between 50 and 100% of W.</p><p>For example, with a base-time of 30 seconds and three failures, W is 240 seconds. When the UA boots it registers immediately, and if that fails and no other flow succeeds, the first retry comes 30 to 60 seconds later. Once the maximum is reached, the UA keeps trying indefinitely at random intervals of 15 to 30 minutes.</p>",
-      "plainLanguage": "<p>If the line drops, you wait a bit before calling back, and wait longer after each failed try. Everyone waiting a different amount stops the server from being swamped.</p>"
+      "number": "4.5",
+      "title": "Recovering a Failed Flow",
+      "content": "<p>When a registered flow fails, the user agent opens a replacement flow and registers it using the same reg-id as the failed registration. It waits before retrying after a failed attempt so that many devices do not reconnect at once after a server failure.</p><p>The upper-bound wait is the smaller of a configured maximum and the base time multiplied by two to the number of consecutive failures. The default maximum is <code>1800 seconds</code>; the default base time is <code>30 seconds</code> if every flow has failed and <code>90 seconds</code> if another flow remains usable. The actual delay is random between 50% and 100% of that upper bound.</p>",
+      "plainLanguage": "<p>After a flow fails, the user agent waits before trying again. Repeated failures increase the wait, and random delays spread retries across time.</p>"
+    },
+    {
+      "id": "design",
+      "number": "5.2",
+      "title": "How Edge Proxies Protect Flow Tokens",
+      "content": "<p>An edge proxy needs a token that uniquely identifies a flow, allows the proxy to recover the flow and cannot be changed by an attacker. The RFC gives a stateless example: combine transport and both endpoints' addresses and ports, then authenticate the value with HMAC-SHA1-80 using a secret key held by the proxy.</p><p>When a request returns with a token, the proxy checks its integrity and finds the flow. If the token has been modified, the proxy should return 403 Forbidden. If the flow no longer exists, it should return 430 Flow Failed.</p>",
+      "plainLanguage": "<p>The proxy uses a protected token to identify the registered flow. It rejects a modified token and reports when the flow it names no longer exists.</p>"
     },
     {
       "id": "security-considerations",
       "number": "12",
-      "title": "Security Considerations",
-      "content": "<p>The key concern is that an attacker must not be able to hijack a valid user's sessions and receive that user's calls. The RFC aims to add no new attacks to existing SIP over UDP and TCP, not to prevent the attacks that already exist.</p><p>Without edge proxies, routing for an AOR changes only when a registration succeeds, so the scheme relies on SIP's existing registration authentication. Storing an instance-id without tying it to its AOR would not work, because an attacker could copy the instance-id. With edge proxies, the Path value is stored by the registrar only after successful authentication and returned later, and an edge proxy routes only over flows named in a flow token it created itself. The RFC changes no mandatory-to-implement security mechanisms: UAs already must implement Digest and should support TLS, and proxies must implement both.</p>",
-      "plainLanguage": "<p>The note only gets accepted if the person proves who they are first, so a stranger cannot trick the helpers into sending your calls to them.</p>"
+      "title": "Keeping Calls Bound to Authenticated Users",
+      "content": "<p>The main security goal is to prevent an attacker from redirecting a valid user's calls. The mechanism relies on SIP registration authentication: the registrar stores flow information only after registration succeeds. An instance ID alone is not enough, because an attacker could copy another user's ID.</p><p>With edge proxies, the registrar stores a Path value only after successful authentication and later returns it to route requests. An edge proxy routes over a flow only when the request contains a flow token that the proxy created. The RFC does not change SIP's required security mechanisms; it relies on existing Digest authentication and TLS support.</p>",
+      "plainLanguage": "<p>The registrar accepts a flow only as part of an authenticated registration. This prevents someone from using a copied device identifier to redirect another user's calls.</p>"
+    },
+    {
+      "id": "operational-considerations",
+      "number": "13",
+      "title": "Transport Choices Affect Large Messages",
+      "content": "<p>The RFC notes that SIP deployments choose which transports to use. When a UDP request is too large, SIP attempts to switch to TCP. With outbound flows, that switch works only if the user agent has established a suitable TCP flow as well.</p><p>A deployment using only UDP outbound flows will fail for sufficiently large SIP messages. The RFC notes that TCP connections require proxies to maintain many active connections, which can affect deployment decisions.</p>",
+      "plainLanguage": "<p>A UDP-only setup cannot carry every large SIP request. If a request needs TCP, the user agent must already have a TCP flow for the server to use.</p>"
     }
   ],
   "viz": [
@@ -115,7 +126,7 @@
       "type": "sequence",
       "anchor": "connection-management",
       "position": "after",
-      "caption": "KEEP-ALIVE PING AND PONG OVER TCP (RFC 5626)",
+      "caption": "CRLF KEEP-ALIVE ON A CONNECTION-ORIENTED FLOW",
       "data": {
         "lanes": [
           {
@@ -124,23 +135,23 @@
           },
           {
             "key": "proxy",
-            "label": "Edge proxy or registrar"
+            "label": "Proxy or registrar"
           }
         ],
         "messages": [
           {
             "from": "ua",
             "to": "proxy",
-            "label": "double CRLF (ping)",
+            "label": "double CRLF ping",
             "color": "blue",
-            "note": "Sent between SIP messages, never inside one."
+            "note": "Sent between SIP messages."
           },
           {
             "from": "proxy",
             "to": "ua",
-            "label": "single CRLF (pong)",
+            "label": "single CRLF pong",
             "color": "green",
-            "note": "No pong within 10 seconds means the flow has failed."
+            "note": "No pong within 10 seconds means the flow failed."
           }
         ]
       }
@@ -149,26 +160,26 @@
       "type": "compare-table",
       "anchor": "connection-management",
       "position": "after",
-      "caption": "THE TWO KEEP-ALIVE TECHNIQUES",
+      "caption": "KEEP-ALIVE METHODS FOR DIFFERENT TRANSPORTS",
       "data": {
         "columns": [
-          "Technique",
+          "Method",
           "Transport",
-          "Default interval without Flow-Timer"
+          "Default timing when Flow-Timer is absent"
         ],
         "rows": [
           {
             "cells": [
               "CRLF ping and pong",
-              "TCP, SCTP",
-              "Up to 120 s (95 s lower bound), or 840 s (672 s) on battery"
+              "TCP or SCTP",
+              "Random interval up to 120 seconds, or 840 seconds when battery power is a concern"
             ]
           },
           {
             "cells": [
               "STUN Binding Request",
               "UDP",
-              "Random 24 to 29 s"
+              "Random interval of 24 to 29 seconds"
             ]
           }
         ]
@@ -177,48 +188,38 @@
   ],
   "references": [
     {
-      "number": "[RFC3261]",
-      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261.",
+      "number": "[RFC 3261]",
+      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
       "rfc": 3261
     },
     {
-      "number": "[RFC3327]",
-      "text": "Willis, D. and B. Hoeneisen, \"Session Initiation Protocol (SIP) Extension Header Field for Registering Non-Adjacent Contacts\", RFC 3327.",
+      "number": "[RFC 3327]",
+      "text": "Willis, D. and B. Hoeneisen, \"Session Initiation Protocol (SIP) Extension Header Field for Registering Non-Adjacent Contacts\", RFC 3327, December 2002.",
       "rfc": 3327
     },
     {
-      "number": "[RFC3263]",
-      "text": "Rosenberg, J. and H. Schulzrinne, \"Session Initiation Protocol (SIP): Locating SIP Servers\", RFC 3263.",
-      "rfc": 3263
-    },
-    {
-      "number": "[RFC5389]",
-      "text": "Session Traversal Utilities for NAT (STUN), RFC 5389.",
+      "number": "[RFC 5389]",
+      "text": "Rosenberg, J., Mahy, R., Matthews, P., and D. Wing, \"Session Traversal Utilities for NAT (STUN)\", RFC 5389, October 2008.",
       "rfc": 5389
     },
     {
-      "number": "[RFC5627]",
-      "text": "Obtaining and Using Globally Routable User Agent URIs (GRUUs) in SIP, RFC 5627.",
-      "rfc": 5627
-    },
-    {
-      "number": "[RFC4122]",
-      "text": "Leach, P., et al., \"A Universally Unique IDentifier (UUID) URN Namespace\", RFC 4122.",
-      "rfc": 4122
-    },
-    {
-      "number": "[RFC2104]",
-      "text": "Krawczyk, H., et al., \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104.",
+      "number": "[RFC 2104]",
+      "text": "Krawczyk, H., Bellare, M., and R. Canetti, \"HMAC: Keyed-Hashing for Message Authentication\", RFC 2104, February 1997.",
       "rfc": 2104
+    },
+    {
+      "number": "[RFC 5627]",
+      "text": "Rosenberg, J., \"Obtaining and Using Globally Routable User Agent URIs (GRUUs) in the Session Initiation Protocol (SIP)\", RFC 5627, October 2009.",
+      "rfc": 5627
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-19"
 }

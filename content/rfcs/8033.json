@@ -5,150 +5,220 @@
   "categoryReviewed": false,
   "summary": "<p>Specifies Proportional Integral controller Enhanced (PIE), an active queue management scheme that fights bufferbloat, where oversized buffers cause high delay. It drops packets probabilistically to keep queueing delay low. It is experimental.</p>",
   "plainLanguage": {
-    "summary": "<p>If a line at a shop gets too long, everybody waits forever. PIE sometimes turns people away early so the line stays short and moves fast.</p>"
+    "summary": "<p>PIE is a queue management algorithm for routers. It watches how long packets wait in a queue and drops some of them early, before the queue grows large, so that the waiting time stays near a target the operator chooses. It needs no timestamp on every packet, which keeps it cheap to run.</p>"
   },
   "questions": [
     "what is pie active queue management",
     "how to fix bufferbloat",
     "why is network latency high",
     "difference between queue length and latency",
-    "ecn explicit congestion notification"
+    "ecn explicit congestion notification",
+    "how does pie control queueing latency"
   ],
   "tags": [
-    "Networking",
-    "QoS",
-    "Performance"
+    "Queue Management",
+    "Bufferbloat",
+    "Latency"
   ],
-  "subtitle": "Active queue management that controls network latency to prevent bufferbloat",
+  "subtitle": "Active queue management that holds queuing latency at a target value instead of letting buffers grow.",
   "tldr": {
-    "problem": "Network buffers are often oversized to avoid packet loss, but oversized buffers cause packets to queue for a long time, resulting in high latency and latency variation that degrade interactive applications like VoIP and real-time video. Traditional queue management schemes like RED adjust dropping based on queue length, not the actual delay users experience.",
-    "mechanism": "PIE (Proportional Integral Controller Enhanced) is an active queue management (AQM) scheme that measures queuing latency directly and uses a proportional-integral control loop to adjust the packet drop probability. When latency exceeds a target (e.g., 15 ms), PIE gradually increases the drop probability; when latency is low, it decreases it. This keeps average queue delay controlled without requiring careful per-packet timestamps.",
-    "outcome": "Networks can achieve low, predictable latency while maintaining high link utilization. PIE has been adopted in cable modem standards (DOCSIS 3.1) and can be implemented in hardware and software with minimal overhead. It is experimental but has seen real-world deployment.",
-    "outcomeLabel": "Fixes network latency"
+    "problem": "Routers carry far more buffered data than they need, so that bursts of traffic do not cause packet loss. Because TCP only slows down when packets are dropped, and drops only happen once the buffer is full, the extra buffering turns into long waits and waits that vary from moment to moment.",
+    "mechanism": "PIE measures how long packets are waiting in a queue, compares that with a target latency, and adjusts a drop probability with a proportional-integral control loop. Every arriving packet is dropped at random with that probability, so senders back off before the queue grows large.",
+    "outcome": "The RFC reports that simulation, theoretical analysis and Linux testbed results show low latency with high link utilization, and that the design needs no per-packet timestamps, so it is cheap to run in hardware or software. The document is Experimental, and it notes that CableLabs mandated a PIE variant in the DOCSIS 3.1 specification in October 2013.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
       "label": "Target latency (QDELAY_REF)",
-      "value": "15 milliseconds (recommended)"
+      "value": "15 milliseconds"
     },
     {
       "label": "Update interval (T_UPDATE)",
-      "value": "15 milliseconds (default)"
+      "value": "15 milliseconds"
     },
     {
       "label": "Burst allowance (MAX_BURST)",
-      "value": "150 milliseconds (default)"
+      "value": "150 milliseconds"
     },
     {
-      "label": "Drop probability decay",
-      "value": "0.98x per update (2% decay when congestion ends)"
+      "label": "Controller weights",
+      "value": "alpha 1/8, beta 1 + 1/4"
     },
     {
       "label": "ECN mark threshold",
-      "value": "10% drop probability (0.1)"
+      "value": "0.1 (10%)"
     },
     {
       "label": "Dequeue threshold (DQ_THRESHOLD)",
-      "value": "16 KB (recommended)"
+      "value": "16 KB"
     }
   ],
-  "today": "<p>RFC 8033 is an Experimental protocol. PIE has been adopted in production systems, notably in the DOCSIS 3.1 cable modem specification mandated by CableLabs in 2013. It is also implemented in the Linux kernel (fq_pie queueing discipline) and is used in various network devices. The design addresses the bufferbloat problem identified in real networks and provides practical latency control for interactive applications.</p>",
+  "today": "<p>RFC 8033 is an Experimental document and has not been obsoleted. The RFC notes that CableLabs' DOCSIS 3.1 specification mandated a variant of the PIE design in October 2013, and that variant is described separately in <a href='/rfc8034'>RFC 8034</a>. The document also describes PIE as based on implementations in different products.</p>",
   "glossary": [
     "congestion-control",
     "tcp",
     "weighted-fair-queueing",
-    "port-number"
+    "port-number",
+    "bufferbloat",
+    "active-queue-management",
+    "queuing-delay",
+    "explicit-congestion-notification",
+    "random-early-detection",
+    "tail-drop"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Bufferbloat Problem",
-      "content": "<p><strong>Bufferbloat</strong> is a phenomenon in which oversized network buffers cause excessive <strong>queuing latency</strong>. To achieve high throughput and avoid packet loss, network operators add large buffers to routers and switches. However, TCP continuously increases its sending rate until packets drop. By that point, the buffer is full, so all packets experience a long delay before transmission.</p><p>This causes real problems for interactive applications:</p><ul><li><strong>VoIP (voice over IP):</strong> delays above 150 milliseconds make conversations feel unnatural</li><li><strong>Online gaming:</strong> high latency causes lag and poor responsiveness</li><li><strong>Real-time video:</strong> high latency variation (jitter) causes video stuttering</li><li><strong>Financial transactions:</strong> traders suffer losses if their orders are delayed</li></ul><p>Traditional <strong>Active Queue Management</strong> (AQM) schemes like RED (Random Early Detection) drop packets based on queue length, not latency. When a queue reaches a threshold, they drop packets to signal congestion. But queue length is not the same as delay: a long queue on a slow link means long wait times, but the same queue on a fast link might clear quickly. PIE measures actual latency instead.</p>",
-      "plainLanguage": "<p>The Internet used to have small buffers, but now they're huge—which helps move lots of data but makes everything slow because packets wait in line forever. PIE measures how long packets actually wait and tries to keep that short.</p>"
+      "title": "Why Large Buffers Cause Delay",
+      "content": "<p><strong>Bufferbloat</strong> is what happens when routers and switches hold far more data in their queues than they need. Operators ask for large buffers so that bursts of traffic do not cause packet loss. TCP then keeps raising its sending rate until packets are dropped, but drops only happen when a buffer is full or nearly full, so the extra buffering buys a long wait instead of a safe delivery.</p><p>That wait appears as high latency and as latency that changes from moment to moment. The RFC names voice over IP, real-time video streaming and financial transactions as applications that suffer from it, and says a queue management scheme must let short bursts pass smoothly while still controlling average latency in the presence of long-running greedy flows.</p><p>Existing schemes such as Random Early Detection (RED) react to the <strong>queue length</strong>. The RFC argues that this is the wrong signal, because the same queue length means very different delays on a fast link and on a slow one. <a href='/rfc7567'>RFC 7567</a>, the IETF recommendations on active queue management, calls for new methods that control network latency directly.</p>",
+      "plainLanguage": "<p>Routers hold data in queues to smooth out traffic bursts. When those queues are too large, every packet waits much longer than it needs to, and the waiting time keeps changing. PIE fixes this by watching the wait itself and dropping packets early.</p>"
     },
     {
       "id": "design",
-      "number": "2",
-      "title": "Design Goals and Control Theory",
-      "content": "<p>PIE aims to achieve four goals:</p><p><strong>1. Control Latency, Not Queue Length:</strong> PIE measures queuing delay directly (either via timestamps or by estimating queue length divided by dequeue rate). It uses a <strong>target latency</strong> (typically 15 milliseconds) and strives to keep the average delay near that target, regardless of how long the queue is.</p><p><strong>2. High Link Utilization:</strong> Dropping packets too early starves the link; dropping too late causes bloat. PIE balances these extremes by gradually increasing drop probability as latency rises, giving TCP time to back off before the queue overflows.</p><p><strong>3. Simple Implementation:</strong> Unlike RED, which requires careful tuning of queue thresholds for different networks, PIE uses <strong>fixed parameters</strong> chosen via control theory. Network operators need only set the target latency; the algorithm auto-tunes itself.</p><p><strong>4. System Stability:</strong> PIE uses a <strong>Proportional-Integral (PI) controller</strong>, a classical control-theory design. The proportional term responds to how far latency is from the target; the integral term responds to the trend (is latency rising or falling?). This combination eliminates steady-state error and ensures stability across different network conditions.</p>",
-      "plainLanguage": "<p>PIE uses a simple control idea: if packets wait too long, drop more of them to reduce the queue. If they're waiting less, drop fewer. The \"proportional\" part responds to the current wait time; the \"integral\" part responds to whether it's getting worse or better.</p>"
+      "number": "3",
+      "title": "Design Goals and the Three Parts of PIE",
+      "content": "<p>PIE stands for Proportional Integral controller Enhanced. The RFC lists four design goals. Queuing latency is controlled instead of queue length, because latency bloat is what impairs real-time applications, and controlling latency frees the buffers for sporadic bursts. Link utilization stays high, since an early congestion signal could otherwise make TCP back off too far. The scheme stays simple enough to scale in both hardware and software. The system stays stable across topologies, with design parameters set automatically so that users only configure performance-related values such as the target queue latency.</p><p>The scheme itself has three parts, drawn in Figure 1 of the RFC: a random drop decision when a packet arrives, a periodic recalculation of the drop probability, and a latency calculation. The drop probability is updated every T_UPDATE interval from two things, how far the current latency sits from the target and whether latency is trending up or down. Latency can be measured directly or estimated from the queue length and the dequeue rate, so the design does not need a timestamp on every packet and carries very little overhead.</p><p>The RFC also expects a latency-based scheme to sit on top of a Fair Queuing structure or an approximation of one, such as Flow Queuing or Class-Based Queuing. Per-flow or per-class fairness is separate from the latency control, so the two goals do not conflict.</p>",
+      "plainLanguage": "<p>PIE has three moving parts. It drops arriving packets at random, it recalculates how often to drop them on a timer, and it measures how long packets wait. Only the target waiting time has to be set by an operator.</p>"
     },
     {
       "id": "algorithms",
-      "number": "3",
-      "title": "The PIE Algorithm",
-      "content": "<p>PIE has three main components:</p><p><strong>Latency Calculation:</strong> PIE measures or estimates the current queuing latency. The simplest method is Little's law: latency = queue_size / dequeue_rate. Alternatively, PIE can timestamp packets at enqueue and calculate actual delay at dequeue, or estimate dequeue rate by measuring how long it takes to drain a threshold number of bytes from the queue.</p><p><strong>Drop Probability Calculation:</strong> PIE periodically updates (every 15 milliseconds by default) the <strong>drop probability</strong> using the PI formula:</p><p><code>p = alpha * (current_latency - target_latency) + beta * (current_latency - previous_latency)</code></p><p>The first term (alpha) is proportional to how far current latency is from the target; the second term (beta) is proportional to the rate of change. If latency is 20 ms and target is 15 ms, and it was 18 ms last update (trending up), both terms increase the drop probability. If latency drops to 10 ms, the drop probability decreases.</p><p>PIE auto-scales alpha and beta based on the current congestion level, so the same parameters work across different link speeds and traffic patterns. When congestion eases (latency stays low), the drop probability decays exponentially at 2% per update, converging to zero quickly.</p><p><strong>Random Dropping:</strong> On packet arrival, PIE randomly drops the packet with probability equal to the current drop probability. If the queue is very short or latency is very low, PIE skips dropping to remain \"work-conserving\" (not idle the link unnecessarily). After dropping decisions are made, packets are enqueued.</p>",
-      "plainLanguage": "<p>Every 15 milliseconds, PIE checks: \"How long are packets waiting? Is it trending worse?\" If yes, it increases how often to drop packets. If latency gets low, it stops dropping.</p>"
+      "number": "4.2",
+      "title": "Calculating the Drop Probability",
+      "content": "<p>Every T_UPDATE the algorithm computes a correction and adds it to the current drop probability:</p><p><code>p = alpha * (current_qdelay - QDELAY_REF) + beta * (current_qdelay - PIE-&gt;qdelay_old_)</code></p><p>The first term is the proportional part. It grows with how far the current latency sits above the target QDELAY_REF. The second term is the integral part. It grows with the rate of change of latency, so a queue that is filling is reacted to faster than a steady one. This is the classical proportional-integral controller method, which is known for removing steady-state error. The resulting drop probability is then held between 0 and 1.</p><p>The RFC recommends T_UPDATE of 15 milliseconds, and says it may be reduced on high-speed links to give a smoother response. The target latency QDELAY_REF should be set to 15 milliseconds. The default weights are alpha of 1/8 and beta of 1 + 1/4, chosen by feedback loop analysis with TCP modelled from earlier work. The algorithm also scales the correction down by itself when the drop probability is very small, dividing it by 2048, 512, 128, 32, 8 or 2 depending on how low the probability has fallen. When the queue is empty and the latency samples are zero, the drop probability is multiplied by 0.98 at each update, which the RFC says gives a time constant of about 50 T_UPDATE intervals and lets the probability settle at zero quickly.</p><p>Latency comes from one of two places. The simplest estimate divides the queue length in bytes by the dequeue rate, which is Little's law. The alternative is to timestamp packets at enqueue and read the timestamp at dequeue. PIE also avoids dropping when there is no reason to: the random drop is bypassed if the previous latency sample is below half the target and the drop probability is below 0.2, or if the queue holds no more than a couple of packets. This keeps PIE work conserving, meaning the link is not left idle on purpose.</p>",
+      "plainLanguage": "<p>Every 15 milliseconds PIE asks two questions: how much longer are packets waiting than the target, and is the wait getting worse? The answers become the chance of dropping the next packet that arrives.</p>"
     },
     {
       "id": "options",
-      "number": "4",
-      "title": "Optional Enhancements and Deployment",
-      "content": "<p><strong>Burst Tolerance:</strong> PIE allows short bursts of traffic (e.g., 150 milliseconds of traffic exceeding the target latency) without dropping. This protects against legitimate temporary spikes and short flows. A <strong>burst allowance</strong> counter starts at 150 ms and decrements every update period; as long as it's positive, packets are enqueued. When congestion clears (drop probability returns to zero), the counter resets.</p><p><strong>ECN Support:</strong> PIE can mark packets with the <strong>Explicit Congestion Notification</strong> (ECN) flag instead of dropping them, if the drop probability is below a threshold (10% by default). ECN-capable endpoints detect the marking and reduce their sending rate without waiting for a packet loss, improving efficiency.</p><p><strong>Dequeue Rate Estimation:</strong> When accurate timestamps are unavailable, PIE can estimate the dequeue rate by measuring how long it takes to drain 16 KB of data from the queue, updating the estimate as the queue drains. This trades a small latency measurement delay for simplicity.</p><p><strong>Deployment Considerations:</strong> PIE should sit on top of a fair queuing structure (per-flow or per-class queuing) to ensure fairness across users. It is most effective on bottleneck links where buffering occurs. Modern implementations include PIE in Linux (kernel fq_pie discipline) and DOCSIS 3.1 cable modems.</p>",
-      "plainLanguage": "<p>PIE has optional extras: allowing brief traffic bursts, marking packets instead of dropping them if endpoints support it, and estimating link speed when you don't have timestamps.</p>"
+      "number": "5",
+      "title": "Optional Enhancements",
+      "content": "<p>The basic scheme works on its own, but the RFC offers several optional parts.</p><p><strong>Explicit Congestion Notification.</strong> PIE may mark ECN-capable packets instead of dropping them. A threshold named mark_ecnth acts as a safeguard: while the drop probability stays below that threshold, which should be set to 0.1 (10%), an ECN-capable packet is marked. Above it, PIE goes back to dropping, because a heavily congested queue should not be asked to signal everything through marks alone.</p><p><strong>Dequeue rate estimation.</strong> When a direct latency sample is not available, PIE measures how long it takes to drain a threshold of data from the queue and turns that into an average dequeue time. The RFC recommends DQ_THRESHOLD of 16 KB, assuming a typical packet of around 1 KB or 1.5 KB. That amount is enough data for a stable average, yet fast enough to reflect a sudden change in the draining rate; a threshold below 64 KB uses a small weight to smooth the measurement.</p><p><strong>Active and inactive states.</strong> PIE can stay inactive while the queue is nearly empty and become active only when the buffer occupancy passes one third of the tail drop threshold. The RFC explains the trade-off: measuring latency while inactive would add processing overhead for no benefit, so the threshold is compared against the tail drop threshold instead of against latency.</p><p><strong>Derandomization.</strong> Independent coin tosses can drop two packets very close together or very far apart, so the real drop rate drifts from the intended one. PIE can accumulate the drop probability in a counter that resets after each drop. A packet is always enqueued while the counter is below a low threshold of 0.85, and is forced to drop once it passes a high threshold of 8.5, which spreads the drops out.</p><p><strong>Cap drop adjustment.</strong> During the slow start phase of a single TCP flow the queue can grow fast, so once the drop probability is at or above 0.1 the increase per step is capped at 0.02, which protects throughput.</p>",
+      "plainLanguage": "<p>The basic scheme is enough on its own, but the RFC adds parts an operator can switch on. These mark packets instead of dropping them, estimate the link speed from the queue, stay idle until there is real congestion, space the drops out evenly, and limit how fast the drop rate can grow.</p>"
+    },
+    {
+      "id": "implementation-notes",
+      "number": "6",
+      "title": "Implementation Cost and Incremental Deployment",
+      "content": "<p>PIE is cheap to run. The decision on packet arrival is one random comparison and needs no packet header work, so without timestamps it needs no extra memory. The drop probability calculation runs in the background once per T_UPDATE, which on modern high-speed links is once every tens, hundreds or even thousands of packets, so it is far slower than the packet processing it sits behind. Because the control law tolerates small changes in alpha and beta, an implementation may choose values such as alpha of 1/8 and beta of 1 + 1/4 so that the multiplications become simple adds and shifts. The state kept per queue is three variables: the burst allowance, the drop probability and the previous latency sample.</p><p>Flow queuing can be combined with PIE to isolate flows. The RFC suggests one drop probability calculation for the whole queue, followed by a per-queue scaling based on the ratio of queue depth to the largest queue. Under that scheme a packet arriving at an empty queue is never dropped, and a setup with a single queue behaves exactly like plain PIE.</p><p>Deployment can be incremental. PIE can be deployed and managed without any interoperability between devices, any individual buffer queue can be upgraded to PIE while it coexists with schemes such as Weighted RED, and the RFC says users should not need to configure any design parameters. On installation, QDELAY_REF and MAX_BURST default to 15 milliseconds and 150 milliseconds on ordinary network devices, and to 15 microseconds and 150 microseconds on data centre switches. The RFC lists further study for the future: automatic tuning of the target latency, tuning for the average round trip time of traffic, a better threshold for moving between ECN marking and dropping, and field tests of other control laws.</p>",
+      "plainLanguage": "<p>PIE adds very little work to a router. The packet path does one random test, and the control calculation runs on a timer in the background. Each queue keeps only three values, so the memory cost is small and the scheme can be turned on one queue at a time.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "9",
+      "title": "Security Considerations",
+      "content": "<p>The RFC states that the PIE algorithm introduces no specific security exposures. It describes PIE as an active queue management algorithm based on implementations in different products, so the behaviour of a deployed device can be examined rather than assumed.</p>",
+      "plainLanguage": "<p>The RFC states that PIE does not introduce security exposures of its own.</p>"
     }
   ],
   "viz": [
     {
-      "type": "layers",
-      "anchor": "algorithms",
-      "caption": "PIE queue management (random drop, drop probability calculation, latency measurement)",
+      "type": "compare-table",
+      "anchor": "motivation",
+      "position": "after",
+      "caption": "Queue length and queuing latency as congestion signals",
       "data": {
-        "layers": [
+        "columns": [
+          "Aspect",
+          "RED",
+          "PIE"
+        ],
+        "rows": [
           {
-            "label": "Arriving Packets",
-            "detail": "Traffic destined for the bottleneck link"
+            "cells": [
+              "Congestion signal",
+              "Queue length",
+              "Queuing latency"
+            ]
           },
           {
-            "label": "Random Drop Decision",
-            "detail": "Drop or enqueue based on current drop probability"
+            "cells": [
+              "What it controls",
+              "Queue length, so latency only indirectly",
+              "Latency directly, toward a target value"
+            ]
           },
           {
-            "label": "Queue Buffer (PIE)",
-            "detail": "Active queue with latency control",
-            "highlight": true
-          },
-          {
-            "label": "Dequeue and Latency Measurement",
-            "detail": "Calculate current queuing delay"
-          },
-          {
-            "label": "Drop Probability Update",
-            "detail": "Adjust probability based on latency trend (PI controller)"
-          },
-          {
-            "label": "Output Link",
-            "detail": "Transmission to next hop"
+            "cells": [
+              "Parameter tuning",
+              "Needs careful tuning for each network condition",
+              "Design parameters fixed; the operator sets the target latency"
+            ]
           }
         ]
       }
     },
     {
-      "type": "contrast",
-      "anchor": "introduction",
-      "caption": "Queue length vs. queuing latency as congestion signal",
+      "type": "key-grid",
+      "anchor": "design",
+      "position": "after",
+      "caption": "The three components of the PIE scheme",
       "data": {
-        "left": {
-          "title": "RED (Queue-Length Based)",
-          "from": "RED",
-          "to": "TCP",
-          "desc": "Drop when queue exceeds threshold. Problem: doesn't account for link speed, so full queue might mean very different delays."
-        },
-        "right": {
-          "title": "PIE (Latency-Based)",
-          "from": "PIE",
-          "to": "TCP",
-          "desc": "Drop when queuing latency exceeds target. Adapts to link speed and traffic patterns automatically."
-        },
-        "joiner": "improves upon"
+        "items": [
+          {
+            "title": "Random dropping",
+            "text": "A packet arriving at the queue is dropped at random, using the current drop probability."
+          },
+          {
+            "title": "Drop probability calculation",
+            "text": "Every T_UPDATE the probability is adjusted from the latency error and from how the latency is trending."
+          },
+          {
+            "title": "Latency calculation",
+            "text": "Queuing latency is measured directly or estimated from the queue length and the dequeue rate."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "How the correction is scaled down at low drop probabilities",
+      "data": {
+        "items": [
+          {
+            "code": "below 0.000001",
+            "label": "divide by 2048",
+            "desc": "Applied while the current drop probability is under 0.000001."
+          },
+          {
+            "code": "below 0.00001",
+            "label": "divide by 512",
+            "desc": "Applied while the current drop probability is under 0.00001."
+          },
+          {
+            "code": "below 0.0001",
+            "label": "divide by 128",
+            "desc": "Applied while the current drop probability is under 0.0001."
+          },
+          {
+            "code": "below 0.001",
+            "label": "divide by 32",
+            "desc": "Applied while the current drop probability is under 0.001."
+          },
+          {
+            "code": "below 0.01",
+            "label": "divide by 8",
+            "desc": "Applied while the current drop probability is under 0.01."
+          },
+          {
+            "code": "below 0.1",
+            "label": "divide by 2",
+            "desc": "Applied while the current drop probability is under 0.1."
+          },
+          {
+            "code": "0.1 or above",
+            "label": "no scaling",
+            "desc": "At or above 0.1 the correction is used as computed."
+          }
+        ]
       }
     }
   ],
   "references": [
     {
       "number": "[RFC7567]",
-      "text": "Baker, F., Ed. and G. White, Ed., \"IETF Recommendations Regarding Active Queue Management\", RFC 7567, July 2015.",
+      "text": "Baker, F., Ed. and G. Fairhurst, Ed., \"IETF Recommendations Regarding Active Queue Management\", BCP 197, RFC 7567, July 2015.",
       "rfc": 7567
     },
     {
@@ -157,23 +227,33 @@
       "rfc": 2309
     },
     {
+      "number": "[RFC7806]",
+      "text": "Baker, F. and R. Pan, \"On Queuing, Marking, and Dropping\", RFC 7806, April 2016.",
+      "rfc": 7806
+    },
+    {
       "number": "[RFC970]",
-      "text": "Nagle, J., \"Host Groups: A Multicast Extension to the Internet Protocol\", RFC 970, December 1985.",
+      "text": "Nagle, J., \"On Packet Switches With Infinite Storage\", RFC 970, December 1985.",
       "rfc": 970
     },
     {
       "number": "[RFC8034]",
-      "text": "White, G., \"Proportional Integral Controller Enhanced (PIE): A Lightweight Control Scheme to Address the Bufferbloat Problem for IP Networks\", RFC 8034, February 2017.",
+      "text": "White, G. and R. Pan, \"Active Queue Management (AQM) Based on Proportional Integral Controller Enhanced (PIE) for Data-Over-Cable Service Interface Specifications (DOCSIS) Cable Modems\", RFC 8034, February 2017.",
       "rfc": 8034
+    },
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

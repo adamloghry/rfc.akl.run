@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines OSPFv2 extensions for Bit Index Explicit Replication, an architecture for multicast forwarding that needs no per-flow state in intermediate routers and no explicit tree-building protocol. The extensions let routers advertise the information BIER needs.</p>",
   "plainLanguage": {
-    "summary": "<p>Instead of each helper remembering who gets a copy of a message, the sender stamps the list of recipients on it, and routers just follow the stamp.</p>"
+    "summary": "<p>BIER is a way of sending multicast traffic without the routers in the middle keeping per-flow state. Each packet carries a bit string, and each bit stands for one destination router. This document describes how OSPF routers tell each other which bit belongs to which router.</p>"
   },
   "questions": [
     "bier ospf extensions",
@@ -22,10 +22,10 @@
   ],
   "subtitle": "How OSPFv2 routers tell each other the information BIER multicast forwarding needs, in MPLS networks.",
   "tldr": {
-    "problem": "BIER forwards multicast without per-flow state in routers, but every router in the BIER domain still has to learn each other router's BIER identity and label ranges. The architecture lets link-state protocols carry that information.",
-    "mechanism": "RFC 8444 defines two new sub-TLVs of the OSPFv2 Extended Prefix TLV: a BIER Sub-TLV (type 9) and a BIER MPLS Encapsulation Sub-TLV (type 10). They are flooded in an area-local Extended Prefix Opaque LSA, and area border routers copy them between areas.",
-    "outcome": "OSPFv2 can now advertise BIER information for MPLS encapsulation. The RFC is a Proposed Standard and has since been updated by RFC 9272.",
-    "outcomeLabel": "Status today"
+    "problem": "BIER forwards multicast packets by a bit in the packet header, so the routers in the path need to know which bit means which destination.",
+    "mechanism": "Each BIER router advertises its own prefix with a BIER sub-TLV giving its identifier, its sub-domain and the MPLS label range it uses. OSPF floods these in Extended Prefix Opaque LSAs.",
+    "outcome": "Every BIER router can build the forwarding table that maps each bit to a set of next hops. RFC 8444 is a Proposed Standard that was later updated by RFC 9272.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
@@ -37,23 +37,23 @@
       "value": "10"
     },
     {
-      "label": "BIER MPLS Encapsulation Sub-TLV length",
+      "label": "MPLS Encapsulation sub-TLV length",
       "value": "8 octets"
     },
     {
       "label": "BFR-id field",
-      "value": "2 octets; 0 means none configured"
-    },
-    {
-      "label": "Label field",
-      "value": "3 octets, 20 rightmost bits used"
+      "value": "2 octets"
     },
     {
       "label": "Flooding scope",
       "value": "Area-local"
+    },
+    {
+      "label": "Label field",
+      "value": "3 octets, 20 rightmost bits used"
     }
   ],
-  "today": "<p>RFC 8444 is a Proposed Standard and has been updated by <a href='/rfc9272'>RFC 9272</a>, so read the two together. It covers only BIER with MPLS encapsulation.</p>",
+  "today": "<p>RFC 8444 is a Proposed Standard published in November 2018. It was later updated by <a href='/rfc9272'>RFC 9272</a>, which added the constraints on underlay path calculation, and it has not been obsoleted.</p>",
   "glossary": [
     "bier",
     "multicast",
@@ -62,212 +62,239 @@
     "area-border-router",
     "ospf-area",
     "tag-length-value",
-    "interior-gateway-protocol"
+    "interior-gateway-protocol",
+    "ospf",
+    "opaque-lsa"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why BIER Needs OSPF",
-      "content": "<p><strong>Bit Index Explicit Replication</strong> (BIER) is an architecture for multicast forwarding through a \"BIER domain\" that does not require intermediate routers to keep multicast-related, per-flow state. It also does not require an explicit tree-building protocol.</p><p>A multicast packet enters the domain at a Bit-Forwarding Ingress Router (BFIR) and leaves at one or more Bit-Forwarding Egress Routers (BFERs). The BFIR adds a BIER header that contains a BitString, in which each bit stands for exactly one BFER. The set of bits that are set is the set of egress routers that must receive the packet.</p><p>The BIER architecture requires participating routers to exchange BIER-related information within a domain, and it permits link-state routing protocols to distribute it. RFC 8444 describes the OSPF side of that, for BIER with MPLS encapsulation as defined in <a href='/rfc8296'>RFC 8296</a>. Other encapsulation types, and using several encapsulation types together, are outside its scope.</p>",
-      "plainLanguage": "<p>Each message carries a checklist of which receivers need a copy. For the routers to read the checklist correctly, they first have to agree on which box on the list means which receiver. This RFC is how they agree.</p>"
+      "title": "What BIER Changes",
+      "content": "<p>Bit Index Explicit Replication is an architecture that forwards multicast traffic optimally through a BIER domain without the intermediate routers keeping any multicast-related state per flow. It does not need a protocol that builds a forwarding tree either. A multicast data packet enters the domain at a Bit-Forwarding Ingress Router and leaves it at one or more Bit-Forwarding Egress Routers. The ingress router adds a BIER packet header, and that header holds a BitString in which each bit represents exactly one egress router to forward the packet to. The set of egress routers the packet must reach is expressed by the set of bits in that header.</p><p>BIER needs the routers taking part to exchange BIER-related information within a domain, and it allows a link-state routing protocol to distribute that information. This document describes the extensions to OSPF needed to advertise BIER-specific information when BIER uses MPLS encapsulation, as defined in <a href='/rfc8296'>RFC 8296</a>. Other encapsulations, and the use of several at once, are out of scope.</p>",
+      "plainLanguage": "<p>Ordinary multicast forwarding needs a tree, and the routers in it keep a record of every flow passing through. BIER replaces that with a bit string in the packet header: bit 3 means deliver to this router, bit 4 means that one. The routers only need to know which bit belongs to which router, so they keep no per-flow state and need no tree-building protocol.</p>"
     },
     {
-      "id": "design",
+      "id": "overview",
       "number": "2",
-      "title": "Advertising BIER Information in OSPF",
-      "content": "<p>All BIER information that a Bit-Forwarding Router (BFR) advertises is tied to its <strong>BFR-prefix</strong>: a routable IP address, unique within the BIER domain, assigned to each BFR as described in <a href='/rfc8279'>RFC 8279</a>.</p><p>Because the information must be associated with a prefix, the authors chose the OSPFv2 Extended Prefix Opaque LSA from <a href='/rfc7684'>RFC 7684</a> to carry it. Inside the OSPFv2 Extended Prefix TLV, the RFC defines a new sub-TLV for BIER, and that sub-TLV can in turn contain a sub-TLV for MPLS encapsulation.</p>",
-      "plainLanguage": "<p>Every router has one unique address that acts like its name tag. All the BIER details are stuck onto that name tag, so other routers know whose details they are reading.</p>"
+      "title": "Where BIER Information Goes in OSPF",
+      "content": "<p>All the BIER-specific information a Bit-Forwarding Router needs to advertise to other such routers is associated with a BFR-prefix. A BFR-prefix is a unique routable IP address, unique within a given BIER domain, assigned to each BIER router as described in Section 2 of <a href='/rfc8279'>RFC 8279</a>. Because the information has to hang off a BFR-prefix, the OSPFv2 Extended Prefix Opaque LSA of <a href='/rfc7684'>RFC 7684</a> is used to carry it.</p><p>Inside the Extended Prefix TLV there is a sub-TLV for distributing BIER information, called the BIER Sub-TLV, and several of them may be included in the same Extended Prefix TLV. The BIER Sub-TLV in turn may hold further sub-TLVs, one for each encapsulation the router uses.</p>",
+      "plainLanguage": "<p>Each BIER router has its own address in the routing protocol, and the BIER information is attached to that address. OSPF already has a way of attaching extra information to a prefix, and that is what is used here.</p>"
     },
     {
       "id": "message-format",
       "number": "2.1",
       "title": "The BIER Sub-TLV",
-      "content": "<p>The <strong>BIER Sub-TLV</strong> is type <code>9</code>. Its fixed fields are the <code>sub-domain-id</code>, the <code>MT-ID</code>, the 2-octet <code>BFR-id</code>, <code>BAR</code> and <code>IPA</code>, followed by a Reserved field and optional nested sub-TLVs. Several BIER Sub-TLVs may appear in one Extended Prefix TLV.</p><ul><li><code>sub-domain-id</code> identifies the BIER sub-domain within the domain.</li><li><code>MT-ID</code> is the Multi-Topology ID, defined in <a href='/rfc4915'>RFC 4915</a>, of the topology associated with the sub-domain.</li><li><code>BFR-id</code> is the router's BFR-id. If the BFR has no valid BFR-id configured, it is set to <code>0</code>, which <a href='/rfc8279'>RFC 8279</a> defines as illegal.</li><li><code>BAR</code> is the BIER Algorithm used to compute underlay paths, taken from the registry in <a href='/rfc8401'>RFC 8401</a>.</li><li><code>IPA</code> is the IGP Algorithm that can modify, enhance or replace the path calculation defined by BAR.</li></ul><p>The RFC then lists rules for bad input. A sub-domain MUST be tied to exactly one OSPF topology, and an advertisement that conflicts with the local configuration MUST be ignored. If a BFR advertises the same sub-domain-id in several BIER Sub-TLVs, it is treated as if it advertised none for that sub-domain. BFRs MUST detect duplicate valid BFR-ids and then act as <a href='/rfc8279'>RFC 8279</a> describes. A BAR or IPA value that does not match the local configuration MUST be reported as a misconfiguration and the Sub-TLV MUST be ignored. Non-zero BAR or IPA values are outside the scope of this document.</p>",
-      "plainLanguage": "<p>This is the main entry in the phone book: which group the router belongs to, its personal number, and which route-finding recipe it uses. If two entries clash, routers ignore the confusing ones instead of guessing.</p>"
+      "content": "<p>The BIER Sub-TLV has Type 9 and a variable Length, because its size depends on the sub-TLVs it carries. Its fields are:</p><ul><li>The <strong>sub-domain-id</strong>, a unique value identifying the BIER sub-domain within the BIER domain, as described in Section 1 of <a href='/rfc8279'>RFC 8279</a>.</li><li>The <strong>MT-ID</strong>, the Multi-Topology ID of <a href='/rfc4915'>RFC 4915</a>, identifying the topology associated with the BIER sub-domain.</li><li>The <strong>BFR-id</strong>, a 2-octet field encoding the identifier of the BIER router. If the router is not locally configured with a valid BFR-id, this field is set to 0, which <a href='/rfc8279'>RFC 8279</a> defines as illegal.</li><li>The <strong>BAR</strong>, a single octet giving the BIER Algorithm used to calculate the underlay paths that reach other BIER routers. The values come from the BIER Algorithm registry of <a href='/rfc8401'>RFC 8401</a>.</li><li>The <strong>IPA</strong>, a single octet giving the IGP Algorithm used to modify, enhance or replace the calculation of those underlay paths, as defined by the BAR value. The values come from the IGP Algorithm Types registry.</li></ul><p>Each BIER sub-domain MUST be associated with exactly one OSPF topology, identified by the MT-ID. If the association advertised by another router conflicts with the association configured locally on the receiving router, the BIER Sub-TLV for that conflicting sub-domain MUST be ignored, and the same is true if the MT-ID holds an invalid value. If a router advertises the same sub-domain-id in more than one BIER Sub-TLV, it MUST be treated as if it had advertised no BIER Sub-TLV for that sub-domain.</p><p>All BIER routers MUST detect the advertisement of duplicate valid BFR-ids for a given MT-ID and sub-domain-id, and when they do they MUST behave as described in Section 5 of <a href='/rfc8279'>RFC 8279</a>.</p><p>The supported BAR and IPA algorithms MUST be the same on every router supporting a given BIER sub-domain. A router that receives a BIER Sub-TLV whose BAR or IPA field does not match its own local value for that sub-domain MUST report a misconfiguration and MUST ignore the sub-TLV containing the error. The use of non-zero values in either field is outside the scope of this document.</p>",
+      "plainLanguage": "<p>The sub-TLV names the sub-domain, the topology, the router's own identifier, and the two algorithms used to work out paths to the other routers. If two routers disagree about those algorithms, the receiver ignores the advertisement and reports a configuration error.</p>"
     },
     {
-      "id": "packet-format",
+      "id": "options",
       "number": "2.2",
       "title": "The BIER MPLS Encapsulation Sub-TLV",
-      "content": "<p>This is a sub-TLV of the BIER Sub-TLV, type <code>10</code>, with a length of 8 octets. It MAY appear several times inside one BIER Sub-TLV and carries the MPLS-specific details.</p><ul><li><code>Max SI</code> is a 1-octet maximum Set Identifier used in the encapsulation for this sub-domain and BitString length.</li><li><code>Label</code> is a 3-octet field whose 20 rightmost bits give the first label of a range. The 4 leftmost bits MUST be ignored.</li><li><code>BS Len</code> is a 4-bit BitString length, using the values allowed in <a href='/rfc8296'>RFC 8296</a>.</li></ul><p>The label range runs from <code>Label</code> to <code>Label + Max SI</code>. Each Set Identifier maps to one label: the first label is for SI=0, the second for SI=1, and so on. A unique range is allocated for each BitString length and sub-domain-id.</p><p>Errors are handled by ignoring. A sub-TLV whose maximum label exceeds the 20-bit range, or whose BitString length is not an allowed value, MUST be ignored. If the same BitString length repeats inside one BIER Sub-TLV, the whole BIER Sub-TLV is ignored. Label ranges advertised by one BFR MUST NOT overlap; if they do, all BIER sub-TLVs from that router MUST be ignored.</p>",
-      "plainLanguage": "<p>BIER on MPLS uses numbered tickets called labels. This entry says which block of tickets a router uses for each list size, so no two blocks from the same router ever overlap.</p>"
+      "content": "<p>The BIER MPLS Encapsulation Sub-TLV is a sub-TLV of the BIER Sub-TLV, and it carries the MPLS-specific information BIER needs. It MAY appear more than once in the BIER Sub-TLV. Its Type is 10 and its Length is 8 octets. Its fields are:</p><ul><li><strong>Max SI</strong>, a 1-octet field encoding the maximum Set Identifier used in the encapsulation for this BIER sub-domain and this BitString length.</li><li><strong>Label</strong>, a 3-octet field whose 20 rightmost bits give the first label in the label range. The 4 leftmost bits MUST be ignored.</li><li><strong>BS Len</strong>, a 4-bit field encoding the supported BitString length associated with this BFR-prefix. The allowed values are specified in Section 2 of <a href='/rfc8296'>RFC 8296</a>.</li><li><strong>Reserved</strong>, which SHOULD be set to 0 on transmission and MUST be ignored on reception.</li></ul><p>The label range is the set of labels beginning with the Label and ending with Label plus Max SI. A unique label range is allocated for each BitString length and sub-domain-id, and these labels are used for BIER forwarding. The size of the range is set by the number of Set Identifiers used in the network, with each Set Identifier mapping to a single label: the first label is for SI 0, the second for SI 1, and so on.</p><p>If the label associated with the maximum Set Identifier exceeds the 20-bit range, the sub-TLV containing the error MUST be ignored. If the BitString length does not match any of the allowed values, the sub-TLV containing the error MUST be ignored. If the same BitString length appears in more than one of these sub-TLVs inside the same BIER Sub-TLV, the whole BIER Sub-TLV containing the conflict MUST be ignored. Label ranges within all the BIER MPLS Encapsulation Sub-TLVs advertised by the same router MUST NOT overlap, and if an overlap is detected all the BIER sub-TLVs advertised by that router MUST be ignored.</p>",
+      "plainLanguage": "<p>This sub-TLV tells the other routers which MPLS labels carry the BIER traffic for each bit-string size. The labels run in a range, one per Set Identifier, and the ranges of different routers must not overlap.</p>"
     },
     {
-      "id": "routing",
+      "id": "operation",
       "number": "2.3",
-      "title": "Flooding Scope and Crossing Areas",
-      "content": "<p>The Extended Prefix Opaque LSA that carries the BIER Sub-TLV has an <strong>area-local</strong> flooding scope. To make BIER work across several OSPF areas, the information has to be passed between areas by the Area Border Routers (ABRs).</p><p>When an ABR advertises a Type-3 Summary LSA for a prefix into its attached areas, it also originates an area-local Extended Prefix Opaque LSA with the route-type set to inter-area. To decide whether to add a BIER Sub-TLV, the ABR finds its best path to the prefix in the source area and the router that advertised that path. If that router advertised a BIER Sub-TLV for the prefix, the ABR copies the information into the BIER Sub-TLV for each attached area.</p><p>In the RFC's example, R1 advertises 192.0.2.1/32 in Area 1 with a BIER Sub-TLV. ABR R2 copies the entire BIER Sub-TLV, including its sub-TLVs, into the LSA it generates for Area 0, and ABR R3 does the same for Area 2.</p>",
-      "plainLanguage": "<p>A note pinned up in one town stays in that town. So the border officers photocopy the note and pin it up in the next town, and the next, so everyone gets the same note.</p>"
+      "title": "Propagating BIER Information Between Areas",
+      "content": "<p>The flooding scope of the OSPFv2 Extended Prefix Opaque LSA used to carry the BIER Sub-TLV is area-local. To allow BIER to be deployed in a multi-area network, OSPF has to propagate BIER information between areas.</p><p>When an OSPF Area Border Router advertises a Type-3 Summary LSA for an intra-area or inter-area prefix to all its attached areas, it also originates an OSPFv2 Extended Prefix Opaque LSA whose flooding scope is area-local and whose route type in the Extended Prefix TLV is inter-area. In deciding whether to include a BIER Sub-TLV in that LSA, the area border router examines its best path to the prefix in the source area and finds the advertising router associated with that best path. If that router advertised a BIER Sub-TLV for the prefix, the area border router copies the information from it when advertising to each attached area.</p><p>The example in the document has R1 advertising the prefix 192.0.2.1/32 in Area 1, along with an Extended Prefix Opaque LSA that includes a BIER Sub-TLV. The area border router R2 computes reachability for that prefix inside Area 1 and propagates it to Area 0, copying the entire BIER Sub-TLV it received from R1, with all of its sub-TLVs, into the Extended Prefix Opaque LSA it generates for 192.0.2.1/32 in Area 0. The area border router R3 then does the same from Area 0 into Area 2.</p>",
+      "plainLanguage": "<p>BIER information normally stops at the edge of an OSPF area. To carry it further, each area border router copies the BIER information it learned in one area into the advertisement it sends to the next area.</p>"
     },
     {
       "id": "security-considerations",
       "number": "3",
       "title": "Security Considerations",
-      "content": "<p>The RFC says the new sub-TLVs add no new security risks to OSPF, and the existing OSPF security extensions from <a href='/rfc2328'>RFC 2328</a> and <a href='/rfc7684'>RFC 7684</a> apply. It assumes BIER and OSPF sit in a single administrative domain. Where attackers might reach the OSPF routing domain, stronger authentication such as <a href='/rfc7474'>RFC 7474</a> SHOULD be used.</p><p>It also argues that the denial-of-service concern discussed in <a href='/rfc8279'>RFC 8279</a>, setting too many bits in a BitString, cannot be triggered through these advertisements. The BFIR decides which bits to set without being influenced by OSPF control messages, and the OSPF data only builds the forwarding tables that map each bit to next hops.</p><p>Implementations MUST detect malformed BIER and BIER MPLS Encapsulation Sub-TLVs so that they cannot crash the OSPF router or process. Malformed TLVs SHOULD be counted or logged, and logging SHOULD be rate-limited.</p>",
-      "plainLanguage": "<p>Tampering with the phone book cannot make the sender stamp extra names on a message, because the sender picks the names itself. Routers must also stay calm when they read a garbled entry, and not keep shouting about it.</p>"
+      "content": "<p>The document introduces new sub-TLVs for the existing OSPFv2 Extended Prefix TLV and brings no new security risks to OSPF. The existing security extensions of <a href='/rfc2328'>RFC 2328</a> and <a href='/rfc7684'>RFC 7684</a> apply. It assumes that the BIER and OSPF layers are under a single administrative domain. Where potential attackers may have access to one or more networks in the OSPF routing domain, stronger authentication mechanisms such as those in <a href='/rfc7474'>RFC 7474</a> SHOULD be used.</p><p>The Security Considerations section of <a href='/rfc8279'>RFC 8279</a> discusses the possibility of a denial-of-service attack by setting too many bits in the BitString of a BIER-encapsulated packet. That attack cannot be started by modifying the OSPF BIER advertisements, because the ingress router decides which systems receive a BIER-encapsulated packet and that decision is not influenced by the OSPF control messages. The ingress router sets one bit for each destination system, and the OSPF advertisements are used only to build the forwarding tables that map each bit to a set of next hops, not to decide which bits to set. An attack on the OSPF control plane therefore cannot cause this kind of denial of service.</p><p>While a BIER-encapsulated packet traverses the network, a router that receives a packet with n bits set may have to replicate it and forward several copies. A given bit is set in only one copy, so each transmitted replica has fewer bits set, and so targets fewer destinations, than the packet that was received. This is an essential property of the BIER forwarding process. A failure of the process might cause a denial-of-service attack, but such a failure cannot be caused by an attack on the OSPF control plane.</p><p>Implementations MUST ensure that malformed BIER and BIER MPLS Encapsulation Sub-TLVs are detected and do not give an attacker a way to crash the OSPF router or routing process. Reception of malformed TLVs or sub-TLVs SHOULD be counted and logged for further analysis, and that logging SHOULD be rate-limited so that a denial-of-service attack cannot overload the OSPF control plane.</p>",
+      "plainLanguage": "<p>The new advertisements travel in the OSPF packets that already have their own security rules, so nothing new is needed. The one thing implementations must get right is rejecting malformed advertisements without crashing, and without logging so much that the logging itself becomes an attack.</p>"
     },
     {
       "id": "iana-considerations",
       "number": "4",
-      "title": "IANA Allocations",
-      "content": "<p>IANA allocated two values from the \"OSPFv2 Extended Prefix TLV Sub-TLVs\" registry defined in <a href='/rfc7684'>RFC 7684</a>: the BIER Sub-TLV is <code>9</code> and the BIER MPLS Encapsulation Sub-TLV is <code>10</code>.</p>",
-      "plainLanguage": "<p>The official number keeper gave the two new entries their numbers, 9 and 10, so everyone uses the same ones.</p>"
+      "title": "IANA Considerations",
+      "content": "<p>IANA has allocated the following values from the OSPFv2 Extended Prefix TLV Sub-TLVs registry of <a href='/rfc7684'>RFC 7684</a>: the BIER Sub-TLV is 9, and the BIER MPLS Encapsulation Sub-TLV is 10.</p>",
+      "plainLanguage": "<p>The document asks the registry for two numbers, 9 and 10, for the two new sub-TLVs.</p>"
     }
   ],
   "viz": [
     {
-      "type": "packet",
-      "anchor": "message-format",
+      "type": "key-grid",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "BIER SUB-TLV (RFC 8444, SECTION 2.1)",
+      "caption": "THE FOUR PARTS OF BIER FORWARDING (RFC 8444, SECTION 1)",
       "data": {
-        "title": "BIER Sub-TLV",
-        "width": 32,
-        "fields": [
+        "items": [
           {
-            "key": "type",
-            "name": "Type",
-            "bits": 16,
-            "desc": "Sub-TLV type.",
-            "value": "9"
+            "title": "Bit-Forwarding Ingress Router",
+            "text": "The router where a multicast packet enters the BIER domain. It adds the BIER packet header."
           },
           {
-            "key": "length",
-            "name": "Length",
-            "bits": 16,
-            "desc": "Variable, depends on the nested sub-TLVs."
+            "title": "BitString",
+            "text": "The bit string in the header, where each bit stands for exactly one Bit-Forwarding Egress Router."
           },
           {
-            "key": "sub-domain-id",
-            "name": "sub-domain-id",
-            "bits": 8,
-            "desc": "Identifies the BIER sub-domain within the domain."
+            "title": "Bit-Forwarding Egress Router",
+            "text": "One or more of these receive the packet and take it out of the BIER domain."
           },
           {
-            "key": "mt-id",
-            "name": "MT-ID",
-            "bits": 8,
-            "desc": "Multi-Topology ID of the topology tied to the sub-domain."
-          },
-          {
-            "key": "bfr-id",
-            "name": "BFR-id",
-            "bits": 16,
-            "desc": "The router's BFR-id; 0 if none is configured."
-          },
-          {
-            "key": "bar",
-            "name": "BAR",
-            "bits": 8,
-            "desc": "BIER Algorithm used to compute underlay paths."
-          },
-          {
-            "key": "ipa",
-            "name": "IPA",
-            "bits": 8,
-            "desc": "IGP Algorithm that modifies or replaces the path calculation."
-          },
-          {
-            "key": "reserved",
-            "name": "Reserved",
-            "bits": 16,
-            "desc": "Reserved field. Nested sub-TLVs follow."
+            "title": "No per-flow state",
+            "text": "The routers in the middle keep no multicast-related state per flow, and BIER needs no protocol that builds a forwarding tree."
           }
         ]
       }
     },
     {
       "type": "packet",
-      "anchor": "packet-format",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "BIER MPLS ENCAPSULATION SUB-TLV (RFC 8444, SECTION 2.2)",
+      "caption": "THE BIER SUB-TLV (RFC 8444, SECTION 2.1)",
       "data": {
-        "title": "BIER MPLS Encapsulation Sub-TLV",
+        "title": "BIER Sub-TLV",
+        "bytes": 12,
         "width": 32,
         "fields": [
           {
             "key": "type",
             "name": "Type",
             "bits": 16,
-            "desc": "Sub-TLV type.",
-            "value": "10"
+            "desc": "9, the BIER Sub-TLV type."
           },
           {
             "key": "length",
             "name": "Length",
             "bits": 16,
-            "desc": "Length of the sub-TLV.",
-            "value": "8"
+            "desc": "Variable, depending on the sub-TLVs carried inside."
+          },
+          {
+            "key": "sub-domain-id",
+            "name": "sub-domain-id",
+            "bits": 8,
+            "desc": "Identifies the BIER sub-domain within the BIER domain."
+          },
+          {
+            "key": "mt-id",
+            "name": "MT-ID",
+            "bits": 8,
+            "desc": "The Multi-Topology ID of the topology associated with the sub-domain."
+          },
+          {
+            "key": "bfr-id",
+            "name": "BFR-id",
+            "bits": 16,
+            "desc": "The identifier of this BIER router. Zero means the router has no valid identifier configured."
+          },
+          {
+            "key": "bar",
+            "name": "BAR",
+            "bits": 8,
+            "desc": "The BIER Algorithm used to calculate the underlay paths to other BIER routers."
+          },
+          {
+            "key": "ipa",
+            "name": "IPA",
+            "bits": 8,
+            "desc": "The IGP Algorithm used to modify, enhance or replace that path calculation."
+          },
+          {
+            "key": "reserved",
+            "name": "Reserved",
+            "bits": 16,
+            "desc": "Reserved for future use."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "options",
+      "position": "after",
+      "caption": "THE BIER MPLS ENCAPSULATION SUB-TLV (RFC 8444, SECTION 2.2)",
+      "data": {
+        "title": "BIER MPLS Encapsulation Sub-TLV",
+        "bytes": 12,
+        "width": 32,
+        "fields": [
+          {
+            "key": "type",
+            "name": "Type",
+            "bits": 16,
+            "desc": "10, the BIER MPLS Encapsulation Sub-TLV type."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 16,
+            "desc": "8 octets."
           },
           {
             "key": "max-si",
             "name": "Max SI",
             "bits": 8,
-            "desc": "Maximum Set Identifier used for this sub-domain and BitString length."
+            "desc": "The maximum Set Identifier used in the encapsulation for this sub-domain and BitString length."
           },
           {
             "key": "label",
             "name": "Label",
             "bits": 24,
-            "desc": "Rightmost 20 bits are the first label of the range; the 4 leftmost bits are ignored."
+            "desc": "A 3-octet field whose 20 rightmost bits give the first label of the label range. The 4 leftmost bits are ignored."
           },
           {
             "key": "bs-len",
             "name": "BS Len",
             "bits": 4,
-            "desc": "Supported BitString length."
+            "desc": "The supported BitString length associated with this BFR-prefix."
           },
           {
             "key": "reserved",
             "name": "Reserved",
             "bits": 28,
-            "desc": "SHOULD be 0 on transmission, MUST be ignored on reception."
+            "desc": "Should be set to 0 on transmission and ignored on reception."
           }
         ]
       }
     },
     {
       "type": "sequence",
-      "anchor": "routing",
+      "anchor": "operation",
       "position": "after",
-      "caption": "BIER INFORMATION COPIED BETWEEN AREAS (RFC 8444, FIGURE 1)",
+      "caption": "PROPAGATING BIER INFORMATION BETWEEN AREAS (RFC 8444, SECTION 2.3)",
       "data": {
         "lanes": [
           {
             "key": "r1",
-            "label": "R1 (Area 1)"
+            "label": "R1 in Area 1"
           },
           {
             "key": "r2",
-            "label": "ABR R2 (Areas 1 and 0)"
+            "label": "R2, area border router"
           },
           {
             "key": "r3",
-            "label": "ABR R3 (Areas 0 and 2)"
+            "label": "R3, area border router"
           }
         ],
         "messages": [
           {
             "from": "r1",
             "to": "r2",
-            "label": "Extended Prefix Opaque LSA for 192.0.2.1/32 with BIER Sub-TLV",
+            "label": "Extended Prefix Opaque LSA with BIER Sub-TLV",
             "color": "blue",
-            "note": "Advertised in Area 1."
+            "note": "For prefix 192.0.2.1/32 in Area 1."
           },
           {
             "from": "r2",
             "to": "r3",
-            "label": "Same prefix, entire BIER Sub-TLV copied",
+            "label": "Copied BIER Sub-TLV into Area 0",
             "color": "green",
-            "note": "Generated by R2 in Area 0."
+            "note": "The whole sub-TLV, with all of its sub-TLVs, is copied."
           },
           {
             "from": "r3",
             "to": "r3",
-            "label": "Copies it again for Area 2",
+            "label": "Copied BIER Sub-TLV into Area 2",
             "color": "neutral",
-            "note": "R3 includes the entire BIER Sub-TLV in the LSA it generates in Area 2."
+            "note": "The same copy is made again at the next area border router."
           }
         ]
       }
@@ -275,48 +302,53 @@
   ],
   "references": [
     {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
       "number": "[RFC2328]",
       "text": "Moy, J., \"OSPF Version 2\", STD 54, RFC 2328, April 1998.",
       "rfc": 2328
     },
     {
       "number": "[RFC4915]",
-      "text": "Psenak, P., et al., \"Multi-Topology (MT) Routing in OSPF\", RFC 4915, June 2007.",
+      "text": "Psenak, P., Mirtorabi, S., Roy, A., Nguyen, L., and P. Pillay-Esnault, \"Multi-Topology (MT) Routing in OSPF\", RFC 4915, June 2007.",
       "rfc": 4915
     },
     {
       "number": "[RFC7474]",
-      "text": "Bhatia, M., et al., \"Security Extension for OSPFv2 When Using Manual Key Management\", RFC 7474, April 2015.",
+      "text": "Bhatia, M., Hartman, S., Zhang, D., and A. Lindem, Ed., \"Security Extension for OSPFv2 When Using Manual Key Management\", RFC 7474, April 2015.",
       "rfc": 7474
     },
     {
       "number": "[RFC7684]",
-      "text": "Psenak, P., et al., \"OSPFv2 Prefix/Link Attribute Advertisement\", RFC 7684, November 2015.",
+      "text": "Psenak, P., Gredler, H., Shakir, R., Henderickx, W., Tantsura, J., and A. Lindem, \"OSPFv2 Prefix/Link Attribute Advertisement\", RFC 7684, November 2015.",
       "rfc": 7684
     },
     {
       "number": "[RFC8279]",
-      "text": "Wijnands, IJ., Ed., et al., \"Multicast Using Bit Index Explicit Replication (BIER)\", RFC 8279, November 2017.",
+      "text": "Wijnands, IJ., Ed., Rosen, E., Ed., Dolganow, A., Przygienda, T., and S. Aldrin, \"Multicast Using Bit Index Explicit Replication (BIER)\", RFC 8279, November 2017.",
       "rfc": 8279
     },
     {
       "number": "[RFC8296]",
-      "text": "Wijnands, IJ., Ed., et al., \"Encapsulation for Bit Index Explicit Replication (BIER) in MPLS and Non-MPLS Networks\", RFC 8296, January 2018.",
+      "text": "Wijnands, IJ., Ed., Rosen, E., Ed., Dolganow, A., Tantsura, J., Aldrin, S., and I. Meilik, \"Encapsulation for Bit Index Explicit Replication (BIER) in MPLS and Non-MPLS Networks\", RFC 8296, January 2018.",
       "rfc": 8296
     },
     {
       "number": "[RFC8401]",
-      "text": "Ginsberg, L., Ed., et al., \"Bit Index Explicit Replication (BIER) Support via IS-IS\", RFC 8401, June 2018.",
+      "text": "Ginsberg, L., Ed., Przygienda, T., Aldrin, S., and Z. Zhang, \"Bit Index Explicit Replication (BIER) Support via IS-IS\", RFC 8401, June 2018.",
       "rfc": 8401
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

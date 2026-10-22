@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines terminology, a problem statement, and requirements for running IKE and IPsec on clusters of machines. It also describes gaps in standards and implementations that need filling so clusters from different vendors can interoperate with peers. It is informational.</p>",
   "plainLanguage": {
-    "summary": "<p>What if one secure connection is handled by a team of computers acting as one? This explains the problems and what is needed so teams from different makers work with others.</p>"
+    "summary": "<p>Two IPsec gateways that act as one need to agree on the keys, the counters and the traffic state they share. When one of them takes over, anything they disagree about causes dropped packets or rejected connections. This memo lists exactly what has to be agreed, so that the protocol can be changed to make it easier.</p>"
   },
   "questions": [
     "ipsec cluster problem statement",
@@ -18,72 +18,192 @@
     "Security",
     "Availability"
   ],
-  "subtitle": "Why clustering IPsec gateways is hard, and what needs fixing.",
+  "subtitle": "Why running IPsec on several gateways at once is hard, and the gaps that have to be closed first.",
   "tldr": {
-    "problem": "IPsec and IKE maintain large amounts of state (encryption keys, counters, policies) that changes frequently. Running them on a cluster of gateways requires synchronizing this state, which is impractical at scale.",
-    "mechanism": "This document identifies specific challenges: IKE message counters, IPsec packet counters, synchronization gaps, and issues with different cluster architectures (hot standby vs. load sharing). It outlines the trade-offs for each problem.",
-    "outcome": "Vendors and operators understand the gaps in standards and implementations, allowing future protocol extensions to enable interoperable IPsec clusters from different vendors.",
-    "outcomeLabel": "Problem basis for solutions"
+    "problem": "IPsec gateways are often clustered so that one can back up or share the load of another, but IKE and IPsec keep more state than other protocols, and that state is harder to share.",
+    "mechanism": "The memo defines the vocabulary for clusters, then lists the specific problems: long-lived security associations, message and packet counters that must not repeat, synchronization messages that can be lost, and security associations used at the same time by different members.",
+    "outcome": "It is a problem statement, not a specification. Its purpose is to let working groups write protocol mechanisms that would let clusters from different vendors interoperate with each other's peers.",
+    "outcomeLabel": "What it is for"
   },
   "facts": [
     {
-      "label": "IKE SA lifetime",
-      "value": "Minutes, hours, or days"
+      "label": "Cluster size",
+      "value": "Two or more gateways with the same security policy"
     },
     {
-      "label": "IPsec SA lifetime",
-      "value": "Minutes or hours"
+      "label": "Availability example",
+      "value": "3 nines means 99.9%"
     },
     {
-      "label": "Typical gateway capacity",
-      "value": "Thousands to hundreds of thousands of SAs"
+      "label": "Typical high availability target",
+      "value": "4 to 6 nines"
+    },
+    {
+      "label": "Suggested outbound counter sync interval",
+      "value": "Every 10,000 packets or every 0.5 seconds"
+    },
+    {
+      "label": "Counter advance after failover",
+      "value": "10,000 packets"
+    },
+    {
+      "label": "Counter values used in the example",
+      "value": "170,000 synced, 180,000 presumed, 165,000 too old"
     }
   ],
-  "today": "<p>RFC 6027 is an Informational RFC that identifies gaps in clustering IPsec. It has not been obsoleted and serves as the problem statement for future standardization efforts in clustering IKE and IPsec gateways.</p>",
+  "today": "<p>RFC 6027 is an Informational document from October 2010, and the unit metadata records no RFC that obsoletes it and none that updates it. It is a problem statement rather than a specification: it names the gaps that have to be filled so that clusters from different vendors can interoperate with each other's peers.</p>",
   "glossary": [
     "ipsec",
     "security-association",
-    "gateway"
+    "gateway",
+    "ike",
+    "ikev2",
+    "spi",
+    "esp",
+    "security-policy-database",
+    "replay-protection",
+    "cluster",
+    "failover"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Clustering Demand",
-      "content": "<p>As VPN deployments become more critical to organizations, there is demand for <strong>IPsec cluster</strong> solutions that provide both high availability (through redundancy) and scalability (through load sharing). IKE and IPsec, however, store more state and change it more frequently than protocols like DHCP or DNS, making them harder to cluster.</p><p>In general, deploying IKE and IPsec in a cluster requires synchronizing so much information among cluster members that it becomes impractical. Alternatively, if less information is synchronized, failover becomes slow and defeats the purpose of having a cluster.</p><p>This document defines terminology and describes the specific problems that arise. It targets members of the IETF community developing solutions for IPsec clusters that can interoperate across vendors.</p>",
-      "plainLanguage": "<p>One bank teller knows all the customers and their secrets. If three tellers act as one, they must all know the same secrets and remember which customers already came in, or trouble follows.</p>"
+      "title": "Why IKE and IPsec Are Hard to Cluster",
+      "content": "<p>IKEv2 (<a href='/rfc5996'>RFC 5996</a>) and IPsec (<a href='/rfc4301'>RFC 4301</a> and others) allow VPNs between different sites and from VPN clients to protected networks. As VPNs become more important to the organizations that deploy them, there is demand to make IPsec solutions more scalable and less prone to downtime, by using more than one physical gateway to either share the load or back each other up, forming a cluster. Similar demands have been made in the past for other critical pieces of an organization's infrastructure, such as DHCP and DNS servers, web servers and databases.</p><p>IKE and IPsec are less friendly to clustering than those other protocols, because they store more state, and that state is more volatile. Deploying IKE and IPsec in a cluster requires such a large amount of information to be synchronized among the members that it becomes impractical. Alternatively, if less information is synchronized, failover means a prolonged and intensive recovery phase, which negates the scalability and availability promises of using clusters.</p>",
+      "plainLanguage": "<p>Most server software can be run on two machines that keep copies of each other's data. IPsec gateways are harder, because what they hold is not just data but live cryptographic state: keys that expire, counters that must never repeat, and connections that have to keep working while the state moves between machines.</p>"
     },
     {
       "id": "terminology",
       "number": "2",
-      "title": "Types of Clusters",
-      "content": "<p>A <strong>cluster</strong> is a set of two or more IPsec gateways implementing the same security policy and protecting the same domain. They exist to provide high availability and scalability.</p><p><strong>Hot standby clusters</strong> (HS) have only one active member at a time; others are standbys. The <strong>Virtual Router Redundancy Protocol</strong> (VRRP) is one way to build these.</p><p><strong>Load sharing clusters</strong> (LS) have multiple active members simultaneously, distributing traffic among them. Load sharing is more efficient but more complex.</p><p>Clusters can be <strong>tight</strong> (all members share one IP address via VRRP or multicast) or <strong>loose</strong> (each member has a different IP address). In a tight cluster, peers need only know one address. In a loose cluster, peers use DNS or IKEv2 redirect mechanisms to find the right member.</p><p>A <strong>synch channel</strong> is the internal communication path among cluster members for sharing state. This channel may be IP-based or proprietary, but its use must be minimized for scalability.</p>",
-      "plainLanguage": "<p>Backup tellers (standby) wait to take over if the active one fails. Or multiple tellers work at once (load sharing). They might share a phone number (tight) or each have their own (loose).</p>"
+      "title": "The Vocabulary for Clusters",
+      "content": "<p>A <strong>Single Gateway</strong> is an implementation of IKE and IPsec enforcing a certain policy. A <strong>Cluster</strong> is a set of two or more gateways implementing the same security policy and protecting the same domain. Clusters exist to provide high availability through redundancy and scalability through load sharing. A <strong>Member</strong> is one gateway in a cluster.</p><p>Availability is a measure of a system's ability to perform the service it was designed for, expressed as the percentage of time the service is available from the time it is supposed to be available. It is colloquially expressed in nines rather than percentage, with 3 nines meaning 99.9% availability and 4 nines meaning 99.99%. High availability is a property of a system, not a configuration type: a system has high availability if its expected downtime is low. Clustering is one way to achieve it, and what high means depends on the application, but is usually 4 to 6 nines, at most 0.5 to 50 minutes of downtime per year in a system that is supposed to be available all the time. Fault tolerance is the related property where a system maintains service availability even when a specified set of fault conditions occur; in clusters, the system is expected to maintain service availability when one or more members fails.</p><p>A <strong>Completely Transparent Cluster</strong> is one where the occurrence of a fault is never visible to the peers, and a <strong>Partially Transparent Cluster</strong> is one where it may be visible. A <strong>Hot Standby Cluster</strong> is one where only one member is active at any one time; that member is the active member and the others are standbys. The Virtual Router Redundancy Protocol (<a href='/rfc5798'>RFC 5798</a>) is one method of building such a cluster. A <strong>Load Sharing Cluster</strong> is one where more than one member may be active at the same time. Load balancing is a common term for it, but that implies the load is actually balanced between members, which is not a requirement. <strong>Failover</strong> is the event where one member takes over some load from another: in a hot standby cluster, when a standby becomes active because of a failure of the former active member or because of an administrator command; in a load sharing cluster, usually because of a failure of one member, though certain load-balancing technologies may move a particular load, such as all the flows associated with a particular child security association, to even out the load even without any failures.</p><p>A <strong>Tight Cluster</strong> is one where all members share an IP address, achieved through configured interfaces with specialized protocols or hardware such as VRRP, or through multicast addresses; peers then need only be configured with one IP address in the Peer Authentication Database. A <strong>Loose Cluster</strong> is one where each member has a different IP address, and peers find the correct member using some method such as DNS queries or the IKEv2 redirect mechanism (<a href='/rfc5685'>RFC 5685</a>); in some cases a member's addresses may be allocated to another member at failover.</p><p>The <strong>Synch Channel</strong> is the communications channel among the cluster members used to transfer state information. It may or may not be IP based, may or may not be encrypted, and may work over short or long distances. Its security and physical characteristics are out of scope for the document, but minimizing its use is a requirement for scalability.</p>",
+      "plainLanguage": "<p>The memo fixes the words first, because the rest depends on them. A hot standby cluster runs one active gateway at a time, a load sharing cluster runs several. A tight cluster gives every member the same address, a loose cluster gives each member its own. The state moves between members over a channel the document calls the synch channel.</p>"
     },
     {
-      "id": "operation",
-      "number": "3",
-      "title": "State Synchronization Challenges",
-      "content": "<p>IKE and IPsec maintain long-lived state: IKE Security Associations last minutes to days and carry keys and information; IPsec SAs last minutes to hours. Some gateways carry hundreds of thousands of these.</p><p><strong>IKE message counters</strong> are critical: each peer must process IKE messages in order, skipping no message IDs. When a member fails over, it must know the last message IDs both sent and received, or the peer will reject its messages and the entire IKE SA will be dropped.</p><p><strong>IPsec packet counters</strong> (anti-replay) prevent duplicate packets. After failover, the newly active member must not reuse a counter number that has been used, or the peer drops the packet as a duplicate attack.</p><p><strong>Inbound counter synchronization</strong> is even tougher: if a packet arrives at a newly active member, there is no way to know if it is a replay without seeing the entire history. One solution is to disable anti-replay verification after failover (allowed by standards but a policy decision), or to rekey all child SAs after failover.</p><p><strong>Missing synch messages</strong> can doom an IKE SA: if the active member creates a new child SA using message N, the synch message might be lost before failover. The newly active member will not have the SA and its IKE message counter will be out of sync, causing peer rejection.</p>",
-      "plainLanguage": "<p>Each conversation with a customer must follow a script: message 1, message 2, message 3. If a teller falls and another takes over at message 4 but doesn't know the script reached message 3, the customer hangs up. Passwords also age: if a teller gives out password number 500 and falls, the new teller cannot use numbers 1-500 again.</p>"
+      "id": "state-machine",
+      "number": "3.2",
+      "title": "Long-Lived State and the Counters That Must Match",
+      "content": "<p>IKE and IPsec have a lot of long-lived state. IKE security associations last for minutes, hours or days and carry keys and other information; some gateways may carry thousands to hundreds of thousands of them. IPsec security associations last for minutes or hours and carry keys, selectors and other information; some gateways may carry hundreds of thousands of them. Security Policy Database (SPD) cache entries also count: while the SPD is unchanging, the SPD cache changes on the fly due to narrowing, and its entries last at least as long as the Security Association Database (SAD) entries and tend to last even longer.</p><p>A naive implementation of a cluster would have no synchronized state, and a failover would produce an effect similar to that of a rebooted gateway. <a href='/rfc5723'>RFC 5723</a> describes how new IKE and IPsec security associations can be recreated in such a case.</p><p>Synchronizing state whenever a security association is created would overcome the first problem, but those states are not only long lived, they are also ever changing. IKE has message counters, and a peer MUST NOT process message n until it has processed message n-1; skipping message IDs is not allowed. A newly active member therefore needs to know the last message IDs both received and transmitted. One possible solution is to synchronize information about the IKE message counters after every IKE exchange, so the newly active member knows what messages it is allowed to process and what message IDs to use on its own requests. This may be appropriate in some cases but may be too onerous in systems with a lot of security associations, and it has the drawback that it never recovers from the missing synch message problem described later.</p><p>The Encapsulating Security Payload (ESP) and Authentication Header (AH) have an optional anti-replay feature where every protected packet carries a counter number. Repeating counter numbers is considered an attack, so the newly active member MUST NOT use a counter number that has already been used; the peer will drop those packets as duplicates or warn of an attack. It is almost never feasible to synchronize the IPsec packet counters for every packet transmitted, so at least for IPsec the replay counter will not be up to date on the newly active member, and that member may repeat a counter. One possible solution is to synchronize replay counter information not for each packet emitted but only at regular intervals, say every 10,000 packets or every 0.5 seconds. After a failover the newly active member advances the counters for outbound IPsec security associations by 10,000 packets; to the peer this looks like up to 10,000 packets were lost, which should be acceptable because neither ESP nor AH guarantee reliable delivery.</p><p>Synchronizing packet counters for inbound IPsec security associations is tougher. If a packet arrives at a newly active member, there is no way to determine whether it is a replay. Periodic synchronization does not solve this. If the counters are synchronized every 10,000 packets and the last synchronization before the failover had the counter at 170,000, it is probable but not certain that packet number 180,000 has not been processed; if packet 175,000 arrives at the newly active member, it has no way of knowing whether that packet has already been processed. The synchronization does prevent the processing of really old packets, such as 165,000. Ignoring all counters below 180,000 would not work either, because that is up to 10,000 dropped packets, which may be very noticeable.</p><p>The easiest solution is to learn the replay counter from the incoming traffic. This is allowed by the standards, because replay counter verification is an optional feature. The case can even be made that it is relatively secure, because non-attack traffic resets the counters to what they should be, so an attacker faces the dual challenge of a very narrow window for attack and the need to time the attack to a failover event. Unless the attacker can cause the failover, this would be very difficult. It is a matter of policy whether this is acceptable. Another possible solution is to rekey all child security associations following a failover, which may or may not be feasible depending on the implementation and the configuration.</p>",
+      "plainLanguage": "<p>The hard part is the counters. Every IKE message carries a number that must go up by one, and every protected packet carries a number that must never be repeated. A gateway taking over has to know where the numbers had got to, so the memo suggests counting in blocks of 10,000 and accepting a gap.</p>"
     },
     {
-      "id": "architecture",
+      "id": "error-handling",
+      "number": "3.6",
+      "title": "Lost Synchronization Messages and Shared Use of Associations",
+      "content": "<p>The synch channel is very likely not to be infallible. Before failover is detected, some synchronization messages may have been missed. For example, the active member may have created a new child security association using message n. The new information, an entry in the SAD and an update to the counters of the IKE security association, is sent on the synch channel, and with every possible technology the update may be missed before the failover.</p><p>The newly active member then has two problems. It does not have the new IPsec security association pair, and will drop all incoming packets protected with it. That could be fixed by sending DELETEs and INVALID_SPI notifications, if it were not for the other problem. The counters for the IKE security association show that only request n-1 has been sent, so the next request will get message ID n, which the peer will reject; after a sufficient number of retransmissions and rejections, the whole IKE security association with all associated IPsec security associations will be dropped.</p><p>The scenario may be rare enough to be acceptable, with a few security associations out of thousands needing to be recreated from scratch or using session resumption techniques. Detecting it may take several minutes, however, and that negates the goal of creating the cluster in the first place.</p><p>For load sharing clusters, all active members may need to use the same security associations, both IKE and IPsec. This is an even greater problem than in a hot standby cluster, because consecutive packets may need to be sent by different members to the same peer gateway. The solution for the IKE side is up to the implementation: it is possible to create a locking mechanism over the synch channel, or to have one member own the IKE security association and manage the child associations for all other members. For IPsec, solutions fall into two broad categories.</p><p>The first is the sticky category, where all communications with a single peer, or all communications involving a certain SPD cache entry, go through a single member. All packets that match a particular security association go through the same member, so no synchronization of the replay counter is needed. Inbound processing is a sticky issue, because packets have to be processed by the correct member based on the peer and the Security Parameter Index (SPI), and most load balancers will not be able to match SPIs to the correct member unless stickiness extends to all traffic with a particular peer. Another disadvantage is that the load tends not to distribute evenly, especially if one security association covers a significant portion of IPsec traffic.</p><p>The second is the duplicate category, where the child security association is duplicated for each pair of IPsec security associations for each active member. Different packets for the same peer go through different members and get protected using different security associations with the same selectors and matching the same SPD cache entries. This has shortcomings: it requires multiple parallel security associations, for which the peer has no use, though Section 2.8 of <a href='/rfc5996'>RFC 5996</a> specifically allows this; different packets belonging to the same flow may be protected by different security associations, which may seem odd to the peer gateway, especially if it is integrated with deep-inspection middleware such as a firewall; and reply packets may arrive with an IPsec security association that is not matched to the one used for the outgoing packets, and might arrive at a different member, which is beyond the scope of this document and should be solved by the application.</p><p>For security associations involving counter mode ciphers such as Counter Mode (CTR) (<a href='/rfc3686'>RFC 3686</a>) or Galois/Counter Mode (GCM) (<a href='/rfc4106'>RFC 4106</a>) there is yet another complication. The initial vector for such modes MUST NOT be repeated, and senders use methods such as counters or linear feedback shift registers to ensure this. For an association shared between more than one active member, or failing over from one member to another, the cluster members need to make sure they do not generate the same initial vector.</p>",
+      "plainLanguage": "<p>The channel between the members can drop a message, and that leaves the takeover in a bad state: the new gateway has never heard of the security association the old one set up, and it is about to reuse a message number the peer will refuse. When several members work at once there are two ways round it: keep each peer's traffic on one member, or give each member its own copy.</p>"
+    },
+    {
+      "id": "design",
+      "number": "3.8",
+      "title": "Addresses and Identifier Allocation Across Members",
+      "content": "<p>In many implementations there are separate IP addresses for the cluster and for each member. While packets protected by tunnel mode child security associations are encapsulated in IP headers with the cluster IP address, the IKE packets originate from a specific member and carry that member's IP address. This may be done so that IPsec traffic bypasses the load balancer, for greater scalability. For the peer this looks weird, because the usual thing is for the IPsec packets to come from the same IP address as the IKE packets, and unmodified peers may drop such packets.</p><p>One obvious solution is to use some capability of the IKE host to change things so that IKE packets also come out of the cluster IP address, achieved through NAT or through assigning multiple addresses to interfaces. This is not, however, possible for all implementations, and it will not reduce the load on the balancer.</p><p>The SPI associated with each child security association, and with each IKE security association, MUST be unique relative to the peer of the association. In the context of a cluster, each member MUST therefore generate SPIs in a fashion that avoids collisions with other cluster members. The means by which members achieve this is a local matter, outside the scope of the document.</p>",
+      "plainLanguage": "<p>Two smaller problems sit alongside the counters. If the members send IKE packets from their own addresses while the protected traffic comes from the cluster address, some peers will drop the packets. And every security association needs an identifier that is unique from the peer's point of view, so two members must never pick the same one.</p>"
+    },
+    {
+      "id": "security-considerations",
       "number": "4",
-      "title": "Load Sharing and Sticky Sessions",
-      "content": "<p>In load sharing clusters, all active members may need to use the same SAs. This creates new problems.</p><p><strong>The sticky approach</strong> routes all traffic with a peer (or matching a specific policy entry) through the same cluster member. This avoids counter synchronization because the same member handles all packets for an SA. But sticky routing leads to uneven load distribution, especially when one SA carries significant traffic.</p><p><strong>The duplicate approach</strong> creates multiple parallel SAs with the same selectors for each active member. Different packets go through different members with different SAs. The downside: peers see redundant SAs that they do not need, and different packets in the same flow may be protected by different SAs, which might confuse firewalls or stateful inspectors.</p><p><strong>Counter modes</strong> (like CTR and GCM ciphers) require that the initial vector is never repeated. For shared SAs across members, cluster members must coordinate to avoid generating the same initial vector, adding another synchronization problem.</p>",
-      "plainLanguage": "<p>Either route all calls from a customer to one teller (sticky, uneven), or let any teller take the call with a copy of the secret (duplicate, but confusing to the customer). Some secrets use a timer: if two tellers start at the same time, they must coordinate so the timer counts differently.</p>"
-    },
-    {
-      "id": "section-1",
-      "number": "5",
-      "title": "IP Addresses and SPI Allocation",
-      "content": "<p><strong>Different IP addresses for IKE and IPsec</strong>: Many implementations use a cluster IP address for tunnel-mode IPsec traffic but individual member IP addresses for IKE packets. To the peer, this looks odd (usually both come from the same address) and may be dropped by unmodified peers. Solutions include NAT or assigning multiple addresses to interfaces, but neither is feasible for all implementations.</p><p><strong>SPI allocation</strong> (Security Parameter Index): each SA must have a unique SPI relative to the peer. In a cluster, each member must generate SPIs that avoid collisions with other members. The means of achieving this is a local matter, outside the scope of standards.</p>",
-      "plainLanguage": "<p>If IKE comes from teller A's phone and IPsec packets come from the team phone, the customer thinks something is wrong. Each teller's secret handshake code (SPI) must be unique or confusion follows.</p>"
+      "title": "Security Considerations",
+      "content": "<p>Implementations running on clusters MUST be as secure as implementations running on single gateways. No extension or interpretation used to allow operation in a cluster may facilitate attacks that are not possible for single gateways. Thought must also be given to the syncing requirements of any protocol extension, to make sure it does not create an opportunity for denial-of-service attacks on the cluster.</p><p>As mentioned earlier, allowing an inbound child security association to fail over to another member has the effect of disabling replay counter protection for a short time. The threat is arguably low, but whether this is acceptable is a policy decision. The situation where the two directions of a flow are protected by two security associations that are not a matched pair, or that are not even processed by the same cluster member, is not a security problem as far as IPsec is concerned, because IPsec has policy at the IP, protocol and port level only. Many IPsec implementations are, however, integrated with stateful firewalls, which need to see both sides of a flow, and such implementations may have to forward packets to other members for the firewall to inspect the traffic properly.</p>",
+      "plainLanguage": "<p>Clustering must not open a hole that a single gateway does not have. The one the memo admits to is brief: for a moment after a takeover, old packets might be accepted because the counter is unknown. The memo leaves that to the operator's judgement.</p>"
     }
   ],
-  "viz": [],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "terminology",
+      "position": "after",
+      "caption": "THE TWO WAYS TO ARRANGE THE MEMBERS OF A CLUSTER",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Hot standby cluster",
+          "Load sharing cluster"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Active members at a time",
+              "One, the active member",
+              "More than one"
+            ]
+          },
+          {
+            "cells": [
+              "Failover",
+              "A standby becomes active after a failure of the active member or an administrator command",
+              "Usually caused by a failure of one member"
+            ]
+          },
+          {
+            "cells": [
+              "Address arrangement",
+              "Members may share one IP address, as in a tight cluster",
+              "Each member has its own IP address, as in a loose cluster"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "error-handling",
+      "position": "after",
+      "caption": "THE WAYS TO HANDLE SHARED SECURITY ASSOCIATIONS AND LOST SYNCHRONIZATION",
+      "data": {
+        "items": [
+          {
+            "title": "Sticky",
+            "text": "All traffic for a peer or an SPD cache entry goes through one member, so no replay counter needs syncing."
+          },
+          {
+            "title": "Duplicate",
+            "text": "Each active member keeps its own child security association, so packets of one flow use different associations."
+          },
+          {
+            "title": "Rekey after failover",
+            "text": "Rebuild every child security association after a takeover, which avoids the inbound counter problem."
+          },
+          {
+            "title": "Learn the counter from traffic",
+            "text": "Derive the inbound replay counter from arriving packets, which the standards allow because that check is optional."
+          }
+        ]
+      }
+    },
+    {
+      "type": "opcodes",
+      "anchor": "state-machine",
+      "position": "after",
+      "caption": "THE COUNTERS THAT HAVE TO MATCH ACROSS MEMBERS",
+      "data": {
+        "items": [
+          {
+            "code": "IKE message ID",
+            "label": "Must go up by one",
+            "desc": "A peer must not process message n before message n-1, so a new active member needs the last IDs sent and received."
+          },
+          {
+            "code": "Outbound ESP/AH counter",
+            "label": "Must not be reused",
+            "desc": "Repeating a counter number looks like an attack, so the peer drops the packet or warns."
+          },
+          {
+            "code": "Inbound ESP/AH counter",
+            "label": "Cannot be recovered exactly",
+            "desc": "A packet arriving after failover cannot be classified as old or new without more information."
+          }
+        ]
+      }
+    }
+  ],
   "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
     {
       "number": "[RFC4301]",
       "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
@@ -91,13 +211,23 @@
     },
     {
       "number": "[RFC5996]",
-      "text": "Kaufman, C., Hoffman, P., Nir, Y., and P. Eronen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", RFC 5996, September 2010.",
+      "text": "Kaufman, C., Hoffman, P., Nir, Y., and P. Eronen, \"Internet Key Exchange Protocol Version 2 (IKEv2)\", September 2010.",
       "rfc": 5996
     },
     {
-      "number": "[RFC2119]",
-      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
-      "rfc": 2119
+      "number": "[RFC3686]",
+      "text": "Housley, R., \"Using Advanced Encryption Standard (AES) Counter Mode\", RFC 3686, January 2009.",
+      "rfc": 3686
+    },
+    {
+      "number": "[RFC4106]",
+      "text": "Viega, J. and D. McGrew, \"The Use of Galois/Counter Mode (GCM) in IPsec Encapsulating Security Payload (ESP)\", RFC 4106, June 2005.",
+      "rfc": 4106
+    },
+    {
+      "number": "[RFC5685]",
+      "text": "Devarapalli, V. and K. Weniger, \"Redirect Mechanism for IKEv2\", RFC 5685, November 2009.",
+      "rfc": 5685
     },
     {
       "number": "[RFC5723]",
@@ -108,20 +238,15 @@
       "number": "[RFC5798]",
       "text": "Nadas, S., \"Virtual Router Redundancy Protocol (VRRP)\", RFC 5798, March 2010.",
       "rfc": 5798
-    },
-    {
-      "number": "[RFC5685]",
-      "text": "Devarapalli, V. and K. Weniger, \"Redirect Mechanism for IKEv2\", RFC 5685, November 2009.",
-      "rfc": 5685
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }

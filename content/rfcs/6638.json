@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This RFC extends CalDAV calendar access with a standard way to do scheduling operations on iCalendar-based events and tasks, such as invitations and replies. It defines the calendar-auto-schedule feature.</p>",
   "plainLanguage": {
-    "summary": "<p>It lets calendars send and answer meeting invitations by themselves, so you do not have to email a note to each friend.</p>"
+    "summary": "<p>When you add an event to a shared calendar, other people should be told about it and be able to accept or decline. This document defines how a CalDAV server does that on its own, without each client inventing its own method.</p>"
   },
   "questions": [
     "how does caldav scheduling work",
@@ -16,174 +16,220 @@
     "how does caldav request free busy time"
   ],
   "tags": [
-    "Calendaring",
+    "CalDAV",
     "Scheduling",
-    "CalDAV"
+    "iCalendar"
   ],
-  "subtitle": "How a CalDAV server sends meeting invitations and replies for you when a client saves an event.",
+  "subtitle": "Lets a calendar server send invitations and collect replies for the events its users create.",
   "tldr": {
-    "problem": "CalDAV let clients store and read calendar data on a server, but it had no standard way to invite people to events, collect their replies or look up when they are busy.",
-    "mechanism": "The server watches calendar changes. When a client creates, changes or deletes an event that has an ORGANIZER and ATTENDEEs, the server itself sends iTIP scheduling messages to their Inbox collections and updates their copies. Busy time is requested with a POST to an Outbox collection.",
-    "outcome": "This defines the calendar-auto-schedule feature. The RFC says most CalDAV implementations already supported it and expects all new ones to support it by default. It is a Proposed Standard, and RFC 7953 updates it.",
+    "problem": "CalDAV servers can store calendars, but without a standard way to schedule, every client had to invent its own way of sending invitations, replies and cancellations.",
+    "mechanism": "The document adds scheduling to CalDAV: a server watches for calendar data that names attendees, sends the matching iTIP messages itself, records what happened in new iCalendar parameters and HTTP headers, and answers busy time requests.",
+    "outcome": "It is a Proposed Standard from June 2012, updated by RFC 7953, and it is the scheduling feature that CalDAV servers are expected to support.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Feature name",
+      "label": "Discovery token in the DAV header",
       "value": "calendar-auto-schedule"
     },
     {
-      "label": "Default SCHEDULE-AGENT",
+      "label": "XML namespace",
+      "value": "urn:ietf:params:xml:ns:caldav"
+    },
+    {
+      "label": "SCHEDULE-AGENT default",
       "value": "SERVER"
     },
     {
-      "label": "New status codes",
-      "value": "1.0, 1.1, 1.2"
+      "label": "Delivery status codes",
+      "value": "1.0 pending, 1.1 sent, 1.2 delivered"
     },
     {
-      "label": "Conflict error",
-      "value": "412 Precondition Failed"
+      "label": "New HTTP headers",
+      "value": "Schedule-Reply, Schedule-Tag, If-Schedule-Tag-Match"
     },
     {
-      "label": "Updates",
-      "value": "RFC 4791, RFC 5546"
+      "label": "Busy time request method",
+      "value": "POST with a VFREEBUSY component"
     }
   ],
-  "today": "<p>RFC 6638 is a Proposed Standard and is updated by <a href='/rfc7953'>RFC 7953</a>. It updates <a href='/rfc4791'>RFC 4791</a> and <a href='/rfc5546'>RFC 5546</a>, and has not been obsoleted.</p>",
+  "today": "<p>RFC 6638 is a Proposed Standard published in June 2012. It is updated by <a href='/rfc7953'>RFC 7953</a> and has not been obsoleted, so it remains the definition of CalDAV scheduling.</p>",
   "glossary": [
     "icalendar",
     "etag",
     "http-method",
-    "uri"
+    "uri",
+    "caldav",
+    "itip",
+    "free-busy",
+    "webdav",
+    "principal",
+    "tls"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Implicit Scheduling for CalDAV",
-      "content": "<p>This RFC extends the CalDAV <code>calendar-access</code> feature so calendar users can schedule iCalendar events and to-dos with each other. It reuses the scheduling methods of iTIP (the iCalendar Transport-independent Interoperability Protocol): schedule, reschedule, respond and cancel, plus searching for busy time.</p><p>The design is a client/server protocol in which the <strong>server</strong> sends and processes the scheduling messages. A client only creates, modifies or deletes a calendar component, and that is enough to make the server deliver the right messages. The RFC calls this <strong>implicit scheduling</strong>.</p><p>Some iTIP features are out of scope: publishing, countering, delegating, refreshing, forwarding, and replacing the Organizer. The RFC covers scheduling only between users on a single system, though it says that servers can still exchange messages with external users, for example by iMIP (<a href='/rfc6047'>RFC 6047</a>).</p>",
-      "plainLanguage": "<p>You just save the event in your calendar. The calendar server does the mailing of invitations and collects the answers, so you never send anything by hand.</p>"
+      "title": "What CalDAV Scheduling Adds",
+      "content": "<p>The document specifies extensions to the CalDAV \"calendar-access\" feature (<a href='/rfc4791'>RFC 4791</a>) that enable scheduling of iCalendar-based calendar components between calendar users. It leans on the scheduling methods defined in the iCalendar Transport-independent Interoperability Protocol (iTIP, <a href='/rfc5546'>RFC 5546</a>) so that users can schedule, reschedule, respond to a request, cancel a component, and search for busy time information. Some iTIP features are not covered: publishing, countering, delegating, refreshing and forwarding calendar components, and replacing the organizer of a component. Future extensions are expected to address those.</p><p>The model is client and server. The server is responsible for sending scheduling messages and processing incoming ones. The client only has to create, modify or delete a calendar component, and the server then delivers whatever messages are needed to the other calendar users. This is sometimes called implicit scheduling.</p><p>Only scheduling between users on a single system is addressed, so scheduling between two different CalDAV servers is not defined. The specification is, however, compatible with servers that send or receive scheduling messages with external users, for example using the iCalendar Message-Based Interoperability Protocol (iMIP, <a href='/rfc6047'>RFC 6047</a>).</p><p>Three parts of the document carry the weight: Section 3 defines the automated scheduling operations that let a client store iCalendar data and have the server act on it, Section 4 defines how the server processes the resulting scheduling messages, and Section 5 defines how freebusy requests get an immediate response. Section 6 defines the access control privileges for these operations. The discussion is mostly about scheduling events, but scheduling of to-dos is supported in the same way.</p>",
+      "plainLanguage": "<p>The client saves the event and forgets about invitations. The server notices that the event names other people and sends the invitations itself.</p>"
     },
     {
       "id": "architecture",
       "number": "2",
-      "title": "Inboxes, Outboxes and Principal Properties",
-      "content": "<p>A server that supports scheduling MUST support CalDAV <code>calendar-access</code> and advertises <code>calendar-auto-schedule</code> in the <code>DAV</code> response header of an OPTIONS request. The server creates the new collections; clients cannot create or delete them.</p><p>A <strong>scheduling Outbox</strong> collection is the target for busy time requests and carries the privileges that control outgoing scheduling. A <strong>scheduling Inbox</strong> collection holds copies of incoming scheduling messages, either requests from an Organizer or replies from an Attendee. Inbox messages may share the same <code>UID</code>, because several messages can concern one event. Neither collection may sit inside a calendar collection.</p><p>Clients find them through principal properties <code>CALDAV:schedule-outbox-URL</code> and <code>CALDAV:schedule-inbox-URL</code>. If either is missing, the user is not enabled for sending or receiving. The REQUIRED property <code>CALDAV:calendar-user-address-set</code> maps calendar addresses such as mailto URLs to principals. The optional <code>CALDAV:calendar-user-type</code> lets a client search only for people or only for rooms.</p>",
-      "plainLanguage": "<p>Each person gets a mail slot for incoming notes (the Inbox) and an outgoing tray (the Outbox). The server hands you the address of each.</p>"
+      "title": "The Inbox, the Outbox and the User's Addresses",
+      "content": "<p>A server supporting these features is REQUIRED to support the CalDAV calendar-access feature, and includes \"calendar-auto-schedule\" as a field in the DAV response header of an OPTIONS request on any resource that supports scheduling operations, properties, privileges or methods. The specification introduces new collection resource types and new scheduling privileges. It is the server's job to create these collections; clients have no way to create or delete them.</p><p>The <strong>scheduling Outbox</strong> collection is where busy time requests are aimed and where the privileges for outgoing scheduling requests are managed. It MUST report the DAV:collection and CALDAV:schedule-outbox elements in its resource type, and it MUST NOT be a child at any depth of a calendar collection. The <strong>scheduling Inbox</strong> collection holds copies of incoming scheduling messages, either requests from an organizer or replies from an attendee, and it too is where the privileges for those are managed. It MUST report the DAV:collection and CALDAV:schedule-inbox elements, MUST NOT contain any collection resources, and MUST NOT be a child of a calendar collection.</p><p>Two properties on principal resources point to these collections. CALDAV:schedule-outbox-URL gives the URL of the scheduling Outbox owned by that principal; if it is absent, the calendar user is not enabled for sending scheduling messages. CALDAV:schedule-inbox-URL does the same for the Inbox and for receiving messages. A third property, CALDAV:calendar-user-address-set, lists the calendar addresses of the principal and is needed to map the addresses used in iCalendar data to principals and their collections; support for it is REQUIRED, and if it is absent the calendar user is not enabled for scheduling at all. A fourth, CALDAV:calendar-user-type, carries the same values as the iCalendar CUTYPE parameter, so a client searching for attendees can restrict the search to people or to rooms.</p>",
+      "plainLanguage": "<p>Each user has two special folders on the server: an outbox where outgoing requests are aimed, and an inbox where incoming requests arrive. The server also records the email addresses that count as belonging to each user.</p>"
+    },
+    {
+      "id": "data-model",
+      "number": "3.1",
+      "title": "Organizer Events and Attendee Events",
+      "content": "<p>When a calendar object resource is created, modified or removed, the server examines the calendar data to see whether it represents a scheduling object resource. If it does, the server automatically attempts to deliver a scheduling message to the appropriate calendar users. The operations are equivalent to the iTIP REQUEST, REPLY, CANCEL and ADD methods.</p><p>A calendar object resource is a valid <strong>organizer scheduling object resource</strong> when the ORGANIZER property is present and set in all of its calendar components to a value that matches one of the calendar user addresses of the owner of the calendar collection. It is a valid <strong>attendee scheduling object resource</strong> when the ORGANIZER property is present and set in all components to the same value, that value does not match an address of the owner, and at least one ATTENDEE property value matches an address of the owner. Attendee scheduling object resources are usually created by the server, in a suitable calendar collection.</p><p>The server's behaviour then depends on who owns the resource. An organizer may create, modify or remove a resource, subject to access privileges, preconditions and the restrictions CalDAV places on calendar objects. When the organizer is also an attendee of the same component, the server MUST NOT send a scheduling message to that attendee. The server SHOULD reject any attempt to set the participation status of another user's ATTENDEE property to a value other than NEEDS-ACTION unless the SCHEDULE-AGENT parameter is present and set to SERVER.</p>",
+      "plainLanguage": "<p>Whether the server sends invitations depends on who owns the event and who is named in it. An event you own triggers invitations; an event you were invited to triggers a reply.</p>"
     },
     {
       "id": "operation",
-      "number": "3",
-      "title": "Scheduling Operations",
-      "content": "<p>When a calendar object resource is created, modified or removed, the server checks whether it is a <strong>scheduling object resource</strong>. An <em>organizer</em> resource has an <code>ORGANIZER</code> property in every component that matches one of the calendar owner's addresses. An <em>attendee</em> resource has the same <code>ORGANIZER</code> throughout, not matching the owner, plus an <code>ATTENDEE</code> that does.</p><p>The server picks the iTIP method for each attendee. When an Organizer creates an event, an attendee with <code>SCHEDULE-AGENT</code> of <code>SERVER</code> (the default) gets a <code>REQUEST</code>; <code>CLIENT</code> and <code>NONE</code> get nothing. Removing the event sends <code>CANCEL</code>. When modifying, removing an attendee sends <code>CANCEL</code>, and adding one sends <code>REQUEST</code> or <code>ADD</code>. HTTP methods map onto this: a PUT that creates a scheduling resource is a Create, PUT over one is a Modify, and DELETE is a Remove.</p><p>Attendees may change only a limited set of data, such as their own <code>PARTSTAT</code>, <code>TRANSP</code>, <code>VALARM</code> components and overridden instances. When an Attendee changes <code>PARTSTAT</code>, or adds an <code>EXDATE</code> to drop one recurrence instance, the server MUST send an iTIP <code>REPLY</code> to the Organizer. The server also resets every other attendee's <code>PARTSTAT</code> to <code>NEEDS-ACTION</code> when the Organizer reschedules.</p><p>For recurring events, attendees only learn about instances that include them. A client can use <code>SCHEDULE-FORCE-SEND</code> to make the server send a message it otherwise would not, for example to ask an attendee who declined to reconsider.</p>",
-      "plainLanguage": "<p>When you add or change a guest on your event, the server notices and sends them a note. If a guest says yes or no, the server tells you.</p>"
+      "number": "3.2",
+      "title": "What the Server Does When an Event Changes",
+      "content": "<p>On create, the server inspects each ATTENDEE property to decide whether to send a scheduling message, taking the SCHEDULE-AGENT parameter into account. With the default value SERVER the server sends an iTIP REQUEST; with CLIENT or NONE it sends nothing. The server MUST add a SCHEDULE-STATUS parameter to each ATTENDEE property it creates a message for and set its value as described below. That means the stored resource differs from what the client sent, so clients MAY reload the calendar data to pick up the server-generated state. The server MUST NOT set SCHEDULE-STATUS on an attendee for which it did not attempt delivery. If the organizer attempts a forbidden change, the server MUST return an error with the CALDAV:allowed-organizer-scheduling-object-change precondition code.</p><p>On modify, the server compares the original and the modified iCalendar data per instance to decide what to send. If an attendee is removed, the server sends CANCEL. If an attendee is added, it sends REQUEST or ADD. If an attendee stays and the event changed, it sends REQUEST. The comparison is per attendee and per SCHEDULE-AGENT value, and the server again updates the SCHEDULE-STATUS parameters. On remove, the server inspects each ATTENDEE property and sends the matching message, normally CANCEL.</p><p>When the server receives a scheduling message it processes it according to whether it came from an organizer or an attendee: requests, additions and cancellations lead to the event being placed in the recipient's default calendar collection, and replies update the participation status recorded in the organizer's copy. A default calendar is needed when a recipient has none, and the CALDAV:default-calendar-needed and CALDAV:valid-schedule-default-calendar-URL preconditions report that case.</p><p>Busy time is handled separately. The requester sends a POST to its own scheduling Outbox collection with a VFREEBUSY calendar component whose METHOD property is set to REQUEST, and the ORGANIZER value must match one of the calendar user's addresses. The response is an XML document with a CALDAV:schedule-response root element holding one CALDAV:response element per calendar user, each naming the user, giving a scheduling status and error codes, and, for a successful request, the busy time information itself as a VFREEBUSY component.</p>",
+      "plainLanguage": "<p>Adding someone to an event sends them an invitation. Changing the event sends an update. Removing them or the event sends a cancellation. Separately, you can ask the server when people are busy.</p>"
     },
     {
-      "id": "message-format",
-      "number": "4",
-      "title": "iCalendar Parameters, Headers and Status Codes",
-      "content": "<p>The RFC adds three iCalendar property parameters. <code>SCHEDULE-AGENT</code> says who delivers messages: <code>SERVER</code> (the default), <code>CLIENT</code> or <code>NONE</code>. <code>SCHEDULE-FORCE-SEND</code> takes <code>REQUEST</code> or <code>REPLY</code>. <code>SCHEDULE-STATUS</code> records the result of the most recent scheduling message. Servers and clients MUST NOT put these parameters into scheduling messages they send.</p><p>Delivery results use new <code>REQUEST-STATUS</code> codes: <code>1.0</code> pending, <code>1.1</code> sent without knowing about delivery (as with email-based iMIP), and <code>1.2</code> delivered. The RFC also lists failure codes: <code>3.7</code> unknown calendar user, <code>3.8</code> insufficient privileges, <code>5.1</code> temporary failure, <code>5.2</code> no way to deliver, and <code>5.3</code> scheduling with that recipient not allowed.</p><p>Three HTTP headers are added. <code>Schedule-Reply</code> (<code>T</code> or <code>F</code>) lets an Attendee delete an event without the server sending a <code>DECLINED</code> reply. <code>Schedule-Tag</code> and <code>If-Schedule-Tag-Match</code> prevent edit conflicts: the <code>CALDAV:schedule-tag</code> changes only on a consequential change, not when another attendee merely replies. If the tags do not match, the server MUST fail with <code>412 Precondition Failed</code>.</p>",
-      "plainLanguage": "<p>Little labels on each guest say who should send the note, and what happened to the last note. Other labels stop two people from overwriting each other's edits.</p>"
+      "id": "status",
+      "number": "3.2.9",
+      "title": "Delivery and Reply Status Codes",
+      "content": "<p>Two kinds of status come back when scheduling with an attendee. The first is a delivery status, which says whether the message from the organizer to the attendee was delivered. The second is a reply status, which corresponds to the attendee's own REQUEST-STATUS information in the reply sent back to the organizer. When an attendee replies to the organizer there is delivery status for that message, but no REQUEST-STATUS comes back, so there is no equivalent reply status.</p><p>The delivery status travels in the SCHEDULE-STATUS parameter. Code 1.0 means the message is pending, because the server is still trying to send it, and the value is expected to change once sending and delivery have been attempted. Code 1.1 means the message was sent successfully but the server has no explicit information about whether it was delivered, which can happen with store-and-forward protocols such as iMIP. Code 1.2 means the message was delivered. Code 3.7 means it was not delivered because the server did not recognise the calendar user address as a valid calendar user. Code 3.8 means it was not delivered because of insufficient privileges. Code 5.1 means the server could not complete delivery, likely a temporary failure, so the originator may try again later. Code 5.2 means the server found no way to deliver it, likely a permanent failure, so the originator ought to check or correct the address. Code 5.3 means delivery was rejected because scheduling with that recipient is not allowed.</p><p>The reply status can be any of the valid iTIP REQUEST-STATUS values. The 1.xx codes are new, and this specification restricts them: for a 1.xx code, all components MUST have exactly the same code. Status 1.0 is Pending, 1.1 is Sent and 1.2 is Delivered.</p>",
+      "plainLanguage": "<p>The server records what happened to each invitation: still trying, sent but delivery unknown, delivered, or failed with a reason. The codes say whether trying again would be worth it.</p>"
     },
     {
-      "id": "procedures",
-      "number": "5",
-      "title": "Incoming Messages and Busy Time",
-      "content": "<p>The server MUST process incoming scheduling messages by the rules of <a href='/rfc5546'>RFC 5546</a>, creating or updating scheduling object resources in the recipient's calendars, and it stores the message in the recipient's Inbox as a signal to the client. For an Organizer's request, the server updates the attendee's matching resource or creates a new one in a calendar collection of theirs. A server MAY support a default calendar through <code>CALDAV:schedule-default-calendar-URL</code> on the Inbox, and MUST reject deleting it.</p><p>For an Attendee's reply, the server updates <code>PARTSTAT</code> in the Organizer's copy, sets <code>SCHEDULE-STATUS</code> from the reply's <code>REQUEST-STATUS</code> (or <code>2.0</code> if absent), and SHOULD tell the other attendees.</p><p>For busy time, a client sends a POST to the user's own Outbox with a <code>VFREEBUSY</code> component and <code>METHOD</code> <code>REQUEST</code>. The reply is an XML <code>CALDAV:schedule-response</code> with one <code>CALDAV:response</code> per user, including the busy time as a <code>VFREEBUSY</code> when successful. The property <code>CALDAV:schedule-calendar-transp</code> decides whether a calendar counts toward busy time (<code>opaque</code> is the default).</p>",
-      "plainLanguage": "<p>When a note arrives, the server files it in your calendar for you. To check if friends are free, you ask the server and it answers with their busy times.</p>"
+      "id": "parameters",
+      "number": "7",
+      "title": "The iCalendar Parameters That Drive Scheduling",
+      "content": "<p>Three iCalendar property parameters are added. <strong>SCHEDULE-AGENT</strong> says who is expected to deliver scheduling messages to that organizer or attendee. Its value is SERVER, CLIENT, NONE, or an experimental or registered token, and when the parameter is absent the value SERVER MUST be used. With SERVER the server sends the message, with CLIENT the client handles it, and with NONE no message is sent at all. Servers and clients MUST NOT include the parameter in scheduling messages they send, and unrecognised x-name and iana-token values must be treated as if they were NONE.</p><p><strong>SCHEDULE-FORCE-SEND</strong> forces a message to be sent where the server would otherwise send none, for example when the event did not change in a way that warrants a new message. An organizer may set it to REQUEST on an attendee, and an attendee may set it to REPLY on the organizer. Its value must be a registered iCalendar METHOD value. Servers MUST NOT preserve it in the stored resource nor include it in scheduling messages, and clients MUST NOT include it in messages they send themselves. A server that sees an unrecognised value sets SCHEDULE-STATUS to 2.3, meaning success with an invalid property parameter ignored.</p><p><strong>SCHEDULE-STATUS</strong> carries the status codes returned from processing the most recent scheduling message sent to that attendee or received from that organizer. Servers MUST only add or change it on attendee properties for users who were actually sent a message, and MUST add it to organizer properties for users who actually sent a reply. Clients SHOULD NOT change or remove a value the server supplied, unless the client is handling scheduling itself, in which case it may set the value to record the last message it received.</p>",
+      "plainLanguage": "<p>Three extra labels on the event data control the flow. One says who sends the invitation, one says send it even though nothing changed, and one records what happened when it was sent.</p>"
+    },
+    {
+      "id": "interoperability",
+      "number": "8",
+      "title": "New HTTP Headers and Avoiding Conflicts",
+      "content": "<p>Three HTTP headers are added. <strong>Schedule-Reply</strong> is a request header with the value \"T\" or \"F\". When an attendee removes a scheduling object resource and the header is \"T\" or absent, the server MUST send a reply message with the attendee's participation status set to DECLINED. When it is \"F\", the server MUST NOT send a scheduling message. That lets a client silently remove an unwanted scheduling message, for security or privacy reasons. The <strong>Schedule-Tag</strong> response header carries the current value of the CALDAV:schedule-tag property, and all scheduling object resources MUST support it. The <strong>If-Schedule-Tag-Match</strong> request header makes a method conditional on that value, so a client can avoid overwriting changes; all scheduling object resources MUST support it too.</p><p>These headers exist because scheduling object resources change often: attendees change their participation status, which updates the organizer's copy and refreshes the other attendees' copies. That produces changes which do not affect the client's own participation status, and the client would otherwise have to reload the data and reconcile it. Instead the server can merge a client's changes with the ones it made itself. When the If-Schedule-Tag-Match header is present, servers MUST automatically resolve conflicts caused by inconsequential changes; the header applies only to the request URI.</p>",
+      "plainLanguage": "<p>Because other people's replies keep changing your copy of an event, the server hands out a version number for it. Send that number back and the server merges your change with the one it made, instead of making you sort it out.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "6",
-      "title": "Privileges and Security",
-      "content": "<p>Scheduling privileges follow WebDAV access control. On an Inbox, <code>CALDAV:schedule-deliver</code> contains <code>schedule-deliver-invite</code>, <code>schedule-deliver-reply</code> and <code>schedule-query-freebusy</code>. On an Outbox, <code>CALDAV:schedule-send</code> contains <code>schedule-send-invite</code>, <code>schedule-send-reply</code> and <code>schedule-send-freebusy</code>. These let a user choose who may schedule with them and who may act on their behalf, such as an assistant.</p><p>Servers and clients MUST use HTTP over TLS for all scheduling operations, clients MUST verify the server by <a href='/rfc6125'>RFC 6125</a>, and servers MUST use HTTP authentication. Servers MUST check that the <code>ORGANIZER</code> matches the calendar owner (to prevent impersonation) and that a new <code>UID</code> does not clash with an existing resource that has a different organizer (to prevent spoofing). Servers MUST limit the cost of large operations and MUST NOT leak one user's private data to another through scheduling messages or errors.</p>",
-      "plainLanguage": "<p>Locks decide who may put notes in your Inbox or send notes in your name. Everything travels in a sealed envelope (TLS) so nobody can read or fake it.</p>"
+      "number": "11",
+      "title": "Security, Privacy and iTIP Threats",
+      "content": "<p>Scheduling means sending and receiving messages, so the usual messaging security problems apply, in particular verifying the authenticity of the scheduling messages. Servers and clients MUST use an HTTP connection protected with TLS for all scheduling operations. Clients MUST verify the authenticity of the server, and servers MUST use HTTP authentication to verify the authenticity of the calendar user the client is acting for.</p><p>Servers MUST ensure that clients cannot consume excessive server resources with large scheduling operations, and SHOULD enforce the maximum resource size, maximum instances and maximum attendees per instance preconditions on the Inbox and Outbox collections.</p><p>When handling a scheduling operation, servers MUST check five things: that the owner of the calendar collection has a scheduling Outbox; that the authenticated user holds the schedule-send privilege on that Outbox; that messages are only delivered where the recipient's Inbox grants the schedule-deliver privilege; that the ORGANIZER property matches one of the owner's calendar user addresses, to prevent impersonation; and that the UID of a new resource does not match an existing resource with a different ORGANIZER, to prevent spoofing. Busy time requests are checked in a similar way.</p><p>On privacy, the specification only defines scheduling between users on the same server, and unauthenticated users have no way to carry out scheduling operations at all. Access control privileges decide which users may schedule with which others, and a user who does not want to expose calendar information can deny privileges, for all scheduling operations or for freebusy alone. The Schedule-Reply header with the value \"F\" lets an attendee delete a scheduling message without telling the organizer. Servers MUST NOT expose private iCalendar data or WebDAV resource state information about one calendar user to another through scheduling messages or error responses, and authorization errors MUST take preference over other errors. Of the iTIP threats, spoofing the organizer, spoofing the attendee, unauthorized replacement of the organizer, eavesdropping, data integrity and flooding are all addressed; unauthorized REFRESH requests are not, because this specification does not support the REFRESH method.</p>",
+      "plainLanguage": "<p>Invitations travel over an encrypted connection, the server checks who is allowed to send and receive them, and nobody's private calendar details leak into an error message or a reply.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "operation",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "ORGANIZER INVITES AN ATTENDEE (SIMPLIFIED, ILLUSTRATIVE)",
+      "caption": "ILLUSTRATIVE: IMPLICIT SCHEDULING BETWEEN TWO USERS ON ONE SERVER",
       "data": {
         "lanes": [
           {
-            "key": "organizer",
-            "label": "Organizer client"
+            "key": "client",
+            "label": "Organizer's client"
           },
           {
-            "key": "server",
-            "label": "CalDAV server"
+            "key": "organizer",
+            "label": "Organizer's calendar"
           },
           {
             "key": "attendee",
-            "label": "Attendee Inbox"
+            "label": "Attendee's calendar"
           }
         ],
         "messages": [
           {
-            "from": "organizer",
-            "to": "server",
-            "label": "PUT event with ATTENDEE",
+            "from": "client",
+            "to": "organizer",
+            "label": "PUT EVENT WITH ATTENDEE",
             "color": "blue",
-            "note": "Create operation on a scheduling object resource."
+            "note": "The client does nothing else."
           },
           {
-            "from": "server",
+            "from": "organizer",
             "to": "attendee",
-            "label": "iTIP REQUEST",
-            "color": "green",
-            "note": "Sent for SCHEDULE-AGENT of SERVER, the default."
+            "label": "REQUEST (iTIP)",
+            "color": "blue",
+            "note": "The server sends the invitation."
           },
           {
             "from": "attendee",
-            "to": "server",
-            "label": "PARTSTAT change",
-            "color": "blue",
-            "note": "The attendee updates their copy."
+            "to": "organizer",
+            "label": "REPLY (iTIP)",
+            "color": "green",
+            "note": "The attendee accepts or declines."
           },
           {
-            "from": "server",
-            "to": "organizer",
-            "label": "iTIP REPLY",
+            "from": "organizer",
+            "to": "client",
+            "label": "EVENT WITH SCHEDULE-STATUS",
             "color": "green",
-            "note": "Delivered to the Organizer's Inbox."
+            "note": "The client reloads to see the new status."
           }
         ]
       }
     },
     {
-      "type": "compare-table",
-      "anchor": "operation",
+      "type": "tree",
+      "anchor": "architecture",
       "position": "after",
-      "caption": "SCHEDULE-AGENT AND THE ORGANIZER CREATE OPERATION",
+      "caption": "THE COLLECTIONS A SERVER PROVIDES FOR EACH USER",
+      "data": {
+        "root": {
+          "label": "Principal resource",
+          "note": "A calendar user on the server",
+          "children": [
+            {
+              "label": "Calendar collection",
+              "note": "Where the user's events live"
+            },
+            {
+              "label": "Scheduling Outbox",
+              "note": "Target of busy time requests, and where send privileges live"
+            },
+            {
+              "label": "Scheduling Inbox",
+              "note": "Where incoming scheduling messages arrive"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "parameters",
+      "position": "after",
+      "caption": "WHAT THE SCHEDULE-AGENT VALUE MEANS",
       "data": {
         "columns": [
           "SCHEDULE-AGENT",
-          "iTIP method on create",
-          "Who handles scheduling"
+          "Who sends the message"
         ],
         "rows": [
           {
             "cells": [
-              "SERVER (default)",
-              "REQUEST",
-              "The server"
+              "SERVER",
+              "The server sends it. This is the default when the parameter is absent."
             ]
           },
           {
             "cells": [
               "CLIENT",
-              "none",
-              "The client"
+              "The client handles scheduling messages itself."
             ]
           },
           {
             "cells": [
               "NONE",
-              "none",
-              "Nobody sends messages"
+              "No scheduling message is sent to that user."
             ]
           }
         ]
@@ -191,138 +237,119 @@
     },
     {
       "type": "opcodes",
-      "anchor": "message-format",
+      "anchor": "status",
       "position": "after",
-      "caption": "DELIVERY STATUS CODES IN SCHEDULE-STATUS",
+      "caption": "DELIVERY STATUS CODES CARRIED IN SCHEDULE-STATUS",
       "data": {
         "items": [
           {
             "code": "1.0",
-            "label": "Pending",
-            "desc": "The server is still sending the message."
+            "label": "PENDING",
+            "desc": "The server is still trying to send the message."
           },
           {
             "code": "1.1",
-            "label": "Sent",
-            "desc": "Sent, but delivery is not known, as with email-based iMIP."
+            "label": "SENT",
+            "desc": "Sent, but delivery to the recipient is unknown."
           },
           {
             "code": "1.2",
-            "label": "Delivered",
-            "desc": "Sent and delivered.",
-            "highlight": true
+            "label": "DELIVERED",
+            "desc": "The message was sent and delivered."
           },
           {
             "code": "3.7",
-            "label": "Unknown user",
-            "desc": "The calendar user address was not recognized."
+            "label": "UNKNOWN USER",
+            "desc": "The calendar user address was not recognised as valid."
           },
           {
             "code": "3.8",
-            "label": "No privilege",
-            "desc": "Insufficient privileges for delivery."
+            "label": "NO PRIVILEGE",
+            "desc": "Delivery failed because of insufficient privileges."
           },
           {
             "code": "5.1",
-            "label": "Temporary failure",
-            "desc": "Delivery could not complete; try again later."
+            "label": "TEMPORARY FAILURE",
+            "desc": "Delivery could not be completed; trying again later may work."
           },
           {
             "code": "5.2",
-            "label": "No route",
-            "desc": "No way found to deliver; likely permanent."
+            "label": "PERMANENT FAILURE",
+            "desc": "No way to deliver it; check the recipient's address."
           },
           {
             "code": "5.3",
-            "label": "Not allowed",
-            "desc": "Scheduling with that recipient is not allowed."
+            "label": "NOT ALLOWED",
+            "desc": "Delivery was rejected because scheduling with that recipient is not allowed."
           }
         ]
-      }
-    },
-    {
-      "type": "tree",
-      "anchor": "security-considerations",
-      "position": "after",
-      "caption": "HOW SCHEDULING PRIVILEGES AGGREGATE",
-      "data": {
-        "root": {
-          "label": "DAV:all",
-          "children": [
-            {
-              "label": "CALDAV:schedule-deliver",
-              "note": "Inbox",
-              "children": [
-                {
-                  "label": "schedule-deliver-invite"
-                },
-                {
-                  "label": "schedule-deliver-reply"
-                },
-                {
-                  "label": "schedule-query-freebusy"
-                }
-              ]
-            },
-            {
-              "label": "CALDAV:schedule-send",
-              "note": "Outbox",
-              "children": [
-                {
-                  "label": "schedule-send-invite"
-                },
-                {
-                  "label": "schedule-send-reply"
-                },
-                {
-                  "label": "schedule-send-freebusy"
-                }
-              ]
-            }
-          ]
-        }
       }
     }
   ],
   "references": [
     {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC2616]",
+      "text": "Fielding, R., et al., \"Hypertext Transfer Protocol -- HTTP/1.1\", RFC 2616, June 1999.",
+      "rfc": 2616
+    },
+    {
+      "number": "[RFC2617]",
+      "text": "Franks, J., Hallam-Baker, P., Hostetler, J., Lawrence, S., Leach, P., Luotonen, A., and L. Stewart, \"HTTP Authentication: Basic and Digest Access Authentication\", RFC 2617, June 1999.",
+      "rfc": 2617
+    },
+    {
+      "number": "[RFC3744]",
+      "text": "Whitehead, E., et al., \"WebDAV Access Control Protocol\", RFC 3744, May 2004.",
+      "rfc": 3744
+    },
+    {
       "number": "[RFC4791]",
-      "text": "Daboo, C., Desruisseaux, B., and L. Dusseault, \"Calendaring Extensions to WebDAV (CalDAV)\", RFC 4791, March 2007.",
+      "text": "Caldwell, M., et al., \"CalDAV: Calendaring Extensions to WebDAV (WebDAV)\", RFC 4791, March 2007.",
       "rfc": 4791
     },
     {
+      "number": "[RFC4918]",
+      "text": "Das, S., et al., \"Web Distributed Authoring and Versioning (WebDAV)\", RFC 4918, June 2007.",
+      "rfc": 4918
+    },
+    {
+      "number": "[RFC5234]",
+      "text": "Crocker, D. and Overell, P., \"Augmented BNF for Syntax Specifications: ABNF\", STD 68, RFC 5234, January 2008.",
+      "rfc": 5234
+    },
+    {
       "number": "[RFC5545]",
-      "text": "Desruisseaux, B., Ed., \"Internet Calendaring and Scheduling Core Object Specification (iCalendar)\", RFC 5545, September 2009.",
+      "text": "Perreault, S., et al., \"Internet Calendaring and Scheduling Core Object Specification (iCalendar)\", RFC 5545, September 2009.",
       "rfc": 5545
     },
     {
       "number": "[RFC5546]",
-      "text": "Daboo, C., Ed., \"iCalendar Transport-Independent Interoperability Protocol (iTIP)\", RFC 5546, December 2009.",
+      "text": "Perreault, S., et al., \"iCalendar Transport-Independent Interoperability Protocol (iTIP)\", RFC 5546, December 2009.",
       "rfc": 5546
     },
     {
-      "number": "[RFC4918]",
-      "text": "Dusseault, L., Ed., \"HTTP Extensions for Web Distributed Authoring and Versioning (WebDAV)\", RFC 4918, June 2007.",
-      "rfc": 4918
-    },
-    {
-      "number": "[RFC3744]",
-      "text": "Clemm, G., Reschke, J., Sedlar, E., and J. Whitehead, \"Web Distributed Authoring and Versioning (WebDAV) Access Control Protocol\", RFC 3744, May 2004.",
-      "rfc": 3744
-    },
-    {
       "number": "[RFC6047]",
-      "text": "Melnikov, A., Ed., \"iCalendar Message-Based Interoperability Protocol (iMIP)\", RFC 6047, December 2010.",
+      "text": "Perreault, S., \"iCalendar Message-Based Interoperability Protocol (iMIP)\", RFC 6047, February 2011.",
       "rfc": 6047
+    },
+    {
+      "number": "[RFC6125]",
+      "text": "Pomeroy, S., et al., \"Representation and Verification of Domain-Based Application Service Identity within Internet Public Key Infrastructure Using X.509 (PKIX) Certificates in the Context of TLS\", RFC 6125, March 2011.",
+      "rfc": 6125
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-20",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-20"
 }

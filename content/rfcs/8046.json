@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines a mobility extension for the Host Identity Protocol, using a LOCATOR_SET parameter so a host can tell peers its alternate addresses. This keeps communication going when an IP address changes.</p>",
   "plainLanguage": {
-    "summary": "<p>When you move house, you send friends your new address so letters still reach you. This lets a computer do that without losing its conversations.</p>"
+    "summary": "<p>When a host using the Host Identity Protocol moves to a new IP address, it tells its peer about the change in a signed HIP UPDATE message. The peer does not simply believe it: it sends a challenge to the new address and waits for the answer before sending anything there.</p><p>Until the answer comes back, the peer may still send a limited amount of data to the new address, limited by how much data it has recently received from that peer. That way a peer cannot use the mechanism to redirect a flood of traffic at someone else.</p>"
   },
   "questions": [
     "host identity protocol mobility",
@@ -22,10 +22,10 @@
   ],
   "subtitle": "How a Host Identity Protocol host tells its peers about a new IP address without dropping the conversation.",
   "tldr": {
-    "problem": "When a host's IP address changes, connections tied to that address break. HIP already separates a host's identity from its IP address, but the peer still has to learn where the host can now be reached, and must not be fooled into sending traffic somewhere else.",
-    "mechanism": "The mobile host sends a HIP UPDATE packet carrying a LOCATOR_SET parameter (plus an ESP_INFO parameter) that lists its new address. The peer verifies the address with a nonce challenge, and may send a limited amount of data to it in the meantime under credit-based authorization.",
-    "outcome": "Communication survives an address change on one or both hosts, with defences against redirection-based flooding. This RFC obsoletes RFC 5206 and moves multihoming procedures to RFC 8047.",
-    "outcomeLabel": "Why it matters"
+    "problem": "With the Host Identity Protocol a host is identified by a public key rather than an IP address, which makes it possible for the host to change its IP address without disturbing the connection. But the peer has to be told, and told carefully, or it will keep sending to the old address.",
+    "mechanism": "The RFC defines a LOCATOR_SET parameter carried in HIP UPDATE packets. The parameter lists the addresses the host can now be reached at, with a lifetime for each, and the peer verifies each new address before it uses it, with a credit scheme limiting traffic to unverified addresses in the meantime.",
+    "outcome": "A host can change its address, or both hosts can change it at once, and the session survives. The same parameter also serves end-host multihoming, whose procedures are specified separately. The RFC obsoletes RFC 5206.",
+    "outcomeLabel": "What it does"
   },
   "facts": [
     {
@@ -33,8 +33,16 @@
       "value": "193"
     },
     {
-      "label": "Locator types defined",
-      "value": "0 (IPv6 address) and 1 (SPI plus address)"
+      "label": "LOCATOR_TYPE_UNSUPPORTED notify type",
+      "value": "46"
+    },
+    {
+      "label": "Maximum locator length",
+      "value": "4*255 octets"
+    },
+    {
+      "label": "Locator Type 1 contents",
+      "value": "A 32-bit ESP SPI followed by a 128-bit address"
     },
     {
       "label": "Credit aging factor",
@@ -43,13 +51,9 @@
     {
       "label": "Credit aging interval",
       "value": "5 seconds"
-    },
-    {
-      "label": "LOCATOR_TYPE_UNSUPPORTED notify type",
-      "value": "46"
     }
   ],
-  "today": "<p>RFC 8046 is a Proposed Standard published in February 2017. It obsoletes <a href='/rfc5206'>RFC 5206</a>, and multihoming is specified separately in <a href='/rfc8047'>RFC 8047</a>. The unit metadata lists no later RFC that obsoletes or updates it.</p>",
+  "today": "<p>RFC 8046 is a Proposed Standard from February 2017. It obsoletes <a href='/rfc5206'>RFC 5206</a>, which extended HIP version 1, and has not itself been obsoleted or updated. The LOCATOR_SET parameter is registered as type 193 in the IANA Host Identity Protocol parameters registry.</p>",
   "glossary": [
     "host-identity-protocol",
     "locator",
@@ -61,180 +65,193 @@
     "hmac",
     "digital-signature",
     "diffie-hellman",
-    "nat"
+    "nat",
+    "host-identity",
+    "host-identity-tag",
+    "rendezvous-server",
+    "mobility"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
       "title": "Introduction and Scope",
-      "content": "<p>The <strong>Host Identity Protocol</strong> (HIP, <a href='/rfc7401'>RFC 7401</a>) uses public/private key pairs, not IP addresses, as host identities. Transport sockets and Encapsulating Security Payload (ESP) Security Associations are bound to those identities, and IP addresses are used only for packet forwarding. This separation makes mobility and multihoming possible.</p><p>This RFC defines a <code>LOCATOR_SET</code> parameter that lets a host tell a peer about alternate addresses where it can be reached, and the message flows needed for basic end-host mobility, including address verification. It also specifies how a HIP rendezvous server (RVS, <a href='/rfc8004'>RFC 8004</a>) can help when both hosts move at once.</p><p>Out of scope are multihoming procedures (see <a href='/rfc8047'>RFC 8047</a>), transports other than ESP, localized mobility management, and how transport protocols should react to an address change.</p>",
-      "plainLanguage": "<p>A computer has a name that never changes and an address that can. This document explains how to say 'my address changed, send mail here now' safely.</p>"
+      "content": "<p>The Host Identity Protocol supports an architecture that decouples the transport layer from the internetworking layer by using public and private key pairs, instead of IP addresses, as host identities. When a host uses HIP, the overlying protocol sublayers, such as transport-layer sockets and ESP Security Associations, are bound to representations of these host identities, and the IP addresses are only used for packet forwarding. Each host still needs to know at least one IP address at which its peers are reachable, and initially these are the addresses used during the HIP base exchange.</p><p>One consequence of the decoupling is that new solutions to network-layer mobility and host multihoming are possible. The scope of the document is messaging and elements of procedure for basic network-level host mobility, leaving more complicated mobility scenarios, multihoming and other variations for further study. Specifically, it defines a LOCATOR_SET parameter for use in HIP messages, which allows a HIP host to notify a peer about alternate locators at which it is reachable; it specifies the messaging and elements of procedure for end-host mobility, including address verification methods; and it describes how the HIP rendezvous server can be used to manage simultaneous mobility of both hosts.</p><p>Out of scope are the procedures for host multihoming, which are specified separately, transport formats other than ESP, and localized mobility management techniques that do not involve directly signalling the correspondent node. Making IP mobility transparent to the transport layer also has implications for congestion control, path MTU selection and quality of service, and the transport-layer response to a mobility or multihoming address change is outside the scope of the document.</p>",
+      "plainLanguage": "<p>The document draws a line around what it covers: one host changing its address, and the two hosts changing at once with a rendezvous server helping. Keeping several addresses at once is a separate document.</p>"
+    },
+    {
+      "id": "terminology",
+      "number": "2",
+      "title": "Terminology",
+      "content": "<p>A LOCATOR_SET is a HIP parameter containing zero or more Locator fields. A locator is a name that controls how a packet is routed through the network and demultiplexed by the end host. It may include a concatenation of traditional network addresses such as an IPv6 address and end-to-end identifiers such as an ESP SPI. It may also include transport port numbers or IPv6 Flow Labels as demultiplexing context, or it may simply be a network address. When capitalized in the middle of a sentence, Locator refers to the encoding of a locator within the LOCATOR_SET parameter.</p><p>An address is a name that denotes a point of attachment to the network; the two most common examples are an IPv4 address and an IPv6 address. The set of possible addresses is a subset of the set of possible locators.</p><p>A preferred locator is a locator on which a host prefers to receive data. Certain locators are labeled as preferred when a host advertises its locator set to its peer. By default, the locators used in the HIP base exchange are the preferred locators.</p><p>Credit-Based Authorization is a mechanism allowing a host to send a certain amount of data to a peer's newly announced locator before the result of mandatory address verification is known.</p>",
+      "plainLanguage": "<p>The distinction that matters is between an address, which says where the host is, and a locator, which says where the host is and how to deliver a packet to it once there.</p>"
     },
     {
       "id": "architecture",
       "number": "3.1",
-      "title": "Locators and the Operating Environment",
-      "content": "<p>HIP is a key establishment and parameter negotiation protocol. In a HIP stack, upper-layer protocols are bound to Host Identity Tags (HITs), not IP addresses, and the HIP sublayer maintains the binding between HITs and IP addresses. The ESP Security Parameter Index (SPI) associates an incoming packet with the right HITs. A function labelled <code>MH</code> in the RFC's architecture figure manages these bindings for mobility and for multihoming.</p><p>The RFC generalizes an address into a <strong>locator</strong>. A locator names a point of attachment to the network but may also carry extra demultiplexing context, such as an ESP SPI, transport ports or an IPv6 Flow Label. The extra context matters because, for example, certain IP addresses may need to be associated with certain SPIs to avoid violating the ESP anti-replay window.</p><p>A host can receive packets protected by a HIP-created ESP SA from any address, so it can change its address and keep sending without necessarily rekeying. Its peers, however, cannot send to the new address until they have reliably and securely updated the addresses they associate with the host.</p>",
-      "plainLanguage": "<p>Your name tag stays the same wherever you go. A locator is the name tag plus a note saying which door to knock on and which mailbox slot to use.</p>"
+      "title": "The HIP Deployment Model",
+      "content": "<p>HIP is a key establishment and parameter negotiation protocol. Its primary applications are authenticating host messages based on host identities and establishing Security Associations for the ESP transport format.</p><p>In the layered view, upper-layer protocols including TCP are bound to Host Identity Tags and not IP addresses. The HIP sublayer is responsible for maintaining the binding between the Host Identity Tags and the IP addresses, and the SPI is used to associate an incoming packet with the right Host Identity Tags. A separate block manages the bindings at the ESP and HIP sublayers for mobility and multihoming.</p><p>With no mobility or multihoming, the HIP base exchange establishes the Host Identity Tags in use between the hosts, the SPIs to use for ESP, and the IP addresses used in both the HIP signalling packets and the ESP data packets. There can only be one such set of bindings in the outbound direction for any given packet, and the only fields used for the binding at the HIP layer are the fields exposed by ESP, the SPI and the Host Identity Tags. For the inbound direction, the SPI alone is enough to find the right host context. ESP rekeying events change the mapping between the Host Identity Tag pair and the SPI, but do not change the IP addresses.</p><p>In a mobility event, two things need to occur: the peer must be notified of the address change using a HIP UPDATE message, and each host must change its local bindings at the HIP sublayer. It may be that both the SPIs and the IP addresses change simultaneously in a single UPDATE, and the protocol supports this.</p>",
+      "plainLanguage": "<p>The HIP layer keeps a table that says which address belongs to which identity. Mobility means changing one line of that table and telling the other host about it.</p>"
     },
     {
       "id": "operation",
       "number": "3.2",
-      "title": "How a Readdress Works",
-      "content": "<p>In the simplest case the mobile host has one interface, one address and one pair of SAs. On getting a new address (a break-before-make or a make-before-break change, either is fine) it sends an <code>UPDATE</code> carrying one <code>LOCATOR_SET</code> and one <code>ESP_INFO</code> parameter, plus a <code>SEQ</code> parameter so the packet is retransmitted until acknowledged. With no rekeying, the OLD SPI and NEW SPI in <code>ESP_INFO</code> are both the existing incoming SPI.</p><p>The peer validates the UPDATE and MUST verify the new address by putting a nonce in an <code>ECHO_REQUEST</code> parameter of its reply. It MAY start using the new address at once but MUST limit how much data it sends there until verification completes. The mobile host echoes the nonce in an <code>ECHO_RESPONSE</code>; on receipt, the peer treats the address as verified.</p><p>The mobile host may also rekey at the same time, by setting a new SPI and KEYMAT Index in <code>ESP_INFO</code> and optionally adding a <code>DIFFIE_HELLMAN</code> parameter. Verification can also be implicit: in some cases the arrival of data on a newly advertised SA may be enough.</p><div class='callout callout-info'><p>If both hosts move at nearly the same time (the 'double-jump' problem), each side's UPDATE goes to a stale address. The RFC lets a host resend its UPDATE to the peer's rendezvous server, which rewrites the packet and adds <code>FROM</code> and <code>RVS_HMAC</code> parameters before forwarding it.</p></div><p>The RFC notes that IPv6 networks are expected to be renumbered more often than most IPv4 networks, and that renumbering looks like mobility to an end host, so the same procedures apply.</p>",
-      "plainLanguage": "<p>You tell your friend your new address. Your friend sends a secret word to that address, and you shout it back. That proves you really live there, and then the mail flows freely.</p>"
+      "title": "Mobility Scenarios",
+      "content": "<p>When a host moves to another address, it notifies its peer of the new address by sending a HIP UPDATE packet containing a single LOCATOR_SET parameter and a single ESP_INFO parameter. This UPDATE packet is acknowledged by the peer. For reliability in the presence of packet loss, the UPDATE packet is retransmitted as defined in the HIP specification. The peer can authenticate the contents of the UPDATE packet based on the signature and keyed hash of the packet.</p><p>The readdressing protocol is asymmetric, where a mobile host informs a peer host about changes of IP addresses on affected SPIs, and is designed to be piggybacked on existing HIP exchanges. Addresses are described as being in an ACTIVE, UNVERIFIED or DEPRECATED state: newly learned addresses of the peer need to be verified before being put into active service, and addresses removed by the peer are put into a deprecated state.</p><p>In the simplest scenario, with a single pair of Security Associations and no rekeying, the mobile host sends an UPDATE containing an ESP_INFO with the old and new SPI both set to the preexisting incoming SPI, and a LOCATOR_SET containing the new IP address in a Locator Type of 1, together with a lifetime. The peer replies with an UPDATE carrying an acknowledgement and an ECHO_REQUEST holding a nonce, sent to the new address. The mobile host echoes the nonce in an ECHO_RESPONSE, and the peer then considers the new address verified. While the peer is verifying, the new address is marked UNVERIFIED and the old one DEPRECATED; once the challenge is answered correctly, the new address becomes ACTIVE and the old address is removed.</p><p>If the peer is itself moving when the local host tries to update the bindings, the two hosts are in the double-jump mobility problem, where each host's UPDATE packets are sent to a stale address of the peer. The rendezvous service can support this: the mobile host may resend its UPDATE to a rendezvous server of the peer, the server must rewrite the IP header source and destination addresses, recompute the IP header checksum and include the FROM and RVS_HMAC parameters, and the receiving host must be prepared to process those parameters and include a VIA_RVS parameter in its reply.</p>",
+      "plainLanguage": "<p>The moving host sends its new address in an UPDATE. The other host does not take it on trust: it sends a challenge to the new address and waits for the echo of a value it chose. Only then does it move its traffic over.</p>"
     },
     {
       "id": "message-format",
       "number": "4",
       "title": "The LOCATOR_SET Parameter",
-      "content": "<p>The <code>LOCATOR_SET</code> parameter has Type <code>193</code> and is a critical parameter, so a recipient MUST recognize and process it. It holds the usual HIP Type and Length fields plus zero or more Locator sub-parameters. Each one carries a Traffic Type, Locator Type, Locator Length, a Reserved field, a preferred-locator <code>P</code> bit, a Locator Lifetime and the Locator itself. An empty LOCATOR_SET is allowed and deprecates all addresses.</p><p><strong>Traffic Type</strong> is <code>0</code> for both signaling and user data, <code>1</code> for HIP signaling only and <code>2</code> for data only. The <code>P</code> bit marks the locator as preferred for that traffic type, and the more specific type wins on conflict. <strong>Locator Type</strong> <code>0</code> is a 128-bit IPv6 address (or IPv4-in-IPv6 format address). Type <code>1</code> is a 32-bit ESP SPI followed by such an address.</p><p>Every locator MUST have a non-zero lifetime in seconds. When it passes, the address is expected to become deprecated, and a deprecated address SHOULD NOT be used as a destination if a non-deprecated one with sufficient scope is available. An UPDATE with a LOCATOR_SET SHOULD include both an HMAC and a HIP_SIGNATURE parameter, and MAY include a HOST_ID parameter, which the receiver MUST then check against the one used to set up the association.</p>",
-      "plainLanguage": "<p>It is a list of addresses where you can be found. Each entry says how long it is good for and whether it is your favorite.</p>"
+      "content": "<p>The LOCATOR_SET parameter has a type number value that is considered a critical parameter, so such parameter types must be recognized and processed by the recipient. The parameter consists of the standard HIP parameter Type and Length fields, plus zero or more Locator sub-parameters. Each Locator sub-parameter contains a Traffic Type, a Locator Type, a Locator Length, a preferred locator bit, a Locator Lifetime and a Locator encoding. A LOCATOR_SET containing zero Locator fields is permitted but has the effect of deprecating all addresses. The type is 193.</p><p>The Traffic Type defines whether the locator pertains to HIP signalling, user data or both: value 0 covers both, 1 covers signalling packets only and 2 covers data packets only. The Locator Type defines the semantics of the Locator field: value 0 is an IPv6 address or an IPv4-in-IPv6 format IPv4 address, 128 bits long, defined primarily for non-ESP-based usage; value 1 is the concatenation of an ESP SPI, the first 32 bits, followed by an IPv6 address or IPv4-in-IPv6 format IPv4 address, an additional 128 bits, defined primarily for ESP-based usage.</p><p>The Locator Length defines the length of the Locator field in units of 4-byte words, so locators up to a maximum of 4 times 255 octets are supported. The reserved field is zero when sent and ignored when received. The preferred bit is set to one if the locator is preferred for that Traffic Type. The Locator Lifetime says how long the locator is expected to be valid, in seconds; each locator must have a non-zero lifetime, and the address is expected to become deprecated when that many seconds have passed. A deprecated address should not be used as a destination address if an alternate, non-deprecated one is available and has sufficient address scope.</p>",
+      "plainLanguage": "<p>The parameter is a list of entries. Each entry says what the address is for, which kind of address it is, how long it is good for, and whether the sender would prefer to receive data there.</p>"
     },
     {
-      "id": "procedures",
-      "number": "5",
-      "title": "Locator States and Processing Rules",
-      "content": "<p>Each locator is tracked with its bit pattern, lifetime, traffic type scope, preferred flag and a status: <code>UNVERIFIED</code> (reachability not yet checked), <code>ACTIVE</code> (verified and not deprecated) or <code>DEPRECATED</code> (lifetime expired). A deprecated address MUST NOT become active without first verifying its reachability. The addresses used in the base exchange start as preferred, ACTIVE, with an unbounded lifetime.</p><p>A host sends a LOCATOR_SET whenever it sees a change to its addresses on an active association that will last at least a few seconds, and SHOULD avoid rapid changes. A new LOCATOR_SET replaces the earlier one, so it must list all active locators. Hosts MUST NOT announce broadcast or multicast addresses.</p><p>A receiver processes <code>ESP_INFO</code> first, deciding from the OLD and NEW SPI whether this is a no-op, a rekey, a new SA or a deprecation. It then checks each locator, adds or refreshes it as UNVERIFIED, and marks listed-nowhere addresses on that SPI as DEPRECATED. It MUST detect and skip a duplicate LOCATOR_SET that arrives via several paths. Unsupported locator types may trigger a <code>LOCATOR_TYPE_UNSUPPORTED</code> NOTIFY error.</p><p>Switching to a new preferred locator requires first verifying its address. Meanwhile the host SHOULD use another ACTIVE locator if one exists, or MAY use the new one as far as credit-based authorization allows.</p>",
-      "plainLanguage": "<p>Each address in your list is marked 'not checked yet', 'checked and good' or 'too old'. You only trust the good ones, and old ones must be checked again.</p>"
+      "id": "state-machine",
+      "number": "5.1",
+      "title": "Locator Status and Transitions",
+      "content": "<p>Each locator announced in a LOCATOR_SET parameter is represented by a piece of state containing the bit pattern representing the locator, the lifetime in seconds, the status, the Traffic Type scope of the locator, and whether the locator is preferred for any particular scope.</p><p>The status tracks the reachability of the address. UNVERIFIED indicates that the reachability of the address has not been verified yet. ACTIVE indicates that the reachability of the address has been verified and the address has not been deprecated. DEPRECATED indicates that the locator's lifetime has expired.</p><p>Five state changes are allowed. UNVERIFIED to ACTIVE happens when the reachability procedure completes successfully. UNVERIFIED to DEPRECATED, and ACTIVE to DEPRECATED, happen when the locator's lifetime expires. ACTIVE to UNVERIFIED happens when there has been no traffic on the address for some time and the local policy mandates that reachability be verified again before using it. DEPRECATED to UNVERIFIED happens when the host receives a new lifetime for the locator. A deprecated address must not be changed to active without first verifying its reachability.</p><p>Whether a locator is preferred is a local decision, possibly influenced by local policy, and is not necessarily the same as the preferred bit in the Locator sub-parameter received from the peer. A locator lifetime that is unbounded can be signified by setting the lifetime field to the maximum unsigned value, and the locators used to establish the HIP association are by default assumed to be the initial preferred locators in ACTIVE state with an unbounded lifetime.</p>",
+      "plainLanguage": "<p>Every address the peer has told you about is in one of three states: not yet checked, working, or expired. Only a working one is used normally, and an expired one has to be checked again before it comes back into use.</p>"
     },
     {
-      "id": "algorithms",
-      "number": "5.6",
-      "title": "Credit-Based Authorization",
-      "content": "<p>Waiting for address verification can slow applications, so the RFC defines <strong>credit-based authorization</strong> (CBA). Its idea is that a flooding attacker wants to amplify traffic, so CBA limits what a host sends to an unverified address to the amount of data recently received from that peer.</p><p>A host keeps a credit counter per peer. Each arriving packet raises the counter by its size. A packet to an UNVERIFIED preferred locator is sent only if no ACTIVE locator exists and the counter is higher than the packet size; sending reduces the counter by the packet size. Otherwise the packet MUST be discarded or buffered until verification succeeds. Sending to an ACTIVE locator does not change the counter.</p><p>To stop an attacker building credit slowly and spending it in one burst, counters are aged: multiplied by <code>CreditAgingFactor</code> every <code>CreditAgingInterval</code>. The RFC proposes <code>7/8</code> and <code>5 seconds</code>, which work for a TCP file transfer when the round-trip time does not exceed 500 milliseconds. How to set the credit limit is not specified, but a heuristic is enough credit to keep the sending rate for two or three round-trip times.</p>",
-      "plainLanguage": "<p>Imagine you may only lend a stranger as many sweets as they gave you first. A trickster cannot get a huge pile from you for free, and the credit slowly shrinks so they cannot save it up.</p>"
+      "id": "authentication",
+      "number": "5.4",
+      "title": "Verifying Reachability and Credit-Based Authorization",
+      "content": "<p>A host must verify the reachability of an UNVERIFIED address. The status of a newly learned address must initially be set to UNVERIFIED unless the new address is advertised in an R1 packet as a new preferred locator. A typical verification that is protected by retransmission timers is to include an ECHO REQUEST within an UPDATE sent to the new address. The host typically starts the procedure by sending a nonce to the new address, and it may use other message exchanges or other nonce values as long as it establishes that the peer has received and replied to the nonce at the new address. In some cases it may be sufficient to use the arrival of data on a newly advertised Security Association as implicit verification.</p><p>While verification is in progress, the host should select a different locator listed as ACTIVE if one is available, or may use the new preferred locator to the extent Credit-Based Authorization permits.</p><p>To prevent redirection-based flooding attacks, a host must use the credit approach when it sends data to an UNVERIFIED locator. A host maintains a credit counter for each of its peers, and whenever a packet arrives from a peer the host should increase that peer's credit counter by the size of the received packet. When the host has a packet to send and the peer's preferred locator is UNVERIFIED and no ACTIVE alternative is available, the packet should be sent if the credit counter is higher than the size of the outbound packet; if the counter is too low, the packet must be discarded or buffered until address verification succeeds. When a packet is sent to an UNVERIFIED locator, the credit counter is reduced by the size of the packet, and it is not affected by packets sent to an ACTIVE locator.</p><p>Credit aging ensures that credit counters gradually decrease over time, which prevents a malicious peer from building up credit at a very slow speed and then using it all at once for a burst of redirected packets. It may be implemented by multiplying credit counters with a factor less than one at fixed intervals. The proposed values are a CreditAgingFactor of 7/8 and a CreditAgingInterval of 5 seconds, which work well when the host transfers a file over a TCP connection and the round-trip time does not exceed 500 milliseconds.</p>",
+      "plainLanguage": "<p>Before the new address is confirmed, the peer may still send it something, but only as much as it has recently received from that peer. The allowance shrinks over time, so credit cannot be saved up for one big burst.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
       "title": "Security Considerations",
-      "content": "<p>Because HIP verifies the sender of an UPDATE cryptographically (HMAC and signature), forging or replaying one is very difficult. The RFC therefore focuses on two threats: malicious redirection of legitimate connections and redirection-based flooding.</p><p>For <strong>impersonation</strong>, the base exchange authentication and UPDATE signatures prevent an attacker from redirecting a connection, and ownership of an association is tied to a HIP identity, so the real owner can reclaim a hijacked connection. A man-in-the-middle can only act if present at the base exchange and the hosts do not authenticate each other.</p><p>For <strong>flooding</strong>, an attacker could start a large download and redirect it to a victim. Reachability checks and CBA do not eliminate flooding but rule out use from off the path to the victim and any amplification, lowering it to the level of a direct flood. Against memory exhaustion, an association SHOULD limit the number of IP addresses tied to any one identity. The RFC also discusses mixed HIP and non-HIP environments, and privacy: implementations SHOULD let an administrator block exposure of selected addresses.</p>",
-      "plainLanguage": "<p>Only the real owner can say 'I moved', because the message is signed. And no one can trick a computer into blasting a stranger with a huge flood of data.</p>"
-    },
-    {
-      "id": "changes",
-      "number": "8",
-      "title": "Differences from RFC 5206",
-      "content": "<p>This RFC extends HIP Version 2, while <a href='/rfc5206'>RFC 5206</a> extended Version 1. RFC 5206 covered both mobility and basic multihoming. Here only mobility remains, and multihoming is specified in <a href='/rfc8047'>RFC 8047</a>.</p><p>Other changes: the LOCATOR parameter is renamed <code>LOCATOR_SET</code>; text was added for double-jump and make-before-break mobility; a host may add the source address of a received HIP packet as a candidate locator while preferring listed ones; the HOST_ID parameter is allowed in UPDATEs; only a single LOCATOR_SET and ESP_INFO in an UPDATE is specified; a simple heuristic for CBA credit is given; and hosts MUST avoid reprocessing redundant LOCATOR_SETs.</p>",
-      "plainLanguage": "<p>This is the newer edition of the rulebook. It does just the moving-house part and leaves the many-addresses part to a sister document.</p>"
+      "content": "<p>The HIP mobility mechanism provides a secure means of updating a host's IP address via HIP UPDATE packets. Upon receipt, a HIP host cryptographically verifies the sender of an UPDATE, so forging or replaying an UPDATE packet is very difficult. Security issues therefore reside in other attack domains: malicious redirection of legitimate connections, and redirection-based flooding attacks using this protocol.</p><p>The extensions introduce an ability to redirect a connection, both before and after establishment. Without precautionary measures an attacker could misuse the redirection feature to impersonate a victim's peer from any arbitrary location. However, the authentication and authorization mechanisms of the HIP base exchange and the signatures in the UPDATE message prevent this attack, and ownership of a HIP association is securely linked to a Host Identity. If an attacker uses a bug in the implementation to redirect a HIP connection, the original owner can always reclaim the connection by proving ownership of the private key.</p><p>With the ability to redirect connections, an attacker could realize a distributed denial-of-service attack without distributing viral code: it initiates a large download from a server and then redirects the download to its victim. This threat is mitigated through reachability checks and credit-based authorization. Both strategies do not eliminate flooding attacks per se, but they preclude their use from a location off the path towards the flooded victim, and any amplification in the number and size of the redirected packets. The combination lowers a redirection-based flooding attack to the level of a direct flooding attack.</p><p>A simple attack is to send many UPDATE packets containing many IP addresses that are not flagged as preferred, until the number of addresses associated with the attacker's Host Identity crashes the system. A HIP association should therefore limit the number of IP addresses that can be associated with any Host Identity.</p><p>The exposure of a host's IP addresses through the mobility extensions may raise privacy concerns, since an administrator may be trying to hide the host's location through a VPN or other virtual interfaces. Implementations should provide a mechanism to allow the host administrator to block the exposure of selected addresses or address ranges.</p>",
+      "plainLanguage": "<p>Because the host can now say where it is, it can also be misused to point other people's traffic at a victim. The verification and credit rules make that harder, but they do not make it impossible, and a host should still be able to hide selected addresses.</p>"
     }
   ],
   "viz": [
     {
-      "type": "sequence",
-      "anchor": "operation",
+      "type": "layers",
+      "anchor": "architecture",
       "position": "after",
-      "caption": "READDRESS WITHOUT REKEYING (RFC 8046)",
+      "caption": "Where the mobility logic sits in a HIP stack",
       "data": {
-        "lanes": [
+        "layers": [
           {
-            "key": "mobile",
-            "label": "Mobile Host"
+            "label": "TCP",
+            "detail": "Sockets bound to Host Identity Tags"
           },
           {
-            "key": "peer",
-            "label": "Peer Host"
-          }
-        ],
-        "messages": [
-          {
-            "from": "mobile",
-            "to": "peer",
-            "label": "UPDATE(ESP_INFO, LOCATOR_SET, SEQ)",
-            "color": "blue",
-            "note": "Announces the new address."
+            "label": "ESP",
+            "detail": "Maps the Host Identity Tag pair to an SPI"
           },
           {
-            "from": "peer",
-            "to": "mobile",
-            "label": "UPDATE(ESP_INFO, SEQ, ACK, ECHO_REQUEST)",
-            "color": "green",
-            "note": "Acknowledges and challenges with a nonce."
+            "label": "HIP",
+            "detail": "Maps the Host Identity Tags and SPI to the IP addresses"
           },
           {
-            "from": "mobile",
-            "to": "peer",
-            "label": "UPDATE(ACK, ECHO_RESPONSE)",
-            "color": "blue",
-            "note": "Echoes the nonce; the address can become ACTIVE."
+            "label": "IP",
+            "detail": "Carries the packets"
           }
         ]
       }
     },
     {
-      "type": "packet",
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "Readdressing without rekeying, from the RFC's Figure 3",
+      "data": {
+        "lanes": [
+          {
+            "key": "mobile-host",
+            "label": "Mobile host"
+          },
+          {
+            "key": "peer-host",
+            "label": "Peer host"
+          }
+        ],
+        "messages": [
+          {
+            "from": "mobile-host",
+            "to": "peer-host",
+            "label": "UPDATE (ESP_INFO, LOCATOR_SET, SEQ)",
+            "color": "blue",
+            "note": "The mobile host announces its new address, with a lifetime, in a signed UPDATE."
+          },
+          {
+            "from": "peer-host",
+            "to": "mobile-host",
+            "label": "UPDATE (ESP_INFO, SEQ, ACK, ECHO_REQUEST)",
+            "color": "green",
+            "note": "The peer acknowledges the UPDATE and puts a nonce in an ECHO_REQUEST, sent to the new address."
+          },
+          {
+            "from": "mobile-host",
+            "to": "peer-host",
+            "label": "UPDATE (ACK, ECHO_RESPONSE)",
+            "color": "blue",
+            "note": "The mobile host echoes the nonce. On receiving it, the peer marks the new address ACTIVE and removes the old one."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
       "anchor": "message-format",
       "position": "after",
-      "caption": "LOCATOR_SET PARAMETER, ONE LOCATOR TYPE 0 SHOWN (RFC 8046)",
+      "caption": "The Traffic Type and Locator Type values",
       "data": {
-        "title": "LOCATOR_SET parameter",
-        "width": 32,
-        "fields": [
+        "columns": [
+          "Field",
+          "Value",
+          "Meaning"
+        ],
+        "rows": [
           {
-            "key": "type",
-            "name": "Type",
-            "bits": 16,
-            "desc": "Parameter type, 193.",
-            "value": "193"
+            "cells": [
+              "Traffic Type",
+              "0",
+              "Both signaling (HIP control packets) and user data"
+            ]
           },
           {
-            "key": "length",
-            "name": "Length",
-            "bits": 16,
-            "desc": "Length in octets, excluding Type, Length and padding."
+            "cells": [
+              "Traffic Type",
+              "1",
+              "Signaling packets only"
+            ]
           },
           {
-            "key": "traffic-type",
-            "name": "Traffic Type",
-            "bits": 8,
-            "desc": "0 both, 1 signaling only, 2 data only."
+            "cells": [
+              "Traffic Type",
+              "2",
+              "Data packets only"
+            ]
           },
           {
-            "key": "locator-type",
-            "name": "Locator Type",
-            "bits": 8,
-            "desc": "Semantics of the Locator field."
+            "cells": [
+              "Locator Type",
+              "0",
+              "An IPv6 address or an IPv4-in-IPv6 format IPv4 address, 128 bits long. Mainly for non-ESP-based usage."
+            ]
           },
           {
-            "key": "locator-length",
-            "name": "Locator Length",
-            "bits": 8,
-            "desc": "Length of the Locator in 4-byte words."
-          },
-          {
-            "key": "reserved",
-            "name": "Reserved",
-            "bits": 7,
-            "desc": "Zero when sent, ignored when received."
-          },
-          {
-            "key": "p",
-            "name": "P",
-            "bits": 1,
-            "desc": "Set to one if the locator is preferred for that Traffic Type."
-          },
-          {
-            "key": "lifetime",
-            "name": "Locator Lifetime",
-            "bits": 32,
-            "desc": "How long the locator is expected to be valid, in seconds."
-          },
-          {
-            "key": "locator",
-            "name": "Locator",
-            "bits": 128,
-            "desc": "The locator; the sub-parameter from Traffic Type onward repeats for each locator."
+            "cells": [
+              "Locator Type",
+              "1",
+              "An ESP SPI of 32 bits followed by an IPv6 address or IPv4-in-IPv6 address of 128 bits. Mainly for ESP-based usage."
+            ]
           }
         ]
       }
     },
     {
       "type": "state-machine",
-      "anchor": "procedures",
+      "anchor": "state-machine",
       "position": "after",
-      "caption": "LOCATOR STATUS CHANGES (RFC 8046)",
+      "caption": "The states a learned locator can be in",
       "data": {
         "states": [
           {
@@ -255,27 +272,53 @@
           {
             "from": "unverified",
             "to": "active",
-            "label": "reachability verified"
+            "label": "The reachability procedure completes"
           },
           {
             "from": "unverified",
             "to": "deprecated",
-            "label": "lifetime expires"
+            "label": "The lifetime expires"
           },
           {
             "from": "active",
             "to": "deprecated",
-            "label": "lifetime expires"
+            "label": "The lifetime expires"
           },
           {
             "from": "active",
             "to": "unverified",
-            "label": "idle, policy requires recheck"
+            "label": "No traffic for a while and policy requires re-verification"
           },
           {
             "from": "deprecated",
             "to": "unverified",
-            "label": "new lifetime received"
+            "label": "A new lifetime is received"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "How the credit scheme works",
+      "data": {
+        "items": [
+          {
+            "title": "Credit counter",
+            "text": "Each host keeps one counter per peer, increased by the size of every packet received from that peer."
+          },
+          {
+            "title": "Sending to an unverified address",
+            "text": "The packet goes out only if the counter is larger than the packet size; the counter is then reduced by the packet size."
+          },
+          {
+            "title": "Otherwise",
+            "text": "The packet must be discarded or buffered until address verification succeeds."
+          },
+          {
+            "title": "Credit aging",
+            "text": "Counters are multiplied by 7/8 every 5 seconds, so credit cannot be built up slowly and then spent in one burst."
           }
         ]
       }
@@ -283,19 +326,19 @@
   ],
   "references": [
     {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
       "number": "[RFC7401]",
       "text": "Moskowitz, R., Ed., Heer, T., Jokela, P., and T. Henderson, \"Host Identity Protocol Version 2 (HIPv2)\", RFC 7401, April 2015.",
       "rfc": 7401
     },
     {
       "number": "[RFC7402]",
-      "text": "Jokela, P., Moskowitz, R., and J. Melen, \"Using the Encapsulating Security Payload (ESP) Transport Format with the Host Identity Protocol (HIP)\", RFC 7402, April 2015.",
+      "text": "McGrew, J., Badra, M., and D. Black, \"The Use of ESP Transport Format with HIP\", RFC 7402, September 2014.",
       "rfc": 7402
-    },
-    {
-      "number": "[RFC8004]",
-      "text": "Laganier, J. and L. Eggert, \"Host Identity Protocol (HIP) Rendezvous Extension\", RFC 8004, October 2016.",
-      "rfc": 8004
     },
     {
       "number": "[RFC8003]",
@@ -303,28 +346,28 @@
       "rfc": 8003
     },
     {
+      "number": "[RFC8004]",
+      "text": "Laganier, J. and L. Eggert, \"Host Identity Protocol (HIP) Rendezvous Extension\", RFC 8004, October 2016.",
+      "rfc": 8004
+    },
+    {
       "number": "[RFC8047]",
-      "text": "Henderson, T., Ed., Vogt, C., and J. Arkko, \"Host Multihoming with the Host Identity Protocol\", RFC 8047, February 2017.",
+      "text": "Henderson, T., Ed., Vogt, C., and J. Arkko, \"Host Identity Protocol (HIP) End-Host Multihoming Extension\", RFC 8047, February 2017.",
       "rfc": 8047
     },
     {
       "number": "[RFC5206]",
       "text": "Nikander, P., Henderson, T., Ed., Vogt, C., and J. Arkko, \"End-Host Mobility and Multihoming with the Host Identity Protocol\", RFC 5206, April 2008.",
       "rfc": 5206
-    },
-    {
-      "number": "[RFC4225]",
-      "text": "Nikander, P., Arkko, J., Aura, T., Montenegro, G., and E. Nordmark, \"Mobile IP Version 6 Route Optimization Security Design Background\", RFC 4225, December 2005.",
-      "rfc": 4225
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

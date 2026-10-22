@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document explains how a sender using UDP Options can run Datagram Packetization Layer Path MTU Discovery (DPLPMTUD). The method lets an application find the largest datagram size that will cross a network path.</p>",
   "plainLanguage": {
-    "summary": "<p>Before mailing a big package, you want to know the largest box the postal route allows. This explains how to test sizes until you find the biggest one that fits.</p>"
+    "summary": "<p>This document explains how a program using UDP can find out how big a message the network between two points will carry. The sender sends a message padded to a chosen size with a small token in it, and the far end sends the token back. If the token comes back, that size fits. The sender repeats with bigger messages until one does not come back, and it can re-check the size it found later to notice when the path silently breaks.</p>"
   },
   "questions": [
     "dplpmtud udp options",
@@ -22,9 +22,9 @@
   ],
   "subtitle": "How a UDP sender uses the REQ and RES options to find the largest datagram a path will carry.",
   "tldr": {
-    "problem": "UDP gives applications no automatic way to learn the largest datagram that crosses a path without IP fragmentation, and ICMP Packet Too Big messages are sometimes dropped.",
-    "mechanism": "The sender pads probe packets to a chosen size and attaches a REQ option with a 4-byte token; the receiver echoes the token in a RES option, proving a packet of that size got through.",
-    "outcome": "The result is a robust search for the largest packet size, repeated to check the path still works, that does not depend on ICMP and needs support at both ends.",
+    "problem": "UDP has no way to discover the largest datagram that will cross a path without being fragmented. The UDP API lets an application react to an ICMP Packet Too Big message, but offers no way to find the limit by itself, and many paths drop those messages.",
+    "mechanism": "RFC 9869 uses the Request and Response options added by RFC 9868. The sender pads a datagram to a chosen size and includes a Request option carrying a four-byte token; the receiver answers with a Response option echoing the token. Each answer confirms that a datagram of that size reached the far end.",
+    "outcome": "The sender can raise the size it uses until a probe stops being answered, and can detect later black holes by re-probing the size it already found. The document has no IANA actions, and it requires both ends to enable the mechanism explicitly.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -33,23 +33,27 @@
       "value": "4 bytes"
     },
     {
-      "label": "RES rate limit example",
-      "value": "1 per measured RTT or 1 per second per pair of ports"
+      "label": "REQ and RES option length",
+      "value": "6 bytes"
     },
     {
-      "label": "Probe fragmentation",
-      "value": "MUST NOT be fragmented; DF bit set in IPv4"
+      "label": "Response rate limit",
+      "value": "1 per measured round-trip time, or 1 per second"
     },
     {
-      "label": "Multicast",
-      "value": "Not specified"
+      "label": "Token uniqueness",
+      "value": "Unique within the maximum segment lifetime"
+    },
+    {
+      "label": "Fragmentation of probes",
+      "value": "Not allowed at the UDP or IP layer"
     },
     {
       "label": "IANA actions",
       "value": "None"
     }
   ],
-  "today": "<p>RFC 9869 is a Proposed Standard published in October 2025 and has not been obsoleted. It depends on the UDP Options defined in <a href='/rfc9868'>RFC 9868</a> and on the generic method in <a href='/rfc8899'>RFC 8899</a>.</p>",
+  "today": "<p>RFC 9869 is a Proposed Standard published in October 2025, and it has not been obsoleted. It uses the Request and Response options defined by <a href='/rfc9868'>RFC 9868</a> and adds no IANA registrations of its own. Both ends of a flow must enable the mechanism before it can work.</p>",
   "glossary": [
     "udp",
     "path-mtu-discovery",
@@ -61,148 +65,228 @@
     "padding",
     "nonce",
     "rate-limiting",
-    "multicast"
+    "multicast",
+    "black-hole",
+    "ip-datagram",
+    "equal-cost-multipath"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why Probe the Path",
-      "content": "<p>UDP Usage Guidelines (<a href='/rfc8085'>RFC 8085</a>) say an application SHOULD use path MTU information from the IP layer or run Path MTU Discovery itself, to avoid IP fragments. The UDP API offers no automatic way to find the supported size. <a href='/rfc8899'>RFC 8899</a> defines Datagram Packetization Layer PMTUD (DPLPMTUD) for datagram transports, a probing method that does not rely only on ICMP Packet Too Big (PTB) messages and so works on paths that drop them.</p><p>RFC 9869 says how to run DPLPMTUD with the UDP Options of <a href='/rfc9868'>RFC 9868</a>. Doing it in the transport service saves each upper layer protocol from implementing the method. It needs support enabled at both sender and receiver. If multipath or multihoming is used, each path needs its own state machine. DPLPMTUD is not specified for multicast.</p>",
-      "plainLanguage": "<p>It is like testing which size of box fits through a mail slot. You try bigger and bigger boxes and ask the person inside to shout back each time one arrives.</p>"
+      "title": "Introduction",
+      "content": "<p>UDP offers a minimal transport service on top of IP and is frequently used as a substrate for other protocols. Section 3.2 of the UDP usage guidelines in <a href='/rfc8085'>RFC 8085</a> recommends that applications implement some form of Path MTU Discovery to avoid the generation of IP fragments, either by using the path MTU information provided by the IP layer or by implementing Path MTU Discovery themselves to determine whether the path to a destination will support the desired message size without fragmentation.</p><p>The UDP API of <a href='/rfc8304'>RFC 8304</a> offers calls for applications to receive ICMP Packet Too Big messages and to control the maximum size of datagrams that are sent, but it offers no automated mechanism for an application to discover the maximum packet size supported by a path. Upper layer protocols, which include applications, can implement mechanisms for Path MTU Discovery above the UDP API.</p><p>Packetization Layer Path MTU Discovery in <a href='/rfc4821'>RFC 4821</a> describes a method for a bidirectional Packetization Layer to search for the largest Packetization Layer Path MTU supported on a path, and DPLPMTUD in <a href='/rfc8899'>RFC 8899</a> specifies that support for datagram transports. Both gain robustness by using a probing mechanism that does not solely rely on ICMP Packet Too Big messages, and that works on paths which drop those messages.</p><p>UDP Options in <a href='/rfc9868'>RFC 9868</a> supply functionality that can be used to implement DPLPMTUD within the transport service, or in an upper layer protocol or application that uses UDP Options. This document specifies how DPLPMTUD using UDP Options is implemented, and requires support to be enabled at both the sender and the receiver.</p><p>Implementing DPLPMTUD within the transport service above UDP Options avoids the need for each upper layer protocol to implement the method. It provides a standard way for applications to discover the current maximum packet size for a path and to detect when that changes. It can be used with equal-cost multipath routing and with multihoming, and if either is supported, a state machine is needed for each path. DPLPMTUD is not specified for multicast, because the method requires explicit acknowledgement of probe packets, which is primarily intended for unicast use.</p>",
+      "plainLanguage": "<p>UDP itself cannot tell an application how large a message the network will carry. The socket interface lets an application react when a router tells it a message was too big, but that message is often blocked on the way. This document uses the UDP options to find the limit by experiment: send a message of a given size and see whether the far end acknowledges it.</p>"
     },
     {
       "id": "design",
-      "number": "2",
-      "title": "How DPLPMTUD Uses UDP Options",
-      "content": "<p>DPLPMTUD here is built from a pair of options: the <strong>Request (REQ)</strong> option and the <strong>Response (RES)</strong> option, plus the End of Options List (EOL) option to pad a probe to the wanted size. Use MUST be explicitly enabled by the application, and a receiver MUST NOT answer a REQ until DPLPMTUD is enabled, to guard against misuse of the mechanism for other forms of probing. By default the API MUST disable it.</p><p>It can live in the UDP transport service or in an upper layer protocol or application. When it lives in the transport, the state machine sends the probes and finds the PLPMTU, which fixes the Maximum Packet Size (MPS). The discovered size can set the maximum datagram size or the maximum fragment size when the UDP Fragmentation option is used. If it runs at more than one layer, the tokens must be coordinated so each probe is identifiable, and the RFC advises avoiding discovery at both levels.</p><p>Probes sent with no payload were not generated by an application, so the receiver does not deliver them to its application.</p>",
-      "plainLanguage": "<p>One side asks \"can you hear me?\" with a numbered card, and the other side holds the same card up in reply. The size of the shout is what is being tested.</p>"
+      "number": "3",
+      "title": "Using the Request and Response Options",
+      "content": "<p>A UDP Options sender implementing DPLPMTUD uses the method specified in RFC 8899, realised with a pair of UDP Options: the Request option and the Response option, plus the End of Options List option to introduce padding that sets the size of a probe packet.</p><p>Use of DPLPMTUD must be explicitly enabled by the application, for instance once the application has established connectivity and is ready to exchange data with the remote upper layer protocol. A DPLPMTUD receiver must not respond to a Request option until DPLPMTUD has been enabled, which helps protect against misuse of the mechanism for other forms of probing.</p><p>Probe packets consume network capacity and incur endpoint processing, so implementations ought to send a probe packet with a Request option only when their local DPLPMTUD state machine requires it: when confirming the base path MTU, when probing to increase the path MTU, or when confirming the current path MTU.</p><p>DPLPMTUD can be implemented over UDP Options in two ways: within the UDP transport service, or in an upper layer protocol or application that uses UDP Options. When it is implemented within the transport service, the DPLPMTUD state machine is responsible for sending the probe packets and determines the maximum packet size, the largest size of application data block that can be sent across a path in a single datagram; the upper layer protocol is responsible for deciding when a session enables DPLPMTUD. The discovered value can then set the maximum datagram size for the current path, or the maximum fragment size when the sender uses the UDP Fragmentation option to divide a datagram into several fragments.</p><p>The design requires an API primitive that lets the application control whether the DPLPMTUD state machine is enabled for a specific UDP port, and by default that API must disable DPLPMTUD processing. When DPLPMTUD is implemented by an upper layer protocol instead, the format and content of the probe packets are determined by that protocol, which is also permitted to use the same options. If DPLPMTUD is active at more than one layer, the token values need to be coordinated so that each probe packet has a unique token, and a configuration ought to avoid doing the discovery in both places at once, since RFC 8899 recommends that an application should avoid using DPLPMTUD when the underlying transport system provides this capability.</p>",
+      "plainLanguage": "<p>Two options do the work: a request that asks for an answer, and a response that carries the answer. The feature is off until the application turns it on, and the far end must also have turned it on before it answers anything. The discovery can be done inside the UDP layer itself, which saves every application from writing it, or inside the application, which gives the application control over what the probes look like.</p>"
     },
     {
-      "id": "packet-format",
-      "number": "3",
-      "title": "Probe Packets and Tokens",
-      "content": "<p>A probe packet carries a UDP Options area with a REQ option and any other needed options, ended by EOL, then padding up to the probe size. A probe can be as large as the local interface MTU, and its size MUST NOT be constrained by a smaller path MTU learned from network layer mechanisms. Probes MUST NOT be fragmented at the UDP or IP layer, and in IPv4 they MUST be sent with the Don't Fragment (DF) bit set.</p><p>The <strong>token</strong> is four bytes. Each probe MUST be uniquely identifiable within the Maximum Segment Lifetime, and a sender MUST NOT reuse a token in that time. It needs to be unique only for the specific 5-tuple. The first value SHOULD be randomized, to protect against off-path attacks. A RES echoes the last received token.</p><p>If a responder sends a datagram solely to carry a RES, it MUST rate limit these responses, for example one per measured RTT or one per second for each pair of ports. This reduces the denial of service risk without noticeably affecting DPLPMTUD.</p>",
-      "plainLanguage": "<p>Every question card gets its own random number so nobody can fake a reply, and you never reuse a number too soon. A helper is not allowed to answer too fast or too often.</p>"
+      "id": "message-format",
+      "number": "3.1",
+      "title": "Packet Formats",
+      "content": "<p>The Request option is set by a sending Packetization Layer to solicit a response from a remote receiver, and a four-byte token identifies each request. A sending layer can use the End of Options List option together with a minimum datagram length to pad the probe packets. The Response option is sent by a UDP Options receiver in response to a previously received Request option, and each Response option echoes the last received four-byte token. Reception of a Response option by the sender confirms that a specific probe packet has been received by the remote receiver.</p><p>If a UDP Options endpoint creates and sends a datagram with a Response option solely in response to a received Request option, the responder must limit the rate of these responses, for example by limiting each pair of ports to send one per measured round-trip time or one per second. This rate limit mitigates the denial-of-service vector without significantly affecting the operation of DPLPMTUD.</p><p>The token lets a sender distinguish between acknowledgements for initial probe packets and acknowledgements confirming the receipt of later probe packets travelling along an alternate path with a larger round-trip time. Each probe packet must be uniquely identifiable by the sender within the maximum segment lifetime, and the sender must not reuse a token value within that lifetime. Because UDP Options operates over UDP, the token values only need to be unique for the specific five-tuple over which it is operating. The value of the four-byte token field should be initialised to a randomised value, to enhance protection from off-path attacks.</p>",
+      "plainLanguage": "<p>Each request carries a four-byte random number. The answer repeats that number, so the sender knows which probe was acknowledged and can tell an answer to an old probe from an answer to a new one. A sender must not reuse a token within the maximum segment lifetime, so that a delayed answer cannot be mistaken for a current one.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "3.2",
+      "title": "Sending and Answering Probes",
+      "content": "<p>DPLPMTUD relies on sending a probe packet of a specific size. Each probe packet includes the UDP Options area, containing a Request option and any other required options concluded with an End of Options List option, followed by the padding needed to inflate it to the required probe size. A probe packet can therefore be up to the maximum size supported by the local interface, the interface MTU, and its size must not be constrained by the maximum PMTU set by network layer mechanisms such as the IP-layer PMTU cache.</p><p>UDP datagrams used as DPLPMTUD probe packets must not be fragmented at the UDP or IP layer. In IPv4, a probe packet must be sent with the Don't Fragment bit set in the IP header and without network layer endpoint fragmentation.</p><p>When DPLPMTUD is enabled, a UDP Options receiver responds by sending a UDP datagram with the Response option when it receives a datagram with the Request option. The operation of DPLPMTUD can depend on the support at the remote endpoint, on the way DPLPMTUD is implemented, and in some cases on the application data exchanged over the transport service. When UDP Options is not supported by the remote receiver, DPLPMTUD will be unable to confirm the path or to discover the path MTU, and the result is the minimum configured path MTU.</p>",
+      "plainLanguage": "<p>A probe is an ordinary UDP datagram padded with zeroes to the size being tested, carrying a request option. The padding is added after the options, and the datagram is marked so that neither UDP nor IP will split it, because a split datagram would arrive at the far end in pieces and would not prove that the whole size fitted. The far end answers with the response option, and that answer is the proof.</p>"
     },
     {
       "id": "procedures",
       "number": "4",
       "title": "Sender Procedures",
-      "content": "<p>There are three kinds of probe. To <strong>confirm connectivity</strong>, UDP has no mechanism of its own, so a sender MUST send a probe padded to BASE_PLPMTU with a REQ option; a matching RES confirms a packet of that size crossed the path and that the remote end supports RES. To <strong>search for a larger size</strong>, DPLPMTUD enters the SEARCHING state, for instance after the PMTU_RAISE_TIMER expires. A Maximum Datagram Size (MDS) option from the remote end MAY be used as a hint. These probes SHOULD NOT carry application data, because they are lost whenever they exceed the real PMTU, and they MUST include REQ.</p><p>To <strong>validate the path</strong>, the sender MUST check that the discovered PLPMTU still works, by sending probes of that size with a REQ in the SEARCH_COMPLETE state to detect black holes. A probe used to confirm connectivity or validate the path MAY carry application data, such as an upper layer control message that need not be delivered reliably. In that case the receiver MUST process the REQ and return the RES with an upper layer message. A simple implementation can use only padding probes without application data, which avoids retransmitting data when a probe fails.</p>",
-      "plainLanguage": "<p>First check that a small box gets through at all. Then try bigger boxes now and then. Later, resend a box of the size you picked to make sure the route has not shrunk.</p>"
-    },
-    {
-      "id": "error-handling",
-      "number": "5",
-      "title": "Network Events and PTB Messages",
-      "content": "<p>The method does not depend on events from the network, but it can use them. A change in the path or a lost probe can make DPLPMTUD update the PLPMTU. A path change notification can trigger path validation, and an upper layer can trigger validation when it sees a high packet loss rate or repeated timeouts. Implementations sharing PLPMTU between layers, for example through the IP cache, must be robust to varied forwarding behavior.</p><p>Support for ICMP PTB messages is OPTIONAL, so a sender can ignore them. Before using one, DPLPMTUD must check that it answers a probe the sender really sent. The receiver MUST validate the protocol information in the quoted packet, and SHOULD confirm that the token in the quoted REQ option matches a recently sent probe. An implementation that cannot do this validation MUST ignore received PTB messages.</p>",
-      "plainLanguage": "<p>Sometimes a postal worker sends a note saying \"too big.\" You only believe it if the note quotes your own numbered card, because anyone could write a fake note.</p>"
+      "content": "<p>DPLPMTUD uses three types of probe: probes to confirm that the path can support the base path MTU, probes to detect whether the path can support a larger path MTU, and probes to validate that the path still supports the current path MTU.</p><p>To confirm connectivity across a path, the sender must elicit a positive confirmation by sending a probe packet padded to the size of the base path MTU. This confirmation probe must include the Request option to elicit a response from the remote DPLPMTUD. Reception of a datagram with the corresponding Response option confirms that a packet of the probed size successfully traversed the path, and also confirms that the remote endpoint supports the Response option.</p><p>To increase the path MTU, the sender periodically enters the searching state, for example after the timer that raises the PMTU expires, to detect whether the current path can support a larger value. When the remote endpoint advertises the UDP Maximum Datagram Size option, that value may be used as a hint to initialise the search. Probe packets seeking to increase the path MTU should not carry application data, because they will be lost whenever their size exceeds the actual path MTU, and they must include the Request option so that the path is asked for a positive acknowledgement of a datagram of the specific probed size. At the receiver, a probe packet that carries no application data is not part of the end-to-end transport data and is not delivered to the upper layer, although a zero-length payload notification could still be delivered.</p><p>To validate the path, the sender must check that the path still supports the path MTU discovered earlier, which detects black-holing of data. Path validation generates a probe packet of the discovered size that must include a Request option to elicit a positive confirmation that the path delivered it. Such a probe may either carry no application data or carry application data with padding.</p><p>A simple implementation uses only probe packets with no application data, padding each one to the required size including the Request option. This avoids having to retransmit application data when a probe fails, and can be achieved by setting a minimum datagram length so that the options list ends in End of Options List with the additional space zero-filled. An alternative format is permitted for a probe used to confirm connectivity or to validate the path: those probes may carry application data, which reduces the need to send additional datagrams. A probe of that kind may use a control message format defined by the upper layer protocol, provided the message does not need to be delivered reliably, and must include the Request option when the sending upper layer protocol performs DPLPMTUD. A receiver that responds to DPLPMTUD must process the Request option and include the corresponding Response option with an upper layer protocol message that it returns to the requester.</p>",
+      "plainLanguage": "<p>The sender probes three times for three reasons. To start, it checks that the path works at the basic size. Then, now and then, it tries a larger size to see whether the path will take it, and keeps the largest size that is answered. Later, it repeats a probe at the size it settled on, so that a path which has quietly started dropping large packets is noticed. Probes that test a larger size carry no application data, because those are the ones expected to be lost.</p>"
     },
     {
       "id": "examples",
       "number": "6",
-      "title": "Different Receiver Behaviors",
-      "content": "<p>The RFC lists four cases that show how the receiver's behavior changes the result.</p><ul><li><strong>No receiver support:</strong> no RES is ever received, so the PLPMTU cannot be discovered and the minimum configured PLPMTU (MIN_PLPMTU) is used.</li><li><strong>Receiver replies with application datagrams:</strong> the RES goes out with the next datagram sent back. This works with traffic in both directions and avoids opportunities for DoS misuse, but a low return rate delays the RES and can leave a smaller PLPMTU than the path supports.</li><li><strong>Unidirectional transfer:</strong> waiting for a queued datagram can easily cause a probe timeout, so exchanging datagrams without a payload could be allowed to return the RES.</li><li><strong>Receiver may send payload-free responses:</strong> this ensures timely progress but could let others probe which UDP ports support the specification, so the rate limit from the previous section applies.</li></ul>",
-      "plainLanguage": "<p>Some helpers shout back right away, some only reply when they were going to write you anyway, and some never reply. The less a helper answers, the less sure you are about the biggest box.</p>"
+      "title": "Examples with Different Receiver Behaviours",
+      "content": "<p>The document describes four possible receiver behaviours. In the first, there is no DPLPMTUD receiver support: no Response option is received from the remote endpoint, so the method cannot discover the path MTU and the result is the minimum configured value. Such a remote endpoint might not be configured to process UDP Options, or might not return a datagram with a Response option for some other reason such as packet loss, insufficient space to include the option, or filtering on the path.</p><p>In the second, the DPLPMTUD receiver uses application datagrams: both ends support the method, but the receiver only returns a Response option with the next UDP datagram it sends, so the reception of a request does not systematically trigger a response. This lets DPLPMTUD work when there is a flow of datagrams in both directions, provided there is periodic feedback, for example one acknowledgement packet per round-trip time. It requires the path MTU at the receiver to be large enough for the Response option to fit in the feedback packets sent in the return direction, and it avoids opportunities to misuse the method as a denial-of-service attack. When there is a low rate of transmission, or none at all, in the return direction, it prevents prompt delivery of the Response option, which at the sender results in probe packets failing to be acknowledged in time and can give a smaller path MTU than the path actually supports, or the minimum configured value.</p><p>In the third, the transfer is unidirectional. When an application only transfers data in one direction, or predominantly in one direction, the wait at the receiver for a datagram to be queued before returning a Response option can easily result in a probe timeout at the sender. In this case, DPLPMTUD can allow exchanging datagrams without a payload to return the Response option.</p><p>In the fourth, the DPLPMTUD receiver is permitted to send responses in UDP datagrams with no payload. A receiver can then generate a datagram, for example with zero payload data, solely to return a Response option, sent when no other datagrams are queued for transmission. This allows an endpoint to probe the set of UDP ports configured to support this specification. It costs some additional traffic but ensures timely progress of DPLPMTUD, and the rate limit of one response per measured round-trip time or one per second applies to it.</p>",
+      "plainLanguage": "<p>What the sender learns depends on how the far end behaves. If the far end never answers, the sender settles on the smallest size it is allowed to use. If the far end only answers when it happens to send something anyway, the answer arrives late or not at all when traffic is one-way, so the sender may end up with a smaller size than the path really supports. If the far end is allowed to send an empty datagram purely to answer, the answer comes back promptly, at the cost of a little extra traffic.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
+      "number": "8",
       "title": "Security Considerations",
-      "content": "<p>The security considerations of <a href='/rfc9868'>RFC 9868</a> and <a href='/rfc8899'>RFC 8899</a> apply, and the method does not change the integrity protection offered by UDP Options. On-path attackers could drop or modify probes to try to lower the PMTU or black-hole traffic.</p><p>A token that is easy to guess, such as an incremented value, would let an on-path observer work out later tokens and forge probes, so the first value is randomized and an unpredictable token per probe is a mitigation. A sender using PTB messages MUST validate the quoted UDP ports together with the token. Upper layer protocols that use encryption ought to run DPLPMTUD above UDP Options instead, so probes are encrypted and the application controls the extra traffic. The RFC has no IANA actions.</p>",
-      "plainLanguage": "<p>If your question cards are numbered 1, 2, 3, a sneaky watcher can guess the next one and send fake replies. Random numbers make that guessing much harder.</p>"
+      "content": "<p>The security considerations for using UDP Options are described in <a href='/rfc9868'>RFC 9868</a>, and the method does not change the integrity protection the UDP Options method offers. The security considerations for using DPLPMTUD are described in <a href='/rfc8899'>RFC 8899</a>. On-path attackers could maliciously drop or modify probe packets to seek to decrease the path MTU, or to modify probe packets in an attempt to black-hole traffic.</p><p>The document recommends that the token value in the Request option is initialised to a randomised value, to enhance protection from off-path attacks. If a subsequent probe packet uses a token value that is easily derived from the initial value, for instance by incrementing it, a misbehaving on-path observer could determine the token values used for later probe packets from that sender, even if those probe packets are not passing through the observer. That would allow probe packets to be forged, with an impact similar to other on-path attacks against probe packets. Using an unpredictable token value for each probe packet mitigates this.</p><p>Section 5.2 covers ICMP Packet Too Big messages. Support for receiving them is optional for DPLPMTUD, so a UDP Options sender can ignore them. Before processing such a message, the method needs two checks to ensure that it was received in response to a sent probe packet. First, the receiver must validate the protocol information in the quoted packet carried in the message, to validate that the message originated from the sending node. Second, the receiver should use information that is not simple for an off-path attacker to determine, by confirming that the token in the Request option of the quoted packet corresponds to a probe packet that was recently sent by the current endpoint. An implementation unable to support this validation must ignore received ICMP Packet Too Big messages.</p>",
+      "plainLanguage": "<p>Someone on the path can drop or alter probes, and that is a problem for path MTU discovery in general, not just for UDP. Two habits reduce the risk. The random token in each request should not be predictable from the previous one, or an observer could work out future tokens and forge probes. And when a router reports that a datagram was too big, the sender should check that the quoted packet is one it actually sent, and ignore the report if it cannot.</p>"
     }
   ],
   "viz": [
     {
       "type": "layers",
-      "anchor": "design",
+      "anchor": "introduction",
       "position": "after",
-      "caption": "DPLPMTUD WITHIN THE UDP TRANSPORT SERVICE (RFC 9869, SECTION 3)",
+      "caption": "Where DPLPMTUD sits when it is implemented in the transport service",
       "data": {
         "layers": [
           {
-            "label": "Upper Layer Protocol or Application",
-            "detail": "Enables DPLPMTUD and uses the MPS"
+            "label": "Upper layer protocol or application",
+            "detail": "Decides when to enable DPLPMTUD"
           },
           {
-            "label": "DPLPMTUD State Machine",
-            "detail": "Tracks MPS, PLPMTU, Probed-Size, Min_PMTU and tokens",
+            "label": "DPLPMTUD state machine",
+            "detail": "Holds the maximum packet size, the probed size and the tokens",
             "highlight": true
           },
           {
-            "label": "UDP Options Transport",
-            "detail": "Sends and receives datagrams carrying the options"
+            "label": "UDP Options transport",
+            "detail": "Sends and receives the probes"
+          },
+          {
+            "label": "IP",
+            "detail": "Delivers the datagrams"
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "design",
+      "position": "after",
+      "caption": "The four things a sender needs to know",
+      "data": {
+        "items": [
+          {
+            "title": "Enabled explicitly",
+            "text": "The application must turn DPLPMTUD on, and the receiver must not answer before it is enabled."
+          },
+          {
+            "title": "A token per probe",
+            "text": "A four-byte value identifies each probe and must not be reused within the maximum segment lifetime."
+          },
+          {
+            "title": "Answers are rate limited",
+            "text": "A receiver that answers only with the response option sends at most one per round-trip time or one per second."
+          },
+          {
+            "title": "Probes are not application data",
+            "text": "A probe without application data is not delivered to the upper layer at the far end."
+          }
+        ]
+      }
+    },
+    {
+      "type": "packet",
+      "anchor": "message-format",
+      "position": "after",
+      "caption": "The Request and Response options (RFC 9868, Figure 15)",
+      "data": {
+        "title": "REQ and RES options",
+        "bytes": 6,
+        "width": 32,
+        "fields": [
+          {
+            "key": "kind",
+            "name": "Kind",
+            "bits": 8,
+            "desc": "6 for the Request option, 7 for the Response option."
+          },
+          {
+            "key": "length",
+            "name": "Length",
+            "bits": 8,
+            "desc": "Always 6, the length of the whole option in bytes."
+          },
+          {
+            "key": "token",
+            "name": "Token",
+            "bits": 32,
+            "desc": "A four-byte value that the response echoes back."
           }
         ]
       }
     },
     {
       "type": "sequence",
-      "anchor": "packet-format",
+      "anchor": "operation",
       "position": "after",
-      "caption": "A PROBE AND ITS ACKNOWLEDGEMENT, ILLUSTRATIVE, NOT FROM THE RFC",
+      "caption": "Probing the path for the largest datagram it will carry (illustrative, not from the RFC)",
       "data": {
         "lanes": [
           {
             "key": "sender",
-            "label": "UDP Options sender"
+            "label": "Sender"
           },
           {
             "key": "receiver",
-            "label": "UDP Options receiver"
+            "label": "Receiver"
           }
         ],
         "messages": [
           {
             "from": "sender",
             "to": "receiver",
-            "label": "Probe: REQ(token) + EOL + padding",
+            "label": "PROBE WITH REQ",
             "color": "blue",
-            "note": "Padded to the probed size, sent with DF set in IPv4."
+            "note": "A datagram padded to the size being tested, carrying a Request option with a token."
           },
           {
             "from": "receiver",
             "to": "sender",
-            "label": "Datagram with RES(token)",
+            "label": "RES",
             "color": "green",
-            "note": "Echoes the token, confirming a packet of that size arrived."
+            "note": "The receiver echoes the token, which confirms that size reached the far end."
+          },
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "LARGER PROBE",
+            "color": "blue",
+            "note": "The sender repeats with a bigger datagram to look for a larger size."
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "RES",
+            "color": "green",
+            "note": "An answer at the new size shows the path carries it."
           }
         ]
       }
     },
     {
       "type": "compare-table",
-      "anchor": "procedures",
+      "anchor": "examples",
       "position": "after",
-      "caption": "THE THREE KINDS OF PROBE (RFC 9869, SECTION 4)",
+      "caption": "What the sender learns from each receiver behaviour",
       "data": {
         "columns": [
-          "Probe purpose",
-          "Size",
-          "Application data"
+          "Receiver behaviour",
+          "What the sender sees"
         ],
         "rows": [
           {
             "cells": [
-              "Confirm connectivity",
-              "BASE_PLPMTU",
-              "MAY carry"
+              "No DPLPMTUD support",
+              "No response option, so the path MTU stays at the minimum configured value"
             ]
           },
           {
             "cells": [
-              "Search for a larger PLPMTU",
-              "Larger than the current PLPMTU",
-              "SHOULD NOT carry"
+              "Answers only with application datagrams",
+              "The response arrives with the next outbound datagram, which needs regular traffic in the return direction"
             ]
           },
           {
             "cells": [
-              "Validate the current PLPMTU",
-              "The current PLPMTU",
-              "MAY carry"
+              "One-way traffic only",
+              "The probe can time out while waiting for a datagram to send"
+            ]
+          },
+          {
+            "cells": [
+              "Allowed to answer with an empty datagram",
+              "The response comes back promptly, at the cost of some extra traffic"
             ]
           }
         ]
@@ -211,43 +295,38 @@
   ],
   "references": [
     {
-      "number": "[RFC0768]",
-      "text": "Postel, J., \"User Datagram Protocol\", STD 6, RFC 768, August 1980.",
-      "rfc": 768
-    },
-    {
-      "number": "[RFC1191]",
-      "text": "Mogul, J. and S. Deering, \"Path MTU discovery\", RFC 1191, November 1990.",
-      "rfc": 1191
-    },
-    {
-      "number": "[RFC4821]",
-      "text": "Mathis, M. and J. Heffner, \"Packetization Layer Path MTU Discovery\", RFC 4821, March 2007.",
-      "rfc": 4821
-    },
-    {
-      "number": "[RFC8085]",
-      "text": "Eggert, L., Fairhurst, G., and G. Shepherd, \"UDP Usage Guidelines\", BCP 145, RFC 8085, March 2017.",
-      "rfc": 8085
+      "number": "[RFC9868]",
+      "text": "Touch, J., and C. Heard, Ed., \"Transport Options for UDP\", RFC 9868, October 2025.",
+      "rfc": 9868
     },
     {
       "number": "[RFC8899]",
-      "text": "Fairhurst, G., Jones, T., Tuexen, M., Ruengeler, I., and T. Voelker, \"Packetization Layer Path MTU Discovery for Datagram Transports\", RFC 8899, September 2020.",
+      "text": "Srinivasan, M., et al., \"Datagram Packetization Layer Path MTU Discovery\", RFC 8899, August 2020.",
       "rfc": 8899
     },
     {
-      "number": "[RFC9868]",
-      "text": "Touch, J. and C. Heard, Ed., \"Transport Options for UDP\", RFC 9868, October 2025.",
-      "rfc": 9868
+      "number": "[RFC8085]",
+      "text": "Hollenbeck, S., \"Usage Guidelines for UDP\", RFC 8085, February 2017.",
+      "rfc": 8085
+    },
+    {
+      "number": "[RFC8304]",
+      "text": "Eastlake, C., \"The UDP Socket API\", RFC 8304, February 2018.",
+      "rfc": 8304
+    },
+    {
+      "number": "[RFC4821]",
+      "text": "Ford, M., et al., \"Packetization Layer Path MTU Discovery\", RFC 4821, March 2007.",
+      "rfc": 4821
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

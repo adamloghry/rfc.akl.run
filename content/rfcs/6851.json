@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Adds two commands to IMAP, <code>MOVE</code> and <code>UID MOVE</code>, which move messages from one mailbox to another. Before this, clients had to copy messages and then delete the originals as separate steps.</p>",
   "plainLanguage": {
-    "summary": "<p>Moving a letter from one folder to another in one step, instead of copying it and then throwing the old one away.</p>"
+    "summary": "<p>This RFC gives IMAP a single command for moving mail between folders. The server does the copy and the deletion together, so a failure part way through cannot leave a message half moved or lost.</p>"
   },
   "questions": [
     "how to move email messages with imap",
@@ -19,135 +19,243 @@
     "IMAP",
     "Mailboxes"
   ],
-  "subtitle": "One IMAP command that moves messages between mailboxes without the copy, flag and expunge dance.",
+  "subtitle": "One IMAP command that moves messages between mailboxes instead of copying and then deleting.",
   "tldr": {
-    "problem": "Base IMAP has no move command, so clients must COPY, STORE a deleted flag and EXPUNGE. That is not atomic, can leave messages in odd intermediate states, and can expunge other messages that were already flagged for deletion.",
-    "mechanism": "The MOVE extension adds MOVE and UID MOVE. The server moves each message to the target mailbox, giving it a new UID, and removes the original, so the client sees it as one action.",
-    "outcome": "Clients get a safer, simpler move, and servers can use efficient back-end moves. It is a Proposed Standard and has not been obsoleted or updated.",
-    "outcomeLabel": "Why it matters"
+    "problem": "Moving a message in IMAP meant three commands: copy it, mark the original deleted, then expunge the mailbox. An interruption or a second client could see the message in an intermediate state, and a failure part way through could lose mail.",
+    "mechanism": "The RFC defines a MOVE command and a UID MOVE variant. The server creates the message in the target mailbox with a new UID and removes it from the source, and it does so without exposing the intermediate states.",
+    "outcome": "It is a Proposed Standard published in January 2013 that has not been obsoleted or updated. A server advertises it by listing MOVE among its capabilities, and it defines how the command interacts with the QUOTA, ACL, UIDPLUS, QRESYNC and Sieve extensions.",
+    "outcomeLabel": "Status today"
   },
   "facts": [
-    {
-      "label": "Commands added",
-      "value": "MOVE and UID MOVE"
-    },
     {
       "label": "Capability name",
       "value": "MOVE"
     },
     {
-      "label": "Equivalent steps",
-      "value": "COPY, STORE +FLAGS.SILENT \\DELETED, UID EXPUNGE"
+      "label": "New commands",
+      "value": "MOVE and UID MOVE"
+    },
+    {
+      "label": "Equivalent IMAP sequence",
+      "value": "COPY, then STORE +FLAGS.SILENT \\DELETED, then UID EXPUNGE"
+    },
+    {
+      "label": "Partial failure rule",
+      "value": "Each message must end up in at least one of the source or target mailboxes"
+    },
+    {
+      "label": "ACL rights required",
+      "value": "The union of the rights for UID STORE, UID COPY and UID EXPUNGE"
+    },
+    {
+      "label": "Result codes",
+      "value": "OK for success, NO for a move error, BAD for an unknown command or invalid arguments"
     }
   ],
-  "today": "<p>RFC 6851 is a Proposed Standard published in January 2013, and no later RFC obsoletes or updates it. It builds on <a href='/rfc3501'>RFC 3501</a>.</p>",
+  "today": "<p>RFC 6851 is a Proposed Standard published in January 2013, and it has not been obsoleted or updated. A server that implements it advertises the extension by listing MOVE among the capabilities it returns, and clients check that list before using the command.</p>",
   "glossary": [
     "imap",
     "mailbox",
     "uid",
-    "pipelining"
+    "pipelining",
+    "expunge",
+    "sieve"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Why IMAP Needs a Move Command",
-      "content": "<p>RFC 6851 defines an extension to IMAP (<a href='/rfc3501'>RFC 3501</a>) that makes it easy to move messages from one mailbox to another. It adds a new <code>MOVE</code> command and extends the <code>UID</code> command so that <code>UID MOVE</code> works too.</p><p>The base IMAP specification has no move function. Clients have had to combine <code>COPY</code>, <code>STORE</code> and <code>EXPUNGE</code> to do this very common operation. A server advertises the extension by returning <code>MOVE</code> as a capability in response to the <code>CAPABILITY</code> command.</p>",
-      "plainLanguage": "<p>Normally, to move a toy to another box you would make a copy and then throw the first one away. This gives you a way to just pick it up and put it in the other box.</p>"
+      "title": "Introduction",
+      "content": "<p>This document defines an IMAP extension, as specified in <a href='/rfc3501'>RFC 3501</a>, to facilitate moving messages from one mailbox to another. It does so by defining a new MOVE command and extending the UID command to allow UID MOVE.</p><p>The existing way to move a message is a three-command sequence: copy it, mark the original deleted, then expunge the mailbox. That sequence has several drawbacks. Because the move is not an atomic process, interruptions can leave messages in intermediate states. Because multiple clients can be accessing the mailboxes at the same time, clients can see messages in intermediate states even without interruptions. If the source mailbox contains other messages flagged for deletion, the third step can have the side effect of expunging more than just the set of moved messages. And servers with certain types of back-end message stores may have efficient ways of moving messages which do not involve the actual copying of data, efficiencies that are often not available to the COPY, STORE and EXPUNGE process.</p><p>The MOVE extension is present in any IMAP implementation that returns MOVE as one of the supported capabilities to the CAPABILITY command.</p>",
+      "plainLanguage": "<p>Mail clients that offer a drag-and-drop move today have to send three commands and then work out what went wrong if one of them fails. This RFC reduces that to one command and one answer.</p>"
     },
     {
-      "id": "motivation",
-      "number": "2",
-      "title": "Problems with Copy, Store and Expunge",
-      "content": "<p>The RFC lists the shortcomings of the old three-step approach. Moving a message that way is not an atomic process, so an interruption can leave messages in intermediate states. Because several clients can open the same mailboxes at the same time, other clients can see those intermediate states even without interruptions.</p><p>There is a side effect too: if the source mailbox holds other messages already flagged for deletion, the final expunge step can remove more than just the moved messages. Finally, servers with certain back-end message stores may have efficient ways to move messages without copying any data, and the copy-and-delete sequence cannot use them.</p>",
-      "plainLanguage": "<p>Copy-then-delete is like photocopying a page and then tearing out the original. If someone walks in halfway, they see two pages, and you might tear out the wrong ones.</p>"
+      "id": "message-format",
+      "number": "3.1",
+      "title": "The MOVE Command",
+      "content": "<p>The MOVE command takes two arguments: a sequence set and a mailbox name. Its responses are no specific responses for this command. Its result is OK for a completed move, NO for a move error, meaning those messages cannot be moved or cannot be moved to that name, and BAD for an unknown command or invalid arguments.</p><p>UID MOVE extends the first form of the UID command, described in Section 6.4.8 of RFC 3501, to add MOVE as a valid argument.</p>",
+      "plainLanguage": "<p>The command names the messages and the destination folder. The server answers with the usual three IMAP outcomes: it worked, it refused, or the request made no sense.</p>"
     },
     {
       "id": "operation",
-      "number": "3",
-      "title": "How MOVE and UID MOVE Work",
-      "content": "<p><code>MOVE</code> takes two arguments: a message set and a mailbox name. For <code>MOVE</code> the set holds sequence numbers, and for <code>UID MOVE</code> it holds UIDs. Each message in the set is moved from the selected (source) mailbox to the named (target) mailbox. A new message with a new UID is created in the target, the original is removed from the source, and the client sees it as a single action. The result is <code>OK</code> if the move completed, <code>NO</code> if the messages cannot be moved or cannot go to that name, and <code>BAD</code> if the command is unknown or its arguments invalid.</p><p>The effect per message matches <code>[UID] COPY</code>, then <code>[UID] STORE +FLAGS.SILENT \\DELETED</code>, then <code>UID EXPUNGE</code>, but the semantics are not identical. The intermediate states do not occur, and the server <strong>MUST NOT</strong> generate STORE response codes or set the <code>\\DELETED</code> flag on any message. COPY and EXPUNGE response codes are still returned.</p><p>Because a move covers a set, it may fail partway. Each message <strong>SHOULD</strong> either be moved or left alone. The server <strong>MUST</strong> leave every message in at least one of the two mailboxes, so nothing is lost, and <strong>SHOULD NOT</strong> leave any message in both. This holds even when the server returns a tagged <code>NO</code>.</p><p>Extensions that affect COPY affect MOVE in the same way, so response codes such as <code>TRYCREATE</code> are sent as appropriate. Moving to the currently selected mailbox is allowed when copying there is allowed.</p>",
-      "plainLanguage": "<p>You tell the server which messages and which folder. It puts each one in the new folder and removes it from the old one, and it promises no message ever ends up lost.</p>"
+      "number": "3.3",
+      "title": "Semantics of MOVE and UID MOVE",
+      "content": "<p>The MOVE command takes a message set, sequence numbers for MOVE and UIDs for UID MOVE, and a named mailbox. Each message included in the set is moved, rather than copied, from the selected source mailbox to the named target mailbox. A new message is created in the target mailbox with a new UID, the original message is removed from the source mailbox, and it appears to the client as a single action.</p><p>This has the same effect for each message as the sequence of UID COPY, then UID STORE with the +FLAGS.SILENT and \\DELETED flags, then UID EXPUNGE. The effect is the same but the semantics are not identical: the intermediate states produced by those steps do not occur, and the response codes are different. In particular, though the COPY and EXPUNGE response codes will be returned, response codes for a STORE must not be generated and the \\DELETED flag must not be set for any message.</p><p>Because a MOVE applies to a set of messages, it might fail part way through the set. Regardless of whether the command succeeds in moving the entire set, each individual message should either be moved or unaffected. The server must leave each message in a state where it is in at least one of the source or target mailboxes, so that no message can be lost or orphaned, and should not leave any message in both mailboxes. This is true even if the server returns a tagged NO response to the command.</p><p>Because of the similarity of MOVE to COPY, extensions that affect COPY affect MOVE in the same way. Response codes such as TRYCREATE, as well as those defined by extensions, are sent as appropriate.</p><p>The RFC gives this example exchange. A client sends <code>UID MOVE 42:69 foo</code>. The server replies with an untagged OK carrying the COPYUID response code with the value 432432, the source set 42:69 and the new UID set 1202:1229, then with an untagged EXPUNGE reporting that message 22 was removed, possibly followed by more expunges, and finally with the tagged OK. The server may send unrelated EXPUNGE responses as well, if any happened to have been expunged at the same time, which is normal IMAP operation.</p><p>Note that moving a message to the currently selected mailbox, where the source and target mailboxes are the same, is allowed when copying the message to the currently selected mailbox is allowed.</p><p>The server may send EXPUNGE, or VANISHED, responses before the tagged response, so the client cannot safely send more commands with message sequence number arguments while the server is processing MOVE or UID MOVE. Both MOVE and UID MOVE can be pipelined with other commands, but care has to be taken, because both modify sequence numbers and allow unrelated EXPUNGE responses. The renumbering of other messages in the source mailbox following any EXPUNGE response can be surprising and makes it unsafe to pipeline any command that relies on message sequence numbers after a MOVE or UID MOVE. Similarly, MOVE cannot be pipelined with a command that might cause message renumbering.</p>",
+      "plainLanguage": "<p>Each message either ends up in the new folder or stays where it was, and it is never in both and never in neither, even if the server reports a failure. The reply also tells the client the new identifiers the messages got in the destination folder, and reports the removals from the source folder as it goes.</p>"
     },
     {
-      "id": "examples",
+      "id": "compatibility",
       "number": "4",
-      "title": "Example and Pipelining Cautions",
-      "content": "<p>The RFC gives this exchange, in which the server sends a <code>COPYUID</code> code, then a series of <code>EXPUNGE</code> responses, then the tagged <code>OK</code>. The server may also send unrelated EXPUNGE responses if other messages happen to be expunged at the same time, which is normal IMAP operation.</p><p>The server may send EXPUNGE (or <code>VANISHED</code>) responses before the tagged response. A client therefore cannot safely send more commands with message sequence number arguments while the server is processing a move. Both commands can be pipelined with other commands, but care is needed, because the renumbering that follows an EXPUNGE makes it unsafe to pipeline any command that relies on sequence numbers after a move. Likewise, a move cannot be pipelined with a command that might cause renumbering.</p><p>Implementers need to read <a href='/rfc4315'>RFC 4315</a> to understand <code>UID EXPUNGE</code>, though full implementation of it is not necessary.</p>",
-      "plainLanguage": "<p>While the server is tidying up, the numbering of the messages in the folder can shift. So the client should not point at messages by position until the server says it is done.</p>"
-    },
-    {
-      "id": "interoperability",
-      "number": "5",
       "title": "Interaction with Other Extensions",
-      "content": "<p>Section 4 of the RFC covers how MOVE works alongside other IMAP extensions.</p><ul><li><strong>QUOTA</strong> (<a href='/rfc2087'>RFC 2087</a>): a MOVE may succeed where a COPY would cause a quota overrun.</li><li><strong>ACL</strong> (<a href='/rfc4314'>RFC 4314</a>): the rights required are the union of those for <code>UID STORE</code>, <code>UID COPY</code> and <code>UID EXPUNGE</code>.</li><li><strong>UIDPLUS</strong> (<a href='/rfc4315'>RFC 4315</a>): servers SHOULD send <code>COPYUID</code> in response to <code>UID MOVE</code>, and are advised to send it in an untagged OK before the EXPUNGE or moved responses, so clients do not see an expunge before the matching COPYUID.</li><li><strong>QRESYNC</strong> (<a href='/rfc5162'>RFC 5162</a>): the server SHOULD send <code>VANISHED</code> rather than EXPUNGE, as for UID EXPUNGE, and the client must handle both. A server that stores modification sequences MUST increment the per-mailbox mod-sequence when messages are moved, send <code>HIGHESTMODSEQ</code>, and give moved messages new mod-sequences higher than the highest in the target mailbox.</li><li><strong>Sieve events</strong> (<a href='/rfc6785'>RFC 6785</a>): MOVE is treated like COPY, so a script can be invoked with <code>imap.cause</code> set to <code>COPY</code>, but never <code>FLAG</code>, because MOVE does not change flags.</li></ul>",
-      "plainLanguage": "<p>MOVE is meant to play nicely with the other add-on features of IMAP, such as storage limits, permissions and keeping a client in sync.</p>"
+      "content": "<p>The RFC describes how MOVE interacts with several other IMAP extensions.</p><p>With the QUOTA extension of <a href='/rfc2087'>RFC 2087</a>, a MOVE command may succeed where COPY would cause a quota overrun.</p><p>For the Access Control List extension of <a href='/rfc4314'>RFC 4314</a>, the rights required for MOVE and UID MOVE are the union of the rights required for UID STORE, UID COPY and UID EXPUNGE.</p><p>For the UIDPLUS extension of <a href='/rfc4315'>RFC 4315</a>, servers supporting it should send COPYUID in response to a UID MOVE command. Servers implementing UIDPLUS are also advised to send the COPYUID response code in an untagged OK before sending EXPUNGE or moved responses, because sending COPYUID in the tagged OK, as the UIDPLUS specification describes, means that clients first receive an EXPUNGE for a message and afterwards the COPYUID for the same message, which can be unnecessarily difficult to process usefully.</p><p>For the QRESYNC extension of <a href='/rfc5162'>RFC 5162</a>, which states that the server should send VANISHED rather than EXPUNGE in response to the UID EXPUNGE command, the same requirement applies to MOVE, and a QRESYNC-enabled client needs to handle both VANISHED and EXPUNGE responses to a UID MOVE command. If the server is capable of storing modification sequences for the selected mailbox, it must increment the per-mailbox mod-sequence if at least one message was permanently moved by the command. For each permanently removed message the server must remember the incremented mod-sequence and the corresponding UID, and if at least one message was moved the server must send the updated per-mailbox modification sequence using the HIGHESTMODSEQ response code of <a href='/rfc4551'>RFC 4551</a> in the tagged or untagged OK response. When one or more messages are moved to a target mailbox, if the server can store modification sequences for that mailbox it must generate and assign new modification sequence numbers to the moved messages that are higher than the highest modification sequence of the messages originally in the mailbox.</p><p>For IMAP events in Sieve, defined in <a href='/rfc6785'>RFC 6785</a>, MOVE applies in the same way as COPY does, so MOVE can cause a Sieve script to be invoked with imap.cause set to COPY. Because MOVE does not cause flags to be changed, a MOVE command will not result in a script invocation with imap.cause set to FLAG.</p>",
+      "plainLanguage": "<p>MOVE behaves like COPY in most of the extensions that watch mailboxes, so the access rights, the quota handling and the filtering rules all follow the rules already written for COPY. The one difference a client has to know about is the order of the replies: the new identifiers should arrive before the removals.</p>"
     },
     {
       "id": "syntax",
-      "number": "6",
+      "number": "5",
       "title": "Formal Syntax",
-      "content": "<p>The RFC defines the syntax in ABNF. It adds <code>MOVE</code> to the list of capabilities and to the commands usable once a mailbox is selected, and it adds <code>move</code> as an allowed argument of <code>UID</code>. The command is <code>MOVE</code>, a space, a sequence set, a space and a mailbox name. Token strings are case insensitive and implementations MUST accept them that way.</p>",
-      "plainLanguage": "<p>The grammar just says what a MOVE line looks like: the word MOVE, which messages, and where to.</p>"
+      "content": "<p>The syntax specification uses the Augmented Backus-Naur Form notation of <a href='/rfc5234'>RFC 5234</a>. RFC 3501 defines the non-terminals capability, command-select, sequence-set and mailbox.</p><p>Except as noted otherwise, all alphabetic characters are case insensitive. The use of upper or lower case characters to define token strings is for editorial clarity only, and implementations must accept these strings in a case-insensitive fashion.</p><p>The ABNF adds three productions. The capability list gains MOVE. The command-select list gains a move production, which is the MOVE keyword, a space, a sequence-set and a space and a mailbox. And the UID production gains move as one of the commands it may carry.</p>",
+      "plainLanguage": "<p>Three lines of grammar, checked by machine. The command names are matched without regard to case, so a client may send move or MOVE.</p>"
     },
     {
       "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>MOVE does not introduce any new capabilities to IMAP, which limits the security impact. However, the transactional semantics of MOVE may interact with specific implementations in ways that could have unexpected consequences. For example, moving messages between mailboxes under the quota root may require temporary suspension of quota checking.</p><p>An additional area of concern is the interaction with antispam, antivirus, and other security scanning and auditing mechanisms. Different mailboxes may have different security policies that could interact with MOVE in complex ways, and scanning with updated rules may also be required when messages are moved even when the underlying policy has not changed.</p><p>MOVE does relieve a problem with the base specification, since client authors currently have to devise and implement complicated algorithms to handle partial failures of the STORE, COPY and EXPUNGE trio. Incomplete or improper implementation of those algorithms can lead to mail loss.</p>",
+      "plainLanguage": "<p>MOVE does not hand out any new powers, but it does change when things happen inside the server. Quota checks may need to be paused while a message is in transit between folders, and mail that has been moved may need to be scanned again under the rules of the folder it landed in.</p>"
+    },
+    {
+      "id": "iana-considerations",
       "number": "7",
-      "title": "Security and IANA Notes",
-      "content": "<p>MOVE adds no new capabilities to IMAP, which limits its security impact. Its transactional semantics may still interact with implementations in unexpected ways. For example, moving messages between mailboxes under the quota root may require temporary suspension of quota checking. Different mailboxes may also have different antispam, antivirus or auditing policies, and messages may need rescanning with updated rules after a move.</p><p>On the positive side, MOVE removes the need for complicated client algorithms to handle partial failures of the STORE, COPY and EXPUNGE trio, and incomplete versions of those algorithms can lead to mail loss. IANA added <code>MOVE</code> to the IMAP 4 Capabilities registry.</p>",
-      "plainLanguage": "<p>Moving mail is safer than the old way, but the server has to make sure its spam and virus checks still apply in the new folder.</p>"
+      "title": "IANA Considerations",
+      "content": "<p>IANA has added MOVE to the IMAP 4 Capabilities registry, which is the list of extension names a server reports in answer to the CAPABILITY command.</p>",
+      "plainLanguage": "<p>The only registration needed is the name of the capability, so that a client can ask the server what it supports.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "examples",
+      "anchor": "operation",
       "position": "after",
-      "caption": "UID MOVE EXAMPLE FROM RFC 6851",
+      "caption": "The example exchange given in the RFC",
       "data": {
         "lanes": [
           {
             "key": "client",
-            "label": "Client"
+            "label": "IMAP client"
           },
           {
             "key": "server",
-            "label": "Server"
+            "label": "IMAP server"
           }
         ],
         "messages": [
           {
             "from": "client",
             "to": "server",
-            "label": "a UID MOVE 42:69 foo",
+            "label": "UID MOVE 42:69 foo",
             "color": "blue",
-            "note": "Move UIDs 42 to 69 to mailbox foo."
+            "note": "The client asks to move messages 42 to 69 into the mailbox foo."
           },
           {
             "from": "server",
             "to": "client",
             "label": "* OK [COPYUID 432432 42:69 1202:1229]",
             "color": "green",
-            "note": "New UIDs in the target mailbox."
+            "note": "The server reports the UID set the moved messages received in the target mailbox."
           },
           {
             "from": "server",
             "to": "client",
-            "label": "* 22 EXPUNGE (and more)",
+            "label": "* 22 EXPUNGE",
             "color": "neutral",
-            "note": "Originals removed from the source."
+            "note": "The server reports that a message was removed from the source mailbox. More expunges may follow."
           },
           {
             "from": "server",
             "to": "client",
             "label": "a OK Done",
-            "color": "green"
+            "color": "green",
+            "note": "The tagged response completes the command."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "How MOVE differs from the three-command sequence it replaces",
+      "data": {
+        "columns": [
+          "Aspect",
+          "COPY, STORE and EXPUNGE",
+          "MOVE"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Net effect",
+              "A new message in the target mailbox, the original removed",
+              "The same"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "Intermediate states",
+              "Other clients can see the message in both mailboxes between the steps",
+              "The intermediate states do not occur"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "STORE response code",
+              "Returned",
+              "Must not be generated"
+            ],
+            "self": true
+          },
+          {
+            "cells": [
+              "\\DELETED flag",
+              "Set on the source messages",
+              "Must not be set"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "syntax",
+      "position": "after",
+      "caption": "The grammar the RFC adds to IMAP",
+      "data": {
+        "title": "ABNF productions",
+        "lang": "abnf",
+        "code": "capability     =/ \"MOVE\"\n\ncommand-select =/ move\nmove           = \"MOVE\" SP sequence-set SP mailbox\nuid            = \"UID\" SP (copy / fetch / search / store / move)"
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "compatibility",
+      "position": "after",
+      "caption": "How MOVE meets the other IMAP extensions",
+      "data": {
+        "items": [
+          {
+            "title": "QUOTA",
+            "text": "A MOVE may succeed where a COPY would cause a quota overrun."
+          },
+          {
+            "title": "ACL",
+            "text": "The access control rights needed for MOVE are the union of those for UID STORE, UID COPY and UID EXPUNGE."
+          },
+          {
+            "title": "UIDPLUS",
+            "text": "A server should send COPYUID in response to a UID MOVE, and should send it before any EXPUNGE."
+          },
+          {
+            "title": "QRESYNC",
+            "text": "The server must bump the per-mailbox modification sequence when messages are moved, and a client must handle VANISHED as well as EXPUNGE."
+          },
+          {
+            "title": "Sieve",
+            "text": "MOVE applies to Sieve events the way COPY does, so a script sees imap.cause of COPY and never FLAG."
           }
         ]
       }
     }
   ],
   "references": [
+    {
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
     {
       "number": "[RFC3501]",
       "text": "Crispin, M., \"INTERNET MESSAGE ACCESS PROTOCOL - VERSION 4rev1\", RFC 3501, March 2003.",
@@ -164,9 +272,19 @@
       "rfc": 4315
     },
     {
+      "number": "[RFC4551]",
+      "text": "Melnikov, A. and S. Hole, \"IMAP Extension for Conditional STORE Operation or Quick Flag Changes Resynchronization\", RFC 4551, June 2006.",
+      "rfc": 4551
+    },
+    {
       "number": "[RFC5162]",
       "text": "Melnikov, A., Cridland, D., and C. Wilson, \"IMAP4 Extensions for Quick Mailbox Resynchronization\", RFC 5162, March 2008.",
       "rfc": 5162
+    },
+    {
+      "number": "[RFC5234]",
+      "text": "Crocker, D. and P. Overell, \"Augmented BNF for Syntax Specifications: ABNF\", STD 68, RFC 5234, January 2008.",
+      "rfc": 5234
     },
     {
       "number": "[RFC2087]",
@@ -182,10 +300,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

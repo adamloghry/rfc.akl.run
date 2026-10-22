@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Introduces an in-band way for DNS operators to publish authenticated information about zones they serve. It lets managed DNS operators securely announce DNSSEC key parameters, even when no DS records exist yet, so the parent can set up the delegation. It updates RFC 7344 and RFC 8078.</p>",
   "plainLanguage": {
-    "summary": "<p>A hosting company can leave a signed note for the registry saying here are my keys, so the registry can safely turn on security.</p>"
+    "summary": "<p>To turn on DNSSEC for a domain, the registry that runs the parent zone needs the domain's signing key, and it needs to be sure that key really belongs to the domain. This document lets the company that hosts the domain publish a signed copy of that key in a place the registry can check. The registry compares the two copies and only then writes the record that makes the domain signed.</p>"
   },
   "questions": [
     "dnssec bootstrapping",
@@ -22,34 +22,34 @@
   ],
   "subtitle": "How a DNS operator can publish signed hints that let a parent zone safely switch on DNSSEC for a new delegation.",
   "tldr": {
-    "problem": "Securing a delegation with DNSSEC for the first time means getting the child's key parameters to the parent over a trusted channel, which is usually manual, error-prone, or checked only weakly (for example by waiting and seeing).",
-    "mechanism": "The child's DNS operator copies the child's CDS/CDNSKEY records to special signal names under its own nameserver hostnames, in zones that are DNSSEC-signed. The parental agent compares these validated signals with what the child serves and, if they all match, publishes the DS records.",
-    "outcome": "The parent gets a cryptographically validated, in-band way to bootstrap DNSSEC. RFC 9615 makes this the preferred method over the RFC 8078 enrollment methods and updates RFC 7344. It does not work for delegations whose nameservers are all inside the child domain.",
+    "problem": "A parent zone cannot sign a delegation to a child zone until it has the child's DNSSEC key in a form it can trust. The keys are usually passed by hand, which is slow and error-prone, and the automated alternative in RFC 8078 has no way to check the keys when the delegation has no chain of trust yet.",
+    "mechanism": "RFC 9615 lets the child DNS operator copy the CDS and CDNSKEY records to a signaling name under a _signal domain built from the child's own nameserver names, and sign them with the signaling zone's key. The parental agent then compares those signed records with the ones at the child apex and only publishes the DS record when they match exactly.",
+    "outcome": "The parent's checks are cryptographic rather than a delay, so the procedure is strictly stronger than the Accept after Delay method of RFC 8078. The document updates RFC 7344 and RFC 8078, and IANA has registered the _signal node name for CDS and CDNSKEY.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Signal prefix label",
-      "value": "_signal"
-    },
-    {
-      "label": "Signaling type for DNSSEC bootstrapping",
+      "label": "Signaling type",
       "value": "_dsboot"
     },
     {
-      "label": "Validation procedure",
-      "value": "4 steps"
+      "label": "Signaling domain label",
+      "value": "_signal"
     },
     {
-      "label": "Records signaled",
-      "value": "CDS and CDNSKEY"
+      "label": "Validation steps",
+      "value": "4"
     },
     {
-      "label": "Updates",
-      "value": "RFC 7344 and RFC 8078"
+      "label": "Example signaling name",
+      "value": "_dsboot.example.co.uk._signal.ns1.example.net"
+    },
+    {
+      "label": "IANA registry entry",
+      "value": "_signal added for CDS and CDNSKEY"
     }
   ],
-  "today": "<p>RFC 9615 is a Proposed Standard from July 2024 that has not been obsoleted or updated by a later RFC. It updates <a href='/rfc7344'>RFC 7344</a> and <a href='/rfc8078'>RFC 8078</a>, and says its method is preferred over the enrollment methods in Section 3 of RFC 8078.</p>",
+  "today": "<p>RFC 9615 is a Proposed Standard published in July 2024, and it has not been obsoleted. It updates RFC 7344 and RFC 8078, and IANA has added the entry _signal to the registry of underscored and globally scoped DNS node names for both CDS and CDNSKEY records.</p>",
   "glossary": [
     "dnssec",
     "ds-record",
@@ -60,118 +60,163 @@
     "name-server",
     "dns-zone",
     "zone-cut",
-    "cds-record"
+    "cds-record",
+    "cds-cdnskey",
+    "parental-agent",
+    "qname-minimization"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Bootstrapping Problem",
-      "content": "<p>To turn DNSSEC on for a zone, the parent needs to publish a <strong>DS record set</strong> that points at the child's key. Getting the key information from the child to the parent has traditionally depended on who the parties are, and often involves the child DNS operator, a registrar and the registrant. <a href='/rfc7344'>RFC 7344</a> observed that this tends to be a manual process that is prone to mistakes, and people may avoid it altogether.</p><p><a href='/rfc8078'>RFC 8078</a> automated the step: the <strong>parental agent</strong> (registry or registrar) reads the CDS and CDNSKEY records at the child's apex. For an existing delegation the child's current chain of trust can validate those records. For a brand-new one it cannot, so other means were needed: out-of-band methods, or weak cross-checks such as 'Accept after Delay'. RFC 8078 defines no in-band validation method for enabling DNSSEC.</p><p>RFC 9615 closes that gap with a generic way for a DNS operator to publish authenticated, per-zone information. DNSSEC bootstrapping is the first application. The RFC suggests others might follow, such as publishing operational metadata or API endpoints.</p>",
-      "plainLanguage": "<p>Before a lock can be put on a door, someone has to hand over the key details safely. Until now that was done by passing notes around, which is slow and easy to get wrong. This RFC gives a safer way to hand the details over.</p>"
+      "title": "Introduction",
+      "content": "<p>Securing a DNS delegation for the first time requires the child's DNSSEC parameters to be conveyed to the parent through some trusted channel. The communication has to happen between the parent registry and the DNSSEC key holder, and what that means in practice depends on the relationship the child has with the parent. The key is usually held by the child DNS operator, and the registrar, possibly through the registrant, may also be involved.</p><p>As observed in <a href='/rfc7344'>RFC 7344</a>, these dependencies often result in a manual process that is susceptible to mistakes and errors, and because of the annoyance of the process, the parties involved may avoid getting a DS record published at all.</p><p>Automated provisioning of DS records was specified in <a href='/rfc8078'>RFC 8078</a>. It is based on the parental agent, which is the registry or registrar, fetching DNSSEC key parameters from the CDS and CDNSKEY records at the child zone's apex and validating them somehow. The child's existing DNSSEC chain of trust can be used for that validation when the aim is to update an existing DS record set, such as during a key rollover. When a delegation is being bootstrapped, the child zone has no existing validation path, so other means of establishing that the records are legitimate have to be found.</p><p>Because there has been no complete solution built into the DNS itself, either out-of-band methods have been used to complete the chain of trust, or cryptographic validation has been dropped in favour of weaker cross-checks such as Accept after Delay. This document closes that gap. It introduces an in-band method for DNS operators to publish information about the zones they are authoritative for, in an authenticated manner and on a per-zone basis, so a managed DNS operator can securely announce the DNSSEC key parameters for the zones it manages. The parent can then use that signal to validate the CDS and CDNSKEY records at an insecure child zone's apex and, on success, secure the delegation.</p><p>The mechanism does not cover some edge cases, such as excessively long child zone names or domains whose nameservers are all inside the domain itself. DNSSEC bootstrapping is one application of the generic signaling mechanism the document specifies; other applications, such as publishing operational metadata or API endpoints, may follow.</p>",
+      "plainLanguage": "<p>A parent zone hands a domain over to a child zone. To make that handover secure, the parent needs the child's signing key and has to be sure the key really belongs to that child. The key is usually passed by hand, which is slow and easy to get wrong. This document replaces that hand-off with a check the parent can do by itself: the hosting company signs the key information and publishes it where the parent can verify the signature.</p>"
     },
     {
-      "id": "concepts",
+      "id": "terminology",
+      "number": "1.1",
+      "title": "Terminology",
+      "content": "<p>The document names the roles in the exchange. The <strong>child</strong> is the zone being delegated and the <strong>parent</strong> is the zone that holds the delegation. The <strong>child DNS operator</strong> is the entity that maintains and publishes the zone information for the child DNS, and the <strong>parental agent</strong> is the entity with the authority to insert DS records into the parent zone on behalf of the child, which could be the registry, the registrar, a reseller or some other authorized entity.</p><p>The four signaling terms describe where the child publishes its signal. A <strong>signaling domain</strong> is a domain name constructed by prepending the label <code>_signal</code> to a hostname taken from a delegation's NS record set, so there are as many signaling domains as there are distinct NS targets. A <strong>signaling name</strong> is the label prefixed to a signaling domain to identify a signaling type and a child zone's name. A <strong>signaling record</strong> is a DNS record located at a signaling name under a signaling domain, used by the child DNS operator to publish information about the child. A <strong>signaling type</strong> is a signal type identifier, such as <code>_dsboot</code> for DNSSEC bootstrapping. The <strong>signaling zone</strong> is the zone that is authoritative for a given signaling record.</p>",
+      "plainLanguage": "<p>Several names are used for the pieces of the exchange. The child DNS operator is the company that hosts the domain and publishes its DNS records. The parental agent is the registry or registrar that writes records into the parent zone. A signaling domain is a special name built by adding the label _signal to one of the domain's own nameserver hostnames, and a signaling name adds one more label to say which kind of signal it is.</p>"
+    },
+    {
+      "id": "design",
       "number": "3",
-      "title": "Signaling Domains and Signaling Names",
-      "content": "<p>The core idea is a <strong>signal</strong>: a DNS record the child DNS operator publishes under a name that the parental agent can find and validate. A <strong>signaling domain</strong> is built by putting the label <code>_signal</code> in front of a hostname from the delegation's NS record set. There is one signaling domain for each distinct NS target.</p><p>Each signaling domain lives in a <strong>signaling zone</strong>. If a child DNS operator implements the specification, each signaling zone MUST be signed and be validatable by the parental agent, which means it needs a valid, publicly resolvable DNSSEC chain of trust. This is typically done by securely delegating each signaling zone.</p><p>Signaling records MUST come with RRSIG records made with the signaling zone's keys. The <strong>signaling name</strong> is the child's name (without the final root label), prefixed with a label for the signaling type. For DNSSEC bootstrapping that type label is <code>_dsboot</code>.</p>",
-      "plainLanguage": "<p>Imagine each of the hosting company's offices has a signed noticeboard. A note about your website goes on every noticeboard, and the registry only trusts notes it can prove really came from those boards.</p>"
+      "title": "The Signaling Mechanism",
+      "content": "<p>The mechanism is general: a child DNS operator publishes an authenticated signal about a child zone, and parental agents or other parties discover and process it. Authenticity comes from ordinary DNSSEC validation.</p><p>Each signaling zone must be signed and must be validatable by the parental agent, which means it must have a valid, publicly resolvable DNSSEC chain of trust. This is typically achieved by securely delegating each signaling zone. For example, when publishing a signal about a child zone whose NS records are ns1.example.net and ns2.example.org, the child DNS operator must make sure the parental agent has a valid chain of trust for the zones authoritative for the signaling domains <code>_signal.ns1.example.net</code> and <code>_signal.ns2.example.org</code>.</p><p>To publish information about the child zone in an authenticated fashion, the child DNS operator must publish one or more signaling records at a signaling name under each signaling domain. The signaling records must be accompanied by RRSIG records created with the key of the corresponding signaling zone, and their type and contents depend on the type of signal.</p><p>The signaling name identifies the child and the signaling type. It is the child name with the final root label removed, prefixed with a label containing the signaling type.</p>",
+      "plainLanguage": "<p>The mechanism has two halves. The child publishes a copy of its key information under a special name and signs that copy with the key of the zone where the special name lives. The parent then resolves that name and checks the signature in the normal way, so the parent learns the key from a source it can verify rather than from a message someone sent it.</p>"
     },
     {
-      "id": "operation",
+      "id": "authentication",
       "number": "4.1",
-      "title": "Publishing the Signal",
-      "content": "<p>To say it is willing to act as the child's signer, the child DNS operator MUST copublish the child's CDS/CDNSKEY RRsets at the matching signaling name under each signaling domain, except those that would fall inside the child domain. It MAY also publish them under in-domain signaling domains for simplicity, although those are not used for validation.</p><p>Unlike the records at the child's apex, a signaling RRset MUST be signed with the signaling zone's keys, and its contents MUST be identical to the RRset at the child's apex. Because this puts CDS/CDNSKEY records at names below the apex, the RFC also says there MUST NOT be a zone cut at a signaling name, to rule out any semantic collision. For this purpose, the first bullet ('Location') of Section 4.1 of RFC 7344 is removed.</p><p>The RFC's example child is <code>example.co.uk</code> with NS records <code>ns1.example.net</code>, <code>ns2.example.org</code> and <code>ns3.example.co.uk</code>. The required signaling names are <code>_dsboot.example.co.uk._signal.ns1.example.net</code> and <code>_dsboot.example.co.uk._signal.ns2.example.org</code>. Nothing is required under the in-domain <code>_signal.ns3.example.co.uk</code>.</p>",
-      "plainLanguage": "<p>The hosting company pins a signed copy of the website's key details to each of its outside noticeboards. It does not bother with a board that belongs to the website itself, because nobody can trust that one yet.</p>"
+      "title": "Publishing the Consent Signal",
+      "content": "<p>To confirm its willingness to act as the child's delegated signer and to authenticate the child's CDS and CDNSKEY record sets, the child DNS operator must copy those records to the corresponding signaling name under each signaling domain, excluding the signaling domains that fall within the child domain itself. For simplicity the operator may also copy them to signaling domains inside the child domain, although those are not used for validation.</p><p>Unlike the CDS and CDNSKEY records at the child's apex, a signaling record set must be signed with the key of the corresponding signaling zone, and its contents must be identical to the record set published at the child's apex.</p><p>Existing use of CDS and CDNSKEY records was specified at the child apex only. This protocol extends the use of these record types to owner names other than the apex, for the purpose of DNSSEC bootstrapping. To exclude the possibility of a semantic collision, there must not be a zone cut at a signaling name.</p><p>The worked example bootstraps the child zone example.co.uk, whose NS records are ns1.example.net, ns2.example.org and ns3.example.co.uk. The required signaling domains are <code>_signal.ns1.example.net</code> and <code>_signal.ns2.example.org</code>, and the operator authenticates the CDS and CDNSKEY records found at the child's apex by copying them as CDS and CDNSKEY records at the names <code>_dsboot.example.co.uk._signal.ns1.example.net</code> and <code>_dsboot.example.co.uk._signal.ns2.example.org</code>. These record sets are signed with DNSSEC just like any other zone data. Publication under the in-domain name <code>_signal.ns3.example.co.uk</code> is not required.</p>",
+      "plainLanguage": "<p>The child publishes the same key records in two places. At the top of its own domain they are signed by the domain itself, which the parent cannot yet check. At the signaling name they are signed by the zone that holds the signal, which the parent can check. The contents of the two copies must be identical, so the parent can compare them.</p>"
     },
     {
       "id": "procedures",
       "number": "4.2",
-      "title": "How the Parent Validates and Reacts",
-      "content": "<p>The parental agent, knowing the child name and its NS hostnames, MUST run four steps. <strong>Step 1:</strong> check that the child has no DS records at the parent and that at least one nameserver is outside the child domain. <strong>Step 2:</strong> query the CDS/CDNSKEY RRset at the child apex directly from each authoritative server in the parent-side NS RRset, without caching. <strong>Step 3:</strong> query the RRset at the signaling name under each out-of-domain signaling domain, using a trusted resolver and enforcing DNSSEC validation. <strong>Step 4:</strong> check, separately by record type, that everything from Steps 2 and 3 is equal.</p><p>If all steps pass, the parental agent can publish the DS RRset, with the precautions in Section 5 of RFC 8078. It MUST abort on any error: the child already being securely delegated or having only in-domain nameservers, any retrieval failure, a failed DNSSEC validation or missing AD bit, or any mismatch, including an RRset that is empty in one place and non-empty in the other.</p><div class='callout callout-info'><p>Parental agents SHOULD start this procedure when they see a new or updated NS RRset, get a notification from the child, find a signaling record during a scan, an NSEC walk or a zone transfer, or hit another condition set by local policy. Timer-based scans scale poorly, so on-demand triggers such as notifications are preferred.</p></div><p>When a list of bootstrappable domains comes from somewhere other than the parent, the agent MUST NOT assume the nameserver where it saw a signal is really authoritative for that child. It MUST check that the delegation contains that hostname and query only the nameservers listed in the parent's delegation.</p>",
-      "plainLanguage": "<p>The registry asks the website directly, then checks the signed noticeboards, and only if every answer says exactly the same thing does it turn the lock on. If anything is different or missing, it stops.</p>"
+      "title": "Validating CDS and CDNSKEY Records",
+      "content": "<p>To validate a child's CDS and CDNSKEY record set for DNSSEC bootstrapping, the parental agent, knowing both the child zone name and its NS hostnames, must carry out four steps.</p><p>In step 1 it verifies that the child has no DS records published at the parent and that at least one of its nameservers is outside the child domain. In step 2 it queries the CDS and CDNSKEY record set at the child zone apex directly from each of the authoritative servers given by the delegation's parent-side NS record set, without caching. In step 3 it queries the CDS and CDNSKEY record set located at the signaling name under each signaling domain, except those inside the child domain, using a trusted DNS resolver and enforcing DNSSEC validation. In step 4 it checks, separately by record type, that all the record sets retrieved in steps 2 and 3 have equal contents.</p><p>If the steps succeed without error, the record sets are verified and the parental agent can proceed with the publication of the DS record set under the precautions described in Section 5 of <a href='/rfc8078'>RFC 8078</a>. The agent must abort if an error occurs: in step 1 if the child is already securely delegated or has in-domain nameservers only; in step 2 on any failure to retrieve the record set at the child apex from any of the authoritative nameservers; in step 3 on any failure to retrieve the record sets at the signaling name under any signaling domain, including a failure of DNSSEC validation or unauthenticated data, shown by the AD bit not being set; and in step 4 on inconsistent responses, including a record set that is empty in one of steps 2 or 3 but not the other.</p><p>In-domain signaling names have no chain of trust at bootstrapping time, so the parental agent does not consider them during validation. Consequently, if all NS hostnames are in-domain, validation cannot be completed and no DS records are published. The same follows from the length limits on DNS names: fully qualified signaling names must be valid DNS names, so the protocol does not work for unusually long child domain names or NS hostnames. As a workaround, an out-of-domain nameserver can be added to the initial NS record set and removed once bootstrapping is complete, with automation for this available through CSYNC records.</p>",
+      "plainLanguage": "<p>The parent checks the signal in four steps. It first confirms that the domain is not yet signed and that at least one nameserver sits outside the domain. It then fetches the key records straight from the domain's own servers, fetches the signed copy from the signaling name, and compares the two sets of records. If anything fails, or if the two sets differ even in one record, the parent stops and does not sign the delegation.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4.3",
+      "title": "Triggers and Discovery",
+      "content": "<p>Parental agents should start the procedure once one of the following conditions is met: the agent receives a new or updated NS record set for a child; it receives a notification that the child wishes to have its CDS or CDNSKEY record set processed; it encounters a signaling record during a proactive, opportunistic scan, such as daily queries of signaling records for some or all of its delegations; it encounters a signaling record during an NSEC walk or when parsing a signaling zone, for example when the zone is made available by zone transfer from the child DNS operator; or any other condition deemed appropriate by local policy.</p><p>Timer-based triggers such as scans have undesirable properties for processing delay and scaling, so on-demand triggers such as notifications are preferable. Using them reduces both the delay and the amount of scanning traffic.</p><p>Most discovery methods, such as daily scans of delegations, are based directly on the delegation's NS record set, and those NS names can be used as they are by the bootstrapping procedure. Some discovery methods do not give reliable knowledge of the delegation's NS record set. When signaling names are discovered by an NSEC walk or a zone transfer of a signaling zone, the parental agent must not assume that a nameserver under whose signaling domain a signaling record appears is actually authoritative for the corresponding child. Whenever a list of bootstrappable domains is obtained by any means other than directly from the parent, the agent must ascertain that the delegation actually contains the nameserver hostname seen during discovery, and must ensure that signaling-record queries are only made against the proper set of nameservers listed in the child's delegation from the parent.</p>",
+      "plainLanguage": "<p>The parent can start the check when a domain asks it to, when it notices a change to a delegation, or on a schedule. Pushing the request is faster and produces less traffic than scanning every domain every day. One caution applies to any way of finding domains other than reading the parent zone: a nameserver whose name appears in a signal is not proof that it serves that domain, so the parent must check the delegation first and query only the nameservers the delegation lists.</p>"
     },
     {
       "id": "operational-considerations",
       "number": "5",
-      "title": "Limits and Operational Advice",
-      "content": "<p>Because of Step 3, bootstrapping does not work for fully in-domain delegations, since no chain of trust to the child exists yet. As a workaround, an out-of-domain nameserver can be added to the initial NS RRset and removed after bootstrapping; <a href='/rfc7477'>RFC 7477</a> CSYNC records can automate this. Signaling names must also be valid DNS names, so the label count and length limits of <a href='/rfc1035'>RFC 1035</a> mean unusually long child domains or NS hostnames do not work.</p><p>For child DNS operators, the RFC notes that CDS/CDNSKEY and signaling records can be added without the domain owner's explicit knowledge, so operators are advised to tell owners, for example in a GUI at zone creation or by email. When moving a zone between operators, the two should cooperate, for example using the multi-signer protocols of <a href='/rfc8901'>RFC 8901</a>. Signaling domains SHOULD be delegated as standalone zones, and processed signaling records should be removed to keep the zone small.</p><p>For parental agents, it is RECOMMENDED to query signaling domains with an initially empty resolver cache, to avoid stalemates from stale cached records in Step 4. It is also RECOMMENDED to use QNAME minimization (<a href='/rfc9156'>RFC 9156</a>) for signaling lookups.</p>",
-      "plainLanguage": "<p>The trick does not work if all of a website's helpers live on the website itself, because there is no outside board to check. Everyone is also told to be open about what they are doing and to tidy up old notes.</p>"
+      "title": "Operational Recommendations",
+      "content": "<p>For the child DNS operator, it is possible to add CDS and CDNSKEY records and the matching signaling records to a zone without the domain owner's explicit knowledge. To spare domain owners from being caught off guard by the DS changes that follow, operators following this practice are advised to make it transparent, for example by informing the domain owner during zone creation or by notifying them by email.</p><p>When a zone is transferred to another DNS operator, the old and new operators need to cooperate to achieve a smooth transition, for example by using the multi-signer protocols of <a href='/rfc8901'>RFC 8901</a>. If all else fails, the domain owner might have to ask for the removal of all DS records and have the transfer performed insecurely.</p><p>Signaling domains should be delegated as standalone zones, so that the apex of the signaling zone coincides with the signaling domain. It is permissible for the signaling domain to sit inside a signaling zone with fewer labels, but a zone cut ensures that bootstrapping does not require changes to the zone that holds the nameserver hostname.</p><p>Once the operator knows that particular signaling record sets have been processed, for example because the result is visible in the parent zone, it is advised to remove them. That reduces the size of the signaling zone and makes bulk processing more efficient.</p><p>For the parental agent, stalemate situations caused by a mismatch of stale cached records have to be avoided if DNSSEC bootstrapping is to be timely. Queries into signaling domains should therefore be made with an initially empty resolver cache, or by some other method that retrieves fresh data from the authoritative servers. It is also recommended that QNAME minimization from <a href='/rfc9156'>RFC 9156</a> be used when resolving queries for signaling records, to guard against certain attacks.</p>",
+      "plainLanguage": "<p>The hosting company is advised to tell the domain owner before it adds the records, to hand over cleanly when the domain moves to another host, to give each signaling domain its own zone, and to delete the signal once it has been used. The registry is advised not to answer from its cache when it fetches a signal, because an old cached answer and a new one may disagree and stall the process.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
       "title": "Security Considerations",
-      "content": "<p>The method builds on the approaches in Section 3 of RFC 8078 but adds authentication, so the RFC says its security level is strictly higher than those approaches, such as 'Accept after Delay'. Otherwise the same security considerations apply as in RFC 8078.</p><p>The rigor in Step 2 to Step 4 is there to prevent publishing a DS RRset that only some of the NS hostnames agreed to. For example, in a setup with several operators, one operator cannot enable DNSSEC unless all the others agree. Because the child DNS operator knows the child's real CDS/CDNSKEY records, it can readily detect fraudulent DS provisioning.</p><p>To avoid the parents of the nameserver hostnames becoming a single point of failure, the RFC advises diversifying the path from the root to those hostnames, for example by using different, independently operated TLDs. Without QNAME minimization, an upstream parent of a signaling domain would see the CDS/CDNSKEY queries and could answer with its own signed answer instead of a referral, so using it reduces the forgery attack surface.</p>",
-      "plainLanguage": "<p>Because the registry insists that every noticeboard agrees, one dishonest board cannot trick it. It is also wise to keep the boards in different places so one problem cannot break everything.</p>"
-    },
-    {
-      "id": "iana-considerations",
-      "number": "7",
-      "title": "IANA Registrations",
-      "content": "<p>IANA has added two entries to the 'Underscored and Globally Scoped DNS Node Names' registry from <a href='/rfc8552'>RFC 8552</a>: the RR types <code>CDS</code> and <code>CDNSKEY</code>, each with the node name <code>_signal</code>, referencing RFC 9615.</p>",
-      "plainLanguage": "<p>The official list of reserved name tags now includes the <code>_signal</code> tag for these two kinds of record, so nobody else uses it for something different.</p>"
+      "content": "<p>The method introduced here is based on the approaches in Section 3 of <a href='/rfc8078'>RFC 8078</a> but adds authentication to the CDS and CDNSKEY concept. Its security level is therefore strictly higher than that of the existing approaches described in that document, such as Accept after Delay. Apart from this general improvement, the same security considerations apply as in RFC 8078.</p><p>The level of rigor required in the validation procedure is needed to prevent the publication of an ill-conceived DS record set that is authorized only under a subset of the NS hostnames. This ensures, for example, that an operator in a multihomed setup cannot enable DNSSEC unless the other operators agree.</p><p>In any case, the child DNS operator has authoritative knowledge of the child's CDS and CDNSKEY records, so it can readily detect fraudulent provisioning of DS records.</p><p>To prevent the parents of nameserver hostnames from becoming a single point of failure for a delegation, both in resolution availability and in the trust model of the protocol, it is advisable to diversify the path from the root to the child's nameserver hostnames, for example by using different and independently operated top-level domains for each of them.</p><p>If QNAME minimization is not used when querying for signaling records, an upstream parent of a signaling domain will see those CDS and CDNSKEY queries and could respond with an authoritative answer signed with its own key instead of sending the referral. Enabling QNAME minimization reduces the attack surface for such a forgery.</p>",
+      "plainLanguage": "<p>The check is stronger than the older methods, which relied on waiting rather than on verifying anything. The strict comparison also stops one operator in a shared setup from signing a domain that other operators have not agreed to. Two operational points follow: the domain's nameservers should not all sit under one top-level domain, so that one failure cannot stop the delegation, and the lookup for the signal should be made in a way that does not reveal the full name to every server on the way.</p>"
     }
   ],
   "viz": [
     {
-      "type": "code",
-      "anchor": "operation",
+      "type": "sequence",
+      "anchor": "authentication",
       "position": "after",
-      "caption": "SIGNALING NAMES FOR THE RFC'S EXAMPLE CHILD",
+      "caption": "How the child's signal and the parent's checks fit together (illustrative)",
       "data": {
-        "title": "Names for example.co.uk",
+        "lanes": [
+          {
+            "key": "child-operator",
+            "label": "Child DNS operator"
+          },
+          {
+            "key": "signaling-zone",
+            "label": "Signaling zone"
+          },
+          {
+            "key": "child-zone",
+            "label": "Child zone"
+          },
+          {
+            "key": "parent-agent",
+            "label": "Parental agent"
+          },
+          {
+            "key": "parent-zone",
+            "label": "Parent zone"
+          }
+        ],
+        "messages": [
+          {
+            "from": "child-operator",
+            "to": "signaling-zone",
+            "label": "COPUBLISH",
+            "color": "blue",
+            "note": "The same CDS and CDNSKEY records, at the signaling name, signed with the signaling zone's key."
+          },
+          {
+            "from": "parent-agent",
+            "to": "child-zone",
+            "label": "QUERY APEX",
+            "color": "neutral",
+            "note": "Step 2: the records at the child apex, straight from each authoritative server, without caching."
+          },
+          {
+            "from": "parent-agent",
+            "to": "signaling-zone",
+            "label": "QUERY SIGNAL",
+            "color": "green",
+            "note": "Step 3: the records at the signaling name, resolved with DNSSEC validation."
+          },
+          {
+            "from": "parent-agent",
+            "to": "parent-zone",
+            "label": "PUBLISH DS",
+            "color": "green",
+            "note": "Only after the two sets of records match, checked separately for each record type."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "authentication",
+      "position": "after",
+      "caption": "Signaling names for the child example.co.uk (RFC 9615, Section 4.1.1)",
+      "data": {
+        "title": "Signaling names",
         "lang": "text",
         "code": "_dsboot.example.co.uk._signal.ns1.example.net\n_dsboot.example.co.uk._signal.ns2.example.org"
       }
     },
     {
-      "type": "sequence",
+      "type": "key-grid",
       "anchor": "procedures",
       "position": "after",
-      "caption": "VALIDATION STEPS 2 AND 3 (SIMPLIFIED)",
+      "caption": "The four steps the parental agent must complete",
       "data": {
-        "lanes": [
+        "items": [
           {
-            "key": "parent",
-            "label": "Parental agent"
+            "title": "Step 1, not secure yet",
+            "text": "Check that the child has no DS records at the parent and that at least one of its nameservers is outside the child domain."
           },
           {
-            "key": "child-ns",
-            "label": "Child's nameservers"
+            "title": "Step 2, ask the child",
+            "text": "Query the CDS and CDNSKEY records at the child apex directly from each authoritative server, without caching."
           },
           {
-            "key": "resolver",
-            "label": "Trusted resolver"
-          }
-        ],
-        "messages": [
-          {
-            "from": "parent",
-            "to": "child-ns",
-            "label": "CDS/CDNSKEY at apex",
-            "color": "blue",
-            "note": "Step 2: asked of each authoritative server, without caching."
+            "title": "Step 3, ask the signal",
+            "text": "Query the signaling name under each signaling domain with a trusted resolver and enforce DNSSEC validation."
           },
           {
-            "from": "child-ns",
-            "to": "parent",
-            "label": "Apex RRsets",
-            "color": "green"
-          },
-          {
-            "from": "parent",
-            "to": "resolver",
-            "label": "CDS/CDNSKEY at signaling names",
-            "color": "blue",
-            "note": "Step 3: one per out-of-domain signaling domain, DNSSEC validation enforced."
-          },
-          {
-            "from": "resolver",
-            "to": "parent",
-            "label": "Validated signal RRsets",
-            "color": "green",
-            "note": "Step 4: the parent compares all results for equality."
+            "title": "Step 4, compare",
+            "text": "Check that the records retrieved in steps 2 and 3 are equal, separately for each record type."
           }
         ]
       }
@@ -189,6 +234,11 @@
       "rfc": 8078
     },
     {
+      "number": "[RFC9156]",
+      "text": "Bortzmeyer, S., Dolmans, R., and P. Hoffman, \"DNS Query Name Minimisation to Improve Privacy\", RFC 9156, November 2021.",
+      "rfc": 9156
+    },
+    {
       "number": "[RFC7477]",
       "text": "Hardaker, W., \"Child-to-Parent Synchronization in DNS\", RFC 7477, March 2015.",
       "rfc": 7477
@@ -199,23 +249,23 @@
       "rfc": 8901
     },
     {
-      "number": "[RFC9156]",
-      "text": "Bortzmeyer, S., Dolmans, R., and P. Hoffman, \"DNS Query Name Minimisation to Improve Privacy\", RFC 9156, November 2021.",
-      "rfc": 9156
+      "number": "[RFC8552]",
+      "text": "Crocker, D., \"Scoped Interpretation of DNS Resource Records through Underscored Naming of Attribute Leaves\", BCP 222, RFC 8552, March 2019.",
+      "rfc": 8552
     },
     {
-      "number": "[RFC8552]",
-      "text": "Crocker, D., \"Scoped Interpretation of DNS Resource Records through 'Underscored' Naming of Attribute Leaves\", BCP 222, RFC 8552, March 2019.",
-      "rfc": 8552
+      "number": "[RFC9499]",
+      "text": "Hoffman, P. and K. Fujiwara, \"DNS Terminology\", BCP 219, RFC 9499, March 2024.",
+      "rfc": 9499
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

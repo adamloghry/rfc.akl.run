@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Describes QNAME minimisation, a technique that improves DNS privacy. Instead of always sending the full query name and type to every upstream server, a resolver sends only as much as each server needs to see. This limits what the servers high in the DNS hierarchy learn about users. It obsoletes RFC 7816.</p>",
   "plainLanguage": {
-    "summary": "<p>Asking for directions, you only tell each helper the part they need, not your whole trip.</p>"
+    "summary": "<p>A DNS resolver normally asks every name server in the chain the same full question, even though only the last server in the chain needs the whole name. QNAME minimisation changes this: the resolver sends each server only the part of the name that server needs in order to point to the next one, and hides the record type it is really looking for. The result is that the servers near the top of the DNS learn less about what their users are looking up.</p>"
   },
   "questions": [
     "what is dns qname minimisation",
@@ -20,36 +20,40 @@
     "Privacy",
     "Resolvers"
   ],
-  "subtitle": "Resolvers stop telling every server in the DNS hierarchy the full name they are looking up.",
+  "subtitle": "A DNS resolver sends only the part of a name each server needs, so the names it looks up stay private.",
   "tldr": {
-    "problem": "A DNS resolver traditionally sends the full query name and original query type to every name server it asks, including root and top-level servers that only need to point it onwards.",
-    "mechanism": "With QNAME minimisation the resolver sends each server only one label more than the zone that server is known to serve, and may hide the original QTYPE behind another type such as A.",
-    "outcome": "It limits what servers high in the hierarchy learn, but it does not hide anything from the recursive resolver itself. This RFC obsoletes the Experimental RFC 7816 and is a Proposed Standard.",
+    "problem": "A DNS resolver traditionally sent the full name and record type it was asked about to every name server in the chain, so name servers near the top of the DNS learned about every lookup.",
+    "mechanism": "A minimising resolver replaces the query type with one of its own choosing and strips the queried name back to one label more than the longest name the target server is known to be authoritative for, then walks down label by label until it reaches the authoritative server.",
+    "outcome": "The technique is compatible with the DNS as it stands, so it could be deployed without changing the protocol, and it is now the Standards Track document on the subject, replacing the Experimental RFC 7816.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Recommended MAX_MINIMISE_COUNT",
-      "value": "10"
+      "label": "Recommended maximisation iterations",
+      "value": "10 (MAX_MINIMISE_COUNT)"
     },
     {
-      "label": "Suggested MINIMISE_ONE_LAB",
-      "value": "4"
+      "label": "Single-label iterations",
+      "value": "4 (MINIMISE_ONE_LAB)"
     },
     {
-      "label": "Extra lookups in research cited",
-      "value": "Up to 26%"
+      "label": "Label schedule for 18 labels",
+      "value": "1,1,1,1,2,2,2,2,3,3"
     },
     {
-      "label": "Extra failed lookups in research cited",
-      "value": "Up to 5%"
+      "label": "Extra DNS lookups",
+      "value": "Up to 26% more"
+    },
+    {
+      "label": "Extra failed lookups",
+      "value": "Up to 5% more"
     },
     {
       "label": "Obsoletes",
       "value": "RFC 7816"
     }
   ],
-  "today": "<p>RFC 9156 is a Proposed Standard published in November 2021. It obsoletes the Experimental <a href='/rfc7816'>RFC 7816</a> and has not itself been obsoleted or updated. The RFC notes that many resolver implementations already support QNAME minimisation.</p>",
+  "today": "<p>RFC 9156 is a Proposed Standard and the current Standards Track document on QNAME minimisation; it obsoletes RFC 7816, which was Experimental.</p><p>The document reports that many resolver implementations support QNAME minimisation, and that data from DNSThought, Verisign and APNIC shows a large percentage of the resolvers deployed on the Internet already support it in some way. It also notes that the technique was already widely deployed before it was standardised.</p>",
   "glossary": [
     "resolver",
     "recursive-resolver",
@@ -60,90 +64,111 @@
     "nxdomain",
     "wildcard-expansion",
     "cname",
-    "dns"
+    "dns",
+    "qname-minimization",
+    "qname",
+    "delegation"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Privacy Problem and the Fix",
-      "content": "<p>Before <strong>QNAME minimisation</strong>, a resolver asked \"What is the AAAA record for www.example.com?\" sent that very same question to the root name server, even with an empty cache. The RFC calls this a tradition, not a protocol requirement. It says the habit came from a wish to save requests when one name server served many zones, which was more common in the old days.</p><p>QNAME minimisation follows the principle from <a href='/rfc6973'>RFC 6973</a>: the less data you send out, the fewer privacy problems you have. It is only a change in how the resolver behaves, so it does not change the DNS protocol and can easily be deployed. The RFC states that the behaviour is allowed by <a href='/rfc1034'>RFC 1034</a> and <a href='/rfc1035'>RFC 1035</a>. It is also explicit that this is one tool among many and does not fully solve DNS privacy.</p>",
-      "plainLanguage": "<p>Long ago, people always told every helper the whole address, just because that was how it had always been done. Nobody needs that, so now each helper hears only what they need.</p>"
+      "title": "Introduction and Background",
+      "content": "<p>A DNS resolver normally sends the full name and record type it was asked about to every name server it consults. When a client asks for the AAAA record of <code>www.example.com</code>, a resolver with an empty cache sends that same question to the root, then to the name server for <code>com</code>, and on down to the server that actually holds the record.</p><p>The document calls this a tradition rather than a protocol requirement. In a conversation with one of the authors in January 2015, Paul Mockapetris explained that the habit came from a wish to reduce the number of requests, back when one set of name servers served both <code>.com</code> and the root, or when a name server was both recursive and authoritative. The DNS is quite different now, and only the one server that is authoritative for the requested record needs the full name and the original record type.</p><p>RFC 9156 obsoletes RFC 7816, which was categorised Experimental. The ideas from it were already widely deployed, and the lessons learned while implementing it were used to produce this revision.</p>",
+      "plainLanguage": "<p>Before this change, a resolver passed the whole name it was asked about to every server it consulted. Only the last server in the chain needs the whole name, so sending it earlier tells more servers more than they need to know. This document makes the resolver send each server only the part it needs.</p>"
     },
     {
-      "id": "concepts",
+      "id": "overview",
       "number": "2",
-      "title": "What a Minimising Resolver Sends",
-      "content": "<p>The full <code>QNAME</code> and original <code>QTYPE</code> are only needed at the name server that is authoritative for the record the client asked for. Every other server queried along the way only needs enough of the name to answer with a delegation. Sending more exposes privacy-sensitive data for no benefit.</p><p>So a minimising resolver sends queries that contain:</p><ul><li>a QTYPE chosen by the resolver to possibly obscure the original QTYPE;</li><li>the original QNAME, stripped to just one label more than the longest matching domain name for which the server is known to be authoritative.</li></ul><p>For the QTYPE, this RFC relaxes the recommendation of <a href='/rfc7816'>RFC 7816</a> to use <code>NS</code>. Using NS is still allowed but has no added value. Any type whose authority always lies below the zone cut will do, as long as the choice has no relation to the incoming QTYPE. <code>A</code> or <code>AAAA</code> are always good candidates because they are least likely to trip up software and middleboxes, and they blend into traffic from non-minimising resolvers.</p><p>Zone cuts do not necessarily exist at every label boundary. In <code>www.foo.bar.example</code> there might be a cut between foo and bar but not between bar and example, so the resolver may have to probe: ask for <code>bar.example</code>, get a non-referral answer, then ask again with one more label.</p>",
-      "plainLanguage": "<p>Each helper only needs to know which direction to point you, so you give just the next piece of the address. You also ask a bland question so they cannot guess what you really want.</p>"
+      "title": "Description of QNAME Minimisation",
+      "content": "<p>The idea is to minimise the privacy-sensitive data a resolver sends to authoritative name servers. A minimising resolver obscures the QNAME and QTYPE in queries sent to a name server that is not known to be responsible for the original name. Each such query contains a QTYPE selected by the resolver, and a QNAME that is the original name stripped to just one label more than the longest matching domain name for which the name server is known to be authoritative.</p><p>The QTYPE in these queries does not matter to the answer, because the server cannot hold the records the client is looking for; it can only answer with a referral to the next zone. The chosen QTYPE must be one whose authority always lies below the zone cut, which rules out DS, NSEC, NSEC3, OPT, TSIG, TKEY, ANY, MAILA, MAILB, AXFR and IXFR. A and AAAA are always good candidates, because DNS software and middleboxes that do not handle every type handle these well, and queries of these types blend into traffic from resolvers that do not minimise.</p><p>Because this changes only how the resolver operates and not the DNS protocol itself, it is allowed by Section 5.3.3 of <a href='/rfc1034'>RFC 1034</a> and Section 7.2 of <a href='/rfc1035'>RFC 1035</a>, and it can be deployed without changing anything else in the system.</p>",
+      "plainLanguage": "<p>Each query the resolver sends upstream has two parts: the type of record it asks for, and the name it asks about. Minimisation replaces the record type with one the resolver picks, and shortens the name to the shortest one that still identifies the right zone. The server answers with a referral to the next zone, which is all the resolver needs to continue.</p>"
     },
     {
-      "id": "operational-considerations",
-      "number": "3",
+      "id": "parameters",
+      "number": "2.3",
       "title": "Limiting the Number of Queries",
-      "content": "<p>Minimising can mean more queries, because a cold resolver may send one per label. Resolvers supporting QNAME minimisation <strong>MUST</strong> implement a mechanism to limit the number of outgoing queries per user request. The RFC warns that an attacker can exploit the extra queries: a name with more than 100 labels answered by a wildcard record, using random labels to bypass the cache, forces the resolver to send many queries upstream. <a href='/rfc8198'>RFC 8198</a> can limit this attack in some cases.</p><p>One optional mechanism is to append more than one label per iteration for names with many labels. A maximum number of iterations (<code>MAX_MINIMISE_COUNT</code>) MUST be selected, with 10 as the RECOMMENDED value. A number of queries that only add one label (<code>MINIMISE_ONE_LAB</code>) MAY be selected, with 4 as a good value, because exposing few labels early on gives the most privacy benefit. For an 18-label name with those settings, the labels added per iteration are 1,1,1,1,2,2,2,2,3,3.</p><p>Another optional shortcut treats labels starting with an underscore as not being privacy-relevant administrative boundaries, so <code>_25._tcp.mail.example.org</code> can be queried in one step once <code>mail.example.org</code> has been searched.</p><p>Stub and forwarding resolvers MAY implement minimisation, but it does not hide data from the upstream resolver, and without a way to find and cache zone cuts it drastically increases outgoing queries.</p>",
-      "plainLanguage": "<p>If you give out the address one tiny piece at a time, the trip takes many stops. So there is a rule that says: do not take too many stops, and sometimes hand over a few pieces at once.</p>"
+      "content": "<p>The number of labels in a query affects how many upstream queries a minimising resolver sends, because the resolver may have to probe label by label to find where the zone cut lies. A resolver that supports QNAME minimisation must therefore implement a mechanism that limits the number of outgoing queries it makes per user request.</p><p>The limit is expressed as two values. The resolver adds one label at a time for a fixed number of iterations, then divides the labels that are still hidden over the remaining iterations. RFC 9156 gives a recommended value of 10 for the maximum number of minimisation iterations (MAX_MINIMISE_COUNT) and says a good value for the number of iterations that add a single label is 4 (MINIMISE_ONE_LAB). For a name with 18 labels, that schedule adds 1,1,1,1,2,2,2,2,3,3 labels per iteration.</p><p>Without a limit, an attacker can force heavy upstream traffic. A query for a name with more than 100 labels that ends in a zone served by a wildcard record produces one upstream query per label, and random labels keep missing the cache. RFC 8198 can limit this attack in some cases. The document also offers an optional refinement: labels that begin with an underscore are assumed not to mark a privacy-relevant administrative boundary, so they can be exposed together.</p>",
+      "plainLanguage": "<p>A minimising resolver has to cap how many upstream queries it sends for one client request, because a name with many labels can force a separate query for every label. The document recommends 10 rounds of minimisation, adding one label at a time for the first four and then sharing the remaining labels between the rest.</p>"
     },
     {
-      "id": "procedures",
-      "number": "4",
-      "title": "The Resolution Algorithm",
-      "content": "<p>Section 3 gives a step-by-step algorithm for finding zone cuts that are not yet known. In outline:</p><ul><li>Answer from the cache if possible. Otherwise find the closest known delegation point, called <code>ANCESTOR</code>, and start with <code>CHILD</code> equal to it.</li><li>If CHILD equals the QNAME (or is one label short for a type that only lives at the parent, like <code>DS</code>), resolve the original query normally from ANCESTOR's name servers.</li><li>Otherwise add the next relevant label or labels from the QNAME to CHILD and check the cache. A cached NXDOMAIN can end the lookup if the resolver supports <a href='/rfc8020'>RFC 8020</a>.</li><li>Query ANCESTOR's name servers for CHILD with the selected QTYPE. A referral is cached and the loop restarts from the closest delegation. A DNAME response restarts resolution at the new name. Other NOERROR answers are cached and the loop continues. An NXDOMAIN ends the lookup if RFC 8020 is supported. A timeout or other response code may be retried against a different ANCESTOR name server.</li></ul>",
-      "plainLanguage": "<p>You keep adding the next piece of the address and asking the nearest helper. If they point you onwards, you move to the new helper. When you have the whole address, you ask your real question.</p>"
+      "id": "operation",
+      "number": "3",
+      "title": "The QNAME Minimisation Algorithm",
+      "content": "<p>The algorithm in Section 3 resolves a name when the zone cuts are not yet known. It starts from the closest delegation point in the cache that can be used for the original name, called the ANCESTOR, and grows a name called CHILD towards the original QNAME. For a record type whose authority lies only at the parent side, such as DS, the ANCESTOR is the delegation whose owner matches the most labels after the QNAME has been stripped by one label.</p><p>Each iteration looks for a cached answer at CHILD. If the cache holds an NXDOMAIN and the resolver supports <a href='/rfc8020'>RFC 8020</a>, that answer can be returned to the client and the process stops. Otherwise the resolver queries one of the ANCESTOR's name servers for CHILD using the selected QTYPE, and acts on the answer: a referral is cached and the search restarts from the closest known delegation point; a DNAME answer restarts the whole resolution for the new name; any other NOERROR answer, including NODATA, is cached and the algorithm continues; an NXDOMAIN either ends the resolution, when the resolver supports RFC 8020, or sends the algorithm back to the start; a timeout or another RCODE may be retried with a different ANCESTOR name server.</p><p>When CHILD is the same as the original QNAME, or when CHILD is one label shorter and the original QTYPE can only be answered at the parent side, the resolver resolves the original query as normal, starting from the ANCESTOR's name servers.</p>",
+      "plainLanguage": "<p>The resolver goes through the name one label at a time, asking the name servers it already knows for the next part of the name. A referral tells it where the next zone starts, so it starts again from there. Once it reaches the full name, it asks the real question, with the original record type, and only to the server that can answer it.</p>"
     },
     {
       "id": "examples",
-      "number": "5",
-      "title": "Worked Examples",
-      "content": "<p>The RFC compares resolving an <code>MX</code> record for <code>a.b.example.org</code> with a cold cache. Traditionally, the resolver sends the full question to the root, the org and the example.org name servers. With minimisation and <code>A</code> as the hiding QTYPE, it asks the root for <code>org</code>, the org servers for <code>example.org</code>, then the example.org servers for <code>b.example.org</code> and <code>a.b.example.org</code> (since \"a\" may be delegated), and finally for the MX record of <code>a.b.example.org</code>.</p><p>If the original type had been A, one query would have been saved, so using the most-used QTYPE to hide the original slightly reduces the number of queries. With a warm cache, the first queries for org are not needed.</p>",
-      "plainLanguage": "<p>Instead of shouting your whole question to the first helper, you ask for one piece at a time. The last helper is the only one who hears the full question.</p>"
+      "number": "4",
+      "title": "QNAME Minimisation Examples",
+      "content": "<p>Section 4 works through a request for the MX record of <code>a.b.example.org</code> with a cold cache. The traditional algorithm sends the same full name and the same MX type three times: to the root, to the <code>org</code> name servers, and to the <code>example.org</code> name servers. With minimisation, the resolver asks for <code>org</code> with an A query, then <code>example.org</code> with an A query, then <code>b.example.org</code>, then <code>a.b.example.org</code>, and only at the end asks for the MX record of the full name.</p><p>The document notes that one query would have been saved if the incoming record type had been the same as the type the resolver chose to hide it, which is why using the most common incoming type slightly reduces the number of outgoing queries. A warm cache removes the first step entirely, because the delegation for <code>org</code> is already known.</p>",
+      "plainLanguage": "<p>The document works through one request: looking up the MX record of a name under example.org. The traditional method repeats the same full question at every step of the chain. The minimised method asks about one more label each time and keeps the real record type hidden until the last step, where the authoritative server is reached.</p>"
     },
     {
       "id": "performance",
-      "number": "6",
-      "title": "Performance Effects",
-      "content": "<p>The main goal is privacy, but there can be side benefits. If a resolver asks the root about A.example, B.example and C.example, it gets three NXDOMAIN answers. A minimising resolver sends one question for <code>.example</code> itself, caches the NXDOMAIN, and can use it to prove nothing exists below it (<a href='/rfc8020'>RFC 8020</a>). So the total number of upstream queries could counterintuitively be lower.</p><p>On the other side, it can increase queries depending on the incoming name. Citing academic research, the RFC says QNAME minimisation increases the number of DNS lookups by up to 26% and leads to up to 5% more failed lookups, and that filling the cache in a production resolver softens that overhead.</p>",
-      "plainLanguage": "<p>Sometimes asking in small pieces means more questions. But sometimes the first small question gets a clear \"no such place\" and saves you lots of other questions.</p>"
+      "number": "5",
+      "title": "Performance Considerations",
+      "content": "<p>Minimising can reduce the number of upstream queries in a common case. If a resolver sends the root server queries for <code>A.example</code>, then <code>B.example</code>, then <code>C.example</code>, the result is three NXDOMAIN answers, because <code>.example</code> does not exist in the root zone. A minimising resolver sends one question, about <code>.example</code> itself, and can cache that single NXDOMAIN and use it to show that nothing below <code>.example</code> exists, as described in <a href='/rfc8020'>RFC 8020</a>. It then knows in advance that neither <code>B.example</code> nor <code>C.example</code> exist, so in this case the total number of upstream queries can be lower than under the traditional iteration.</p><p>Minimisation can also increase the number of queries, because the number of labels in the incoming name drives how many upstream requests are made. The research cited in the document measures an increase of up to 26% in DNS lookups and up to 5% more failed lookups. Filling the cache in a production resolver softens that overhead, and the difference between a cold and a warm cache is small.</p>",
+      "plainLanguage": "<p>Minimising the name sometimes saves queries, because one answer about a parent name can rule out every name below it. It can also add queries, because each extra label may need its own lookup. The document cites measurements of up to 26% more lookups and up to 5% more failed lookups, and notes that a busy resolver's cache absorbs much of that.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
+      "number": "6",
       "title": "Security Considerations",
-      "content": "<p>Minimising helps most where you want to reduce what the authoritative name server learns about the queried name. It also partly helps against a wire sniffer, but only if the sniffer is on the DNS path. Encryption is a better defence against sniffers, but unlike QNAME minimisation it changes the protocol and cannot be deployed unilaterally.</p><p>It offers <strong>no protection against the recursive resolver</strong>, which still sees the full request from the stub resolver. A minimising resolver can also be used to cause a query storm when resolving names with a large number of labels. Section 2.3 proposes methods to significantly dampen that.</p>",
-      "plainLanguage": "<p>This only keeps the middle helpers from hearing your whole address. The first helper you talk to, the one who does all the asking for you, still hears everything.</p>"
+      "content": "<p>The document presents QNAME minimisation as one tool among many for DNS privacy, not as a full solution. It reduces what the authoritative name server learns about the query, and it also reduces what a wire sniffer on the path can read. Encryption is the better defence against a wire sniffer, but unlike minimisation it changes the protocol and cannot be deployed on one side alone, and the effect of minimisation against a sniffer depends on whether the sniffer is on the DNS path at all.</p><p>Minimisation offers no protection against the recursive resolver, which still sees the full request coming from the stub resolver. The document also points out the query amplification described in Section 2.3, and the limit proposed in that section is what dampens it down.</p>",
+      "plainLanguage": "<p>Minimising the name helps against the servers that answer the query and against someone watching the traffic, but it does nothing about the resolver that receives the original request. It is one tool for DNS privacy rather than a complete answer to it.</p>"
     }
   ],
   "viz": [
     {
       "type": "sequence",
-      "anchor": "examples",
+      "anchor": "operation",
       "position": "after",
-      "caption": "COLD CACHE QUERIES FOR AN MX RECORD OF A.B.EXAMPLE.ORG (RFC 9156, TABLE 2)",
+      "caption": "COLD-CACHE QNAME MINIMISATION FOR AN MX LOOKUP (RFC 9156, TABLE 2)",
       "data": {
         "lanes": [
+          {
+            "key": "client",
+            "label": "Client"
+          },
           {
             "key": "resolver",
             "label": "Resolver"
           },
           {
             "key": "root",
-            "label": "Root server"
+            "label": "Root name server"
           },
           {
             "key": "org",
-            "label": "org server"
+            "label": "org name server"
           },
           {
             "key": "example-org",
-            "label": "example.org server"
+            "label": "example.org name server"
           }
         ],
         "messages": [
           {
+            "from": "client",
+            "to": "resolver",
+            "label": "MX a.b.example.org",
+            "color": "blue",
+            "note": "The original request."
+          },
+          {
             "from": "resolver",
             "to": "root",
             "label": "A org",
-            "color": "blue"
+            "color": "blue",
+            "note": "QTYPE chosen by the resolver; QNAME stripped to the shortest name the root can answer."
+          },
+          {
+            "from": "root",
+            "to": "resolver",
+            "label": "referral to .org",
+            "color": "neutral"
           },
           {
             "from": "resolver",
@@ -152,26 +177,61 @@
             "color": "blue"
           },
           {
+            "from": "org",
+            "to": "resolver",
+            "label": "referral to example.org",
+            "color": "neutral"
+          },
+          {
             "from": "resolver",
             "to": "example-org",
             "label": "A b.example.org",
             "color": "blue"
           },
           {
+            "from": "example-org",
+            "to": "resolver",
+            "label": "referral to example.org",
+            "color": "neutral"
+          },
+          {
             "from": "resolver",
             "to": "example-org",
             "label": "A a.b.example.org",
             "color": "blue",
-            "note": "\"a\" may be delegated"
+            "note": "The label that may be delegated."
+          },
+          {
+            "from": "example-org",
+            "to": "resolver",
+            "label": "answer",
+            "color": "neutral"
           },
           {
             "from": "resolver",
             "to": "example-org",
             "label": "MX a.b.example.org",
             "color": "green",
-            "note": "The only query with the original QTYPE."
+            "note": "The original question, asked only of the server that is authoritative."
+          },
+          {
+            "from": "example-org",
+            "to": "resolver",
+            "label": "MX answer",
+            "color": "green"
           }
         ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "examples",
+      "position": "after",
+      "caption": "TABLE 2, COLD CACHE WITH QNAME MINIMISATION (RFC 9156)",
+      "data": {
+        "title": "Cold cache with QNAME minimisation",
+        "lang": "text",
+        "code": "+=======+=================+=========================+============+\n| QTYPE | QNAME           | TARGET                  | NOTE       |\n+=======+=================+=========================+============+\n| A     | org             | root name server        |            |\n+-------+-----------------+-------------------------+------------+\n| A     | example.org     | org name server         |            |\n+-------+-----------------+-------------------------+------------+\n| A     | b.example.org   | example.org name server |            |\n+-------+-----------------+-------------------------+------------+\n| A     | a.b.example.org | example.org name server | \"a\" may be |\n|       |                 |                         | delegated  |\n+-------+-----------------+-------------------------+------------+\n| MX    | a.b.example.org | example.org name server |            |\n+-------+-----------------+-------------------------+------------+"
       }
     }
   ],
@@ -187,8 +247,13 @@
       "rfc": 1035
     },
     {
+      "number": "[RFC2181]",
+      "text": "Elz, R. and R. Bush, \"Clarifications to the DNS Specification\", RFC 2181, July 1997.",
+      "rfc": 2181
+    },
+    {
       "number": "[RFC6973]",
-      "text": "Cooper, A., et al., \"Privacy Considerations for Internet Protocols\", RFC 6973, July 2013.",
+      "text": "Cooper, A., Tschofenig, H., Aboba, B., Peterson, J., Morris, J., Hansen, M., and R. Smith, \"Privacy Considerations for Internet Protocols\", RFC 6973, July 2013.",
       "rfc": 6973
     },
     {
@@ -215,10 +280,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

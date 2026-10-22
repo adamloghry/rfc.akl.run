@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines a framework for coupling the Active Queue Management algorithms of two queues, for flows that respond to congestion differently. It offers a path for the Internet to move from classic Reno-friendly congestion control to scalable congestion control with very low queuing delay. It is an experimental specification.</p>",
   "plainLanguage": {
-    "summary": "<p>Two lines at a shop, one for gentle shoppers and one for pushy ones, are linked so both get a fair turn and the gentle line stays quick.</p>"
+    "summary": "<p>L4S is about delay. The idea is that a router keeps two queues at its bottleneck: one for ordinary TCP-style traffic and one for newer traffic that reacts to congestion much faster. The router then links the two so that neither group gets more of the link than the other.</p><p>The point is that the fast-reacting traffic gets a very short, very steady wait in the queue while the ordinary traffic keeps the throughput it had before.</p>"
   },
   "questions": [
     "what is dualq coupled aqm",
@@ -21,9 +21,9 @@
   ],
   "subtitle": "Two linked queues let low-latency Scalable traffic and Classic TCP-style traffic share one link fairly without per-flow inspection.",
   "tldr": {
-    "problem": "Classic congestion controls such as Reno and CUBIC need a big queue to keep a link full, which makes queuing delay vary. Scalable controls that could give consistently low delay were too aggressive to share an ECN-capable queue with them.",
-    "mechanism": "A DualQ Coupled AQM keeps an L4S queue and a Classic queue. The Classic queue's drop probability is tied to the L4S marking probability by p_C = (p_CL / k)^2, so both kinds of flow get roughly the same throughput, while the L4S queue gets conditional priority for low delay.",
-    "outcome": "It is an Experimental specification. It lets Scalable congestion controls be deployed on the shared Internet, without clean-slate environments such as private data centres.",
+    "problem": "Classic TCP-style congestion control needs a large queue to keep a link full, so queuing delay stays high and varies. Newer Scalable congestion controls can keep a link full with almost no queue, but on their own they would push Classic traffic out of the way.",
+    "mechanism": "The router keeps two queues, one for each kind of traffic, and links them. The Classic queue's marking probability is tied to the square of the L4S queue's, so both kinds of flow get roughly the same throughput while the L4S queue stays nearly empty.",
+    "outcome": "The RFC fixes the framework and its requirements rather than one algorithm, and gives two example algorithms in its appendices. It is an Experimental document, and it needs the matching ECN protocol in RFC 9331 to work.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -32,72 +32,82 @@
       "value": "2"
     },
     {
-      "label": "Queues",
-      "value": "2 (L4S and Classic)"
+      "label": "L4S average queuing delay in the tests",
+      "value": "Below 1 ms"
     },
     {
-      "label": "L4S identifier",
-      "value": "ECT(1) and CE codepoints"
+      "label": "L4S 99th percentile delay in tests",
+      "value": "No worse than 2 ms"
     },
     {
-      "label": "Example Classic scheduler weight",
-      "value": "1/16"
+      "label": "Classic AQM worst-case smoothing delay",
+      "value": "About 100-200 ms"
     },
     {
-      "label": "Required default configuration",
-      "value": "None needed on the public Internet (SHOULD NOT)"
+      "label": "Queuing delay with current AQMs",
+      "value": "5-15 ms on average and 20-30 ms at the 99th percentile"
+    },
+    {
+      "label": "Range of the test links",
+      "value": "Base round-trip delays up to 100 ms and link rates up to 200 Mb/s"
     }
   ],
-  "today": "<p>RFC 9332 is an Experimental RFC, published in January 2023, and the metadata lists no RFC that obsoletes or updates it. It works together with the L4S architecture in <a href='/rfc9330'>RFC 9330</a> and the L4S ECN protocol in <a href='/rfc9331'>RFC 9331</a>.</p>",
+  "today": "<p>RFC 9332 is an Experimental document and has not been obsoleted. It is the network half of the L4S work: <a href='/rfc9330'>RFC 9330</a> describes the overall architecture and <a href='/rfc9331'>RFC 9331</a> the ECN protocol that end systems use with it.</p>",
   "glossary": [
     "congestion-control",
     "active-queue-management",
     "explicit-congestion-notification",
     "scalable-congestion-control",
-    "weighted-fair-queueing"
+    "weighted-fair-queueing",
+    "queuing-delay",
+    "round-trip-time",
+    "packet-loss",
+    "ecn",
+    "diffserv",
+    "tcp"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "The Problem and the Idea",
-      "content": "<p>RFC 9332 specifies a framework for <strong>DualQ Coupled AQMs</strong>, which serve as the network part of the L4S architecture in <a href='/rfc9330'>RFC 9330</a>. Latency is becoming the critical performance factor for many applications, and queuing remains a major intermittent part of it. The RFC argues that better AQMs in the network alone, or better congestion control in end systems alone, are both yielding diminishing returns.</p><p>The text reports that recent single-queue AQMs are tuned to let a typical Reno-friendly flow induce an average queue that roughly doubles the base round-trip time, adding 5-15 ms of queuing on average. It also gives 20-30 ms as the 99th percentile queuing delay with those AQMs, against 2 ms with L4S for the same traffic.</p><p>Until now, Scalable controls such as DCTCP did not coexist well with Classic ones in a shared ECN-capable queue, because Scalable controls are so aggressive that Classic flows drive themselves to a small capacity share. They could only be deployed where a clean-slate environment could be arranged.</p>",
-      "plainLanguage": "<p>Some internet programs need to wait in a long line to go fast, and others want almost no wait. When they shared one line, the pushy ones crowded out the rest. This document builds two linked lines so both kinds get what they need.</p>"
+      "title": "The Problem With Classic Congestion Control",
+      "content": "<p>Latency is becoming the critical performance factor for many applications on the public Internet, among them interactive web, voice, conversational video, online gaming and remote desktop. Once access network bitrates reach the levels now common in the developed world, further increases give diminishing returns unless latency is addressed too. Queuing remains a major intermittent component of latency.</p><p>Very low latency has so far only been available to a few selected low-rate applications that confine their sending rate within a specially carved-off portion of capacity, which is prioritised over other traffic, for example Diffserv Expedited Forwarding. It has not been possible to let any number of low-latency, high-throughput applications seek to fully use available capacity, because the capacity-seeking process itself causes too much queuing delay.</p><p>Recent active queue management in the network, such as Flow Queue CoDel, PIE and ARED, has reduced queuing delay for all traffic. But however good the AQM is, the capacity-seeking rate of TCP-like congestion controls sets a floor: the queue either varies or the link sits underused. These AQMs are tuned to let a typical Reno-friendly flow produce an average queue that roughly doubles the base round-trip time, which adds 5 to 15 ms of queuing on average, and a 99th percentile queuing delay of 20 to 30 ms. Research into congestion control in the end system alone, such as BBR, seems to have hit a similar floor of about 20 ms on average.</p><p>L4S learns from Data Center TCP, which shows that two small but radical changes to congestion control cut the two main causes of queuing delay variability: far smaller rate variations than Reno-friendly controls, and a shift of smoothing from the network to the sender. Both changes only work together with a complementary change in the network, and both are only feasible with ECN rather than drop, because without ECN the resulting high marking levels would become very high loss levels.</p>",
+      "plainLanguage": "<p>Ordinary TCP keeps a link busy by pushing back on itself, and the queue that builds up while it does so is what makes the connection slow. The newer methods react quickly enough to keep the queue almost empty, but only if the network cooperates.</p>"
     },
     {
       "id": "concepts",
-      "number": "2",
-      "title": "Classic and Scalable Congestion Control",
-      "content": "<p>The <strong>Classic service</strong> is for congestion controls that coexist with Reno without hurting its flow rate, such as Reno itself and CUBIC. The <strong>L4S service</strong> is for Scalable congestion controls such as Prague, which was derived from Data Center TCP. With Classic controls, it now takes hundreds of round trips to recover after a congestion signal, so control of queuing and utilization becomes very slack.</p><p>A <strong>Scalable</strong> congestion control is one where the average time from one congestion signal to the next stays the same as flow rate scales. For instance, DCTCP averages 2 congestion signals per round trip, whatever the flow rate. Scalable controls make far smaller rate variations than Reno-friendly ones and shift smoothing from the network to the sender. Both changes only work with ECN signalling, not drop: with ECN, high marking levels are just signals, not impairments.</p><div class='callout callout-info'><p>L4S packets are identified by the experimentally assigned ECN codepoints ECT(1) and CE in the IP header (see <a href='/rfc8311'>RFC 8311</a> and <a href='/rfc9331'>RFC 9331</a>).</p></div>",
-      "plainLanguage": "<p>Pushy shoppers keep tiny, quick steps and ask the cashier for a nudge all the time. Careful shoppers take big slow steps and only react when something goes wrong. The two styles need different treatment.</p>"
+      "number": "1.3",
+      "title": "Classic and Scalable Traffic",
+      "content": "<p>The DualQ Coupled AQM uses two queues for two services. The <strong>Classic service</strong> is intended for all the congestion control behaviours that coexist with Reno, such as Reno itself, CUBIC and TFRC, and the Classic queue is a queue providing that service. The <strong>L4S service</strong> is intended for traffic from Scalable congestion control algorithms such as Prague, and the L4S queue is a queue providing that service. The L4S service is for more general traffic than just Prague, so that the set of congestion controls with similar scaling properties can evolve.</p><p>A <strong>Classic Congestion Control</strong> is a behaviour that can coexist with standard Reno without significantly harming its flow rate. Because flow rates have scaled since TCP congestion control was first designed in 1988, it now takes hundreds of round trips, and growing, to recover after a congestion signal, whether a loss or an ECN mark. Control of queuing and utilisation therefore becomes very slack, and the slightest disturbance, such as new flows starting, prevents a high rate from being attained.</p><p>A <strong>Scalable Congestion Control</strong> is one where the average time from one congestion signal to the next, the recovery time, stays invariant as the flow rate scales. DCTCP, for example, averages 2 congestion signals per round trip whatever the flow rate. Scalable controls keep the same degree of control over queuing and utilisation at any flow rate, and high throughput stays robust to disturbances.</p><p>For L4S the four names of the 2-bit IP ECN field are unchanged from the original ECN specification: Not-ECT, ECT(0), ECT(1) and CE, where ECT stands for ECN-Capable Transport and CE for Congestion Experienced. A packet marked with CE is called ECN-marked.</p>",
+      "plainLanguage": "<p>Classic traffic is everything that behaves like ordinary TCP. Scalable traffic is the newer kind that reacts in step with the round trip, so its queue never has to build up to keep the link busy.</p>"
     },
     {
       "id": "design",
       "number": "2.1",
       "title": "The Coupled AQM",
-      "content": "<p>To a first-order approximation, the steady-state congestion window of Reno is inversely proportional to the square root of the drop probability p. For DCTCP, the window is inversely proportional to p itself, where p is the ECN-marking probability. So for safe coexistence, the drop probability for Classic traffic (p_C) has to differ from the marking probability for L4S traffic (p_L). <a href='/rfc8311'>RFC 8311</a> updates the original ECN spec (<a href='/rfc3168'>RFC 3168</a>), which required them to be the same, to allow experiments where they differ.</p><p>The Coupled AQM makes the Classic drop probability proportional to the square of the coupled L4S probability p_CL, so the squaring counterbalances the square root in the Reno formula. The constant of proportionality <code>k</code> is the <strong>coupling factor</strong>.</p><p>The Classic AQM is built in two stages: a base stage that outputs an internal probability p' (p-prime), then a squaring stage. The L queue also has a Native AQM that tracks the instantaneous L queue delay, and the marking applied to L traffic is the larger of that and the coupled value.</p>",
-      "plainLanguage": "<p>The slow line's waiting-time penalty is squared before it reaches the quick line, like a recipe that balances a big step on one side with a small step on the other, so both kinds of shopper end up with similar-sized portions.</p>"
+      "content": "<p>The design starts from the 1990s TCP formula, which relates the steady-state congestion window of standard Reno to the drop probability p. To a first-order approximation, the steady-state window of Reno is inversely proportional to the square root of p. The design focuses on Reno as the worst case, because if it does no harm to Reno it will not harm CUBIC or any traffic designed to be friendly to Reno.</p><p>DCTCP behaves differently: its congestion window is inversely proportional to the marking probability, not to its square root. Scalable is used for all congestion control behaviours that behave this way.</p><p>For safe coexistence a Scalable flow has to run at roughly the same rate as a Reno TCP flow, all other factors being equal, so the drop probability for Classic traffic, p_C, has to be distinct from the marking probability for L4S traffic, p_L. The original ECN specification required these to be the same, but <a href='/rfc8311'>RFC 8311</a> updates it to allow them to differ.</p><p>The Coupled AQM makes the Classic drop probability proportional to the square of the coupled L4S probability p_CL, which is an input to the instantaneous L4S marking probability p_L but changes as slowly as p_C. The squaring of p_CL counterbalances the square root of p_C in the TCP formula, so the Reno flow rate ends up roughly equal to the DCTCP flow rate. The relation is:</p><p><code>p_C = ( p_CL / k )^2</code></p><p>where k is the constant of proportionality, called the coupling factor. The L4S ECN protocol says that k does not have to be standardised for interoperability, but that a value of 2 is recommended. The choice of k is a matter of operator policy. It does not affect relative flow rates when all flows are Classic or all are L4S, and it does not affect the relative throughput of small flows.</p>",
+      "plainLanguage": "<p>The link between the queues is a single number, k, and the RFC suggests 2. The bigger it is, the more the Classic traffic is penalised relative to L4S traffic.</p>"
     },
     {
       "id": "architecture",
       "number": "2.4",
       "title": "The Dual Queue Structure",
-      "content": "<p>A classifier on the left separates incoming traffic between the L and C queues. Each queue has its own AQM that decides the likelihood of marking or dropping (p_L and p_C). A scheduler then forwards packets to the link, giving the L queue <strong>conditional priority</strong>.</p><p>The priority has to be conditional so the C queue cannot be starved in the short term. If there is only a small finite set of C packets, such as a DNS request or an initial window of data, some Classic AQMs would not induce enough ECN marking in the L queue to make it yield. Coupling only runs in one direction, from Classic to L4S. Because the scheduler is work preserving, any C traffic is scheduled in gaps that responsive L flows leave when they slow down.</p><p>Operators may also steer other packets into the L queue by their own classifiers, so it can be seen as a general low-latency queue. The RFC gives two example algorithms in appendices: <strong>DualPI2</strong>, based on a Proportional Integral controller, and <strong>Curvy RED</strong>, derived from RED. Both regulate queues against targets in units of time rather than bytes.</p>",
-      "plainLanguage": "<p>The quick line is allowed to go first, but only up to a point, so the slow line never waits forever. When the slow line gets long, it also tells the quick-line shoppers to ease off.</p>"
+      "content": "<p>A classifier separates incoming traffic between the two queues, L and C. Each queue has its own AQM that decides the likelihood of marking or dropping, p_L and p_C. The AQM for Classic traffic works in two stages: a base stage that outputs an internal probability p-prime, and a squaring stage that outputs p_C. Substituting into the coupling equation gives <code>p' = p_CL / k</code>, so the slow-moving input to ECN marking in the L queue is <code>p_CL = k*p'</code>.</p><p>The L queue uses a Native AQM that calculates a probability p-prime-L as a function of the instantaneous L queue delay. Because the L queue has conditional priority over the C queue, whenever the L queue grows the AQM ought to apply that probability, but p_L ought not to fall below p_CL. This gives <code>p_L = max(p'_L, p_CL)</code>, which has also been found to work well in practice.</p><p>After the AQMs have applied their dropping or marking, a scheduler forwards their packets to the link. The scheduler gives priority to the L queue, but not as strongly as the coupling from the C queue, because as the C queue grows the base AQM applies more congestion signals to L traffic, and the L flows then use less of the scheduling share. Because the scheduler is work preserving it schedules any C traffic in the gaps. Priority has to be conditional to prevent the C queue from being starved in the short term, which also gives short Classic messages such as DNS requests better response times.</p><p>Classification uses the ECN field rather than flow identifiers: the ECT(1) and CE codepoints identify L4S packets. This means the coupling can achieve coexistence without inspecting transport-layer flow identifiers, which is not always practical or desirable. An operator may still steer particular packets into the L queue, but a network node must not change Not-ECT or ECT(0) into an L4S identifier, so the L queue is more generally a low-latency queue. Two example algorithms are given in the appendices: DualPI2, which uses a Proportional Integral controller as the base AQM, and Curvy RED, derived from RED with delay-based configuration parameters.</p>",
+      "plainLanguage": "<p>Traffic goes into one of two queues based on the two-bit ECN field in the packet header, so the router never has to look at which flow a packet belongs to. The L queue is served first, but the C queue is not locked out, and the two queues feed each other's congestion signals.</p>"
     },
     {
       "id": "requirements",
       "number": "2.5",
       "title": "What an Implementation Must Do",
-      "content": "<p>A DualQ Coupled AQM implementation MUST use two queues, each with an AQM algorithm, and the AQM for the L queue MUST be able to apply ECN marking. The scheduler MUST give L4S packets priority over Classic, but that priority MUST be bounded so Classic traffic is not starved. The scheduler SHOULD be work-conserving or close to it.</p><p>The AQM MUST apply ECN marking to L queue traffic that is no lower than what equation (1) derives from the likelihood of drop in the Classic queue. The value of <code>k</code> does not have to be standardised for interoperability, but a value of 2 is RECOMMENDED, and operators MAY choose another value. If the AQM detects overload, it MUST introduce Classic drop to both types of ECN-capable traffic until the overload episode has subsided.</p><p>By default, a DualQ Coupled AQM SHOULD NOT need any configuration for use at a bottleneck on the public Internet. The RFC lists parameters operators MAY configure, and says an experimental implementation SHOULD offer monitoring (such as bits forwarded and mean and 99th percentile queue delay per queue) and anomaly reporting (such as start time and duration of overload).</p>",
-      "plainLanguage": "<p>The rules say: keep two lines, let the quick line go first but never forever, and if the shop gets overcrowded, turn people away from both lines. The shop should work without anyone fiddling with settings.</p>"
+      "content": "<p>The normative requirements are written so that they hold for any AQM designed for a single queue that generates a statistical or deterministic mark or drop probability driven by the queue dynamics.</p><p>An implementation must comply with the prerequisite L4S behaviours for any L4S network node, must use two queues each with an AQM algorithm, and the AQM for the L queue must be able to apply ECN marking to ECN-capable packets. The scheduler draining the two queues must give L4S packets priority over Classic, although the priority must be bounded so that Classic traffic is not starved, and it should be work-conserving or close to it, so that Classic traffic can fill any space left by L4S traffic. The AQM must apply ECN marking to traffic in the L queue that is no lower than that derived from the likelihood of drop or ECN marking in the Classic queue using the coupling equation.</p><p>When a packet that does not carry the expected ECN codepoint is classified into a queue, the requirements are weaker, because operator-specific classifiers exist for flexibility. An ECT(0) packet in the L queue should get CE marking with a probability appropriate to Classic congestion control. A Not-ECT packet in the L queue should be forwarded unchanged if separate queue protection is provided, and should be dropped with a Classic-like probability if it is not. An ECT(1) packet in the C queue should get CE marking using the coupled probability p_CL. If the DualQ has detected overload it must introduce Classic drop to both types of ECN-capable traffic until the overload episode has subsided.</p><p>By default a DualQ Coupled AQM should not need any configuration for use at a bottleneck on the public Internet. Optional settings include extra classifiers, the expected typical and maximum round-trip time, the coupling factor k, a limit on the conditional priority of L4S, and the maximum Classic ECN-marking probability before drop is introduced. An implementation should also let the operator monitor, per queue and per sample interval, the bits forwarded, the packet counts for arrived, presented to the AQM and forwarded, the ECN packets marked and the packets dropped, and the queue delay, with mean and 99th percentile queue delay derivable per queue per sample interval.</p>",
+      "plainLanguage": "<p>The RFC sets out what any implementation has to do, so that different vendors' routers can be told apart by behaviour rather than by algorithm. It also says what the router should report so that an operator can see what is happening in each queue.</p>"
     },
     {
       "id": "security-considerations",
       "number": "4",
       "title": "Unresponsive Flows and Overload",
-      "content": "<p>The DualQ gives low delay without per-flow processing, so users who encrypt flow identifiers, for example in VPN tunnels, do not have to give up low delay. Per-flow rate policing or queue protection can be added as an optional module.</p><p>The basic goal is that unresponsive flows get no more throughput advantage than they would in a single-queue AQM. The RFC discusses two ways to keep Classic from short-term starvation: weighted round robin (sacrifice some L4S throughput, with a Classic weight such as 1/16) or a time-shifted FIFO (sacrifice some L4S delay).</p><p>When L4S ECN marking saturates, the RFC contrasts <strong>drop on saturation</strong> with <strong>delay on saturation</strong>. The example DualPI2 algorithm uses drop on saturation, which also limits the advantage unresponsive ECN-capable traffic would otherwise gain. The RFC says these policy choices belong to developers or operators rather than the IETF.</p>",
-      "plainLanguage": "<p>If someone ignores the shop rules and pushes in, the shop still treats them no better than in a single line. When it gets very crowded, the shop starts turning people away from both lines to restore order.</p>"
+      "content": "<p>The privacy argument for the DualQ approach is that users who encrypt application flow identifiers, for example in IPsec or other encrypted VPN tunnels, do not have to sacrifice low delay. On the question of policing, the RFC explains that users' interests do not collide in the same way for delay as they do for bandwidth: getting more bandwidth on a shared link necessarily means someone gets less, whereas queuing delay can be reduced for everyone. Per-flow rate policing is therefore separable from a basic AQM, as an option under policy control, and the DualQ gives low delay without prejudging that question.</p><p>Handling unresponsive flows matters, because in the absence of any per-flow control the basic DualQ must give unresponsive flows no more throughput advantage than a single-queue AQM would. The goal is that the DualQ behaves no worse than a single-queue AQM when the total load of unresponsive flows is within the link capacity. Tests showed this is the case with no mechanism beyond the regular coupled DualQ. Whether the unresponsive flow classifies itself into the L or the C queue, the system behaves as if it has subtracted from the overall link capacity, and the coupling shares out the remaining capacity between the competing responsive flows.</p><p>Overload is handled by requiring drop for both types of ECN-capable traffic until the episode subsides, and by making the priority of the L queue conditional so that the C queue is not starved in the short term. The RFC is explicit that the choice of how much each class should give up under overload, in throughput, delay or drop, is for the developer or for operator policy rather than for the IETF.</p>",
+      "plainLanguage": "<p>Because the router never looks at which flow a packet belongs to, it also cannot police one flow against another, and the RFC treats that as a separate, optional choice. If the link is overloaded, both kinds of traffic have to give up something, and the RFC leaves the choice to the operator.</p>"
     }
   ],
   "viz": [
@@ -105,62 +115,105 @@
       "type": "compare-table",
       "anchor": "concepts",
       "position": "after",
-      "caption": "CLASSIC VERSUS SCALABLE CONGESTION CONTROL (SUMMARY OF RFC 9332)",
+      "caption": "How Classic and Scalable congestion control differ",
       "data": {
         "columns": [
-          "Aspect",
-          "Classic (Reno-friendly)",
+          "Property",
+          "Classic",
           "Scalable (L4S)"
         ],
         "rows": [
           {
             "cells": [
-              "Examples",
-              "Reno, CUBIC",
-              "DCTCP, Prague"
-            ]
+              "Recovery time after a congestion signal",
+              "Hundreds of round trips, and growing",
+              "Stays invariant as the flow rate scales"
+            ],
+            "self": false
           },
           {
             "cells": [
-              "Window vs. probability p",
-              "Inversely proportional to the square root of p",
-              "Inversely proportional to p"
-            ]
+              "Queue needed to keep the link full",
+              "Roughly one base round-trip time",
+              "None"
+            ],
+            "self": false
           },
           {
             "cells": [
-              "Where smoothing happens",
-              "In the network",
-              "At the sender"
-            ]
+              "Where congestion feedback is smoothed",
+              "In the network, with a worst-case delay of about 100-200 ms",
+              "At the sender, using its own round-trip time"
+            ],
+            "self": false
           },
           {
             "cells": [
-              "Queue it uses",
-              "Classic (C) queue",
-              "L4S (L) queue"
-            ]
+              "Congestion signals",
+              "Loss or ECN mark, treated as equivalent",
+              "ECN mark only, with a very shallow threshold"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "architecture",
+      "position": "after",
+      "caption": "The parts of a DualQ Coupled AQM",
+      "data": {
+        "items": [
+          {
+            "title": "IP-ECN classifier",
+            "text": "Splits incoming traffic between the L and C queues using the ECT(1) and CE codepoints."
+          },
+          {
+            "title": "L4S queue and Native AQM",
+            "text": "Holds Scalable traffic. Its AQM computes a marking probability from the instantaneous queue delay."
+          },
+          {
+            "title": "ECN marker",
+            "text": "Marks packets in the L queue with the CE codepoint instead of dropping them."
+          },
+          {
+            "title": "Classic queue and Base AQM",
+            "text": "Holds Classic traffic. Its AQM outputs an internal probability that is then squared."
+          },
+          {
+            "title": "Drop or mark",
+            "text": "Drops or marks packets in the C queue, using the squared probability."
+          },
+          {
+            "title": "Conditional priority scheduler",
+            "text": "Serves the L queue first, but bounds that priority so Classic traffic is not starved."
           }
         ]
       }
     },
     {
       "type": "code",
-      "anchor": "architecture",
+      "anchor": "design",
       "position": "after",
-      "caption": "THE COUPLING EQUATIONS, AS WRITTEN IN RFC 9332",
+      "caption": "The probability relations that define the coupling",
       "data": {
         "title": "Coupling equations",
         "lang": "text",
-        "code": "p_C  = ( p_CL / k )^2      (1)\np_C  = (p')^2              (2)\np_CL = k*p'                (3)\np_L  = max(p'_L, p_CL)     (4)"
+        "code": "p_C  = ( p_CL / k )^2\np'   = p_CL / k\np_CL = k*p'\np_L  = max(p'_L, p_CL)"
       }
     }
   ],
   "references": [
     {
-      "number": "[RFC3168]",
-      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
-      "rfc": 3168
+      "number": "[RFC9330]",
+      "text": "Briscoe, B., Ed., De Schepper, K., Bagnulo, M., and G. White, \"Low Latency, Low Loss, and Scalable Throughput (L4S) Internet Service: Architecture\", RFC 9330, January 2023.",
+      "rfc": 9330
+    },
+    {
+      "number": "[RFC9331]",
+      "text": "De Schepper, K. and B. Briscoe, Ed., \"The Explicit Congestion Notification (ECN) Protocol for Low Latency, Low Loss, and Scalable Throughput (L4S)\", RFC 9331, January 2023.",
+      "rfc": 9331
     },
     {
       "number": "[RFC8311]",
@@ -168,18 +221,48 @@
       "rfc": 8311
     },
     {
-      "number": "[RFC9331]",
-      "text": "De Schepper, K. and B. Briscoe, Ed., \"The Explicit Congestion Notification (ECN) Protocol for Low Latency, Low Loss, and Scalable Throughput (L4S)\", RFC 9331, January 2023.",
-      "rfc": 9331
+      "number": "[RFC3168]",
+      "text": "Ramakrishnan, K., Floyd, S., and D. Black, \"The Addition of Explicit Congestion Notification (ECN) to IP\", RFC 3168, September 2001.",
+      "rfc": 3168
+    },
+    {
+      "number": "[RFC5681]",
+      "text": "Allman, M., Paxson, V., and E. Blanton, \"TCP Congestion Control\", RFC 5681, September 2009.",
+      "rfc": 5681
+    },
+    {
+      "number": "[RFC8312]",
+      "text": "Rhee, I., Xu, L., Ha, S., Zimmermann, A., Eggert, L., and D. Taht, \"CUBIC for Fast Long-Distance Networks\", RFC 8312, December 2018.",
+      "rfc": 8312
+    },
+    {
+      "number": "[RFC8257]",
+      "text": "Bensley, S., Thaler, D., Balasubramanian, P., Eggert, L., and K. Yildirim, \"Data Center TCP (DCTCP)\", RFC 8257, October 2017.",
+      "rfc": 8257
+    },
+    {
+      "number": "[RFC8033]",
+      "text": "Pan, R., Natarajan, P., Baker, F., and G. White, \"Proportional Integral controller Enhanced (PIE) AQM for the Datacenter\", RFC 8033, November 2016.",
+      "rfc": 8033
+    },
+    {
+      "number": "[RFC7567]",
+      "text": "Baker, F., Ed. and G. Fairhurst, Ed., \"IETF Recommendations for AQM\", RFC 7567, June 2015.",
+      "rfc": 7567
+    },
+    {
+      "number": "[RFC8290]",
+      "text": "Hoeiland-Joergensen, T., McKenney, P., Taht, D., Gettys, T., and E. Dumazet, \"The Flow Queue CoDel AQM Algorithm\", RFC 8290, July 2017.",
+      "rfc": 8290
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-19"
 }

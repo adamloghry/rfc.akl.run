@@ -321,7 +321,7 @@ describe('explanation lens', () => {
     click(el('.sim-lens button[data-lens="plain-language"]', fig()));
     expect(lensBody('plain-language').hidden).toBe(false);
     expect(lensBody('std').hidden).toBe(true);
-    expect(lensBody('plain-language').textContent).toContain('The computer wakes up');
+    expect(lensBody('plain-language').textContent).toContain('The workstation powers on');
     expect(localStorage.getItem('rfc-lens')).toBe('plain-language');
     click(el('.sim-lens button[data-lens="orig"]', fig()));
     expect(lensBody('orig').textContent).toContain('Network hosts such as diskless workstations');

@@ -5,13 +5,15 @@
   "categoryReviewed": false,
   "summary": "<p>This experimental RFC describes boundary-node behavior for the Controlled Load mode of Pre-Congestion Notification, a measurement-based load control approach using three marking states: not-marked, threshold-marked and excess-traffic-marked.</p>",
   "plainLanguage": {
-    "summary": "<p>The entry and exit guards watch warning colors and use them to decide whether to let more cars in or stop some.</p>"
+    "summary": "<p>Pre-Congestion Notification, or PCN, lets a network react before it congests. Edge nodes label packets when traffic passes a configured limit, and a control point uses those labels to decide whether to admit new flows or to shut some existing ones down.</p><p>This RFC describes one way to run PCN, called Controlled Load. It uses three marking states and is meant for networks that carry voice and video.</p>"
   },
   "questions": [
     "what is pcn controlled load mode",
     "how do pcn boundary nodes behave in cl mode",
     "what is the congestion level estimate in pcn",
-    "how does pcn decide to terminate flows"
+    "how does pcn decide to terminate flows",
+    "what is the cle-limit in pcn",
+    "how does pcn cl mode mark traffic"
   ],
   "tags": [
     "Quality of Service",
@@ -20,10 +22,10 @@
   ],
   "subtitle": "How edge nodes use three marking states to admit new flows and terminate existing ones before a network congests.",
   "tldr": {
-    "problem": "Voice and video flows cannot adapt when a network gets overloaded. A Diffserv domain needs a simple, scalable way to protect admitted flows, including in abnormal cases such as rerouting after a failure.",
-    "mechanism": "Interior nodes mark PCN packets as not-marked, threshold-marked or excess-traffic-marked. Egress nodes measure the marked rates and report to a Decision Point, which compares a congestion level estimate to a limit to admit or block flows, and terminates flows when excess-traffic marking persists.",
-    "outcome": "It is an Experimental RFC, published to validate and evaluate the Controlled Load edge behavior. A companion, RFC 6662, specifies the Single Marking alternative.",
-    "outcomeLabel": "Status today"
+    "problem": "A network carrying inelastic traffic such as voice and video must protect the quality of the flows it has already admitted, and it needs to react before congestion actually happens.",
+    "mechanism": "Every link meters the traffic and marks PCN packets when a configured rate is exceeded. An egress node reports the marked rates to a decision point, which either admits or blocks new flows and can terminate existing ones.",
+    "outcome": "This RFC defines the Controlled Load (CL) mode of PCN, one of a series of experimental boundary-node behaviors. It uses three marking states and expects admission control of micro-flows at the edge of the network.",
+    "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
@@ -31,71 +33,80 @@
       "value": "3: not-marked, threshold-marked, excess-traffic-marked"
     },
     {
-      "label": "T_meas recommended",
+      "label": "Recommended measurement period",
       "value": "100 to 500 ms"
     },
     {
-      "label": "T_maxsuppress recommended",
+      "label": "Recommended report suppression interval",
       "value": "3 to 6 seconds"
     },
     {
-      "label": "Recovery design goal",
-      "value": "1-3 seconds"
+      "label": "Intended reaction time",
+      "value": "1 to 3 seconds"
     },
     {
-      "label": "SAR formula",
+      "label": "Failure timeout with suppression",
+      "value": "3 * T_maxsuppress"
+    },
+    {
+      "label": "Sustainable aggregate rate",
       "value": "NM-rate + ThM-rate"
     }
   ],
-  "today": "<p>RFC 6661 is an Experimental RFC and is not obsoleted or updated according to the metadata. The Single Marking alternative is in <a href='/rfc6662'>RFC 6662</a>.</p>",
+  "today": "<p>RFC 6661 is an Experimental document, published for examination, experimental implementation and evaluation, and it has not been obsoleted. The RFC calls itself one of a series of possible PCN boundary-node behaviors; the sibling document <a href='/rfc6662'>RFC 6662</a> specifies the Single Marking mode.</p>",
   "glossary": [
     "pre-congestion-notification",
     "quality-of-service",
     "dscp",
-    "congestion-control"
+    "congestion-control",
+    "diffserv",
+    "admission-control",
+    "decision-point",
+    "ingress-egress-aggregate",
+    "congestion-level-estimate"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Introduction and the Experiment",
-      "content": "<p><strong>Pre-Congestion Notification</strong> (PCN) aims to protect the quality of service of inelastic flows in a Diffserv domain. It uses two mechanisms: admission control, which decides whether to admit or block a new flow, and flow termination, which decides in abnormal circumstances whether to end some existing flows. Packets are marked when configured rates, set below the link rate, are exceeded, so edge nodes learn about incipient overload before any congestion occurs.</p><p>This document describes an experimental edge-node behavior, known as the <strong>Controlled Load</strong> (CL) mode. The experiment aims to validate the specification, evaluate how well it preserves quality of service, and assess whether PCN can reduce capital and operational costs compared with other methods. The text suggests a month or two in busy season may be enough for the first two goals. A companion document, <a href='/rfc6662'>RFC 6662</a>, covers the Single Marking mode and shares much of this text.</p>",
-      "plainLanguage": "<p>A warning system tells the gatekeepers that a road is getting full before it is jammed, so they can stop letting more cars in.</p>"
+      "title": "What Pre-Congestion Notification Does",
+      "content": "<p>Pre-Congestion Notification (PCN) protects the quality of service of inelastic traffic inside a Diffserv domain. Inelastic traffic is traffic such as voice and video that cannot slow down when the network is busy. The overall architecture is described in <a href='/rfc5559'>RFC 5559</a>.</p><p>PCN uses two mechanisms. Admission control decides whether to admit or block a new flow request. Flow termination decides, in abnormal circumstances, whether to terminate some of the existing flows. Both work from measurements taken on every link of the PCN-domain: the overall rate of PCN traffic is metered, and PCN packets are marked when certain configured rates are exceeded. Those configured rates are below the rate of the link, so the boundary nodes learn about a possible overload before any congestion occurs.</p><p>This RFC specifies the Controlled Load (CL) mode of the PCN boundary-node behavior. It uses three PCN marking states: not-marked, threshold-marked and excess-traffic-marked. The companion document <a href='/rfc6662'>RFC 6662</a> specifies the Single Marking (SM) mode, which uses two states. The RFC notes that the words block and terminate describe several possible courses of action, and that the choice between them is a matter of local policy.</p>",
+      "plainLanguage": "<p>PCN gives a network a way to act before it congests. Edge nodes mark packets when traffic passes a configured limit, and a control point uses the marks to decide whether to let new flows in or to shut some existing ones down.</p>"
     },
     {
-      "id": "architecture",
-      "number": "2",
-      "title": "Assumed Core Behavior and Roles",
-      "content": "<p>CL mode assumes that interior nodes perform both threshold-marking and excess-traffic-marking according to <a href='/rfc5670'>RFC 5670</a>, using the codepoints defined in <a href='/rfc6660'>RFC 6660</a>. On each link the threshold-meter's reference rate equals the PCN-admissible-rate, and the excess-traffic-meter's reference rate equals the PCN-supportable-rate.</p><p>The <strong>egress node</strong> collects the rates of not-marked, threshold-marked and excess-traffic-marked traffic per ingress-egress-aggregate and reports them. The <strong>ingress node</strong> enforces admission and termination decisions and reports the rate it sends when asked. The <strong>Decision Point</strong> makes the decisions and MAY be collocated with the ingress node. The signaling protocol for reports is out of scope.</p>",
-      "plainLanguage": "<p>Road sensors paint cars with two kinds of warning marks. Exit guards count marks, entry guards let cars in, and a boss decides who goes.</p>"
-    },
-    {
-      "id": "procedures",
-      "number": "3.2",
-      "title": "Egress Reporting and Report Suppression",
-      "content": "<p>The <strong>Decision Point</strong> is the node that decides which flows to admit and terminate; it can be the ingress node or a centralized node. The egress node meters each ingress-egress-aggregate over a period of length <code>T_meas</code> and computes <code>NM-rate</code>, <code>ThM-rate</code> and <code>ETM-rate</code> in octets per second. The <strong>congestion level estimate</strong> (CLE) is the ratio of PCN-marked to total PCN-traffic in octets.</p><p>The egress node SHOULD calculate the three rates at the end of each measurement period. Unless report suppression is activated, it MUST report them to the Decision Point each time. As an option it MAY also record identifiers of PCN-flows that saw excess-traffic marking, which helps avoid ending flows that are not on a congested path when multipath routing is used.</p><p>Report suppression MUST be available as a configurable option. When it is on, the egress node computes <code>CLE = (ThM-rate + ETM-rate) / (NM-rate + ThM-rate + ETM-rate)</code> and reports only if the latest or previous CLE exceeds the <code>CLE-reporting-threshold</code> (default zero), or if <code>T_maxsuppress</code> has elapsed since the last report. That guarantees a periodic sign of life.</p>",
-      "plainLanguage": "<p>Exit guards report how many cars had each flag. To save chatter, they may stay quiet when all is calm, but they must still check in now and then.</p>"
+      "id": "terminology",
+      "number": "1.1",
+      "title": "The Terms the RFC Defines",
+      "content": "<p>The RFC borrows most of its vocabulary from <a href='/rfc5559'>RFC 5559</a> and <a href='/rfc6660'>RFC 6660</a> and adds a few terms of its own. A <strong>Decision Point</strong> is the node that decides which flows to admit and which to terminate. It can be the PCN-ingress-node itself or a separate centralized control node, and in either case the PCN-ingress-node is the point where the decisions are enforced.</p><p>Three rates are measured for each ingress-egress-aggregate, that is, for each group of flows that shares an ingress node and an egress node. The <strong>NM-rate</strong> is the octets per second of PCN traffic in not-marked packets, the <strong>ThM-rate</strong> counts threshold-marked traffic and the <strong>ETM-rate</strong> counts excess-traffic-marked traffic. The <strong>PCN-sent-rate</strong> is the rate at which an ingress node is receiving PCN traffic destined for a given aggregate.</p><p>The <strong>congestion level estimate</strong> (CLE) is the ratio of PCN-marked to total PCN traffic, measured in octets, received for an aggregate during one measurement period. It is used to derive the PCN-admission-state, which is either <em>admit</em> or <em>block</em>, and it is also used by the report suppression procedure. The <strong>sustainable aggregate rate</strong> (SAR) is the estimated maximum rate of PCN traffic that an aggregate can carry at a given moment without risking a degradation of quality of service for the admitted flows.</p>",
+      "plainLanguage": "<p>The RFC names the node that makes the decisions the Decision Point. It also names three measured traffic rates, one for each marking state, and one number that compares marked traffic with all traffic.</p>"
     },
     {
       "id": "operation",
+      "number": "3.2",
+      "title": "Collecting and Reporting Traffic Rates",
+      "content": "<p>At the end of every measurement period, the PCN-egress-node meters the PCN traffic it received and calculates the NM-rate, the ThM-rate and the ETM-rate for each ingress-egress-aggregate passing through it. The length of a measurement period is the configurable value <code>T_meas</code>. Unless report suppression is switched on, the node must report the latest values of those three rates to the Decision Point each time it calculates them.</p><p>As a configurable option, the egress node may also record the identifiers of the PCN flows for which excess-traffic-marked packets were observed during the interval, and it must then include them in the report. If the set is large, for example more than 20 flows, the node may record only the most recently marked flows. The Decision Point can start with those flows when it selects flows for termination, which helps in networks that route one aggregate over several paths and where only some paths are congested.</p><p>Report suppression is a configurable option that reduces signalling traffic. With it, the node calculates the CLE for each measurement interval and sends a report only when the latest CLE is greater than the <code>CLE-reporting-threshold</code>, or when the previous interval's CLE was greater than it. It must also send a report once <code>T_maxsuppress</code> has passed since the last one, whatever the CLE says. The result is at least one report per interval of <code>T_maxsuppress + T_meas</code>, which tells the Decision Point that the node and the communication path are still working.</p>",
+      "plainLanguage": "<p>The egress node measures traffic over short periods and reports how much of it carried each mark. It may skip reports when nothing much is happening, but it has to report at least once every few seconds so the Decision Point knows it is still there.</p>"
+    },
+    {
+      "id": "algorithms",
       "number": "3.3",
-      "title": "Admission and Termination at the Decision Point",
-      "content": "<p>For <strong>admission</strong>, the Decision Point takes the reported or calculated CLE and compares it to the configurable <code>CLE-limit</code>. If the CLE is less than the limit, the state for that aggregate is set to \"admit\"; otherwise it is \"block\". New flows SHOULD be admitted only in the admit state.</p><p>For <strong>termination</strong>, when a report shows a non-zero ETM-rate, the Decision Point asks the ingress node for its <code>PCN-sent-rate</code> and waits for the next egress report. If that report also shows a non-zero ETM-rate, it estimates the sustainable aggregate rate as <code>SAR = NM-rate + ThM-rate</code> and terminates traffic equal to <code>PCN-sent-rate - SAR</code>. It SHOULD first consider flows on the egress node's excess-marked list, and it is RECOMMENDED to wait between termination rounds so earlier terminations show up in the measurements.</p>",
-      "plainLanguage": "<p>If too many cars are flagged, the gate closes to new cars. If the road really is overloaded, the boss sends some cars off the road, only as many as needed.</p>"
+      "title": "Admitting and Terminating Flows",
+      "content": "<p>The Decision Point determines the PCN-admission-state for an aggregate each time it receives a report. It compares the CLE, which it should take from the report or else calculate itself, with a configurable <code>CLE-limit</code>. If the CLE is less than the limit the state is <em>admit</em>, otherwise it is <em>block</em>. When the state is admit the Decision Point should allow new flows to be admitted to the aggregate; when it is block it should not.</p><p>Termination starts when a report includes a non-zero ETM-rate for an aggregate. The Decision Point then requests the PCN-sent-rate from the ingress node and waits for both that answer and the next report from the egress node. If the next report also shows a non-zero ETM-rate, the Decision Point estimates the sustainable aggregate rate as <code>SAR = NM-rate + ThM-rate</code> and works out the amount of traffic to terminate as <code>PCN-sent-rate - SAR</code>. If that difference is positive it selects flows to terminate, using upper rate limits for the individual flows so that it does not remove too much, and it should first consider the flows the egress node reported as excess-traffic-marked.</p><p>When a report does not arrive, the Decision Point uses a timer called <code>t_recvFail</code>. The timeout <code>T_fail</code> is the configurable duration <code>T_crit</code> when report suppression is not deployed, and also when the last report carried a CLE greater than the reporting threshold. Otherwise it is <code>3 * T_maxsuppress</code>. When the timer expires the Decision Point should notify management, and local policy may then block new flows destined for that egress node until a report arrives. If a request for the PCN-sent-rate goes unanswered, the request is repeated once, and the ETM-rate is used as an estimate of how much traffic to terminate.</p>",
+      "plainLanguage": "<p>The control point compares the share of traffic that carries a mark against a limit. Below the limit it lets new flows in; above the limit it blocks them and can shut existing flows down to bring the rate back down.</p>"
     },
     {
-      "id": "error-handling",
-      "number": "3.3.3",
-      "title": "Missing Reports and Timers",
-      "content": "<p>The Decision Point SHOULD run a timer <code>t_recvFail</code> that resets whenever a report arrives. It expires at <code>T_fail</code>, which is <code>T_crit</code> without suppression (or when the last CLE was above the reporting threshold) and <code>3 * T_maxsuppress</code> otherwise. On expiry it SHOULD notify management, and local policy may block new flows to that egress node.</p><p>If a centralized Decision Point gets no answer about the PCN-sent-rate, it SHOULD repeat the request once. While waiting it MAY use ETM-rate as an over-estimate of the amount to terminate, and so SHOULD terminate less than the full amount at first. If the second request also fails, it MUST select flows using that approximation and SHOULD notify management.</p><p>Recommended values: <code>T_meas</code> on the order of 100 to 500 ms, <code>T_maxsuppress</code> on the order of 3 to 6 seconds, and <code>T_crit</code> not less than 3 * T_meas with a reasonable upper bound on the order of 3 seconds. They are based on judgement rather than operational experience.</p>",
-      "plainLanguage": "<p>If a guard goes silent too long, the boss raises the alarm. If the entry guard does not answer, the boss asks once more, then makes a careful guess.</p>"
+      "id": "parameters",
+      "number": "3.5",
+      "title": "Timers and Recommended Values",
+      "content": "<p>Four timers drive the procedures. <code>t_meas</code> runs at the egress node, one per ingress-egress-aggregate, and expires when it reaches <code>T_meas</code>; the node then calculates the three rates and reports them. <code>t_maxsuppress</code> also runs at the egress node and expires at <code>T_maxsuppress</code>, after which a report is sent whatever the CLE says. <code>t_recvFail</code> runs at the Decision Point and expires at <code>T_fail</code>. <code>t_sndFail</code> is used only by a centralized Decision Point, one per outstanding request for the PCN-sent-rate, and expires at <code>T_crit</code>.</p><p>The recommended values are all tied to an intended PCN reaction time of 1 to 3 seconds, and the RFC says they rest on judgement rather than on operational experience or mathematical derivation. The value of <code>T_meas</code> is recommended to be on the order of 100 to 500 ms, which trades the demands on the egress node, the Decision Point and the network against how quickly PCN reacts. The value of <code>T_maxsuppress</code> is recommended to be on the order of 3 to 6 seconds, for similar reasons. <code>T_crit</code> should not be less than <code>3 * T_meas</code>, because a smaller value would cause too many management notifications after transient trouble, and a reasonable upper bound for it is on the order of 3 seconds.</p>",
+      "plainLanguage": "<p>The RFC suggests measuring traffic every 100 to 500 milliseconds and checking in with the control point every 3 to 6 seconds. It aims to react to overload within one to three seconds.</p>"
     },
     {
-      "id": "deployment",
-      "number": "5",
-      "title": "Deployment, Management and Security",
-      "content": "<p>The RFC fills in the per-domain behavior template of <a href='/rfc3086'>RFC 3086</a>. It applies to inelastic traffic such as voice and video and notes that CL is less likely than SM to terminate flows unnecessarily. The suggested service classes include Telephony (EF), Real-time interactive (CS4), Broadcast Video (CS3) and Multimedia Conferencing (AF4). The design requirement was recovery from overload by flow termination within 1-3 seconds.</p><p>Deployment involves choosing options and global parameters, deriving per-node and per-link information, installing but not activating parameters, and then activating and verifying behaviors. Filters to classify packets by ingress-egress-aggregate reliably require tunnels from ingress to egress node. Implementations MUST be able to log loss of contact, restored contact and flow termination events using syslog (<a href='/rfc5424'>RFC 5424</a>), and counters are RECOMMENDED on all PCN nodes.</p><p>The security considerations of <a href='/rfc5559'>RFC 5559</a> apply. This memo adds one: with a centralized Decision Point, the interface on the ingress node used to communicate policy decisions is a point of vulnerability that must be protected from denial-of-service attacks. The Decision Point itself is a trusted entity.</p><p>IANA has added the syslog structured data IDs <code>PCNNode</code> and <code>PCNTerm</code> for event logs. The text also notes that PCN reuse of the ECN bits could theoretically interfere with end-to-end ECN.</p>",
-      "plainLanguage": "<p>Before switching it on, the road crew sets up rules, installs sensors everywhere, tests them, and writes down every alarm in a logbook.</p>"
+      "id": "security-considerations",
+      "number": "6",
+      "title": "Security Considerations",
+      "content": "<p>The RFC points to <a href='/rfc5559'>RFC 5559</a> for the general security considerations for PCN and adds one point of its own. A centralized Decision Point is itself a trusted entity. Using one means there is an interface on the PCN-ingress-node through which policy decisions are communicated, and that interface is a point of vulnerability that must be protected from denial-of-service attacks.</p><p>The deployment section adds that the information needed for a centralized Decision Point and each PCN edge node to authenticate one another has to be prepared for them. The per-domain behavior section also notes that reusing the ECN bits for PCN marking could interfere with the use of end-to-end ECN, and points to <a href='/rfc6660'>RFC 6660</a> for the actions that can be taken to protect ECN signalling.</p>",
+      "plainLanguage": "<p>A centralized control point is trusted, so the link that carries its decisions into the network is a weak point that must not be easy to flood. The nodes also need information that lets them check each other's identity.</p>"
     }
   ],
   "viz": [
@@ -103,47 +114,72 @@
       "type": "sequence",
       "anchor": "operation",
       "position": "after",
-      "caption": "FLOW TERMINATION CHECK (RFC 6661, simplified)",
+      "caption": "The measurement exchange between the egress node, the Decision Point and the ingress node",
       "data": {
         "lanes": [
           {
-            "key": "egress",
+            "key": "egress-node",
             "label": "PCN-egress-node"
           },
           {
-            "key": "dp",
+            "key": "decision-point",
             "label": "Decision Point"
           },
           {
-            "key": "ingress",
+            "key": "ingress-node",
             "label": "PCN-ingress-node"
           }
         ],
         "messages": [
           {
-            "from": "egress",
-            "to": "dp",
-            "label": "Report with non-zero ETM-rate",
-            "color": "blue"
-          },
-          {
-            "from": "dp",
-            "to": "ingress",
-            "label": "Request PCN-sent-rate",
-            "color": "neutral"
-          },
-          {
-            "from": "ingress",
-            "to": "dp",
-            "label": "PCN-sent-rate",
-            "color": "neutral"
-          },
-          {
-            "from": "egress",
-            "to": "dp",
-            "label": "Next report, ETM-rate still non-zero",
+            "from": "egress-node",
+            "to": "decision-point",
+            "label": "RATE REPORT",
             "color": "blue",
-            "note": "Terminate PCN-sent-rate minus SAR."
+            "note": "NM-rate, ThM-rate and ETM-rate for one ingress-egress-aggregate."
+          },
+          {
+            "from": "decision-point",
+            "to": "ingress-node",
+            "label": "REQUEST SENT RATE",
+            "color": "neutral",
+            "note": "Asked when the ETM-rate is not zero."
+          },
+          {
+            "from": "ingress-node",
+            "to": "decision-point",
+            "label": "SENT RATE",
+            "color": "green",
+            "note": "The PCN-sent-rate estimate for the same aggregate."
+          },
+          {
+            "from": "egress-node",
+            "to": "decision-point",
+            "label": "NEXT RATE REPORT",
+            "color": "blue",
+            "note": "A second report is needed before any traffic is terminated."
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "terminology",
+      "position": "after",
+      "caption": "The three PCN marking states used in Controlled Load mode",
+      "data": {
+        "items": [
+          {
+            "title": "Not-marked (NM)",
+            "text": "PCN packets carrying the not-marked codepoint. Their rate is counted as NM-rate."
+          },
+          {
+            "title": "Threshold-marked (ThM)",
+            "text": "PCN packets marked by the threshold-meter, whose reference rate on a link is the PCN-admissible-rate."
+          },
+          {
+            "title": "Excess-traffic-marked (ETM)",
+            "text": "PCN packets marked by the excess-traffic-meter, whose reference rate on a link is the PCN-supportable-rate."
           }
         ]
       }
@@ -156,19 +192,39 @@
       "rfc": 5559
     },
     {
-      "number": "[RFC5670]",
-      "text": "Eardley, P., \"Metering and Marking Behaviour of PCN-Nodes\", RFC 5670, November 2009.",
-      "rfc": 5670
-    },
-    {
       "number": "[RFC6660]",
       "text": "Briscoe, B., Moncaster, T., and M. Menth, \"Encoding Three Pre-Congestion Notification (PCN) States in the IP Header Using a Single Diffserv Codepoint (DSCP)\", RFC 6660, July 2012.",
       "rfc": 6660
     },
     {
+      "number": "[RFC5670]",
+      "text": "Eardley, P., \"Metering and Marking Behaviour of PCN-Nodes\", RFC 5670, November 2009.",
+      "rfc": 5670
+    },
+    {
       "number": "[RFC3086]",
       "text": "Nichols, K. and B. Carpenter, \"Definition of Differentiated Services Per Domain Behaviors and Rules for their Specification\", RFC 3086, April 2001.",
       "rfc": 3086
+    },
+    {
+      "number": "[RFC6662]",
+      "text": "Charny, A., Zhang, J., Karagiannis, G., Menth, M., and T. Taylor, Ed., \"Pre-Congestion Notification (PCN) Boundary Node Behavior for the Single Marking (SM) Mode of Operation\", RFC 6662, July 2012.",
+      "rfc": 6662
+    },
+    {
+      "number": "[RFC4594]",
+      "text": "Babiarz, J., Chan, K., and F. Baker, \"Configuration Guidelines for DiffServ Service Classes\", RFC 4594, August 2006.",
+      "rfc": 4594
+    },
+    {
+      "number": "[RFC2474]",
+      "text": "Nichols, K., Blake, S., Baker, F., and D. Black, \"Definition of the Differentiated Services Field (DS Field) in the IPv4 and IPv6 Headers\", RFC 2474, December 1998.",
+      "rfc": 2474
+    },
+    {
+      "number": "[RFC3289]",
+      "text": "Baker, F., Chan, K., and A. Smith, \"Management Information Base for the Differentiated Services Architecture\", RFC 3289, May 2002.",
+      "rfc": 3289
     },
     {
       "number": "[RFC5424]",
@@ -179,10 +235,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-19"
 }

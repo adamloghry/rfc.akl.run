@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines a way for SIP presence subscribers to receive only the parts of a presence document that changed, instead of the full document each time. By default, any small change causes the whole presence document to be delivered again. This extension reduces that traffic, which helps on slow or constrained networks.</p>",
   "plainLanguage": {
-    "summary": "<p>When a friend changes only their mood on a chat app, you do not need their whole profile again. This tells the server to send you just the new mood, which saves data.</p>"
+    "summary": "<p>When a watcher subscribes to someone's presence, the server sends the whole document every time anything in it changes. That is wasteful on a slow link, where the one element that changed may be smaller than the document around it. This document lets the server send only the part that changed.</p>"
   },
   "questions": [
     "sip partial notification presence",
@@ -22,9 +22,9 @@
   ],
   "subtitle": "A SIP extension that lets presence servers send only what changed instead of the whole presence document every time.",
   "tldr": {
-    "problem": "By default, when any part of a person's presence document changes, even one element, the server delivers a new document with the full set of elements. That wastes bandwidth, especially on slow, high-latency links.",
+    "problem": "When any part of a person's presence document changes, even one element, the presence server delivers a new document with the full set of elements, which wastes bandwidth on slow, high-latency links.",
     "mechanism": "A watcher adds application/pidf-diff+xml to the Accept header of its SUBSCRIBE request. The presence agent then sends a full document first, followed by numbered NOTIFY requests that carry only the added, removed and replaced parts.",
-    "outcome": "Less presence data crosses the network. RFC 5263 is a Proposed Standard that has been updated by RFC 8996.",
+    "outcome": "Less presence data crosses the network, and the watcher keeps a local copy that it updates as the diffs arrive. The RFC is a Proposed Standard and was later updated by RFC 8996.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
@@ -38,14 +38,22 @@
     },
     {
       "label": "Version step",
-      "value": "Incremented by one per partial notification"
+      "value": "incremented by one per partial notification"
     },
     {
-      "label": "Diff elements",
-      "value": "add, replace, remove"
+      "label": "Change elements",
+      "value": "add, replace and remove"
+    },
+    {
+      "label": "Full document root element",
+      "value": "pidf-full"
+    },
+    {
+      "label": "Partial document root element",
+      "value": "pidf-diff"
     }
   ],
-  "today": "<p>RFC 5263 is a Proposed Standard published in September 2008 and has been updated by <a href='/rfc8996'>RFC 8996</a>. It has not been obsoleted.</p>",
+  "today": "<p>RFC 5263 is a Proposed Standard published in September 2008. It has not been obsoleted, but it was updated by <a href='/rfc8996'>RFC 8996</a>.</p>",
   "glossary": [
     "sip",
     "presence",
@@ -53,50 +61,68 @@
     "mime-type",
     "xml-stream",
     "tls",
-    "s-mime"
+    "s-mime",
+    "watcher",
+    "presentity",
+    "pidf",
+    "xml"
   ],
   "sections": [
     {
       "id": "motivation",
       "number": "1",
-      "title": "The Problem with Full Presence Documents",
-      "content": "<p>The SIP presence event package lets <strong>watchers</strong> subscribe to the presence information of <strong>presentities</strong>. That information is a document made of elements called presence tuples, and it can be large. In the baseline behavior, the presence agent (PA) always delivers all the presence data authorized for that watcher, regardless of what changed since the last notification.</p><p>The RFC points out that sending the complete document over low bandwidth and high latency links, when only part has changed, can degrade the presence service and give the watcher a bad impression of it. RFC 5263 therefore defines a partial notification approach in which the server sends only the parts that changed since the previous notifications.</p>",
-      "plainLanguage": "<p>Imagine a friend repainting one wall and mailing you a photo of the entire house each time. This extension says to just send a photo of the wall.</p>"
+      "title": "Introduction",
+      "content": "<p>The presence event package for SIP allows users, called watchers, to subscribe to other users' presence information, that is, to the presence of a presentity. The presence information is composed of multiple pieces of data delivered to the watcher, and the size of the presence information document can be large, because the document can contain an arbitrary number of elements called presence tuples that convey data.</p><p>As specified in <a href='/rfc2778'>RFC 2778</a> and in the presence event package for SIP, a Presence Agent always delivers in presence notifications all the presence data that has been authorized for a certain watcher. This is done regardless of what presence data has changed compared to the last notification. It may not be reasonable to send the complete presence information over low bandwidth and high latency links when only part of the presence information has actually changed. This may end up degrading the presence service and causing bad perception at the watcher side.</p><p>This document defines a partial notification approach where the presence server delivers to the watchers only those parts of the presence information that have changed compared to the presence information sent in the previous notifications. This reduces the amount of data that is transported over the network. The mechanism utilizes the presence event package for SIP and a new MIME type for carrying partial Presence Information Data Format documents.</p>",
+      "plainLanguage": "<p>When a watcher subscribes to someone's presence, the server sends the whole document every time anything in it changes. That is wasteful on a slow link, where the one element that changed may be smaller than the document around it. This document lets the server send only the part that changed.</p>"
     },
     {
       "id": "overview",
-      "number": "2",
-      "title": "How Partial Notification Works",
-      "content": "<p>In normal operation a watcher sends a SIP <code>SUBSCRIBE</code> to the presentity, optionally with an <code>Accept</code> header naming content types. The PA answers with <code>NOTIFY</code> requests carrying a PIDF document with the full state.</p><p>For partial notification, the watcher lists both <code>application/pidf+xml</code> and <code>application/pidf-diff+xml</code> in its <code>Accept</code> header. If the PA sees the second type, it can decide to use the mechanism and sets the <code>Content-Type</code> of its <code>NOTIFY</code> requests to <code>application/pidf-diff+xml</code>. The first <code>NOTIFY</code> with presence information carries a full document, and later ones can carry partial documents.</p><p>The mechanism builds on the presence event package (<a href='/rfc3856'>RFC 3856</a>) and on the partial presence format defined in <a href='/rfc5262'>RFC 5262</a>. Unless this RFC says otherwise, regular watcher and PA behavior applies.</p>",
-      "plainLanguage": "<p>The watcher says, 'I can read either the whole story or just the changes.' The server, if it agrees, sends the whole story once and then only changes.</p>"
+      "number": "3.1",
+      "title": "Basic Presence Agent Operation",
+      "content": "<p>The presence service normally operates so that a watcher sends a SIP SUBSCRIBE request targeted to the presentity. The request is routed to the presence agent, where the presentity's presence information is stored. The SUBSCRIBE request can include an Accept header field that indicates the supported content types.</p><p>The presence agent receives the SUBSCRIBE request, and if there is no Accept header indicating the supported content types, or the Accept header contains the default PIDF content type, the presence agent will generate presence notifications using the default PIDF format. The PIDF document can contain one or multiple XML elements, and includes a set of elements defined in RFC 2778 together with its extensions for representing the presence information. This PIDF document is carried in the body of a NOTIFY request. During basic operation, the presence document always contains the full state corresponding to the presence status of the presentity, as determined by the presence agent's local policy and authorization rules.</p>",
+      "plainLanguage": "<p>In the ordinary case, a watcher subscribes to a person and the server keeps that person's presence information. Every notification carries the whole document, chosen according to the server's policy and the rules about what the watcher is allowed to see.</p>"
     },
     {
-      "id": "procedures",
-      "number": "3",
-      "title": "What the Watcher Must Do",
-      "content": "<p>A watcher that wants partial notifications MUST include an <code>Accept</code> header whose value contains <code>application/pidf-diff+xml</code> in addition to <code>application/pidf+xml</code>. It MAY add a <code>q</code> parameter to each value to show its relative preference. Entities that support the extension MUST support the <code>application/pidf-diff+xml</code> content type.</p><p>On receiving the first such document, the watcher MUST initialize a version counter for the subscription to the document's <code>version</code> value and store the full document as its local copy. For each later document it compares versions:</p><ul><li>A version equal to or lower than the local counter is treated as a PA failure, and the watcher SHOULD discard the document.</li><li>A <code>pidf-full</code> root replaces the local copy and sets the counter to the document's version.</li><li>A <code>pidf-diff</code> root whose version is exactly one higher is applied to the local copy, and the counter is incremented by one.</li><li>A <code>pidf-diff</code> root whose version is higher by more than one means one or more NOTIFYs were lost. The watcher SHOULD refresh the subscription to get a full document, or terminate it.</li></ul><p>If processing a document fails, the watcher SHOULD renew the subscription. It MAY also fall back to normal presence by leaving the diff type out of a new <code>SUBSCRIBE</code>. If the PA switches content types mid-subscription, the watcher MUST discard previously received presence information for that presentity but keep its version counter, since the count continues if the PA switches back.</p>",
-      "plainLanguage": "<p>The watcher keeps a numbered copy of the friend's status. Each update says 'this is number 5,' so if number 4 never showed up, the watcher knows something is missing and asks for a fresh copy.</p>"
+      "id": "design",
+      "number": "3.2",
+      "title": "Operation with Partial Notification",
+      "content": "<p>The partial notification mechanism allows a watcher to request that, whenever possible, notifications contain only presence information that has actually changed. A watcher that wants to receive partial notifications according to this document creates a SIP SUBSCRIBE request similar to that of a regular presence subscription, but the Accept header field contains the <code>application/pidf-diff+xml</code> tag as well as the <code>application/pidf+xml</code> tag.</p><p>When the presence agent receives the subscription, it examines the Accept header field value, and if the <code>application/pidf-diff+xml</code> value is present, it can decide to use the partial notifications mechanism. The presence agent then builds NOTIFY requests with the Content-Type header field set to <code>application/pidf-diff+xml</code>. The first NOTIFY request that contains presence information carries a full presence document, and subsequent NOTIFY requests can carry partial presence documents.</p>",
+      "plainLanguage": "<p>The watcher asks for the diff format in the Accept header of its subscription. If the server agrees, it sends one complete document first, so the watcher starts from a known state, and after that only the changes.</p>"
+    },
+    {
+      "id": "negotiation",
+      "number": "4.2",
+      "title": "Negotiating the Content Type",
+      "content": "<p>Entities supporting the partial notification extension described in this document MUST support the <code>application/pidf-diff+xml</code> content type specified in the PIDF extension for partial presence.</p><p>A SUBSCRIBE request can be used to negotiate the preferred content type to be used in the notifications, and the Accept header field is used for this purpose. When a watcher wants to allow the presence agent to send partial notifications, the watcher MUST include an Accept header field in its SUBSCRIBE request, and its value MUST contain <code>application/pidf-diff+xml</code>, in addition to the <code>application/pidf+xml</code> required by the SIP presence event package. The watcher MAY include a <code>q</code> parameter with each Accept value to indicate the relative preference of that value.</p><p>The presence agent compares the values included in the Accept header field with the supported ones, and decides which one to use. If the watcher has indicated preferred accept values by means of <code>q</code> parameters, the presence agent SHOULD base the decision on those preferences, unless otherwise indicated by the presence agent's local policy.</p>",
+      "plainLanguage": "<p>The two formats are negotiated in the Accept header, the same way a browser and a server agree on a file format. The watcher can also say which it prefers, using the q value. The server follows the watcher's preference unless its own policy says otherwise.</p>"
     },
     {
       "id": "operation",
-      "number": "4",
-      "title": "What the Presence Agent Must Do",
-      "content": "<p>The PA compares the watcher's <code>Accept</code> values with what it supports and decides which to use. If the watcher gave <code>q</code> preferences, the PA SHOULD follow them unless its local policy says otherwise.</p><p>Once the subscription is accepted, the PA MUST deliver the full state in the first partial notification, in a document with a <code>&lt;pidf-full&gt;</code> root element. It MUST include a <code>version</code> attribute, starting at one (1) for the first partial notification of a subscription and incremented by one for each following one. The counter is reset only when the subscription ends, not when it is refreshed.</p><p>Later documents SHOULD include only what changed. What counts as a change is up to the PA's local policy. Added information goes in <code>&lt;add&gt;</code> elements, removed information in <code>&lt;remove&gt;</code> and changed information in <code>&lt;replace&gt;</code>. The PA MUST NOT send another partial NOTIFY for the same Request-URI until it has a final response to the previous one or that request has timed out.</p><p>When the PA receives a refresh or termination <code>SUBSCRIBE</code>, it SHOULD send a NOTIFY with the full presence document. If it switches from some other content type to the diff type mid-subscription, the first partial notification MUST again be a full <code>&lt;pidf-full&gt;</code> document.</p>",
-      "plainLanguage": "<p>The server numbers every update 1, 2, 3 and so on, sends the whole picture first, and then sends only small patches. It waits for the watcher to say 'got it' before sending the next patch.</p>"
+      "number": "4.4",
+      "title": "Presence Agent Generation of Partial Notifications",
+      "content": "<p>Once a subscription is accepted and installed, the presence agent MUST deliver the full state of the presence information in the first partial notification that contains a presence document having a <code>pidf-full</code> root element. If the presence agent decides to send notifications that include a presence document according to this specification, it MUST build the presence document according to the PIDF extension for Partial Presence and MUST set the Content-Type header field to the value <code>application/pidf-diff+xml</code>.</p><p>The presence agent MUST include a <code>version</code> attribute, and for the first partial notification within a given subscription the version MUST be initialized to the value one. This version counter is scoped to the subscription and is incremented by one within each partial notification. The version value is only reset when the given subscription is terminated, and is not reset when the subscription is refreshed.</p><p>The presence agent SHOULD include only the presence information that has changed compared to the previous notifications, and it is up to the presence agent's local policy to determine what is considered a change to the previous state. The document is constructed so that all the information that has been added is listed inside <code>add</code> elements, all information that has been removed is listed inside <code>remove</code> elements, and all information that has been changed is listed under <code>replace</code> elements. The version number MUST be incremented by one compared to the earlier successfully sent presence document to the watcher associated with the subscription.</p><p>The presence agent MUST NOT send a new NOTIFY request that contains a partial notification for the same Request-URI until it has received a final response from the watcher for the previous one, or the previous NOTIFY request has timed out. When the presence agent receives a SUBSCRIBE request, whether a refresh or a termination, within the associated subscription, it SHOULD send a NOTIFY request containing the full presence document. If the presence agent has used a content type other than <code>application/pidf-diff+xml</code> within the existing subscription, and changes to delivering partial notifications, it MUST deliver the full state of the presence information as the first partial notification.</p>",
+      "plainLanguage": "<p>Each partial notification carries a version number that goes up by one, so the watcher can tell whether it missed anything. The body lists what was added, what was removed and what was replaced. Only one partial notification is in flight at a time, and the full document comes back whenever the subscription is refreshed.</p>"
+    },
+    {
+      "id": "data-transfer",
+      "number": "4.5",
+      "title": "Watcher Processing of NOTIFY Requests",
+      "content": "<p>The watcher processes all NOTIFY requests that contain <code>application/pidf+xml</code> content type as specified in the presence event package for SIP.</p><p>When the watcher receives the first notification containing an <code>application/pidf-diff+xml</code> body, it MUST initialize an internal version counter, related to this subscription, to the value of the version included in the presence document, and MUST store the received full presence document as its local copy. For a subsequent document the watcher MUST compare the received version attribute with the local version counter. If the watcher receives a presence document with a version equal to or lower than the locally stored version number, it is considered a presence agent failure, and the watcher SHOULD discard the document without further processing.</p><p>Otherwise the watcher MUST modify its locally stored information. If the root element is <code>pidf-full</code>, the watcher replaces its local copy with the document received and sets the internal version to the value of the version attribute. If the root element is <code>pidf-diff</code> and the received version number is incremented by one compared with the local version counter, the watcher MUST apply the changes to its local copy as specified in the PIDF extension for Partial Presence, and MUST increment its local version counter by one. If the root element is <code>pidf-diff</code> and the received version is higher by more than one compared with the locally stored value, the watcher assumes that one or more NOTIFYs were lost, and SHOULD either refresh the subscription in order to receive a full presence document, or terminate the subscription.</p><p>If the watcher encounters a processing error while processing the received document, it SHOULD renew the subscription, and MAY fall back to normal presence operations by not inserting <code>application/pidf-diff+xml</code> in a new SUBSCRIBE request. If the presence agent changes the content type used in notifications within the existing subscription, the watcher MUST discard all the previously received presence information, except the local version counter, and process the new content as specified for that content type. The local version counter MUST NOT be discarded, because if the presence agent changes back to <code>application/pidf-diff+xml</code> the version counter will continue to increase from the last value.</p>",
+      "plainLanguage": "<p>The watcher keeps its own copy of the presence information and its own version number. Each new document is checked against that number: a version that goes up by one is applied to the local copy, a version that goes backwards is thrown away as a server error, and a jump of more than one means a notification was lost, so the watcher asks for a fresh full document or gives up on the subscription.</p>"
     },
     {
       "id": "examples",
       "number": "5",
-      "title": "Worked Example",
-      "content": "<p>The RFC walks through a full exchange. The watcher sends a <code>SUBSCRIBE</code> with <code>Accept: application/pidf+xml;q=0.3, application/pidf-diff+xml;q=1</code> and <code>Expires: 3600</code>. The PA replies <code>200 OK</code> and, because of the <code>q</code> values, chooses partial notifications. Its first <code>NOTIFY</code> carries a <code>pidf-full</code> document with <code>version=\"1\"</code>.</p><p>Later the presentity's presence changes and the PA sends a second <code>NOTIFY</code> with a <code>pidf-diff</code> document with <code>version=\"2\"</code>. It adds a new tuple, replaces a status value and a contact priority, and removes one activity element. Each <code>NOTIFY</code> is acknowledged with <code>200 OK</code>.</p>",
-      "plainLanguage": "<p>First the watcher gets the full picture marked number 1. Then, when something changes, it gets a short note marked number 2 saying 'add this, change that, remove this one.'</p>"
+      "title": "Examples",
+      "content": "<p>The example message flow shows a watcher that declares support for the default presence format, <code>application/pidf+xml</code>, and for the partial notification format, <code>application/pidf-diff+xml</code>, in the Accept header field value. The watcher uses the <code>q</code> parameter to set the preference for receiving partial notifications. The presence agent accepts the subscription and, based on the <code>q</code> parameter value, selects to send partial notifications in NOTIFY requests. The first NOTIFY request includes the full state of the presence information, and the following notifications only include the difference from the previous NOTIFY requests. Each NOTIFY request is answered by the watcher with a 200 OK.</p>",
+      "plainLanguage": "<p>The worked example shows one subscription, one full document and one partial document. The watcher marks the diff format as its first preference, and the server follows that.</p>"
     },
     {
       "id": "security-considerations",
       "number": "6",
       "title": "Security Considerations",
-      "content": "<p>The extension relies on the presence event package, and all security considerations from that package apply unchanged, including confidentiality, integrity and authenticity, replay prevention and denial-of-service concerns.</p><p>Partial notifications can reveal what has changed, which may help an eavesdropper see what kind of changes are happening, but the RFC notes the same can be learned with baseline PIDF. A third party could inject a partial NOTIFY that makes the watcher think it missed one and request a new full document, which the RFC considers no worse than injecting a NOTIFY with <code>Subscription-State: terminated</code>.</p><p>The RFC says TLS is RECOMMENDED between elements for hop-by-hop confidentiality, and that S/MIME MAY be used for integrity and authenticity of SUBSCRIBE and NOTIFY requests.</p>",
-      "plainLanguage": "<p>Sending only changes shows what changed, but a snooper could already learn that from full updates. The usual protections, like encrypted connections, still apply.</p>"
+      "content": "<p>The security considerations of the presence event package for SIP apply to this document as well. Issues described in that package, including confidentiality, message integrity and authenticity, outbound authentication, replay prevention, denial-of-service attacks against third parties and denial-of-service attacks against servers, all apply here without any change. It is RECOMMENDED that TLS be used between elements to provide hop-by-hop confidentiality protection, and S/MIME MAY be used for integrity and authenticity of SUBSCRIBE and NOTIFY requests.</p><p>The RFC also notes that a third party can inject a NOTIFY request with partial state that will cause the watcher to think it has missed a partial notification and to request a new full presence document. This is no worse than what happens without the extension, because a party that could perform such an action could also send a NOTIFY with a Subscription-State of terminated and achieve the same effect without knowing about the extension. Partial Notification does not make the situation any worse, and the protection mechanisms from the existing system apply to preventing this attack against the partial notification mechanism.</p>",
+      "plainLanguage": "<p>The security rules of the presence event package apply unchanged. One new point is that someone who can inject a fake notification could make the watcher ask for a full document again, but that party could already end the subscription, so the extension does not make things worse.</p>"
     }
   ],
   "viz": [
@@ -104,7 +130,7 @@
       "type": "sequence",
       "anchor": "examples",
       "position": "after",
-      "caption": "PARTIAL NOTIFICATION EXCHANGE (RFC 5263 SECTION 5)",
+      "caption": "THE PARTIAL NOTIFICATION EXAMPLE",
       "data": {
         "lanes": [
           {
@@ -114,130 +140,164 @@
           {
             "key": "pa",
             "label": "Presence Agent"
-          },
-          {
-            "key": "pua",
-            "label": "PUA"
           }
         ],
         "messages": [
           {
             "from": "watcher",
             "to": "pa",
-            "label": "F1 SUBSCRIBE",
+            "label": "SUBSCRIBE",
             "color": "blue",
-            "note": "Accept lists pidf+xml and pidf-diff+xml, with q values."
+            "note": "The Accept header lists application/pidf+xml;q=0.3 and application/pidf-diff+xml;q=1."
           },
           {
             "from": "pa",
             "to": "watcher",
-            "label": "F2 200 OK",
+            "label": "200 OK",
             "color": "green"
           },
           {
             "from": "pa",
             "to": "watcher",
-            "label": "F3 NOTIFY",
-            "color": "blue",
-            "note": "Full document, version 1."
+            "label": "NOTIFY, full document",
+            "color": "green",
+            "note": "Content type application/pidf-diff+xml, version 1."
           },
           {
             "from": "watcher",
             "to": "pa",
-            "label": "F4 200 OK",
+            "label": "200 OK",
             "color": "green"
-          },
-          {
-            "from": "pua",
-            "to": "pa",
-            "label": "Update presence",
-            "color": "neutral"
           },
           {
             "from": "pa",
             "to": "watcher",
-            "label": "F5 NOTIFY",
-            "color": "blue",
-            "note": "Only the changes, version 2."
+            "label": "NOTIFY, changes only",
+            "color": "green",
+            "note": "Version 2, listing the add, replace and remove elements."
           },
           {
             "from": "watcher",
             "to": "pa",
-            "label": "F6 200 OK",
+            "label": "200 OK",
             "color": "green"
           }
         ]
       }
     },
     {
-      "type": "opcodes",
+      "type": "tree",
       "anchor": "operation",
       "position": "after",
-      "caption": "ELEMENTS OF A PARTIAL PRESENCE DOCUMENT",
+      "caption": "WHAT A PARTIAL PRESENCE DOCUMENT LISTS",
       "data": {
-        "items": [
+        "root": {
+          "label": "pidf-diff",
+          "note": "Root element of a partial presence document, with a version attribute",
+          "children": [
+            {
+              "label": "add",
+              "note": "Information added to the presence document"
+            },
+            {
+              "label": "replace",
+              "note": "Information that has changed"
+            },
+            {
+              "label": "remove",
+              "note": "Information removed from the presence document"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "WHAT THE WATCHER DOES WITH EACH VERSION NUMBER",
+      "data": {
+        "columns": [
+          "Version received",
+          "What the watcher does"
+        ],
+        "rows": [
           {
-            "code": "pidf-full",
-            "label": "Root element",
-            "desc": "Carries the complete presence state; used for the first partial notification."
+            "cells": [
+              "Equal to or lower than the stored value",
+              "Treats it as a presence agent failure and discards the document"
+            ]
           },
           {
-            "code": "pidf-diff",
-            "label": "Root element",
-            "desc": "Carries only changes since the previous notification."
+            "cells": [
+              "Exactly one higher",
+              "Applies the changes to its local copy and increments its counter"
+            ]
           },
           {
-            "code": "add",
-            "label": "Child of pidf-diff",
-            "desc": "Lists information added to the document."
-          },
-          {
-            "code": "replace",
-            "label": "Child of pidf-diff",
-            "desc": "Lists information that was changed."
-          },
-          {
-            "code": "remove",
-            "label": "Child of pidf-diff",
-            "desc": "Lists information removed from the document."
+            "cells": [
+              "More than one higher",
+              "Assumes a notification was lost, then refreshes or terminates the subscription"
+            ]
           }
         ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "negotiation",
+      "position": "after",
+      "caption": "THE ACCEPT HEADER OF THE EXAMPLE (RFC 5263, SECTION 5)",
+      "data": {
+        "title": "Accept header in the SUBSCRIBE request",
+        "lang": "text",
+        "code": "Accept: application/pidf+xml;q=0.3,\n  application/pidf-diff+xml;q=1"
       }
     }
   ],
   "references": [
     {
-      "number": "[2]",
-      "text": "Lonnfors, M., Khartabil, H., Leppanen, E., and J. Urpalainen, \"Presence Information Data Format (PIDF) Extension for Partial Presence\", RFC 5262.",
+      "number": "[RFC2119]",
+      "text": "Bradner, S., \"Key words for use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
+      "number": "[RFC5262]",
+      "text": "Lonnfors, M., Khartabil, H., Leppanen, E., and J. Urpalainen, \"Presence Information Data Format (PIDF) Extension for Partial Presence\", RFC 5262, August 2008.",
       "rfc": 5262
     },
     {
-      "number": "[3]",
+      "number": "[RFC3856]",
       "text": "Rosenberg, J., \"A Presence Event Package for the Session Initiation Protocol (SIP)\", RFC 3856, August 2004.",
       "rfc": 3856
     },
     {
-      "number": "[4]",
-      "text": "Rosenberg, J., et al., \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
+      "number": "[RFC3261]",
+      "text": "Rosenberg, J., Schulzrinne, H., Camarillo, G., Johnston, A., Peterson, J., Sparks, R., Handley, M., and E. Schooler, \"SIP: Session Initiation Protocol\", RFC 3261, June 2002.",
       "rfc": 3261
     },
     {
-      "number": "[5]",
-      "text": "Sugano, H., et al., \"Presence Information Data Format (PIDF)\", RFC 3863, August 2004.",
+      "number": "[RFC3863]",
+      "text": "Sugano, H., Fujimoto, S., Klyne, G., Bateman, A., Carr, W., and J. Peterson, \"Presence Information Data Format (PIDF)\", RFC 3863, August 2004.",
       "rfc": 3863
     },
     {
-      "number": "[6]",
-      "text": "Roach, A., \"SIP-Specific Event Notification\", RFC 3265, June 2002.",
+      "number": "[RFC3265]",
+      "text": "Roach, A.B., \"SIP-Specific Event Notification\", RFC 3265, June 2002.",
       "rfc": 3265
     },
     {
-      "number": "[8]",
+      "number": "[RFC4346]",
+      "text": "Dierks, T. and E. Rescorla, \"The TLS Protocol Version 1.1\", RFC 4346, April 2006.",
+      "rfc": 4346
+    },
+    {
+      "number": "[RFC5261]",
       "text": "Urpalainen, J., \"An Extensible Markup Language (XML) Patch Operations Framework Utilizing XML Path Language (XPath) Selectors\", RFC 5261, September 2008.",
       "rfc": 5261
     },
     {
-      "number": "[9]",
+      "number": "[RFC2778]",
       "text": "Day, M., Rosenberg, J., and H. Sugano, \"A Model for Presence and Instant Messaging\", RFC 2778, February 2000.",
       "rfc": 2778
     }
@@ -245,10 +305,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-16",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-16"
+  "updated": "2026-10-21"
 }

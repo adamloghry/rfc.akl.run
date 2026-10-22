@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>Defines how an IKEv2 client and gateway can resume a previous session with fewer round trips and less cryptographic work. This helps remote-access VPNs where EAP authentication is expensive or a gateway fails over. It is on the standards track.</p>",
   "plainLanguage": {
-    "summary": "<p>If you already showed your badge this morning, a guard can wave you in quickly when you come back instead of checking everything again. This lets a VPN session restart fast.</p>"
+    "summary": "<p>When a remote access client loses its connection to a VPN gateway, it normally has to start the whole handshake again, including checking the user's credentials. This RFC lets it resume instead. The gateway gives the client a small piece of protected data called a ticket, and the client sends that ticket back when it reconnects, so the gateway knows who it is talking to without asking for a password again.</p>"
   },
   "questions": [
     "how does ikev2 session resumption work",
@@ -20,36 +20,40 @@
     "IPsec",
     "Session Resumption"
   ],
-  "subtitle": "How an IKEv2 client can quickly resume a dropped VPN session with a ticket instead of authenticating all over again.",
+  "subtitle": "Letting a VPN client pick up a dropped session where it left off, without starting the whole handshake again.",
   "tldr": {
-    "problem": "Re-establishing an IKEv2 session after a failure takes many round trips and cryptographic work, especially with EAP authentication and a gateway that must bring back many clients at once.",
-    "mechanism": "The gateway gives the client an opaque ticket holding or pointing to the old IKE state. After a break, the client sends the ticket in a new IKE_SESSION_RESUME exchange, and fresh keys are derived from the old SK_d and new nonces using only symmetric cryptography.",
-    "outcome": "A session can resume with less overhead and no user interaction. Tickets are single use, short lived and tied to one IKE SA, and the RFC covers failure recovery to the same gateway only.",
-    "outcomeLabel": "Why it matters"
+    "problem": "Re-establishing an IPsec session from scratch takes several round trips and a full authentication, which is slow for a remote access client and expensive for a gateway handling many clients.",
+    "mechanism": "The gateway hands the client an opaque ticket carrying the previous session state, encrypted and integrity-protected in the ticket-by-value case or held on the gateway in the ticket-by-reference case. The client later presents the ticket in a new IKE_SESSION_RESUME exchange and confirms it with a normal IKE_AUTH exchange.",
+    "outcome": "The resumed session gets fresh keys derived from the old session key and the new nonces, so the protection is as strong as a full handshake. Tickets are for one-time use and must be deleted when the session ends.",
+    "outcomeLabel": "The catch"
   },
   "facts": [
     {
       "label": "New exchange type",
-      "value": "IKE_SESSION_RESUME (38)"
+      "value": "IKE_SESSION_RESUME, value 38"
     },
     {
-      "label": "Notify types",
+      "label": "New notification types",
       "value": "16409 to 16413"
     },
     {
-      "label": "Lifetime field",
-      "value": "4 octets, seconds"
+      "label": "Ticket lifetime",
+      "value": "the minimum of the IKE SA lifetime and the re-authentication time"
     },
     {
-      "label": "Ticket reuse",
-      "value": "Not allowed (single use)"
+      "label": "Ticket key strength",
+      "value": "at least 128 bits"
     },
     {
-      "label": "Key strength advice",
-      "value": "At least 128 bits"
+      "label": "IKE SA window size after resumption",
+      "value": "reset to 1"
+    },
+    {
+      "label": "Old SA after a successful resumption",
+      "value": "silently deleted"
     }
   ],
-  "today": "<p>RFC 5723 is a Proposed Standard and the metadata lists no RFC that obsoletes or updates it. It covers resuming to the same gateway only; failover between gateways is listed as a non-goal.</p>",
+  "today": "<p>RFC 5723 is a Proposed Standard on the Internet standards track, and no RFC in the site index obsoletes or updates it. It is an extension to the IKEv2 protocol in RFC 4306, and it leaves the ticket format to the implementor while giving examples of both approaches in its Appendix A.</p>",
   "glossary": [
     "ike",
     "ipsec",
@@ -61,171 +65,305 @@
     "spi",
     "pseudorandom-function",
     "man-in-the-middle",
-    "nat-traversal"
+    "nat-traversal",
+    "pre-shared-key"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Problem and the Ticket Idea",
-      "content": "<p>IKEv2 has computational and communication overhead. In remote access, the Extensible Authentication Protocol (EAP) adds more round trips. After a failure, a VPN gateway may have to rebuild a large number of security associations at once, and users may have to re-authenticate by hand.</p><p>RFC 5723 lets a client resume using a <strong>ticket</strong>, an opaque data structure created by the responder. There are two flavours. With <strong>ticket by reference</strong>, the gateway keeps the state and gives the client an opaque reference to it. With <strong>ticket by value</strong>, the gateway encrypts and integrity-protects its state under a key only it knows and hands that to the client. The client behaves the same in both cases. The approach is modelled on TLS session resumption (<a href='/rfc5077'>RFC 5077</a>).</p><p>Goals are symmetric-only cryptography, cryptographic agility and no harm to IKEv2 security. Non-goals are failover between gateways, load balancing and detecting when resumption is needed.</p>",
-      "plainLanguage": "<p>When you first get in, the gateway gives you a sealed envelope. Next time, you hand it back and it remembers you without asking all the questions again.</p>"
+      "title": "Why Resume Instead of Starting Over",
+      "content": "<p>The Internet Key Exchange version 2 protocol has a computational and communication overhead in terms of the number of round trips required and the cryptographic operations involved. In remote access situations the Extensible Authentication Protocol is used for authentication, which adds several more round trips and consequently latency.</p><p>Re-establishing security associations upon a failure recovery condition is time-consuming, especially when an IPsec peer such as a VPN gateway has to re-establish a large number of SAs with various endpoints. A high number of concurrent sessions might cause additional problems for an IPsec peer during SA re-establishment, and usability is affected when the re-establishment of an IKE SA involves user interaction for re-authentication.</p><p>This document proposes an extension to IKEv2 that allows a client to re-establish an IKE SA with a gateway in a highly efficient manner, using a previously established IKE SA. The client, the IKEv2 initiator, stores the state about the previous IKE SA locally. The gateway, the IKEv2 responder, has two options for maintaining the state.</p><p>In the <strong>ticket by reference</strong> approach the gateway stores the state locally and gives the client a protected and opaque reference, for example an index into the gateway's table, which the gateway can later use to find the state. In the <strong>ticket by value</strong> approach the gateway stores its state in a ticket, a data structure that is encrypted and integrity-protected by a key known only to the gateway. The ticket is passed to the client, who treats it as an opaque string, and sent back to the gateway when the session is resumed, so the gateway can decrypt it and recover the state.</p><p>The client behaves identically in both cases and in general does not know which approach the gateway is using. Since the ticket or reference is interpreted only by the party that created it, the document does not specify an exact format for it, but Appendix A gives examples of both. The approach is similar to TLS session resumption, with the adaptations IKEv2 needs for its two-phase structure. The stated goals are to use only symmetric cryptography, to provide cryptographic agility, and to have no negative impact on IKEv2 security features. The non-goals are failover from one gateway to another, load balancing among gateways, and specifying how a client detects the need for resumption.</p>",
+      "plainLanguage": "<p>Setting up a protected connection from scratch takes several round trips and a lot of cryptography, and with a password prompt it can take even longer. This RFC lets a client that was disconnected pick up where it left off, using a small piece of data the gateway gave it earlier.</p>"
     },
     {
-      "id": "background",
+      "id": "design",
       "number": "3",
       "title": "Usage Scenarios",
-      "content": "<p>Two settings are envisioned: a remote access client reaching a gateway through an IPsec tunnel, and two servers protecting a client-server protocol with transport or tunnel mode.</p><p>The RFC lists situations where resumption helps. A client that briefly loses connectivity and times out through dead peer detection can reconnect with less overhead and no user interaction. When many clients lose connectivity together, resumption reduces the load spike on the gateway when they all return. A laptop put into stand-by could resume too, although the RFC notes that policy may often disallow user-level resumption, and the client must destroy its ticket when the user explicitly logs out.</p>",
-      "plainLanguage": "<p>It helps when your connection drops for a moment, when a whole crowd reconnects at once, or when you close your laptop and open it again.</p>"
+      "content": "<p>The specification envisions two usage scenarios. The first is like the use case in the IKEv2 specification, where IPsec tunnel mode is used to establish a secure channel between a remote access client and a gateway, and the traffic flow may be between the client and entities beyond the gateway. The second focuses on using transport or tunnel mode to secure the communication between two endpoints, such as two servers, where the two endpoints have a client-server relationship with respect to a protocol that runs using the protections afforded by the IPsec SA.</p><p>In the first use case an end host with a host implementation of IPsec establishes a tunnel mode IPsec SA with a gateway in a remote network using IKEv2. At a later stage, when the client needs to re-establish the IKEv2 session, it may choose to establish IPsec SAs using a full IKEv2 exchange or the IKE_SESSION_RESUME exchange.</p><p>The RFC lists several situations where the mechanism is useful. If a client temporarily loses network connectivity and the IKE SA times out through the liveness test facility, known as dead peer detection, the mechanism re-establishes the SA with less overhead in network, CPU and authentication infrastructure, and without requiring user interaction for authentication. If connectivity problems affect a large number of clients, as at a large remote access VPN gateway, then when connectivity is restored all the clients might reconnect almost simultaneously, and the mechanism reduces the load spike for cryptographic operations and authentication infrastructure. Losing connectivity can also be predictable and planned, for example putting a laptop into stand-by mode before travelling, and the mechanism re-establishes the SA when the laptop is switched back on. The RFC notes that such user-level resumption may often be disallowed by policy, and that this document requires the client to destroy the ticket when the user explicitly logs out.</p>",
+      "plainLanguage": "<p>The main case is a remote access client that lost its connection to a VPN gateway. The other case is two servers that keep a protected channel between them. Resumption helps most when many clients reconnect at once, because the gateway does far less work than if every client authenticated from scratch.</p>"
     },
     {
       "id": "operation",
       "number": "4.1",
-      "title": "Getting and Using a Ticket",
-      "content": "<p>A client MAY request a ticket by including a <code>TICKET_REQUEST</code> notification in the first IKE_AUTH request. It can also ask during rekeying of the IKE SA (when the client starts it), in an Informational exchange at any time, or in the IKE_AUTH that follows a resumption. The responder answers with <code>TICKET_LT_OPAQUE</code> carrying the ticket, <code>TICKET_NACK</code> to refuse, or <code>TICKET_ACK</code> if it cannot grant one right now, for example due to packet size limits. The normal IKE response is always sent as well.</p><p>To resume, the client sends a new exchange type, <code>IKE_SESSION_RESUME</code> (value 38), containing a nonce Ni and a <code>TICKET_OPAQUE</code> notification. It acts like IKE_SA_INIT, and MUST be followed by IKE_AUTH. The initiator sets SPIi to a new unique value and SPIr to 0. If the gateway accepts, it replies with its nonce Nr. If it rejects the ticket it sends an unprotected <code>TICKET_NACK</code> and the client starts a regular IKE exchange.</p><p>The client may resume from any IP address and port, and NAT traversal status is determined anew. Tickets are one-time use: a client MUST NOT reuse one, and a reused ticket SHOULD be rejected. A client MUST NOT present a ticket it knows has expired, but MAY choose a regular exchange anyway.</p>",
-      "plainLanguage": "<p>You ask for an envelope when you sign in. If the connection drops, you show it to the gateway. If it is not accepted, you simply do the long check-in again.</p>"
+      "title": "Requesting and Receiving a Ticket",
+      "content": "<p>A client MAY request a ticket in several exchanges: in an IKE_AUTH exchange, which is the typical case; in a CREATE_CHILD_SA exchange when an IKE SA is rekeyed, and only when the client initiates that exchange; in an Informational exchange at any time, for example when the gateway previously replied with an acknowledgement instead of a ticket, when the ticket lifetime is about to expire, or following a gateway-initiated IKE rekey, all of which must be client-initiated; and while resuming an IKE session, in the IKE_AUTH exchange that follows an IKE_SESSION_RESUME exchange.</p><p>Normally the client requests a ticket in the third message of an IKEv2 exchange, the first of IKE_AUTH, by adding an N(TICKET_REQUEST) notification.</p><p>When a responder receives that request and supports the extension, it MUST do one of three things. It may create a ticket and return it with an N(TICKET_LT_OPAQUE) payload in a subsequent message. It may return an N(TICKET_NACK) if it refuses to grant a ticket for some reason. Or it may return an N(TICKET_ACK) if it cannot grant a ticket immediately, for example because of packet size limitations, in which case the client MAY request a ticket later using an Informational exchange at any time during the lifetime of the IKE SA. Whichever it does, there is no change to the behaviour of the responder with respect to the IKE exchange, and the proper IKE response, such as an IKE_AUTH response or an error notification, MUST still be sent.</p><p>The initiator receives the ticket and may accept it, provided the IKEv2 exchange was successful, and it may be used later with a responder that supports the extension. When a multi-round-trip IKE_AUTH exchange is used, the request MUST be included in the first IKE_AUTH request, and the ticket, nack or ack MUST only be returned in the final IKE_AUTH response. When the client accepts the ticket it stores it in its local storage for later use, along with the IKE SA to which the ticket refers. Since the ticket itself is opaque to the client, the local storage MUST also include all the items the RFC marks as coming from the ticket.</p>",
+      "plainLanguage": "<p>The client asks for a ticket during the normal handshake, by adding a small notification to the third message. The gateway then either sends the ticket, refuses, or says it cannot do it now and will send it later. The client keeps the ticket with the details of the session it belongs to.</p>"
     },
     {
-      "id": "authentication",
-      "number": "4.3.3",
-      "title": "Authenticating the Resumed Session",
-      "content": "<p>After IKE_SESSION_RESUME, the client MUST run an IKE_AUTH exchange. The AUTH payload is computed like pre-shared secret authentication, as <code>AUTH = prf(SK_px, message octets)</code>, using SK_pi for the initiator and SK_pr for the responder from the newly generated keys.</p><p>The IDi in IKE_AUTH MUST match the value in the ticket. No CERT payload is allowed, so a new IDr cannot be negotiated, and the IDr sent MUST also match the ticket. A client will typically ask for a new ticket in this same IKE_AUTH so it can resume again after a second failure. When the responder accepts a ticket for an IKE SA that is still active, it SHOULD silently delete the old SA without a DELETE exchange, which also deletes its Child SAs.</p>",
-      "plainLanguage": "<p>Even with the envelope, you still prove it is really you using a secret only the two of you share, and your name has to match the one inside.</p>"
+      "id": "procedures",
+      "number": "4.3",
+      "title": "Presenting the Ticket",
+      "content": "<p>It is up to the client's local policy to decide when communication with the responder is seen as interrupted and the resumption procedure is started. A client MAY initiate a regular, non-ticket-based IKEv2 exchange even if it is in possession of a valid, unexpired ticket, and it MUST NOT present a ticket when it knows that the ticket's lifetime has expired. Tickets are intended for one-time use: a client MUST NOT reuse a ticket, and a reused ticket SHOULD be rejected by a gateway. A ticket counts as used only when an IKE SA has been established successfully with it.</p><p>The RFC specifies a new IKEv2 exchange type called IKE_SESSION_RESUME, whose value is 38. It is equivalent to the IKE_SA_INIT exchange and MUST be followed by an IKE_AUTH exchange. The initiator sets the SPIi value in the header to a new, unique value and the SPIr value to 0. When the responder receives a ticket it MUST either accept it, responding with the SPIi copied from the request and a new, unique SPIr, or reject it for any reason with an unprotected N(TICKET_NACK), in which case the initiator should re-initiate a regular IKE exchange. One such case is a ticket for an IKE SA that the responder itself has previously terminated, which may indicate inconsistent state between the initiator and the responder.</p><p>Where not otherwise specified, the exchange behaves exactly like the IKE_SA_INIT exchange. The client MAY resume from any IP address and port, regardless of its original address, although the gateway MAY reject the exchange if its policy depends on the client's address. The first message MAY be rejected in denial-of-service situations, with the initiator instructed to send a cookie. Notifications normally associated with IKE_SA_INIT can be sent, in particular NAT detection payloads, and the client's NAT traversal status SHOULD be determined anew, because NAT status is explicitly not part of the session resumption state.</p><p>Following the IKE_SESSION_RESUME exchange the client MUST initiate an IKE_AUTH exchange. The AUTH payload is derived in a manner similar to IKEv2 pre-shared secret authentication, as <code>AUTH = prf(SK_px, &lt;message octets&gt;)</code>, where each side uses its own value for SK_px, namely SK_pi for the initiator and SK_pr for the responder, both taken from the newly generated IKE SA. The IDi value sent in the IKE_AUTH exchange MUST be identical to the value included in the ticket, a CERT payload MUST NOT be included, and the IDr value sent by the gateway, and optionally by the client, MUST also be identical to the value included in the ticket. When the responder accepts the ticket and the IKE_AUTH exchange completes, the old SA SHOULD be silently deleted without sending a DELETE informational exchange, and consequently all the dependent IPsec Child SAs are also deleted.</p>",
+      "plainLanguage": "<p>To resume, the client sends the ticket in a short exchange that works like the first message of a normal handshake, then confirms the session in the usual authentication exchange. The ticket already carries the proof of identity, so no certificate or password is needed again.</p>"
     },
     {
       "id": "key-management",
-      "number": "5",
-      "title": "State and Keys After Resumption",
-      "content": "<p>Section 5 has a table of what happens to each piece of IKE and IPsec state. The identities, authentication method, certificates when needed, and IKE SA algorithms come from the ticket. NAT detection status, SPIs and MOBIKE support come from the new exchange. Message IDs reset to 0 and the window size resets to 1. Child SAs are created in a new exchange, and the internal IP address and other configuration payload information are not resumed, though the client can ask for its earlier address.</p><p>Keys are refreshed using the old SK_d from the ticket and both nonces: <code>SKEYSEED = prf(SK_d_old, \"Resumption\" | Ni | Nr)</code>. The usual keys SK_d, SK_ai, SK_ar, SK_ei, SK_er, SK_pi and SK_pr are then derived with <code>prf+</code> from SKEYSEED, the nonces and the new SPIs. The literal string is 10 ASCII characters with no NULL terminator.</p>",
-      "plainLanguage": "<p>The old secret is stirred together with fresh random numbers from both sides, so the new session gets brand new keys.</p>"
+      "number": "5.1",
+      "title": "Generating Cryptographic Material for the Resumed IKE SA",
+      "content": "<p>The cryptographic material is refreshed based on the ticket and the nonce values Ni and Nr from the current exchange. A new SKEYSEED value is derived as <code>SKEYSEED = prf(SK_d_old, \"Resumption\" | Ni | Nr)</code>, where SK_d_old is taken from the ticket and the literal string is encoded as 10 ASCII characters with no NULL terminator. The keys are then derived as they are in IKEv2, with <code>{SK_d | SK_ai | SK_ar | SK_ei | SK_er | SK_pi | SK_pr} = prf+(SKEYSEED, Ni | Nr | SPIi | SPIr)</code>, where the SPI values are those created in the new exchange and the pseudorandom function is determined from the SA value in the ticket.</p><p>The RFC also tabulates the IKE and IPsec state after resumption and how it relates to the state before the IKE SA was interrupted. An item marked as coming from the ticket is retrieved by the client from its local store, encoded into the ticket by the gateway in the ticket-by-value case, or fetched by the gateway from the ticket store in the ticket-by-reference case. So IDi and IDr come from the ticket, as do the authentication method and, where applicable, the certificates. The NAT detection status and the SPIs come from the new exchange, the IKE SA sequence numbers are reset to 0 in IKE_SESSION_RESUME and then incremented normally, and the IKE SA algorithms come from the ticket. The IKE SA window size is reset to 1, Child SAs are created in the new exchange, and the internal IP address, other Configuration Payload information and the peer vendor IDs are not resumed.</p>",
+      "plainLanguage": "<p>The new keys are computed from the old session key and the random numbers in the new exchange, so both ends end up with fresh keys that nobody has seen before. The identity and the authentication method come from the ticket, but anything about the network connection is worked out again.</p>"
     },
     {
-      "id": "data-model",
+      "id": "management",
       "number": "6",
-      "title": "Ticket Contents and Lifecycle",
-      "content": "<p>A ticket by value MUST be integrity protected and encrypted, and MUST contain all state marked as coming from the ticket. It MUST include a protected absolute expiration time and a key identity field, so keys and algorithms can be changed. A ticket by reference need not be encrypted, but access to the state store MUST be protected, and integrity protection is RECOMMENDED to avoid problems such as SQL injection. The exact ticket format is left to implementers; Appendix A gives examples for both kinds.</p><p>Each ticket belongs to a single IKE SA. The client MUST delete it when the IKE SA is deleted or its credentials are invalidated, and rekeying invalidates it, so the client SHOULD request a new one. The ticket lifetime SHOULD be the minimum of the IKE SA lifetime and the re-authentication time, and a finite lifetime is always required. The key protecting tickets MUST live significantly longer than an IKE SA.</p>",
-      "plainLanguage": "<p>An envelope is good for only one trip and one visit. It has an expiry date, and you throw it away when you log out.</p>"
+      "title": "Ticket Handling and Lifetime",
+      "content": "<p>When passing a ticket by value to the client, the ticket content MUST be integrity-protected and encrypted. A ticket by reference does not need to be encrypted, as it holds no sensitive material such as keying material, but access to the storage where that material is kept MUST be protected so that only authorised access is allowed. The RFC compares such a ticket to the stub concept and to a TLS session identifier. Although not strictly required for cryptographic protection, it is RECOMMENDED to integrity-protect a ticket by reference, because failing to do so could result in security vulnerabilities on the gateway side, depending on the format of the reference, such as the gateway accessing unintended URLs or SQL injection.</p><p>A ticket by value MUST encode all the state information marked as coming from the ticket, and the same state MUST be stored in the ticket store in the ticket-by-reference case. A ticket by value MUST include a protected expiration time, an absolute time value that SHOULD correspond to the value included in the TICKET_LT_OPAQUE payload, and it MUST additionally include a key identity field, so that the keys for ticket encryption and authentication can be changed and, when necessary, algorithms replaced.</p><p>Each ticket is associated with a single IKE SA. When an IKE SA is deleted by the client or the gateway, the client MUST delete its stored ticket, and when credentials associated with the IKE SA are invalidated, for example when a user logs out, the ticket MUST be deleted. When the IKE SA is rekeyed the ticket is invalidated and the client SHOULD request a new one.</p><p>The lifetime of the ticket sent by the gateway SHOULD be the minimum of the IKE SA lifetime, per the gateway's local policy, and its re-authentication time. Even if neither of these is enforced by the gateway, a finite lifetime MUST be specified for the ticket. The key used to protect the ticket MUST have a lifetime significantly longer than the lifetime of an IKE SA. In normal operation the client requests a ticket when establishing the initial IKE SA, and then every time the SA is rekeyed or re-established because of re-authentication.</p>",
+      "plainLanguage": "<p>A ticket is only good for one session and one try. The client has to throw it away when the session ends or when the user logs out, and the gateway has to give it an end date. The key that protects the ticket must live longer than any single session.</p>"
     },
     {
-      "id": "packet-format",
+      "id": "message-format",
       "number": "7",
-      "title": "The Ticket Notifications",
-      "content": "<p>Five new Notify Message types are defined, all with Protocol ID and SPI Size sent as 0. <code>TICKET_LT_OPAQUE</code> carries a four-octet Lifetime field, the number of seconds until the ticket expires as an unsigned integer in network byte order, followed by the ticket. <code>TICKET_OPAQUE</code> carries just the ticket with no lifetime. <code>TICKET_REQUEST</code>, <code>TICKET_ACK</code> and <code>TICKET_NACK</code> carry no data. IANA allocated the IKE_SESSION_RESUME exchange type and the notification values.</p>",
-      "plainLanguage": "<p>These are the little labelled notes the two sides pass back and forth: please give me a ticket, here it is, no thanks, or later.</p>"
+      "title": "The Notify Payloads",
+      "content": "<p>The RFC defines five notifications. The TICKET_LT_OPAQUE payload carries a ticket together with its remaining lifetime: it consists of the Notify message header, a Lifetime field and the ticket itself. The four octet Lifetime field contains a relative time value, the number of seconds until the ticket expires, encoded as an unsigned integer in network byte order. The TICKET_OPAQUE payload consists of the Notify message header and the ticket itself, with no lifetime value, and it is the payload the client sends back when it presents the ticket. TICKET_REQUEST, TICKET_ACK and TICKET_NACK carry no data.</p><p>For all of these notifications the Protocol ID and the SPI Size fields MUST both be sent as 0.</p>",
+      "plainLanguage": "<p>The ticket travels in a small notification message. One kind carries the ticket and how long it stays valid, and another carries just the ticket, which is what the client sends back when it wants to resume.</p>"
     },
     {
       "id": "security-considerations",
       "number": "9",
       "title": "Security Considerations",
-      "content": "<p>A stolen ticket is of no use on its own, because the thief cannot prove knowledge of the secret IKE state during IKE_AUTH. The responder MUST use strong encryption and integrity protection for ticket by value, and MUST enforce access control on reference resolution. Forging or altering a ticket fails if strong integrity protection is used.</p><p>Denial of service is a concern: floods of tickets by value burden the CPU, and floods of references force lookups, so verification and resolution should be lightweight. The regular IKEv2 cookie mechanism can handle state overflow. Recommended key practice includes secure generation, at least 128 bits of strength, no other uses, and regular changes.</p><p>Revoked tickets by value could be replayed by a misbehaving client. A gateway may keep an Invalid Ticket List, and short lifetimes (the RFC gives 1 hour as an example) mitigate the issue. Because the resumption exchange is not confidential, an observer could link repeated use of the same ticket to the same endpoints, which is why tickets are single use.</p>",
-      "plainLanguage": "<p>A copied envelope is useless without the secret inside, but the gateway should still check envelopes quickly, change its locks often, and never let one be used twice.</p>"
+      "content": "<p>A man in the middle may try to eavesdrop on an exchange to obtain a ticket by value and use it to establish a session with the responder. Since all the exchanges where the client obtains a ticket are encrypted, this is only possible by listening in on the client's use of the ticket to resume a session. Because the ticket's contents are encrypted and the attacker does not know the corresponding secret key, a stolen ticket cannot be used to resume a session successfully, and the responder MUST use strong encryption and integrity protection of the ticket. A ticket by reference cannot be used by an attacker to resume a session either, for the same reason, because the attacker would not be able to prove during IKE_AUTH its knowledge of the secret part of the IKE state embedded in the ticket. Access control must also ensure the reference is disclosed only to authorised entities.</p><p>A malicious user could forge or alter a ticket by value in order to resume a session, extend its lifetime, impersonate another user or gain additional privileges. This is not possible if the content is protected using a strong integrity protection algorithm. For a ticket by reference, an adversary may attempt to construct a fake reference pointing at state information stored by the responder, but the attack fails because the adversary is not in possession of the keying material associated with the IKE SA.</p><p>For denial of service, an adversary could send a large number of tickets by value to burden the gateway's CPU or exhaust its memory with half-open IKE state, so ticket verification should be lightweight and use efficient symmetric key algorithms. A large number of tickets by reference may lead to an amplification attack, because the responder is forced to resolve the reference to discover that the adversary holds no keying material, so the resolution protocol should be as lightweight as possible and should not generate a large number of messages. The regular IKEv2 cookie mechanism can be used for state-overflow denial-of-service situations.</p><p>On key management, the RFC recommends that the keys used to protect a ticket by value be generated securely following the randomness recommendations in <a href='/rfc4086'>RFC 4086</a>, that the keys and cryptographic protection algorithms be at least 128 bits in strength, that the keys not be used for any other purpose than generating and verifying tickets, that the keys be changed regularly, and that they be changed if the ticket format or the algorithms change. A misbehaving client could present a ticket for an IKE SA that has already been deleted, so the gateway may maintain an Invalid Ticket List, a simple blacklist of revoked tickets, or use Bloom filters to keep the list in constant space; a policy requiring shorter ticket lifetimes, an hour for example, significantly mitigates the issue. Finally, since the IKE_SESSION_RESUME exchange provides no confidentiality, an on-path adversary could observe several exchanges that use the same state and conclude that they belong to the same endpoints, so this document requires the ticket to be presented to the responder only once.</p>",
+      "plainLanguage": "<p>The ticket acts as proof that the client was here before, so it has to be protected like a password. If it is stolen it cannot be used, because the attacker cannot produce the matching keys, and it must not be used twice, because repeated use would let an observer link the sessions together.</p>"
     }
   ],
   "viz": [
     {
+      "type": "compare-table",
+      "anchor": "motivation",
+      "position": "after",
+      "caption": "THE TWO WAYS TO PASS THE SESSION STATE",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Ticket by reference",
+          "Ticket by value"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Where the state lives",
+              "On the gateway, in a ticket store",
+              "Inside the ticket, encrypted"
+            ]
+          },
+          {
+            "cells": [
+              "What the client holds",
+              "An opaque reference, such as an index",
+              "The opaque ticket itself"
+            ]
+          },
+          {
+            "cells": [
+              "Encryption",
+              "Not needed, but integrity protection is recommended",
+              "MUST be encrypted and integrity-protected"
+            ]
+          },
+          {
+            "cells": [
+              "What the client does",
+              "The same in both cases",
+              "The same in both cases"
+            ]
+          }
+        ]
+      }
+    },
+    {
       "type": "sequence",
       "anchor": "operation",
       "position": "after",
-      "caption": "TICKET RESUMPTION FLOW (SIMPLIFIED FROM SECTION 4)",
+      "caption": "REQUESTING AND RECEIVING A TICKET (RFC 5723)",
       "data": {
         "lanes": [
           {
             "key": "initiator",
-            "label": "Initiator (client)"
+            "label": "Initiator"
           },
           {
             "key": "responder",
-            "label": "Responder (gateway)"
+            "label": "Responder"
           }
         ],
         "messages": [
           {
             "from": "initiator",
             "to": "responder",
-            "label": "IKE_AUTH + N(TICKET_REQUEST)",
+            "label": "IKE_SA_INIT",
             "color": "blue",
-            "note": "Ask for a ticket during normal setup."
+            "note": "HDR, SAi1, KEi, Ni"
           },
           {
             "from": "responder",
             "to": "initiator",
-            "label": "IKE_AUTH + N(TICKET_LT_OPAQUE)",
-            "color": "green",
-            "note": "Ticket and lifetime."
+            "label": "IKE_SA_INIT REPLY",
+            "color": "neutral",
+            "note": "HDR, SAr1, KEr, Nr [, CERTREQ]"
           },
           {
             "from": "initiator",
             "to": "responder",
-            "label": "IKE_SESSION_RESUME: Ni, N(TICKET_OPAQUE)",
+            "label": "IKE_AUTH WITH TICKET REQUEST",
             "color": "blue",
-            "note": "After an interruption."
+            "note": "HDR, SK {IDi, AUTH, SAi2, TSi, TSr, N(TICKET_REQUEST)}"
           },
           {
             "from": "responder",
             "to": "initiator",
-            "label": "IKE_SESSION_RESUME: Nr",
+            "label": "IKE_AUTH WITH TICKET",
             "color": "green",
-            "note": "Ticket accepted."
+            "note": "HDR, SK {IDr, AUTH, SAr2, TSi, TSr, N(TICKET_LT_OPAQUE)}"
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "procedures",
+      "position": "after",
+      "caption": "RESUMING A SESSION (RFC 5723)",
+      "data": {
+        "lanes": [
+          {
+            "key": "initiator",
+            "label": "Initiator"
+          },
+          {
+            "key": "responder",
+            "label": "Responder"
+          }
+        ],
+        "messages": [
+          {
+            "from": "initiator",
+            "to": "responder",
+            "label": "IKE_SESSION_RESUME",
+            "color": "blue",
+            "note": "HDR, [N(COOKIE),] Ni, N(TICKET_OPAQUE). New SPIi, SPIr set to 0."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "IKE_SESSION_RESUME REPLY",
+            "color": "green",
+            "note": "HDR, Nr [,N+]. The responder copies SPIi and sets a new SPIr."
           },
           {
             "from": "initiator",
             "to": "responder",
-            "label": "IKE_AUTH (AUTH from SK_pi)",
-            "color": "blue"
+            "label": "IKE_AUTH",
+            "color": "blue",
+            "note": "AUTH = prf(SK_px, message octets). The IDi and IDr values must match the ticket."
+          },
+          {
+            "from": "responder",
+            "to": "initiator",
+            "label": "IKE_AUTH REPLY",
+            "color": "green",
+            "note": "The old SA is then silently deleted."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "THE KEY DERIVATION FOR A RESUMED SESSION (RFC 5723)",
+      "data": {
+        "title": "Deriving the new keys",
+        "lang": "text",
+        "code": "SKEYSEED = prf(SK_d_old, \"Resumption\" | Ni | Nr)\n\n{SK_d | SK_ai | SK_ar | SK_ei | SK_er | SK_pi | SK_pr} =\n    prf+(SKEYSEED, Ni | Nr | SPIi | SPIr)"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "key-management",
+      "position": "after",
+      "caption": "WHAT IS RESUMED AND WHAT IS DONE AFresh",
+      "data": {
+        "columns": [
+          "State item",
+          "After resumption"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "IDi and IDr",
+              "From the ticket, and exchanged again in IKE_AUTH"
+            ]
+          },
+          {
+            "cells": [
+              "Authentication method and certificates",
+              "From the ticket"
+            ]
+          },
+          {
+            "cells": [
+              "NAT detection status",
+              "From the new exchange"
+            ]
+          },
+          {
+            "cells": [
+              "IKE SA sequence numbers",
+              "Reset to 0 in IKE_SESSION_RESUME"
+            ]
+          },
+          {
+            "cells": [
+              "IKE SA window size",
+              "Reset to 1"
+            ]
+          },
+          {
+            "cells": [
+              "Child SAs",
+              "Created in the new exchange"
+            ]
+          },
+          {
+            "cells": [
+              "Internal IP address and other configuration payloads",
+              "Not resumed"
+            ]
           }
         ]
       }
     },
     {
       "type": "opcodes",
-      "anchor": "packet-format",
+      "anchor": "message-format",
       "position": "after",
-      "caption": "NEW NOTIFY MESSAGE TYPES",
+      "caption": "THE NEW NOTIFICATION TYPES (RFC 5723)",
       "data": {
         "items": [
           {
             "code": "16409",
             "label": "TICKET_LT_OPAQUE",
-            "desc": "Carries a lifetime in seconds and the ticket."
+            "desc": "Carries a ticket and the number of seconds until it expires."
           },
           {
             "code": "16410",
             "label": "TICKET_REQUEST",
-            "desc": "Client asks for a ticket; no data."
+            "desc": "The client asks for a ticket. Carries no data."
           },
           {
             "code": "16411",
             "label": "TICKET_ACK",
-            "desc": "Cannot grant a ticket now; no data."
+            "desc": "The gateway cannot issue a ticket right now. Carries no data."
           },
           {
             "code": "16412",
             "label": "TICKET_NACK",
-            "desc": "Refuses a ticket request or rejects a presented ticket; no data."
+            "desc": "The gateway refuses to issue a ticket. Carries no data."
           },
           {
             "code": "16413",
             "label": "TICKET_OPAQUE",
-            "desc": "Carries the ticket the client presents.",
-            "highlight": true
-          }
-        ]
-      }
-    },
-    {
-      "type": "key-grid",
-      "anchor": "data-model",
-      "position": "after",
-      "caption": "TWO KINDS OF TICKET",
-      "data": {
-        "items": [
-          {
-            "title": "Ticket by value",
-            "text": "The gateway's state, encrypted and integrity-protected under a key only the gateway knows."
-          },
-          {
-            "title": "Ticket by reference",
-            "text": "An opaque reference to state kept in the gateway's own store."
+            "desc": "Carries the ticket the client presents when it resumes."
           }
         ]
       }
@@ -243,37 +381,28 @@
       "rfc": 4306
     },
     {
-      "number": "[RFC4301]",
-      "text": "Kent, S. and K. Seo, \"Security Architecture for the Internet Protocol\", RFC 4301, December 2005.",
-      "rfc": 4301
-    },
-    {
-      "number": "[RFC4478]",
-      "text": "Nir, Y., \"Repeated Authentication in Internet Key Exchange (IKEv2) Protocol\", RFC 4478, April 2006.",
-      "rfc": 4478
-    },
-    {
-      "number": "[RFC4555]",
-      "text": "Eronen, P., \"IKEv2 Mobility and Multihoming Protocol (MOBIKE)\", RFC 4555, June 2006.",
-      "rfc": 4555
-    },
-    {
       "number": "[RFC5077]",
       "text": "Salowey, J., Zhou, H., Eronen, P., and H. Tschofenig, \"Transport Layer Security (TLS) Session Resumption without Server-Side State\", RFC 5077, January 2008.",
       "rfc": 5077
     },
     {
-      "number": "[TOKENS]",
-      "text": "Rescorla, E., \"How to Implement Secure (Mostly) Stateless Tokens\", Work in Progress, March 2007."
+      "number": "[RFC4086]",
+      "text": "Eastlake, D., Schiller, J., and S. Crocker, \"Randomness Requirements for Security\", BCP 106, RFC 4086, June 2005.",
+      "rfc": 4086
+    },
+    {
+      "number": "[RFC4478]",
+      "text": "Nir, Y., \"Repeated Authentication in Internet Key Exchange (IKEv2) Protocol\", RFC 4478, April 2006.",
+      "rfc": 4478
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

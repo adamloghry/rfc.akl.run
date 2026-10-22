@@ -5,7 +5,7 @@
   "categoryReviewed": false,
   "summary": "<p>This document defines Multi-Protocol BGP procedures that let BGP speakers exchange Route Target reachability information. That information can build a route distribution graph that limits how far VPN routes propagate between autonomous systems or clusters. It updates RFC 4364.</p>",
   "plainLanguage": {
-    "summary": "<p>Instead of sending every private-network map to every router, routers say which maps they want. Then each only receives the ones it needs, saving effort.</p>"
+    "summary": "<p>In a carrier VPN network, routers exchange every customer's routes, even the routes for customers they have nothing to do with. RFC 4684 lets a router say in advance which VPN route targets it wants, so the other side sends it only those routes and the network carries less traffic.</p>"
   },
   "questions": [
     "constrained route distribution bgp mpls vpn",
@@ -49,64 +49,76 @@
       "value": "60 seconds"
     }
   ],
-  "today": "<p>RFC 4684 is a Proposed Standard. It updates <a href='/rfc4364'>RFC 4364</a> and has not been obsoleted.</p>",
+  "today": "<p>RFC 4684 is a Proposed Standard published in November 2006. It updates <a href='/rfc4364'>RFC 4364</a>, and no later RFC is recorded as obsoleting or updating it. The RFC says its output filters are not intended for security purposes, so other filtering should be used alongside them.</p>",
   "glossary": [
     "bgp",
     "nlri",
     "mpls",
     "autonomous-system",
     "ibgp-and-ebgp",
-    "route-target"
+    "route-target",
+    "vrf",
+    "vpn",
+    "address-family",
+    "safi",
+    "extended-community"
   ],
   "sections": [
     {
-      "id": "motivation",
+      "id": "introduction",
       "number": "1",
-      "title": "The Route Target Scaling Problem",
-      "content": "<p>In BGP/MPLS IP VPNs, provider edge (PE) routers use <strong>Route Target</strong> (RT) extended communities to decide which routes go into which VRFs. Within an iBGP mesh, a PE router only needs routes carrying Route Targets for VRFs that have local customer attachments.</p><p>Autonomous systems often use route reflection to make it easier to bring up a new PE router and to limit the size of the iBGP mesh. When VPNs have members in more than one autonomous system, the number of routes carried by inter-cluster or inter-AS distribution routers becomes an important consideration.</p><p><a href='/rfc4364'>RFC 4364</a> suggests Cooperative Route Filtering between route reflectors. This RFC is designed to supersede that for VPN-related uses. It adds support for multiple autonomous systems and asymmetric VPN topologies such as hub-and-spoke, by reusing BGP itself to carry the filtering information, including route reflection, confederations and inter-AS loop detection.</p>",
-      "plainLanguage": "<p>Imagine a mail room that has to store every club's newsletters, even for clubs nobody in the building joined. This RFC lets the mail room learn which clubs people joined.</p>"
+      "title": "The Problem and the Idea",
+      "content": "<p>In BGP/MPLS IP VPNs, PE routers use Route Target extended communities to control the distribution of routes into VRFs. Within a given iBGP mesh, PE routers need only hold routes marked with Route Targets pertaining to VRFs that have local CE attachments.</p><p>It is common for an autonomous system to use route reflection in order to simplify bringing up a new PE router and to limit the size of the iBGP peering mesh. In that scenario, and when VPNs have members in more than one autonomous system, the number of routes carried by the inter-cluster or inter-AS distribution routers is an important consideration.</p><p>To limit the VPN routing information maintained at a given route reflector, RFC 4364 suggests, in Section 4.3.3, the use of Cooperative Route Filtering between route reflectors. This document extends that work to include support for multiple autonomous systems and asymmetric VPN topologies such as hub-and-spoke. It would have been possible to extend the encoding defined for the extended-community ORF capability, but BGP already has the machinery for disseminating arbitrary information in a loop-free fashion, both within one autonomous system and across several.</p><p>The document adds the ability to propagate Route Target membership information between iBGP meshes, and it is designed to supersede cooperative route filtering for VPN-related applications. By using MP-BGP UPDATE messages to propagate Route Target membership information, it reuses that machinery, including route reflection, confederations and inter-AS loop detection. Received membership information then restricts the advertisement of VPN NLRI to peers that have advertised their respective Route Targets, which effectively builds a route distribution graph. In that model, VPN NLRI routing information flows in the inverse direction of Route Target membership information.</p><p>The same mechanism applies to any BGP NLRI that controls the distribution of routing information by using Route Targets, such as VPLS. Throughout the document NLRI, meaning Network Layer Reachability Information, describes routing information carried via MP-BGP updates without any assumption of semantics, and an NLRI consisting of {origin-as#, route-target} is called RT membership information.</p>",
+      "plainLanguage": "<p>The trick is to turn the membership information around. Instead of every router receiving every customer's routes, each router first says which customers it cares about, and the routes then travel in the opposite direction to that information.</p>"
     },
     {
-      "id": "concepts",
-      "number": "1",
-      "title": "The Core Idea: Membership Flows One Way, Routes the Other",
-      "content": "<p>A router advertises <strong>RT membership information</strong>, an NLRI of the form <code>{origin-as#, route-target}</code>. A receiver then limits its VPN route advertisements to peers that have advertised matching Route Targets. This effectively builds a <strong>route distribution graph</strong>, and VPN routes flow in the inverse direction of the membership information.</p><p>The mechanism applies to any BGP NLRI that uses Route Targets to control distribution, such as VPLS. Standard <a href='/rfc4364'>RFC 4364</a> inter-AS behavior can be seen as a dense-mode approach, in analogy with multicast routing protocols, while this mechanism pays off when VPN membership is sparse.</p>",
-      "plainLanguage": "<p>Routers shout \"send me this kind of map!\" in one direction, and the maps travel back the other way along the same path.</p>"
+      "id": "overview",
+      "number": "3.1",
+      "title": "Between Autonomous Systems",
+      "content": "<p>The problem divides into inter-AS and intra-AS parts. The RFC works through an example graph of autonomous systems, a through j, interconnected in an ad hoc fashion. Consider a VPN with CE attachments in ASes a and i that uses a single Route Target to control VPN route distribution. Ideally the flooding graph for those routes would not include nodes c, g, h and j: c and j are leaf ASes that do not require the information, while g and h are not on the shortest inter-AS path between e and i and should be excluded by standard BGP path selection.</p><p>To achieve this, AS a and AS i generate an NLRI consisting of {origin-as#, route-target}. Receipt of such an advertisement by one of the ASes signals the need to distribute VPN routes containing that Route Target community to the peer that advertised it.</p><p>Including both the route target and the originator AS number in the membership information lets BGP speakers use standard path selection rules concerning AS-path length, and other policy mechanisms, to prune duplicate paths in the RT membership flooding graph, while keeping the information needed to reach all autonomous systems advertising the Route Target. In the example, AS e needs to maintain a path to AS a in order to flood VPN routing information originating in AS i and the other way round, but by default policy it should prune less preferred paths such as the longer path to AS i with AS-path (g h i).</p><p>Adding AS j to the VPN distribution graph makes AS f advertise two RT membership NLRIs to AS e, one with origin AS i and one with origin AS j. Advertising a single path would be enough to guarantee that VPN information flows to all VPN member ASes, but not enough for the desired path selection: if (f j) were selected, the information about the path (f i), needed to prune the arc (e g h i) from the distribution graph, would be missing.</p><p>The benefit of the mechanism is directly proportional to how sparse the VPN membership is. Standard RFC 2547 inter-AS behaviour can be seen as a dense-mode approach, using the analogy of multicast routing protocols.</p>",
+      "plainLanguage": "<p>Only the networks that actually have a customer in the VPN need the routes for it. By advertising who is in the VPN, each network can drop the paths that lead nowhere useful, using the same path rules BGP already applies.</p>"
     },
     {
       "id": "routing",
-      "number": "3.1",
-      "title": "Distribution Between Autonomous Systems",
-      "content": "<p>The RFC works an example with ASes a to j in an ad hoc graph. A VPN with customer sites in AS a and AS i uses a single Route Target. Ideally the flooding graph leaves out ASes c, g, h and j: c and j are leaves that do not need the information, while g and h are not on the shortest inter-AS path between e and i, so standard BGP path selection excludes them.</p><p>Including the origin AS number in the NLRI lets speakers use ordinary rules, such as AS-path length, to prune duplicate paths while still keeping the information needed to reach every AS that advertised the Route Target. If AS j also joins the VPN, AS f advertises two RT membership NLRIs to AS e, one for origin AS i and one for origin AS j. Advertising only one would lose the information needed to prune the longer path through g and h.</p>",
-      "plainLanguage": "<p>Each town only sends the parcel down the shortest road to the towns that asked for it, and skips the long detours and the towns that did not ask.</p>"
-    },
-    {
-      "id": "operation",
       "number": "3.2",
-      "title": "Distribution Inside an Autonomous System",
-      "content": "<p>For membership information from other ASes, standard BGP route selection and advertisement already create the needed state in a transit AS. Membership that originates inside the AS needs more care, because several PE routers may source the same <code>{origin-as#, route-target}</code>.</p><p>When processing RT membership NLRIs from internal iBGP peers, a speaker must consider all available iBGP paths for a given RT prefix when building the outbound route filter, not only the best path. When advertising locally sourced membership to an iBGP peer, two rules apply:</p><ul><li>To a route-reflector client, the Originator attribute is set to the advertiser's router-id and the Next-hop to the local address for that session. This keeps the originator from dropping a membership NLRI reflected back to it, so the reflector can tell the client to send VPN routes towards it.</li><li>To a non-client peer, if the best path came from a non-client and an alternative path exists from a client, the client path's attributes are advertised. This lets any speaker in the mesh signal the interest of its clients.</li></ul><p>These procedures assume the route reflection topology would already work for IPv4 unicast, for instance with contiguous clusters. The authors note an alternative of per-PE routes of the form <code>{originator-id, route-target}</code> aggregated at the network edge, but rejected it because it needs more routing information inside an AS.</p>",
-      "plainLanguage": "<p>Inside one town, the post office keeps every street's request, not just the nearest one, so it never forgets a house that wants the parcel.</p>"
+      "title": "Inside One Autonomous System",
+      "content": "<p>Inside the BGP topology of a given autonomous system, standard BGP route selection and advertisement rules are enough for external RT membership information, meaning route targets whose AS number is not the local one: a transit AS can create the necessary flooding state, because BGP guarantees a valid route for forwarding data packets for a destination prefix in the inverse path of received routing updates. The same holds for the {origin-as#, route-target} key, which gives uniqueness between the several ASes that may source a route target, so that a valid VPN route distribution path exists to the origin of the advertisement.</p><p>RT membership information originated within the autonomous system needs more care. Several PE routers in one AS may source the same NLRI, so the default route advertisement rules are no longer enough to guarantee that every node in the distribution graph has selected a feasible path to each PE that imports the route target. When processing RT membership NLRIs received from internal iBGP peers, it is necessary to consider all available iBGP paths for a given RT prefix when building the outbound route filter, and not just the best path.</p><p>When advertising RT membership information sourced by the local AS to an iBGP peer, a BGP speaker modifies its attribute calculation in two ways. When advertising to a route-reflector client, the Originator attribute is set to the router ID of the advertiser and the Next-hop attribute is set to the local address for that session. When advertising to a non-client peer, if the best path as selected by the base BGP path selection procedure is a route received from a non-client peer and there is an alternative path to the same destination from a client, the attributes of the client path are advertised instead.</p><p>The first rule stops the originator of an RT membership NLRI from dropping one that is reflected back to it, which lets the route reflector signal to the client that it should distribute VPN routes with that target towards the reflector. The second rule lets any speaker in an iBGP mesh signal the interest of its route reflection clients. The procedures assume the route reflection topology is configured so that IPv4 unicast routing would work correctly, so route reflection clusters must be contiguous.</p>",
+      "plainLanguage": "<p>Inside one network the routers are closer together, and the rules have to change so that the right router hears about the customer. Two small changes to how attributes are set make sure a route reflector can tell its clients which routes they should send.</p>"
     },
     {
       "id": "message-format",
       "number": "4",
-      "title": "The Route Target Membership NLRI",
-      "content": "<p>Membership is carried in BGP UPDATE messages using the <code>MP_REACH_NLRI</code> and <code>MP_UNREACH_NLRI</code> attributes. The (AFI, SAFI) pair is (AFI=1, SAFI=132). The Next Hop is read as IPv4 when its length is 4 octets and as IPv6 when it is 16 octets.</p><p>The NLRI is a prefix of 0 to 96 bits: a 4-octet origin AS followed by an 8-octet route target. Except for the default route target, which is a zero-length prefix, the minimum prefix length is 32 bits. Shorter prefixes can stand for groups of route targets, such as all those assigned by one Global Administrator.</p><p>The <strong>default route target</strong> tells a peer you want all VPN routes, for example a route reflector speaking to one of its PE clients.</p>",
-      "plainLanguage": "<p>The request card has the sender's town number and the club's code. A blank card means \"send me everything.\"</p>"
+      "title": "The RT Membership NLRI",
+      "content": "<p>RT membership NLRI is advertised in BGP UPDATE messages using the MP_REACH_NLRI and MP_UNREACH_NLRI attributes. The [AFI, SAFI] value pair used to identify this NLRI is AFI=1, SAFI=132.</p><p>The Next Hop field of MP_REACH_NLRI is interpreted as an IPv4 address whenever the length of the Next Hop address is 4 octets, and as an IPv6 address whenever it is 16 octets. The NLRI field is a prefix of 0 to 96 bits, encoded as defined in the multiprotocol extensions document.</p><p>The prefix is structured as an origin AS field of 4 octets followed by a route target field of 8 octets. Except for the default route target, which is encoded as a zero-length prefix, the minimum prefix length is 32 bits, since the origin-AS field cannot be interpreted as a prefix.</p><p>Route targets can then be expressed as prefixes, so a prefix could encompass all route target extended communities assigned by a given Global Administrator. The default route target can be used to indicate to a peer the willingness to receive all VPN route advertisements, as in the case of a route reflector speaking to one of its PE router clients.</p>",
+      "plainLanguage": "<p>The advertisement is small: four bytes saying which network it comes from, and eight bytes naming the route target. A special empty form of it means \"send me everything\".</p>"
     },
     {
-      "id": "procedures",
+      "id": "negotiation",
       "number": "5",
-      "title": "Capability and Operation",
-      "content": "<p>A speaker that wants to exchange membership information advertises the Multiprotocol Extensions Capability for that (AFI, SAFI) pair. It may take part without using the information to filter VPN output, though this is discouraged.</p><p>A VPN route should be sent to a peer if that peer advertised either the default membership NLRI or one containing any Route Target in the route's extended communities. On receiving an advertisement or withdrawal of membership, a speaker re-examines its RIB-OUTs for matching routes and sends the minimum set of VPN updates needed to move to the new graph.</p><p>Implementations SHOULD send an End-of-RIB marker for the membership (AFI, SAFI) as a hint that the initial exchange is complete, even if graceful restart is not enabled. A speaker that delays VPN updates until it receives the marker MUST bound the delay, and 60 seconds should be used by default.</p>",
-      "plainLanguage": "<p>When a router has finished listing everything it wants, it says \"that is all.\" Others wait for that, but never longer than a minute.</p>"
+      "title": "Saying the Feature Is Supported",
+      "content": "<p>A BGP speaker that wishes to exchange Route Target membership information must use the Multiprotocol Extensions Capability Code, as defined in RFC 2858, to advertise the corresponding (AFI, SAFI) pair.</p><p>A BGP speaker MAY participate in the distribution of Route Target information without using the learned information for the purposes of VPN NLRI output route filtering, although this is discouraged.</p>",
+      "plainLanguage": "<p>Before exchanging the new information, two routers tell each other that they understand it, using the same capability message BGP already uses for other address families.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "6",
+      "title": "How the Filtering Works",
+      "content": "<p>A VPN NLRI route should be advertised to a peer that participates in the exchange of Route Target membership information if that peer has advertised either the default Route Target membership NLRI or a Route Target membership NLRI containing any of the targets in the extended communities attribute of the VPN route in question.</p><p>When a BGP speaker receives an UPDATE that advertises or withdraws a given Route Target membership NLRI, it should examine the RIB-OUTs of VPN NLRIs and re-evaluate the advertisement status of routes matching that Route Target. It should generate the minimum set of BGP VPN route updates, advertisements and withdrawals, necessary to move between the previous and the current state of the route distribution graph.</p><p>As a hint that the initial RT membership exchange is complete, implementations SHOULD generate an End-of-RIB marker, as defined in the graceful restart document, for the Route Target membership (afi, safi), regardless of whether graceful restart is enabled on the BGP session. This lets the receiver know when it has the peer's full membership information. The exchange of VPN NLRI should follow the receipt of the End-of-RIB markers. If a BGP speaker chooses to delay the advertisement of BGP VPN route updates until it receives that marker, it MUST limit the delay to an upper bound, and by default a 60 second value should be used.</p>",
+      "plainLanguage": "<p>A router sends a VPN route only to a neighbour that asked for that route target. When the list of wanted targets changes, the router re-checks its outgoing routes and sends the smallest set of updates that reflects the change.</p>"
     },
     {
       "id": "deployment",
       "number": "7",
-      "title": "Deployment and Security",
-      "content": "<p>The mechanism limits a route reflector to the VPN routes used by its direct clients, instead of the total number of VPN routes on the network. A reflector's load can then be reduced by splitting its PE routers into more clusters, a localized change. Operators can also filter inbound RT membership advertisements to control which VPN routes cross a border. For instance, a spoke RT used only inside an AS can be left out of what is advertised externally. The RFC assumes ASes agree on an RT assignment convention, and treats RT translation at the border as a local decision.</p><p>The RFC does not alter the security properties of BGP-based VPNs. Filters built from RT membership are not intended for security. Between administrative domains, incoming and outgoing NLRIs should also be filtered by other means, and implementations SHOULD provide ways to filter RT membership information.</p>",
-      "plainLanguage": "<p>This helps big routers do less work, but it is a convenience, not a lock. For safety you still check mail at the border by other means.</p>"
+      "title": "Deployment Considerations",
+      "content": "<p>The mechanism reduces the scaling requirements imposed on route reflectors by limiting the number of VPN routes and events a reflector has to process to the VPN routes used by its direct clients. By default a reflector must scale in terms of the total number of VPN routes present on the network. It also becomes possible to reduce the load on a reflector by dividing the PE routers in its cluster into a new set of clusters, which is a localized configuration change that need not affect any system outside the cluster.</p><p>The effectiveness of RT-based filtering depends on how sparse the VPN membership is. The same policy mechanisms applicable to other NLRIs are applicable to RT membership information, which gives an operator the option of controlling which VPN routes get advertised across an inter-domain border by filtering the acceptable RT membership advertisements inbound.</p><p>In the inter-AS case a VPN is likely connected only to a subset of the participating ASes, and the only current mechanism to limit the scope of VPN route flooding is manual filtering on the external BGP border routers. With this proposal, that filtering can be performed according to the dynamic Route Target membership information. In some inter-AS deployments not all RTs used for a given VPN have external significance: a VPN can use a hub RT and a spoke RT internally, and the spoke RT does not have meaning outside the AS, so it may be stripped at an external border router. The same policy rules that result in extended community filtering can be applied to RT membership information in order to avoid advertising a membership NLRI for the spoke RT.</p><p>The document assumes that autonomous systems agree on an RT assignment convention. RT translation at the external border router boundary is considered a local implementation decision, as it should not affect interoperability.</p>",
+      "plainLanguage": "<p>The benefit shows up where the network is large: a route reflector only handles the routes its own customers need, and a provider can also use the same mechanism to decide how far a customer's routes spread beyond its own network.</p>"
+    },
+    {
+      "id": "security-considerations",
+      "number": "8",
+      "title": "Security Considerations",
+      "content": "<p>The document does not alter the security properties of BGP-based VPNs. It notes, however, that output route filters built from RT membership information NLRIs are not intended for security purposes. When exchanging routing information between separate administrative domains, it is a good practice to filter all incoming and outgoing NLRIs by some other means in addition to RT membership information. Implementations SHOULD also provide means to filter RT membership information itself.</p>",
+      "plainLanguage": "<p>These filters are about saving bandwidth, not about keeping anyone out. A provider that exchanges routes with another network should still filter the traffic in the usual way, and should be able to filter the membership advertisements themselves.</p>"
     }
   ],
   "viz": [
@@ -114,9 +126,9 @@
       "type": "packet",
       "anchor": "message-format",
       "position": "after",
-      "caption": "ROUTE TARGET MEMBERSHIP NLRI PREFIX (RFC 4684)",
+      "caption": "THE RT MEMBERSHIP NLRI PREFIX (RFC 4684 SECTION 4)",
       "data": {
-        "title": "RT membership NLRI (prefix of 0 to 96 bits)",
+        "title": "RT membership NLRI",
         "bytes": 12,
         "width": 32,
         "fields": [
@@ -124,45 +136,117 @@
             "key": "origin-as",
             "name": "Origin AS",
             "bits": 32,
-            "desc": "4 octets; the AS that originated the membership."
+            "desc": "The autonomous system that advertises this route target."
           },
           {
-            "key": "route-target-hi",
-            "name": "Route Target (first 4 octets)",
-            "bits": 32,
-            "desc": "The 8-octet route target, first half."
+            "key": "route-target",
+            "name": "Route target",
+            "bits": 64,
+            "desc": "The route target being advertised."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "operation",
+      "position": "after",
+      "caption": "ILLUSTRATIVE, NOT FROM THE RFC: THE RT CONSTRAIN EXCHANGE",
+      "data": {
+        "lanes": [
+          {
+            "key": "peer-a",
+            "label": "PE router A"
           },
           {
-            "key": "route-target-lo",
-            "name": "Route Target (last 4 octets)",
-            "bits": 32,
-            "desc": "The 8-octet route target, second half."
+            "key": "peer-b",
+            "label": "PE router B"
+          }
+        ],
+        "messages": [
+          {
+            "from": "peer-a",
+            "to": "peer-b",
+            "label": "RT membership NLRI",
+            "color": "blue",
+            "note": "Says which route targets this speaker wants."
+          },
+          {
+            "from": "peer-b",
+            "to": "peer-a",
+            "label": "RT membership NLRI",
+            "color": "blue",
+            "note": "The same in the other direction."
+          },
+          {
+            "from": "peer-b",
+            "to": "peer-a",
+            "label": "VPN route",
+            "color": "green",
+            "note": "Sent because the receiver advertised a matching route target."
           }
         ]
       }
     },
     {
       "type": "key-grid",
-      "anchor": "concepts",
+      "anchor": "operation",
       "position": "after",
-      "caption": "KEY IDEAS",
+      "caption": "RULES FOR THE OUTGOING FILTER",
       "data": {
         "items": [
           {
-            "title": "Membership NLRI",
-            "text": "{origin-as#, route-target} advertised in MP-BGP."
+            "title": "Advertise on request",
+            "text": "Send a VPN route only to a peer that advertised the default target or a matching target."
           },
           {
-            "title": "Inverse flow",
-            "text": "VPN routes flow opposite to membership information."
+            "title": "Re-evaluate",
+            "text": "When a membership NLRI is advertised or withdrawn, re-check the outgoing VPN routes."
           },
           {
-            "title": "Default route target",
-            "text": "A zero-length prefix meaning send me all VPN routes."
+            "title": "Minimal updates",
+            "text": "Send the smallest set of advertisements and withdrawals that reflects the new state."
           },
           {
-            "title": "Sparse VPNs",
-            "text": "The benefit grows with how sparse VPN membership is."
+            "title": "End-of-RIB",
+            "text": "Mark the end of the initial membership exchange, and delay VPN routes at most 60 seconds."
+          }
+        ]
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "introduction",
+      "position": "after",
+      "caption": "RT CONSTRAIN AND COOPERATIVE ROUTE FILTERING",
+      "data": {
+        "columns": [
+          "Aspect",
+          "Cooperative route filtering",
+          "RT Constrain"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Where it applies",
+              "Between route reflectors, as suggested in RFC 4364",
+              "Between autonomous systems and between route reflection clusters"
+            ]
+          },
+          {
+            "cells": [
+              "What is exchanged",
+              "An extended community route filtering capability",
+              "MP-BGP NLRI holding origin AS and route target"
+            ]
+          },
+          {
+            "cells": [
+              "Asymmetric topologies",
+              "Not covered by the earlier work",
+              "Included, such as hub-and-spoke"
+            ],
+            "self": true
           }
         ]
       }
@@ -170,8 +254,13 @@
   ],
   "references": [
     {
+      "number": "[1]",
+      "text": "Bradner, S., \"Key Words for Use in RFCs to Indicate Requirement Levels\", BCP 14, RFC 2119, March 1997.",
+      "rfc": 2119
+    },
+    {
       "number": "[2]",
-      "text": "Bates, T., Chen, E., and R. Chandra, \"BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP)\", RFC 4456, April 2006.",
+      "text": "Bates, T., Chen, E. and R. Chandra, \"BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP)\", RFC 4456, April 2006.",
       "rfc": 4456
     },
     {
@@ -181,17 +270,17 @@
     },
     {
       "number": "[4]",
-      "text": "Rekhter, Y., Li, T., and S. Hares, \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
+      "text": "Rekhter, Y., Li, T. and S. Hares, \"A Border Gateway Protocol 4 (BGP-4)\", RFC 4271, January 2006.",
       "rfc": 4271
     },
     {
       "number": "[5]",
-      "text": "Bates, T., Rekhter, Y., Chandra, R., and D. Katz, \"Multiprotocol Extensions for BGP-4\", RFC 2858, June 2000.",
+      "text": "Bates, T., Rekhter, Y., Chandra, R. and D. Katz, \"Multiprotocol Extensions for BGP-4\", RFC 2858, June 2000.",
       "rfc": 2858
     },
     {
       "number": "[6]",
-      "text": "Sangli, S., Tappan, D., and Y. Rekhter, \"BGP Extended Communities Attribute\", RFC 4360, February 2006.",
+      "text": "Sangli, S., Tappan, D. and Y. Rekhter, \"BGP Extended Communities Attribute\", RFC 4360, February 2006.",
       "rfc": 4360
     },
     {
@@ -203,10 +292,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-19",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-19"
 }

@@ -5,53 +5,54 @@
   "categoryReviewed": false,
   "summary": "<p>Outlines standard mechanisms that help TCP use the available capacity of network paths that include satellite links. These links have long delays, so extra care is needed. It is a Best Current Practice.</p>",
   "plainLanguage": {
-    "summary": "<p>A satellite link makes messages take a long time to reach you, like talking to someone on the moon. This lists tricks to keep TCP efficient.</p>"
+    "summary": "<p>A TCP connection on a satellite link spends most of its time waiting, because the signal needs about half a second to make the round trip. This document lists the standard options that let TCP use the link better: discovering the largest packet size, correcting errors on the link, opening a much larger window, and using selective acknowledgments.</p>"
   },
   "questions": [
     "how to improve tcp over satellite links",
     "why is tcp slow over satellite",
     "what is forward error correction",
-    "why do large tcp windows matter on satellite links"
+    "why do large tcp windows matter on satellite links",
+    "what does selective acknowledgment fix in tcp"
   ],
   "tags": [
     "TCP",
     "Satellite",
     "Performance"
   ],
-  "subtitle": "Standard TCP and link-level mechanisms that help TCP fill long, high-delay satellite paths.",
+  "subtitle": "Why TCP underuses a satellite link, and the standard mechanisms that help it use the capacity.",
   "tldr": {
-    "problem": "Satellite links add long delay, noise, asymmetric capacity and sometimes changing delay, so ordinary TCP uses little of the available capacity.",
-    "mechanism": "The RFC recommends Path MTU Discovery and forward error correction below TCP, and standard TCP features: slow start and congestion avoidance, fast retransmit and fast recovery, large windows with PAWS and RTTM, and selective acknowledgments.",
-    "outcome": "Every mitigation is an IETF standards track mechanism or compliant with one, and Table 1 sorts them into Recommended and Required for satellite networks.",
+    "problem": "A satellite link has a very long delay, so TCP spends most of its time waiting for acknowledgments instead of sending, and the channel carries far less than it could.",
+    "mechanism": "The document collects the mechanisms that already exist: finding the largest packet the path can carry, cleaning up the link with error correction, large windows, selective acknowledgments, and the usual congestion control.",
+    "outcome": "RFC 2488 is BCP 28 and is not obsoleted. Its table of mitigations tells a satellite operator which options to ask a TCP vendor for.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "GSO altitude",
+      "label": "Geostationary orbit altitude",
       "value": "Approximately 36,000 km"
     },
     {
-      "label": "GSO round-trip time",
-      "value": "At least 558 ms"
+      "label": "One satellite hop delay",
+      "value": "239.6 ms to 279.0 ms"
+    },
+    {
+      "label": "Minimum round-trip time",
+      "value": "558 ms"
     },
     {
       "label": "Standard maximum TCP window",
       "value": "65,535 bytes"
     },
     {
-      "label": "Throughput at 560 ms RTT",
-      "value": "117,027 bytes/second"
-    },
-    {
-      "label": "Fast retransmit trigger",
-      "value": "3 duplicate ACKs"
+      "label": "Throughput with that window",
+      "value": "117,027 bytes/second at 560 ms RTT"
     },
     {
       "label": "Delayed ACK timeout",
       "value": "Must not exceed 500 ms"
     }
   ],
-  "today": "<p>RFC 2488 is a Best Current Practice, and the metadata lists no RFC that obsoletes or updates it. Its advice reflects the TCP standards cited in 1999, such as RFC 2001 and RFC 1323.</p>",
+  "today": "<p>RFC 2488 is a Best Current Practice document, BCP 28, and is neither obsoleted nor updated by any RFC listed for it. Its recommendations are about which standard TCP options a satellite deployment should switch on.</p>",
   "glossary": [
     "tcp",
     "congestion-control",
@@ -62,117 +63,265 @@
     "receive-window",
     "retransmission",
     "fragmentation",
-    "tcp-segment"
+    "tcp-segment",
+    "congestion-window",
+    "slow-start",
+    "slow-start-threshold",
+    "bandwidth-delay-product",
+    "forward-error-correction",
+    "selective-acknowledgment",
+    "round-trip-time",
+    "congestion-collapse"
   ],
   "sections": [
     {
       "id": "introduction",
       "number": "1",
-      "title": "Scope and Approach",
-      "content": "<p>Satellite channel characteristics can change how transport protocols such as TCP (<a href='/rfc793'>RFC 793</a>) behave, and poor behavior means low channel utilization. Other things matter too, such as the data link protocol, application protocol, router buffer size, queueing discipline and proxy location, but this document focuses on TCP.</p><p>Many mitigations have been proposed by researchers. This RFC considers only mechanisms that are currently well understood and on the IETF standards track (or compliant with IETF standards). Section 3 covers two non-TCP mechanisms, Section 4 the TCP mechanisms, and Section 5 a summary of what a satellite friendly TCP should include.</p>",
-      "plainLanguage": "<p>This note only suggests tricks that are already well tested and approved, not brand new experiments.</p>"
+      "title": "Why This Document Exists",
+      "content": "<p>The Transmission Control Protocol (TCP) provides reliable delivery of data across any network path, including paths containing satellite channels. TCP works over satellite channels, but several IETF standardized mechanisms enable TCP to use the available capacity of the path more effectively.</p><p>Satellite channel characteristics may affect the way transport protocols behave. When protocols such as TCP perform poorly, channel utilization is low. Performance of a transport protocol is important but not the only consideration when constructing a network containing satellite links: data link protocol, application protocol, router buffer size, queueing discipline and proxy location are also considerations. This document focuses on improving TCP in the satellite environment and leaves the non-TCP considerations to another document.</p><p>Many satellite mitigations have been proposed and studied by the research community. This document only considers TCP mechanisms which are currently well understood and on the IETF standards track, or are compliant with IETF standards. All the mitigations it discusses are IETF standards track mechanisms.</p>",
+      "plainLanguage": "<p>The document is a survey of what is already standardized, not a proposal for something new. If you run a satellite link, it tells you which parts of TCP to check with your vendor.</p>"
     },
     {
-      "id": "background",
+      "id": "performance",
       "number": "2",
-      "title": "How Satellite Links Behave",
-      "content": "<p>A message over a satellite link is delayed by the speed of light and the satellite's altitude. A geostationary (GSO) satellite sits at approximately 36,000 km. The one-hop propagation time is 239.6 ms for a ground station directly below the satellite and 279.0 ms at the edge of the view area, so a round-trip time (RTT) could be at least 558 ms. Other links, queueing and on-board processing add more. Low Earth Orbit (LEO) delays range from several milliseconds to as much as 80 ms.</p><p>Two basic limits apply. <strong>Noise</strong>: signals weaken with distance, and typical bit error rates are on the order of 1 error per 10 million bits (1 x 10^-7) or less frequent. <strong>Bandwidth</strong>: the radio spectrum is limited and usually controlled by licenses.</p><p>The RFC lists the characteristics that can hurt TCP:</p><ul><li><strong>Long feedback loop:</strong> it takes a long time to learn whether a packet arrived.</li><li><strong>Large delay*bandwidth product:</strong> TCP must keep a large amount of data in flight to fill the channel.</li><li><strong>Transmission errors:</strong> TCP treats every drop as congestion and shrinks its window, even when corruption caused it.</li><li><strong>Asymmetric use:</strong> for example, a slow dialup return path with a satellite downlink.</li><li><strong>Variable round trip times:</strong> for example in LEO constellations; whether this affects TCP is called an open question.</li><li><strong>Intermittent connectivity:</strong> handoffs in non-GSO configurations may cause packet loss.</li></ul><p>Most satellite channels show only some of these, and the mechanisms should also help other networks, such as gigabit networks with large delay*bandwidth products.</p>",
-      "plainLanguage": "<p>Signals going up to a satellite and back take a long time, and the radio signal can get fuzzy. TCP has to be patient and keep lots of messages in flight so the line stays busy.</p>"
+      "title": "Satellite Channels and Their Traits",
+      "content": "<p>There is an inherent delay in the delivery of a message over a satellite link, due to the finite speed of light and the altitude of communications satellites. Many communications satellites are located at Geostationary Orbit at an altitude of approximately 36,000 km. The propagation time for a radio signal to travel twice that distance, for a ground station directly below the satellite, is 239.6 milliseconds. For ground stations at the edge of the view area of the satellite, the distance traveled is 2 x 41,756 km, for a total propagation delay of 279.0 ms. These delays are for one ground station to satellite to ground station route, so the propagation delay for a message and the corresponding reply, one round-trip time, could be at least 558 ms. The round-trip time is not based solely on satellite propagation time: it is increased by the transmission time and propagation time of other links in the path and by queueing delay in gateways, and it is longer if the link includes multiple hops or intersatellite links.</p><p>Lower orbits require constellations of satellites for constant coverage, and the propagation delay to a Low Earth Orbit ranges from several milliseconds when communicating with a satellite directly overhead to as much as 80 ms when the satellite is on the horizon.</p><p>Two fundamental characteristics dominate satellite channels. Noise: the strength of a radio signal falls in proportion to the square of the distance travelled, so the signal becomes weak on the way, giving a low signal-to-noise ratio. Some frequencies are particularly susceptible to atmospheric effects such as rain attenuation, and mobile applications are especially susceptible to multi-path distortion and shadowing. Typical bit error rates for a satellite link today are on the order of 1 error per 10 million bits or less frequent. Bandwidth: the radio spectrum is a limited natural resource, so the amount of bandwidth available is restricted and typically controlled by licenses. Typical carrier frequencies for current point-to-point commercial satellite services are 6 GHz uplink and 4 GHz downlink, also known as C band, and 14/12 GHz for Ku band. Traditional C band transponder bandwidth is typically 36 MHz, to accommodate one colour television channel or 1200 voice channels, while Ku band transponders are typically around 50 MHz.</p><p>Satellites also have advantages over terrestrial links: they have a natural broadcast capability, which suits multicast applications; they can reach remote areas with little terrestrial infrastructure; and they can reach mobile users.</p><p>Six characteristics differ from most terrestrial channels and may degrade TCP: the long feedback loop, the large delay*bandwidth product, transmission errors, asymmetric use of the link, variable round trip times, and intermittent connectivity in non-GSO orbits, where connections must be transferred from one satellite or ground station to another and the handoff may cause packet loss if not properly performed. Most satellite channels exhibit only a subset of these, and satellite networks are not the only environments where they appear, but the mechanisms in the document should benefit most networks, especially gigabit networks, which have large delay*bandwidth products.</p>",
+      "plainLanguage": "<p>A geostationary satellite sits about 36,000 km up, so a signal needs a quarter of a second to reach it and another quarter to come back. The link is also noisy and narrow. Those two facts, the long wait and the errors, are what make TCP behave badly there.</p>"
     },
     {
       "id": "design",
       "number": "3",
-      "title": "Lower Level Mitigations",
-      "content": "<p>Two non-TCP mechanisms are recommended for satellite networks. The data link protocol also matters: its flow control window should not be too small, and how link level retransmissions interact with TCP retransmissions is called a subject for further research.</p><p><strong>Path MTU Discovery</strong> finds the largest packet size usable on a path without IP fragmentation. The sender sets the IP don't fragment (DF) bit, and a gateway that cannot forward the packet returns an ICMP message with the largest size it can forward. Larger packets carry more data per overhead byte and let the congestion window, which grows in segments, grow faster in bytes. The drawback is a possible delay before data flows, which satellite delay can worsen, though the RFC says in practice discovery does not take long because common MTU values are widely supported. Its use is recommended.</p><p><strong>Forward error correction</strong> (FEC) improves the bit error rate. TCP treats every loss as congestion and takes a long time to recover over a satellite link, so the link should be made as clean as possible. The RFC makes no specific BER recommendation other than that it should be as low as possible. FEC is not a cure-all: it does not solve military jamming, deep space missions or rain fade, and it needs extra hardware, uses some bandwidth and can add delay and jitter. Detecting corruption loss is still a research issue, and wrongly assuming loss is not congestion can lead to congestive collapse.</p>",
-      "plainLanguage": "<p>Use the biggest envelopes the road allows, and use a spell-checker style code so garbled messages get fixed on the way instead of making TCP slow down.</p>"
+      "title": "Path MTU Discovery and Forward Error Correction",
+      "content": "<p>Two non-TCP mechanisms are recommended for those using satellite channels in their networks. The first is Path MTU Discovery, which determines the maximum packet size a connection can use on a given network path without being subjected to IP fragmentation. The sender transmits a packet that is the appropriate size for the local network to which it is connected, for example 1500 bytes on an Ethernet, and sets the IP don't fragment (DF) bit. If the packet is too large to be forwarded without being fragmented to a given channel along the path, the gateway that would normally fragment it instead returns an ICMP message to the originator, indicating that the segment could not be transmitted without being fragmented and containing the size of the largest packet the gateway can forward.</p><p>Path MTU Discovery allows TCP to use the largest possible packet size without incurring the cost of fragmentation and reassembly. Large packets reduce the packet overhead by sending more data bytes per overhead byte. Because increasing TCP's congestion window is segment based rather than byte based, larger segments enable TCP senders to increase the congestion window more rapidly in terms of bytes. The disadvantage is that discovery may cause a delay before TCP can start sending data, since the process repeats for each gateway that cannot forward the segment. Satellite delays can aggravate this problem, but in practice Path MTU Discovery does not consume a large amount of time because common MTU values are widely supported.</p><p>The second mechanism is forward error correction (FEC). A loss event in TCP is always interpreted as an indication of congestion and always causes TCP to reduce its congestion window size. Since the congestion window grows based on returning acknowledgments, TCP spends a long time recovering from loss in satellite networks. When packet loss is due to corruption rather than congestion, TCP does not need to reduce its congestion window, but detecting corruption loss is a research issue. The use of FEC coding on a satellite link should therefore be used to improve the bit-error rate of the channel, so that nearly all loss is due to network congestion. The document does not make a specific bit error rate recommendation for TCP other than that it should be as low as possible.</p><p>FEC is not without cost: it requires additional hardware, uses some of the available bandwidth, and can add delay and timing jitter due to the processing time of the coder and decoder. It also cannot solve problems such as military jamming, deep space missions or noise caused by rain fade, and link outages cause problems in satellite systems that do not occur as frequently in terrestrial networks.</p>",
+      "plainLanguage": "<p>Two things happen below TCP. Finding the largest packet the path can carry means fewer packets carry more data, which helps TCP's window grow faster in bytes. Cleaning up the link with error correction means fewer packets are lost, because every lost packet makes TCP slow down as if the network were congested.</p>"
     },
     {
       "id": "algorithms",
-      "number": "4",
-      "title": "Congestion Control and Loss Recovery",
-      "content": "<p>TCP uses four congestion control algorithms: slow start, congestion avoidance, fast retransmit and fast recovery. They rely on two variables: the congestion window (<code>cwnd</code>), an upper bound on data in flight limited by the receiver's advertised window, and the slow start threshold (<code>ssthresh</code>), which selects the algorithm used to grow <code>cwnd</code>.</p><p>In <strong>slow start</strong>, <code>cwnd</code> starts at 1 segment and grows by 1 segment per ACK. In <strong>congestion avoidance</strong>, <code>cwnd</code> grows by 1/<code>cwnd</code> per ACK, roughly 1 segment per RTT. After the first segment, a GSO sender idles for roughly 500 ms, so these phases take more real time over satellites. This is why larger packets from Path MTU Discovery matter.</p><p>On a retransmission timeout, <code>ssthresh</code> becomes half of <code>cwnd</code> and <code>cwnd</code> drops to 1 segment. With <strong>fast retransmit</strong>, 3 duplicate ACKs cause the missing segment to be resent without waiting for the timeout. <strong>Fast recovery</strong> then sets <code>ssthresh</code> to half of <code>cwnd</code>, halves <code>cwnd</code>, and inflates it by 1 segment per duplicate ACK. Fast retransmit generally resends only one segment per window, so multiple losses in a window usually wait for the timeout and fall back to slow start.</p><p>These algorithms waste bandwidth on long-delay links, but they are needed to prevent congestive collapse in a shared network, so the benefit to the whole network outweighs the cost to one connection. Implementers are advised to follow <a href='/rfc2001'>RFC 2001</a> or subsequent versions.</p>",
-      "plainLanguage": "<p>TCP starts by sending just one message and doubles up as replies come back. If something is lost it slows down. On a satellite each wait is long, but this care keeps the shared road from jamming.</p>"
+      "number": "4.1",
+      "title": "TCP Congestion Control",
+      "content": "<p>During a connection TCP employs four congestion control mechanisms: slow start, congestion avoidance, fast retransmit and fast recovery. These algorithms adjust the amount of unacknowledged data that can be injected into the network and retransmit segments dropped by the network.</p><p>Two state variables do the work. The congestion window (cwnd) is an upper bound on the amount of data the sender can inject before receiving an acknowledgment, limited by the receiver's advertised window, and it is increased or decreased based on the inferred amount of congestion. The slow start threshold (ssthresh) determines which algorithm is used to increase the value of cwnd: if cwnd is less than ssthresh, slow start is used; otherwise congestion avoidance is used. The initial value of ssthresh is the receiver's advertised window size, and it is set when congestion is detected.</p><p>Slow start begins by initializing cwnd to 1 segment and ssthresh to the receiver's advertised window, which forces the sender to transmit one segment and wait for the corresponding ACK. For each ACK received during slow start, cwnd is increased by 1 segment. When cwnd reaches ssthresh, congestion avoidance is used, which increases cwnd more slowly: during congestion avoidance cwnd is increased by 1/cwnd for each incoming ACK, so if one ACK is received for every data segment, cwnd increases by roughly 1 segment per round-trip time.</p><p>These algorithms can force poor utilization of the available channel bandwidth on long-delay satellite networks. Transmission begins with one segment, and the sender must then wait for its ACK, which on a GSO satellite leads to an idle time of roughly 500 ms when no useful work is being accomplished. The number of segments transmitted is determined by the congestion control algorithms, but the size of those segments is not, which is why larger packets and Path MTU Discovery matter.</p><p>The default mechanism for detecting a dropped segment is a timeout. When the retransmission timeout expires, the value of ssthresh is set to half of cwnd and cwnd is reduced to 1 segment, which triggers slow start. Fast retransmit uses duplicate acknowledgments instead: if 3 duplicate ACKs arrive, TCP assumes a segment has been lost and retransmits it without waiting for the timeout. Fast recovery then sets ssthresh to half of cwnd, halves cwnd, and artificially increases cwnd by 1 segment for each duplicate ACK, because each duplicate ACK represents one segment that has left the network. The difference between the two paths is that duplicate ACKs show that packets are still flowing, so the congestion is probably not that bad, while a timeout reveals nothing about the state of the network, so the sender must proceed conservatively with slow start.</p>",
+      "plainLanguage": "<p>TCP keeps two dials: how much unacknowledged data it may have in flight, and the point where it switches from doubling that amount to raising it slowly. On a satellite link, both steps take a round trip each, so the link sits idle much of the time. The document explains how TCP reacts to loss, and why reacting fast is not always the same as reacting well.</p>"
     },
     {
-      "id": "extensibility",
-      "number": "5",
-      "title": "Large Windows, ACKs and SACK",
-      "content": "<p><strong>Large windows.</strong> The standard maximum TCP window of 65,535 bytes limits throughput to window size divided by RTT. With a GSO RTT of 560 ms that is 117,027 bytes/second, which cannot fill a T1 rate channel (approximately 192,000 bytes/second). The window scaling options of <a href='/rfc1323'>RFC 1323</a> should be used, along with the companion algorithms PAWS (Protection Against Wrapped Sequence space) and RTTM (Round-Trip Time Measurements). On a link shared by many flows large windows may not be needed: two connections with 65,535 byte windows can fully use a T1 GSO channel.</p><p><strong>Acknowledgment strategies.</strong> Delayed ACKs, which <a href='/rfc1122'>RFC 1122</a> says hosts SHOULD use, produce an ACK for every second full-sized segment or after a timeout that must not exceed 500 ms. Because <code>cwnd</code> grows per ACK, growth is slower with delayed ACKs. Turning them off is not recommended, since doubling the number of ACKs in a shared network may have consequences not yet understood, so receivers should keep generating them.</p><p><strong>Selective acknowledgments.</strong> SACKs (<a href='/rfc2018'>RFC 2018</a>) tell the sender exactly which packets arrived. With SACK the sender can usually work out what to retransmit within the first RTT after loss detection, keeps the ACK clock running, and avoids a slow start period after multiple losses. The RFC calls a SACK based loss recovery algorithm the best way to improve fast retransmit and fast recovery.</p>",
-      "plainLanguage": "<p>A bigger bucket lets TCP keep more water in the pipe at once. Telling the sender exactly which pieces went missing means it only resends those pieces.</p>"
+      "id": "data-transfer",
+      "number": "4.2",
+      "title": "Large TCP Windows",
+      "content": "<p>The standard maximum TCP window size of 65,535 bytes is not adequate to let a single TCP connection use the entire bandwidth available on some satellite channels. Throughput is limited by the formula throughput = window size / RTT. Using the maximum window size of 65,535 bytes and a geosynchronous satellite channel RTT of 560 ms, the maximum throughput is limited to 117,027 bytes/second. A single standard TCP connection therefore cannot fully use, for example, T1 rate GSO satellite channels of approximately 192,000 bytes/second.</p><p>TCP has been extended to support larger windows. The window scaling options should be used in satellite environments, as well as the companion algorithms PAWS (Protection Against Wrapped Sequence space) and RTTM (Round-Trip Time Measurements).</p><p>For a satellite link shared among many flows, large windows may not be necessary: two long-lived TCP connections each using a window of 65,535 bytes can fully utilize a T1 GSO satellite channel. Using large windows often requires both client and server applications or TCP stacks to be hand tuned, usually by an expert. Research into operating system mechanisms that adjust the buffer capacity as dictated by the current network conditions was underway, which would allow stock TCP implementations and applications to better use the capacity provided by the underlying network.</p>",
+      "plainLanguage": "<p>How much data TCP can have in flight is a window, and the whole window has to be confirmed before the next one starts. With a standard window and a half-second round trip, the connection tops out well below what the link can carry, so the window has to be enlarged, along with the options that keep a large window safe.</p>"
+    },
+    {
+      "id": "operation",
+      "number": "4.4",
+      "title": "Delayed and Selective Acknowledgments",
+      "content": "<p>There are two standard methods for a TCP receiver to generate acknowledgments. The original method generates an ACK for each incoming segment, while the delayed acknowledgment method generates an ACK for every second full-sized segment, or if a second full-size segment does not arrive within a given timeout, which must not exceed 500 ms. The congestion window is increased based on the number of incoming ACKs, so delayed ACKs reduce the number of ACKs and make cwnd grow much more slowly.</p><p>A tempting fix is to turn delayed acknowledgments off and let the receiver ACK each incoming segment, but this is not recommended: the requirements say a TCP receiver should generate delayed ACKs, and increasing the number of ACKs by a factor of two in a shared network may have consequences that are not yet understood. TCP receivers should therefore continue to generate delayed ACKs.</p><p>Selective acknowledgments (SACKs) allow a receiver to inform the sender exactly which packets have arrived, so TCP can recover more quickly from lost segments and avoid needless retransmissions. Fast retransmit can generally only repair one loss per window of data, so when multiple losses occur the sender must usually rely on a timeout to determine which segment to retransmit next. While waiting for the timeout, the data segments and their acknowledgments drain from the network, and with no incoming ACKs to clock new segments into the network the sender must use slow start to restart transmission, which is time consuming over satellite channels.</p><p>With SACKs, the sender is generally able to determine which segments need to be retransmitted in the first RTT following loss detection, which lets it keep transmitting at an appropriate rate, sustain the ACK clock and avoid a costly slow start. Generally SACK is able to retransmit all dropped segments within the first RTT following loss detection.</p>",
+      "plainLanguage": "<p>When several packets are lost at once, plain TCP cannot tell which ones they are, so it waits for a timeout and then restarts slowly. Selective acknowledgments let the receiver name the packets that did arrive, so the sender knows exactly what to resend and can keep going at full speed.</p>"
     },
     {
       "id": "summary",
-      "number": "6",
-      "title": "Mitigation Summary",
-      "content": "<p>Table 1 lists each mechanism, whether it is Recommended or Required, the section that discusses it, and where it is implemented: S for the data sender, R for the data receiver and L for the satellite link. Required means the IETF defined it as required for hosts using the shared Internet (<a href='/rfc1122'>RFC 1122</a>); Recommended means the authors recommend it for networks with satellite channels.</p><p>Satellite users are advised to check with TCP vendors that these mechanisms are supported in their stack. The RFC also names a planned memo on research into improving TCP over satellite channels, together with other considerations such as satellite network architectures.</p>",
-      "plainLanguage": "<p>The note ends with a checklist of which tricks are must-haves and which are strongly suggested, and who has to do each one.</p>"
+      "number": "5",
+      "title": "What a Satellite-Friendly TCP Includes",
+      "content": "<p>Table 1 summarizes the mechanisms discussed in the document. Those denoted Recommended are IETF standards track mechanisms that the authors recommend for use in networks containing satellite channels, and those marked Required have been defined by the IETF as required for hosts using the shared Internet. The last column of the table shows where each mechanism needs to be implemented, with S for the data sender, R for the data receiver and L for the satellite link.</p><p>The recommended entries are Path-MTU Discovery, which is implemented in the sender; FEC, which is implemented in the satellite link; Fast Retransmit and Fast Recovery in the sender; Window Scaling, PAWS and RTTM in both the sender and the receiver; and TCP SACKs in both the sender and the receiver. Slow Start and Congestion Avoidance are marked Required and live in the sender.</p><p>Satellite users should check with their TCP vendors to ensure the recommended mechanisms are supported in their stack, in current and later versions. Research into improving the efficiency of TCP over satellite channels is ongoing.</p>",
+      "plainLanguage": "<p>The last table is the checklist: path MTU discovery and error correction at the link, and on the TCP side the congestion control, the larger window options and selective acknowledgments, split between the sending and receiving ends.</p>"
     },
     {
       "id": "security-considerations",
-      "number": "7",
+      "number": "6",
       "title": "Security Considerations",
-      "content": "<p>The authors believe the recommendations do not alter the security implications of TCP. A broadcast medium such as a satellite link does carry its own implications. Eavesdropping is a passive attack that could reveal traffic control information or compromise user data privacy, and because satellite signals can be received without a physical connection, monitoring can go undetected, although the resources needed to monitor a satellite link are non-trivial.</p><p>Encryption at the physical or link layer can secure the satellite hop, but traffic remains exposed before and after it, so end-to-end security should be considered. The document does not recommend any specific mechanism.</p>",
-      "plainLanguage": "<p>Anyone with a dish might be able to listen in on a satellite signal without being noticed, so secret things should be locked up all the way from sender to receiver.</p>"
+      "content": "<p>The authors believe that the recommendations in the memo do not alter the security implications of TCP. However, when using a broadcast medium such as satellite links to transfer user data or network control traffic, the intrinsic security implications of such technology should be considered.</p><p>Eavesdropping on network links is a form of passive attack that could reveal critical traffic control information and compromise the privacy of user data, especially if end-to-end security mechanisms are not in use. While passive monitoring can occur on any network, the wireless broadcast nature of satellite links allows reception of signals without physical connection to the network, which enables monitoring to be conducted without detection. The resources needed to monitor a satellite link are non-trivial.</p><p>Data encryption at the physical and link layers can provide secure communication over satellite channels, but this still leaves traffic vulnerable to eavesdropping on networks before and after the satellite link, so end-to-end security mechanisms should be considered. The document makes no recommendation as to which security mechanisms should be employed, but those operating and using satellite networks should survey the currently available mechanisms and choose those that meet their security requirements.</p>",
+      "plainLanguage": "<p>Nothing here changes how safe TCP is. The one point about satellites is that anyone in the signal's path can receive the traffic without touching the network, so encryption at the link does not protect the parts of the journey before and after the satellite.</p>"
     }
   ],
   "viz": [
     {
-      "type": "opcodes",
-      "anchor": "summary",
+      "type": "key-grid",
+      "anchor": "performance",
       "position": "after",
-      "caption": "TABLE 1 OF RFC 2488, SIMPLIFIED",
+      "caption": "THE SIX SATELLITE CHARACTERISTICS THAT DEGRADE TCP",
       "data": {
         "items": [
           {
-            "code": "3.1",
-            "label": "Path-MTU Discovery",
-            "desc": "Recommended; implemented at the sender (S).",
-            "highlight": true
+            "title": "Long feedback loop",
+            "text": "It takes a long time for the sender to learn that a packet arrived."
           },
           {
-            "code": "3.2",
-            "label": "FEC",
-            "desc": "Recommended; implemented on the satellite link (L)."
+            "title": "Large delay*bandwidth product",
+            "text": "A lot of data must be in flight to fill the link."
           },
           {
-            "code": "4.1.1",
-            "label": "Slow Start",
-            "desc": "Required; sender (S)."
+            "title": "Transmission errors",
+            "text": "A higher bit error rate than terrestrial networks."
           },
           {
-            "code": "4.1.1",
-            "label": "Congestion Avoidance",
-            "desc": "Required; sender (S)."
+            "title": "Asymmetric use",
+            "text": "Sending to the satellite costs more, so the uplink is often slower."
           },
           {
-            "code": "4.1.2",
-            "label": "Fast Retransmit",
-            "desc": "Recommended; sender (S)."
+            "title": "Variable round trip times",
+            "text": "The delay changes over time in low-Earth orbit constellations."
           },
           {
-            "code": "4.1.2",
-            "label": "Fast Recovery",
-            "desc": "Recommended; sender (S)."
+            "title": "Intermittent connectivity",
+            "text": "Connections move between satellites or ground stations."
+          }
+        ]
+      }
+    },
+    {
+      "type": "sequence",
+      "anchor": "algorithms",
+      "position": "after",
+      "caption": "FAST RETRANSMIT AFTER THREE DUPLICATE ACKNOWLEDGMENTS",
+      "data": {
+        "lanes": [
+          {
+            "key": "sender",
+            "label": "Sender"
           },
           {
-            "code": "4.2",
-            "label": "Window Scaling",
-            "desc": "Recommended; sender and receiver (S,R)."
+            "key": "receiver",
+            "label": "Receiver"
+          }
+        ],
+        "messages": [
+          {
+            "from": "sender",
+            "to": "receiver",
+            "label": "Segment 11",
+            "color": "blue",
+            "note": "Lost somewhere in the network."
           },
           {
-            "code": "4.2",
-            "label": "PAWS",
-            "desc": "Recommended; sender and receiver (S,R)."
+            "from": "sender",
+            "to": "receiver",
+            "label": "Segment 12",
+            "color": "blue"
           },
           {
-            "code": "4.2",
-            "label": "RTTM",
-            "desc": "Recommended; sender and receiver (S,R)."
+            "from": "receiver",
+            "to": "sender",
+            "label": "Duplicate ACK for segment 10",
+            "color": "neutral"
           },
           {
-            "code": "4.4",
-            "label": "TCP SACKs",
-            "desc": "Recommended; sender and receiver (S,R)."
+            "from": "receiver",
+            "to": "sender",
+            "label": "Duplicate ACK for segment 10",
+            "color": "neutral"
+          },
+          {
+            "from": "receiver",
+            "to": "sender",
+            "label": "Third duplicate ACK",
+            "color": "green",
+            "note": "Fast retransmit resends segment 11 without waiting for the timeout."
+          }
+        ]
+      }
+    },
+    {
+      "type": "code",
+      "anchor": "data-transfer",
+      "position": "after",
+      "caption": "THE THROUGHPUT FORMULA AND ITS EXAMPLE FROM RFC 2488, SECTION 4.2",
+      "data": {
+        "title": "Throughput of one TCP connection",
+        "lang": "text",
+        "code": "throughput = window size / RTT\n\nthroughput = 65,535 bytes / 560 ms = 117,027 bytes/second"
+      }
+    },
+    {
+      "type": "compare-table",
+      "anchor": "summary",
+      "position": "after",
+      "caption": "THE MITIGATION SUMMARY TABLE FROM SECTION 5",
+      "data": {
+        "columns": [
+          "Mechanism",
+          "Use",
+          "Section",
+          "Where"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "Path-MTU Discovery",
+              "Recommended",
+              "3.1",
+              "S"
+            ]
+          },
+          {
+            "cells": [
+              "FEC",
+              "Recommended",
+              "3.2",
+              "L"
+            ]
+          },
+          {
+            "cells": [
+              "Slow Start",
+              "Required",
+              "4.1.1",
+              "S"
+            ]
+          },
+          {
+            "cells": [
+              "Congestion Avoidance",
+              "Required",
+              "4.1.1",
+              "S"
+            ]
+          },
+          {
+            "cells": [
+              "Fast Retransmit",
+              "Recommended",
+              "4.1.2",
+              "S"
+            ]
+          },
+          {
+            "cells": [
+              "Fast Recovery",
+              "Recommended",
+              "4.1.2",
+              "S"
+            ]
+          },
+          {
+            "cells": [
+              "Window Scaling",
+              "Recommended",
+              "4.2",
+              "S,R"
+            ]
+          },
+          {
+            "cells": [
+              "PAWS",
+              "Recommended",
+              "4.2",
+              "S,R"
+            ]
+          },
+          {
+            "cells": [
+              "RTTM",
+              "Recommended",
+              "4.2",
+              "S,R"
+            ]
+          },
+          {
+            "cells": [
+              "TCP SACKs",
+              "Recommended",
+              "4.4",
+              "S,R"
+            ],
+            "self": true
           }
         ]
       }
@@ -180,48 +329,53 @@
   ],
   "references": [
     {
-      "number": "[Pos81]",
+      "number": "[RFC793]",
       "text": "Postel, J., \"Transmission Control Protocol\", STD 7, RFC 793, September 1981.",
       "rfc": 793
     },
     {
-      "number": "[Bra89]",
+      "number": "[RFC1122]",
       "text": "Braden, R., \"Requirements for Internet Hosts -- Communication Layers\", STD 3, RFC 1122, October 1989.",
       "rfc": 1122
     },
     {
-      "number": "[MD90]",
+      "number": "[RFC1191]",
       "text": "Mogul, J. and S. Deering, \"Path MTU Discovery\", RFC 1191, November 1990.",
       "rfc": 1191
     },
     {
-      "number": "[JBB92]",
-      "text": "Jacobson, V., Braden, R. and D. Borman, \"TCP Extensions for High Performance\", RFC 1323, May 1992.",
+      "number": "[RFC1323]",
+      "text": "Jacobson, V., Braden, R., and D. Borman, \"TCP Extensions for High Performance\", RFC 1323, May 1992.",
       "rfc": 1323
     },
     {
-      "number": "[MMFR96]",
-      "text": "Mathis, M., Mahdavi, J., Floyd, S. and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
-      "rfc": 2018
+      "number": "[RFC1435]",
+      "text": "Knowles, S., \"IESG Advice from Experience with Path MTU Discovery\", RFC 1435, March 1993.",
+      "rfc": 1435
     },
     {
-      "number": "[Ste97]",
+      "number": "[RFC2001]",
       "text": "Stevens, W., \"TCP Slow Start, Congestion Avoidance, Fast Retransmit, and Fast Recovery Algorithms\", RFC 2001, January 1997.",
       "rfc": 2001
     },
     {
-      "number": "[AFP98]",
-      "text": "Allman, M., Floyd, S. and C. Partridge, \"Increasing TCP's Initial Window\", RFC 2414, September 1998.",
+      "number": "[RFC2018]",
+      "text": "Mathis, M., Mahdavi, J., Floyd, S., and A. Romanow, \"TCP Selective Acknowledgment Options\", RFC 2018, October 1996.",
+      "rfc": 2018
+    },
+    {
+      "number": "[RFC2414]",
+      "text": "Allman, M., Floyd, S., and C. Partridge, \"Increasing TCP's Initial Window\", RFC 2414, September 1998.",
       "rfc": 2414
     }
   ],
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-17",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-17"
+  "updated": "2026-10-21"
 }

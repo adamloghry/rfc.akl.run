@@ -1,11 +1,11 @@
 {
   "number": 970,
-  "shortTitle": null,
+  "shortTitle": "Fair Queuing",
   "category": "transport",
   "categoryReviewed": false,
   "summary": "<p>This RFC discusses congestion in a packet switch with infinite storage. Such a switch never runs out of buffers, yet it can still become congested, since delay grows. It asks for discussion of the problem and solutions.</p>",
   "plainLanguage": {
-    "summary": "<p>Even a post office with endless room for mail gets bad if the mail piles up and arrives far too late.</p>"
+    "summary": "<p>RFC 970 asks what congestion really is. It assumes a packet switch with unlimited memory and shows that even then, a network under heavy load can drop every packet, because queued packets run out of time before they are sent. The memo then proposes giving each sending host its own queue, so that every host gets an equal share of the link.</p>"
   },
   "questions": [
     "what happens with infinite buffers in packet switches",
@@ -17,65 +17,140 @@
   ],
   "tags": [
     "Congestion Control",
-    "Packet Switching"
+    "Packet Switching",
+    "Queueing"
   ],
-  "subtitle": "Why unlimited buffers don't solve packet congestion, and how fair queuing helps.",
+  "subtitle": "Why a switch with unlimited memory can still lose every packet, and how per-host queues fix it.",
   "tldr": {
-    "problem": "Packet switching systems can become congested even with infinite buffer storage; the real problem is not running out of memory but excessive delay.",
-    "mechanism": "With time-to-live (TTL) limits on packets, extremely long queues cause packets to expire and be discarded before transmission; fair queuing by source address distributes bandwidth equally and creates incentives for well-behaved hosts.",
-    "outcome": "This discussion RFC influenced thinking about congestion control, but does not specify a protocol; modern networks use variants of fair queuing and congestion control algorithms like those in TCP.",
+    "problem": "Earlier work treated congestion as the risk of a switch running out of buffer space. RFC 970 sets that aside and asks what congestion means when a switch has unlimited memory, and shows that the network can still fail completely.",
+    "mechanism": "Under overload, packets wait so long in the queue that their time-to-live reaches zero and they are discarded at the next switch, so every packet is dropped. The memo proposes fair queuing: one queue per sending host, served in round-robin order, with Source Quench messages to tell a host when its own queue has grown too long.",
+    "outcome": "The memo is a discussion document and says so: nothing in it is intended as a standard, and the hope is that a general consensus will emerge. It reports reproducing the packet-dropping effect on the author's own network and presents fair queuing as a direction for further work.",
     "outcomeLabel": "Why it matters"
   },
   "facts": [
     {
-      "label": "Default TTL",
+      "label": "Default IP time-to-live",
       "value": "15 seconds"
     },
     {
-      "label": "Maximum buffer for 4 x 56Kb links",
+      "label": "Time-to-live of forwarded packets",
+      "value": "Exactly 1"
+    },
+    {
+      "label": "Maximum buffer, four 56Kb links",
       "value": "420K bytes"
     },
     {
-      "label": "Proposed threshold for Source Quench",
-      "value": "2 packets per host per switch"
+      "label": "Source Quench queue threshold",
+      "value": "Probably 2 packets"
+    },
+    {
+      "label": "Peak queue in the reported experiment",
+      "value": "916 IP datagrams"
+    },
+    {
+      "label": "Buffer for one 10Mb Ethernet",
+      "value": "318 million bytes"
     }
   ],
-  "today": "<p>RFC 970 is a discussion document, not a protocol specification. Its ideas influenced congestion control research and practice. Modern routers implement variants of fair queuing (such as weighted fair queuing) and protocols like TCP use congestion avoidance algorithms based on packet loss and delay feedback.</p>",
+  "today": "<p>RFC 970 is a discussion memo, not a specification, and it says so in its status note: no solution proposed in it is intended as a standard for the ARPA-Internet, and the hope is that a general consensus will emerge. It has not been obsoleted or updated, and the RFC Editor lists its status as unknown.</p>",
   "glossary": [
     "datagram",
-    "ttl"
+    "ttl",
+    "source-quench",
+    "congestion-control"
   ],
   "sections": [
     {
-      "id": "introduction",
+      "id": "motivation",
       "number": "1",
-      "title": "The Congestion Paradox",
-      "content": "<p>Historically, packet switching engineers focused on <strong>buffer management</strong>: building switches with enough memory so they would never drop packets due to buffer exhaustion. RFC 970 challenges this assumption by analyzing a theoretical packet switch with <strong>infinite storage</strong>. The surprising result: such a switch can still become congested and drop all packets.</p><p>The mechanism is simple. Internet packets carry a <strong>time-to-live</strong> (TTL) field that is decremented at each hop and must be positive to be forwarded. When arrival rate exceeds departure rate, queues grow long. Packets wait so long in the queue that their TTL expires before they can be sent. Once TTL reaches zero, the packet is discarded. Under extreme overload with FIFO (first-in-first-out) queuing, even arriving packets with the shortest possible TTL (value 1) are decremented to zero at the next hop and discarded. The result: the network stops delivering any packets.</p>",
-      "plainLanguage": "<p>Even with infinite storage, if mail piles up too much, letters expire and never get delivered. The problem is not running out of space but wasting time.</p>"
+      "title": "Congestion Without a Buffer Limit",
+      "content": "<p>Packet switching began when computer memory was several orders of magnitude more expensive than it is today, so engineers built switches with the absolute minimum of storage and treated congestion control as the business of avoiding buffer exhaustion. RFC 970 takes a different view. It starts by assuming infinite memory, which removes the questions of when to block and which packets to discard, and forces the harder question of how the system should behave.</p><p>The point of the assumption is to separate two problems that earlier work had treated as one. The memo argues that the order in which packets are transmitted is a design question in its own right, and that solving it for the infinite-storage case gives results that also apply to switches with finite memory.</p><p>Datagram systems are especially exposed, the memo notes, because they have no blocking mechanism of the kind a virtual circuit system provides. No fully effective solution to congestion in pure datagram systems is known, and most existing datagram systems behave badly under overload.</p>",
+      "plainLanguage": "<p>Early engineers built packet switches with as little memory as possible and treated congestion as the danger of running out of it. This RFC assumes unlimited memory instead, so it can ask a different question: in what order should a switch send the packets it is holding?</p>"
+    },
+    {
+      "id": "operation",
+      "number": "2",
+      "title": "How an Overloaded Switch Drops Every Packet",
+      "content": "<p>Each packet in the DoD Internet Protocol carries a <strong>time-to-live</strong> field, the number of seconds left before the packet must be discarded as uninteresting. The field is decremented as the packet travels, and a packet whose value reaches zero is dropped. The initial value is fixed, and in the DoD IP protocol it is 15 by default.</p><p>Consider a switch with one incoming link and one outgoing link where packets arrive faster than they leave. The queue on the outgoing link grows until the time a packet spends waiting exceeds its remaining lifetime. The switch then finds packets whose time-to-live has been decremented to zero and discards them, sending the packets that still have time. Once the steady state under overload is reached, every packet that leaves has a time-to-live of exactly one, because more than one packet is sent per time-to-live unit.</p><p>At the next switch, that value of one is decremented to zero and the packet is discarded. A datagram network with infinite storage, first-in-first-out queuing, at least two switches and a finite packet lifetime therefore drops all packets under overload. The memo reports seeing the effect experimentally: a load applied over a TCP connection produced a peak queue of 916 IP datagrams, although the connection timed out from the long round trip time before the predicted stable state was reached.</p><p>The result is not an artifact of infinite buffers, and the same thing happens with finite memory, where the effect is simply harder to see. The memo adds that the memory needed to avoid dropping a packet from buffer exhaustion is modest: for a switch with four 56Kb links and an upper bound on the time-to-live of 15 seconds, the maximum buffer space is 420K bytes.</p>",
+      "plainLanguage": "<p>Every IP packet has a time-to-live counter that is reduced at each switch, and the packet is dropped when the counter reaches zero. When a queue grows longer than that lifetime, the switch can only send out packets with one second left, and the next switch throws them all away. Under heavy load, a network with unlimited memory can therefore deliver nothing at all.</p>"
     },
     {
       "id": "design",
-      "number": "2",
-      "title": "Fair Queuing Solution",
-      "content": "<p>The RFC proposes <strong>fair queuing</strong> as a solution. Instead of a single FIFO queue per outgoing link, maintain separate queues for each source host. Serve them in round-robin order, taking one packet from each source in turn. This guarantees that each source host gets an equal fraction of the outgoing link's bandwidth, regardless of how many packets it sends.</p><p>Fair queuing creates new incentives. Under FIFO, a host gains bandwidth by sending more packets (since it claims more queue slots). Under fair queuing, sending more packets only means packets wait longer in the host's own queue. A host optimizes by sending just enough packets to keep one queued at each switch, minimizing its own transit delay. Badly-behaved hosts that send many packets simply experience longer delays for their own traffic, without blocking well-behaved hosts.</p><p>The RFC also proposes using IP's <strong>Source Quench</strong> mechanism to provide feedback: a switch sends a Source Quench message to a host when that host's queue grows beyond a threshold (e.g., 2 packets), signaling the host to slow down.</p>",
-      "plainLanguage": "<p>Instead of one big line, give each person their own line and take one person from each line in order. Cheaters can jump in more, but they just get longer waits for themselves, not for honest people.</p>"
+      "number": "3",
+      "title": "Fair Queuing: One Queue per Sending Host",
+      "content": "<p>The proposed fix is to stop treating every packet on an outgoing link as one queue. Each switch keeps a separate queue for each source host in the network and serves those queues in round-robin order, taking one packet from each non-empty queue in turn. Packets with a positive time-to-live are transmitted on the outgoing link, expired packets are dropped, and empty queues are skipped over and lose their turn.</p><p>Each source host then receives an equal share of the outgoing link, so a host that sends more packets does not get more bandwidth. The best strategy for a host becomes to send at the rate that keeps exactly one packet waiting in each switch, which gives that host its turn on every round-robin cycle and the minimum transit delay. The memo notes that this is acceptable from the network's point of view, since each queue will generally be between one and two packets long.</p><p>Hosts need advice from the network to find that rate. The memo reuses the existing Source Quench mechanism in DoD IP: a switch should send a Source Quench message to a source host whenever the number of packets in that host's queue exceeds a small value, probably two. A host that keeps its traffic just below the point at which Source Quench messages arrive keeps mean queue lengths below two for itself.</p><p>The memo is careful about the limits of the scheme. Making the switches fair does not make the network as a whole fair, so the approach suits a switch at a choke point, such as the entry node of a wide area network or an internetwork gateway, better than an intermediate node carrying packets from many hosts at different locations. The author does not claim it is a complete solution.</p>",
+      "plainLanguage": "<p>Give each sending host its own queue and take one packet from each queue in turn. Every host then gets the same share of the link, so sending more packets only makes that host's own traffic wait longer. Source Quench messages tell a host when its queue has grown past a small threshold.</p>"
     },
     {
-      "id": "section-1",
-      "number": "3",
-      "title": "Game Theory and Network Incentives",
-      "content": "<p>The RFC frames congestion as a game-theory problem, applying the classic <strong>tragedy of the commons</strong> analogy. When each participant benefits from using more resources but the shared resource degrades as usage increases, self-interest leads everyone to overuse it and collectively cause collapse. Networks face this: each host benefits from sending more packets, but if all hosts do so, throughput plummets.</p><p>Solutions fall into three categories: cooperative (everyone agrees to be nice), authoritarian (rules enforced), and market-based (change the game so selfish behavior is optimal). The RFC argues that fair queuing is a market-based solution: it makes it pay to be well-behaved by ensuring that selfish behavior (sending more packets) harms only the selfish sender, not others.</p>",
-      "plainLanguage": "<p>Everyone at the commons wants more grazing land, so everyone brings more sheep, and the land dies. Fair queuing makes each person get an equal share no matter how many sheep they bring, so they can't gain by cheating.</p>"
+      "id": "discussion",
+      "number": "4",
+      "title": "Why Self-Interest Breaks the Network",
+      "content": "<p>Each host can normally obtain more network bandwidth by transmitting more packets per unit of time, because first-in-first-out queuing gives the most resources to the sender of the most packets. Collectively, as hosts overload the network, total throughput drops, and as shown earlier it may drop to zero. The optimal strategy for each host is therefore strongly suboptimal for the network as a whole.</p><p>The memo compares this to the tragedy of the commons in economics, where each individual can improve their own position by using more of a free resource while the total amount of the resource degrades as the number of users increases, and notes the close analogy with the prisoner's dilemma. It groups the possible answers into three classes. Cooperative solutions, where everyone agrees to behave well, work for small numbers of players but break down as the number grows. Authoritarian solutions work when behaviour is easy to monitor, and fail when good behaviour is subtly defined. A market solution is possible only where the rules of the game can be changed so that the optimal strategy for one player is also optimal for all.</p><p>Fair queuing is the market-style answer, because the rules change so that sending more packets buys no extra bandwidth. The memo also records the limit of the approach: a malicious host, unlike a merely badly behaved one, can overload the network by sending from many different source addresses and impersonating a large number of hosts, thereby obtaining a larger share of the bandwidth. The memo calls that a network security problem and does not discuss it further.</p>",
+      "plainLanguage": "<p>Each host on its own gains by sending more packets, but together the hosts can drive total throughput down to zero. The memo compares this with a shared resource that everyone can over-use. It asks for the rules to change so that behaving well is also the best choice for one host, and fair queuing is how that is done.</p>"
     },
     {
       "id": "implementation-notes",
-      "number": "4",
-      "title": "Implementation Considerations",
-      "content": "<p>Fair queuing's main cost is maintaining separate queues for each source host. The RFC notes this is simpler than it might appear. A practical approach uses singly-linked per-host queues, with doubly-linked queue heads to allow efficient deletion of empty queues. Only three pointers per buffer are needed. When buffers are exhausted, drop the packet at the end of the longest queue (the one from the heaviest sender), which is both fair and discourages aggressive senders.</p><p>The RFC emphasizes that the overhead is modest and the complexity is not greater than other data structure approaches like balanced binary trees. This made fair queuing practical to implement in real packet switches, and variants of it have become common in modern routers and end-host systems.</p>",
-      "plainLanguage": "<p>To keep separate lines, you just need to link each packet to the next one in its line. When you run out of space, drop from the longest line, which is fair.</p>"
+      "number": "5",
+      "title": "Implementing the Per-Host Queues",
+      "content": "<p>Keeping a separate queue for each source host on each outgoing link seems at first to add a lot of complexity to a switch. The memo argues that the manipulations are simpler than those required by, for example, a balanced binary tree. One simple implementation provides space for pointers in the header of each datagram buffer. The queue for each source host need only be singly linked, and the queue heads, which are the first buffer of each queue, need to be doubly linked so that a whole queue can be deleted when it becomes empty. That means three pointers in each buffer. More elaborate strategies can be devised to speed the process up when the queues are long, but the additional complexity is probably not justified in practice.</p><p>If buffer space does run out, the memo says to drop the packet at the end of the longest queue, since that is the packet that would be transmitted last. This is unfavourable to the host with the most datagrams in the network, which is in keeping with the goal of fairness.</p>",
+      "plainLanguage": "<p>One queue per host needs three pointers in each buffer and a list of queue heads that can be removed when empty. If buffers still fill up, the packet at the end of the longest queue is dropped, so the host sending the most packets is the one that loses the most.</p>"
     }
   ],
-  "viz": [],
+  "viz": [
+    {
+      "type": "compare-table",
+      "anchor": "design",
+      "position": "after",
+      "caption": "FIRST IN, FIRST OUT COMPARED WITH FAIR QUEUING",
+      "data": {
+        "columns": [
+          "Queueing rule",
+          "Share of the link per sending host",
+          "Effect of sending more packets"
+        ],
+        "rows": [
+          {
+            "cells": [
+              "First in, first out",
+              "Proportional to the number of packets sent",
+              "Buys more bandwidth, at the cost of everyone's delay"
+            ]
+          },
+          {
+            "cells": [
+              "Fair queuing",
+              "Equal for every host",
+              "Only delays that host's own packets"
+            ],
+            "self": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "key-grid",
+      "anchor": "discussion",
+      "position": "after",
+      "caption": "THREE WAYS TO ANSWER THE OVERLOAD PROBLEM",
+      "data": {
+        "items": [
+          {
+            "title": "Cooperative",
+            "text": "Everyone agrees to behave well. Works for small numbers of hosts, breaks down as they grow."
+          },
+          {
+            "title": "Authoritarian",
+            "text": "Behaviour is monitored and controlled. Fails when good behaviour is hard to define."
+          },
+          {
+            "title": "Market",
+            "text": "The rules change so that the best choice for one host is also best for all."
+          }
+        ]
+      }
+    }
+  ],
   "references": [
     {
       "number": "[1]",
@@ -85,10 +160,10 @@
   "provenance": {
     "source": "llm-draft",
     "model": "claude-sonnet-5-5",
-    "drafted": "2026-10-18",
+    "drafted": "2026-10-21",
     "reviewedBy": null,
-    "promptVersion": "explain-v1",
+    "promptVersion": "explain-v2",
     "schemaVersion": "rfc-datasheet-v1"
   },
-  "updated": "2026-10-18"
+  "updated": "2026-10-21"
 }
