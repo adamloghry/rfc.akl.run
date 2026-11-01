@@ -2,7 +2,7 @@
  * The retired "ELI5" framing.
  *
  * The explainers are ISO Plain Language (ISO 24495-1:2023) explanations for an adult reader who does not work in
- * networking; the site labels them "ISO Plain Language" (see AGENTS.md). The phrases below name the old kid-level
+ * networking; the site labels them "ISO Plain Language" (see scripts/explain/SPEC.md section 8). The phrases below name the old kid-level
  * framing and the old reader description, so they must not come back in prose, in generated output or in site chrome.
  */
 

@@ -211,34 +211,34 @@ test('files over 25 MiB are errors', () => {
   assert.match(r.errors[0], /^big\.bin: 25\.0 MiB exceeds the Cloudflare limit of 25 MiB per file/);
 });
 
-test('wrangler.jsonc assets.directory must equal the checked dist dir', () => {
+test('wrangler.jsonc pages_build_output_dir must equal the checked dist dir', () => {
   const d = dist({ 'rfc1.html': page('x') });
   const root = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'rfc-wr-'));
   const cfg = path.join(root, 'wrangler.jsonc');
   const write = (directory: string) =>
     fs.writeFileSync(
       cfg,
-      `{\n  // comment with "quotes" and a // slash\n  "name": "x", /* block */\n  "assets": { "directory": ${JSON.stringify(directory)}, "url": "http://a//b", },\n}\n`,
+      `{\n  // comment with "quotes" and a // slash\n  "name": "x", /* block */\n  "pages_build_output_dir": ${JSON.stringify(directory)}, "url": "http://a//b",\n}\n`,
     );
   write(path.relative(root, d));
   assert.deepEqual(checkDist(d, { wranglerConfig: cfg }).errors, []);
   write('./dist');
   const bad = checkDist(d, { wranglerConfig: cfg });
   assert.equal(bad.errors.length, 1);
-  assert.match(bad.errors[0], /assets\.directory "\.\/dist" resolves to .*not the checked directory/);
+  assert.match(bad.errors[0], /pages_build_output_dir "\.\/dist" resolves to .*not the checked directory/);
   fs.writeFileSync(cfg, '{"name":"x"}');
-  assert.match(checkDist(d, { wranglerConfig: cfg }).errors[0], /assets\.directory is not set/);
+  assert.match(checkDist(d, { wranglerConfig: cfg }).errors[0], /pages_build_output_dir is not set/);
   assert.match(checkDist(d, { wranglerConfig: path.join(root, 'missing.jsonc') }).errors[0], /cannot read or parse/);
   assert.deepEqual(parseJsonc('{"a":"x//y" /* c */, // d\n "b":[1,],}'), { a: 'x//y', b: [1] });
 });
 
 test('the repo wrangler.jsonc points at dist/', () => {
   const cfg = parseJsonc(fs.readFileSync(path.join(process.cwd(), 'wrangler.jsonc'), 'utf8'));
-  assert.equal(path.resolve(cfg.assets.directory), path.resolve(process.cwd(), 'dist'));
+  assert.equal(path.resolve(cfg.pages_build_output_dir), path.resolve(process.cwd(), 'dist'));
   assert.equal(cfg.name, 'rfc-akl-run');
-  assert.equal(cfg.workers_dev, true);
-  assert.equal(cfg.preview_urls, true);
-  assert.equal(cfg.assets.not_found_handling, '404-page');
+  // Pages configs reject Worker-only keys; a leftover assets block would break `wrangler pages deploy`.
+  assert.equal(cfg.assets, undefined);
+  assert.equal(cfg.main, undefined);
 });
 
 test('inline scripts must be covered by the _headers CSP', () => {

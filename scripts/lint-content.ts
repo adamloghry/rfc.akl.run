@@ -81,7 +81,7 @@ function lintContent(label: string, data: unknown, ctx: { max: number; errors: s
       const n = /^\/rfc(\d+)(?:[#?].*)?$/.exec(href);
       if (n && (Number(n[1]) < 1 || Number(n[1]) > max)) errors.push(`${label}: ${ptr} internal link ${href} is outside 1..${max}`);
     }
-    // The retired ELI5 framing (AGENTS.md): these explainers are ISO Plain Language for an adult reader.
+    // The retired ELI5 framing (scripts/explain/SPEC.md section 8): these explainers are ISO Plain Language for an adult reader.
     if (CITATION_POINTER.test(ptr)) return; // a citation quotes the RFC's own bibliography
     for (const found of checkRetiredFraming(s, AUDIENCE_POINTER.test(ptr)))
       errors.push(`${label}: ${ptr} ${retiredFramingMessage(found, found)}`);

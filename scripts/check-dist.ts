@@ -33,11 +33,11 @@ export const markupOnly = (html: string): string =>
 const JS_BUDGET = 25 * KB;
 const COVERAGE_BUDGET = 25 * KB;
 const QUESTIONS_BUDGET = 30 * KB;
-const FILE_LIMIT = 20000; // Cloudflare Workers static assets, Free plan, files per version
+const FILE_LIMIT = 20000; // Cloudflare Pages, Free plan, files per deployment
 const FILE_WARN = 18000;
 const MAX_STATIC_REDIRECTS = 2000;
 const MAX_DYNAMIC_REDIRECTS = 100;
-const MAX_FILE_BYTES = 25 * 1024 * 1024; // Cloudflare Workers static assets: 25 MiB per file
+const MAX_FILE_BYTES = 25 * 1024 * 1024; // Cloudflare Pages: 25 MiB per file
 const MAX_HEADER_RULES = 100; // _headers: 100 rules
 const MAX_HEADER_LINE = 2000; // _headers: 2,000 characters per line
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -116,7 +116,7 @@ export function parseJsonc(text: string): any {
   return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1'));
 }
 
-/** Problems with the syntax of a _redirects file (Cloudflare Workers static assets rules). */
+/** Problems with the syntax of a _redirects file (Cloudflare Pages rules). */
 export function redirectsSyntaxErrors(content: string): string[] {
   const errs: string[] = [];
   content.split('\n').forEach((raw, i) => {
@@ -169,7 +169,7 @@ function walkAll(dir: string, rel: string, out: { path: string; size: number }[]
 }
 
 export interface CheckOptions {
-  /** path to wrangler.jsonc: its assets.directory must be the directory being checked */
+  /** path to wrangler.jsonc: its pages_build_output_dir must be the directory being checked */
   wranglerConfig?: string | null;
 }
 
@@ -262,7 +262,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
   };
 
   // Resolve a site-absolute path (no query/hash) to a file, or null, the way Cloudflare's
-  // "auto-trailing-slash" does for slash-less URLs: "/" -> index.html, "/rfc903" -> rfc903.html,
+  // Pages HTML handling does for slash-less URLs: "/" -> index.html, "/rfc903" -> rfc903.html,
   // "/areas/core" -> areas/core.html, "/assets/x.js" -> itself. A trailing slash (other than the root) never resolves.
   const resolve = (p: string) => {
     const rel = decodeURIComponent(p.replace(/^\//, ''));
@@ -404,7 +404,7 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
   }
   if (fs.existsSync(path.join(dir, 'not-found'))) errors.push('not-found/ must not exist in dist/ (the error page belongs at 404.html)');
 
-  // Cloudflare Workers static assets: 25 MiB per file
+  // Cloudflare Pages: 25 MiB per file
   for (const f of walkAll(dir, '', [])) {
     if (f.size > MAX_FILE_BYTES)
       errors.push(`${f.path}: ${(f.size / 1048576).toFixed(1)} MiB exceeds the Cloudflare limit of 25 MiB per file`);
@@ -420,11 +420,11 @@ export function checkDist(dir: string, opts: CheckOptions = {}) {
   if (opts.wranglerConfig) {
     try {
       const cfg = parseJsonc(fs.readFileSync(opts.wranglerConfig, 'utf8'));
-      const assetsDir = cfg?.assets?.directory;
-      if (typeof assetsDir !== 'string') errors.push(`${path.basename(opts.wranglerConfig)}: assets.directory is not set`);
-      else if (path.resolve(path.dirname(opts.wranglerConfig), assetsDir) !== path.resolve(dir)) {
+      const outDir = cfg?.pages_build_output_dir;
+      if (typeof outDir !== 'string') errors.push(`${path.basename(opts.wranglerConfig)}: pages_build_output_dir is not set`);
+      else if (path.resolve(path.dirname(opts.wranglerConfig), outDir) !== path.resolve(dir)) {
         errors.push(
-          `${path.basename(opts.wranglerConfig)}: assets.directory "${assetsDir}" resolves to ${path.resolve(path.dirname(opts.wranglerConfig), assetsDir)}, not the checked directory ${path.resolve(dir)}`,
+          `${path.basename(opts.wranglerConfig)}: pages_build_output_dir "${outDir}" resolves to ${path.resolve(path.dirname(opts.wranglerConfig), outDir)}, not the checked directory ${path.resolve(dir)}`,
         );
       }
     } catch (e) {

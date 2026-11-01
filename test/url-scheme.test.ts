@@ -52,7 +52,9 @@ test.skipIf(!built)('canonical URLs, sitemap and data files use the slash-less s
   assert.match(html, /<meta property="og:url" content="https:\/\/rfc\.akl\.run\/rfc903">/);
   const xml = fs.readFileSync(path.join(dist, 'sitemap.xml'), 'utf8');
   const locs = [...xml.matchAll(/<loc>([^<]*)<\/loc>/g)].map((m) => m[1]);
-  assert.ok(locs.includes('https://rfc.akl.run/rfc903') && locs.includes('https://rfc.akl.run/areas/core') && locs.includes('https://rfc.akl.run/'));
+  assert.ok(
+    locs.includes('https://rfc.akl.run/rfc903') && locs.includes('https://rfc.akl.run/areas/core') && locs.includes('https://rfc.akl.run/'),
+  );
   assert.deepEqual(
     locs.filter((u) => u !== 'https://rfc.akl.run/' && u.endsWith('/')),
     [],

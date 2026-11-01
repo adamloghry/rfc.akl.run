@@ -341,7 +341,7 @@ const AUDIENCE_POINTER = /^\/(?:plainLanguage(?:\/summary)?|sections\/\d+\/plain
 
 /**
  * The retired ELI5 framing must not come back: the explainers are ISO Plain Language (ISO 24495-1:2023) written for
- * an adult reader who does not work in networking (AGENTS.md, SPEC.md section 8).
+ * an adult reader who does not work in networking (SPEC.md section 8).
  */
 function checkFraming(out: Obj, err: Errors) {
   walkStrings(out, (s, ptr) => {
