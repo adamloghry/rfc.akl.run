@@ -33,7 +33,9 @@ test.describe('RFC page tabs', () => {
     await expect(page.locator('#plain-language')).toBeVisible();
     await expect(page.locator('#rfc-text')).toBeHidden();
     await expect(page.locator('.ai-note')).toContainText('AI-generated explainer.');
-    await expect(page.locator('.ai-note')).toContainText('Written by AI from the RFC text following ISO Plain Language guidelines and not reviewed by a human');
+    await expect(page.locator('.ai-note')).toContainText(
+      'Written by AI from the RFC text following ISO Plain Language guidelines and not reviewed by a human',
+    );
 
     await page.goto('/rfc903#packet-format');
     await expect(tab(page, 'plain-language')).toHaveAttribute('aria-selected', 'true');

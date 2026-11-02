@@ -53,7 +53,7 @@ in
   e2e =
     mk "e2e"
       ''
-        # Serve the Nix-built site with the nixpkgs wrangler (`wrangler pages dev`; workerd is patched there).
+        # Serve the Nix-built site with the nixpkgs wrangler (workerd is patched there).
         export HOME=$TMPDIR
         rm -rf dist && cp -r ${site} dist && chmod -R u+w dist
         export WRANGLER_SEND_METRICS=false

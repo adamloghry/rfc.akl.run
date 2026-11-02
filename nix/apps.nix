@@ -15,7 +15,7 @@ in
   mkApps =
     site:
     let
-      # wrangler.jsonc points pages_build_output_dir at ./dist; run it from a temp dir holding a symlink to the
+      # wrangler.jsonc points assets.directory at ./dist; run it from a temp dir holding a symlink to the
       # store output plus the same config, so nothing is copied and the store stays read-only.
       # Wrangler runs as a child (no exec) so the EXIT trap removes the temp dir; INT/TERM are forwarded to it.
       run = sub: ''
@@ -37,11 +37,10 @@ in
       '';
     in
     rec {
-      default = mkApp "rfc-serve" (run ''${wrangler} pages dev --port "''${PORT:-8787}" "$@"'');
+      default = mkApp "rfc-serve" (run ''${wrangler} dev --local --port "''${PORT:-8787}" "$@"'');
       serve = default;
-      # Production is the Pages project's production branch (trunk); any other --branch is a preview deployment.
-      deploy = mkApp "rfc-deploy" (run ''${wrangler} pages deploy --branch trunk "$@"'');
-      preview-deploy = mkApp "rfc-preview-deploy" (run ''${wrangler} pages deploy --branch preview "$@"'');
+      deploy = mkApp "rfc-deploy" (run ''${wrangler} deploy "$@"'');
+      preview-deploy = mkApp "rfc-preview-deploy" (run ''${wrangler} versions upload "$@"'');
 
       # Fetches the RFC Editor index into the committed snapshot data/rfc-index.xml (the only networked step).
       # Runs in the repository checkout and needs node_modules (`npm ci`) for tsx and the XML parser.

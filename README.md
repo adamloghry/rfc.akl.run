@@ -31,10 +31,10 @@ Other commands:
 | `npm run check` | Verifies `dist/`: links, anchors, that every sitemap URL resolves to a file, size budgets (an RFC page: 60 KB gz plus 1.25 x the gzip size of its RFC text; JS counted with its statically imported chunks), forbidden strings in built HTML (the RFC Editor text itself is excluded from the link, anchor and string checks; the repo slug `adamloghry/rfc.akl.run` and the solicitation copy "Contribute", "Request an explainer", feed.xml anywhere; GitHub only outside `<main>`, since RFC content may mention it), that `404.html`, `rfc404.html`, `_redirects` and `_headers` exist (and no `not-found/` dir), that internal links resolve to files the way Cloudflare serves them (`/rfc903` to `rfc903.html`, `/areas/core` to `areas/core.html`, `/` to `index.html`) and that no internal link has a trailing slash or is an old-style `/<n>/` link, the Cloudflare file-count limit and `_redirects` rule limits |
 | `npm run check:types` | `astro check` (TypeScript and Astro diagnostics) |
 | `npm run parity` | Dev tool: structural comparison of `dist/` pages against a golden directory (see below) |
-| `npm run test:e2e` | Playwright (desktop and 390px mobile) against `wrangler pages dev` serving `dist/` (build first) |
+| `npm run test:e2e` | Playwright (desktop and 390px mobile) against `wrangler dev --local` serving `dist/` (build first) |
 | `npm run lint:code` | Biome check (lint and format) |
 | `npm run refresh-index` | Fetch the RFC Editor index into `data/rfc-index.xml` (see below) |
-| `npm run deploy` | Build, check, then `wrangler pages deploy --branch trunk` (uses `$WRANGLER_BIN` when set, as in `nix develop`); `deploy:preview` deploys to the `preview` branch instead |
+| `npm run deploy` | Build, check, then `wrangler deploy` (uses `$WRANGLER_BIN` when set, as in `nix develop`); `deploy:preview` runs `wrangler versions upload` instead (a preview URL; production unchanged) |
 
 The scripts run TypeScript through `node --import tsx`, which works everywhere (the `tsx` CLI itself can fail in sandboxes that block its IPC socket).
 
@@ -42,7 +42,7 @@ The scripts run TypeScript through `node --import tsx`, which works everywhere (
 
 1. **Unit and coverage** (`npm test`, `npm run test:coverage`): pure `src/lib` logic, CLI scripts, and the browser scripts in `src/scripts` driven through happy-dom against markup fixtures extracted from the real build (`scripts/extract-client-fixtures.ts`). Coverage thresholds (per-glob, in `vitest.config.ts`) fail the run when they drop.
 2. **Component tests**: the same Vitest run renders Astro components through the Container API and checks the HTML.
-3. **End to end** (`npm run test:e2e`): Playwright drives Chromium against `wrangler pages dev` (Cloudflare Pages' workerd runtime) serving the built `dist/`, so redirects, `_headers`, the CSP (any violation fails a test), the custom 404 and the mobile layout are tested as Cloudflare will serve them. Needs `wrangler` and a Playwright Chromium (`npx playwright install chromium`, or `nix develop`). `WRANGLER_BIN` and `E2E_BASE_URL` override the server.
+3. **End to end** (`npm run test:e2e`): Playwright drives Chromium against `wrangler dev --local` (workerd, Cloudflare's runtime) serving the built `dist/`, so redirects, `_headers`, the CSP (any violation fails a test), the custom 404 and the mobile layout are tested as Cloudflare will serve them. Needs `wrangler` and a Playwright Chromium (`npx playwright install chromium`, or `nix develop`). `WRANGLER_BIN` and `E2E_BASE_URL` override the server.
 4. **`nix flake check -L`**: runs all of the above plus types, Biome, the site build with `npm run preflight`, and formatting, in the Nix sandbox. Run it before pushing to `trunk`.
 
 ### Nix (optional, recommended)
@@ -53,9 +53,9 @@ The flake builds, checks and deploys the site with no network access during the 
 nix develop                  # Node 22, nixpkgs wrangler, biome, Playwright browsers, nixfmt
 nix build                    # packages.default: the built site (dist/ contents) in ./result
 nix flake check -L           # unit, lint, types, code-style, site (build + preflight), e2e, formatting
-nix run                      # serve the Nix-built site with `wrangler pages dev` on :8787 (PORT=... to change)
-nix run .#deploy             # wrangler pages deploy --branch trunk of the Nix-built site (needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID)
-nix run .#preview-deploy     # wrangler pages deploy --branch preview (a preview deployment, not production)
+nix run                      # serve the Nix-built site with `wrangler dev` on :8787 (PORT=... to change)
+nix run .#deploy             # wrangler deploy of the Nix-built site (needs CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID)
+nix run .#preview-deploy     # wrangler versions upload (a preview URL, not a deployment)
 nix run .#refresh-index      # refresh data/rfc-index.xml (needs node_modules: npm ci)
 nix fmt                      # nixfmt on flake.nix and nix/*.nix
 ```
@@ -113,23 +113,23 @@ src/
 scripts/              CLI tools run with node --import tsx: lint-content, check-dist, parity,
                       coverage-diff, import-summaries, merge-glossary, make-summary-batches
 test/                 Vitest suites and fixtures
-e2e/                  Playwright specs (run against wrangler pages dev)
+e2e/                  Playwright specs (run against wrangler dev --local)
 docs/                 Design and build specs
 flake.nix, nix/        Nix package, checks, apps and dev shell
 ```
 
 ## Deploy
 
-Hosting is a Cloudflare Pages project, `rfc-akl-run` (free plan, static only), configured by `wrangler.jsonc` (`pages_build_output_dir: ./dist`). Production is `https://rfc.akl.run`; `rfcs.akl.run` redirects to it. Setup, domains and limits are in [docs/cloudflare.md](docs/cloudflare.md). In short: connect the GitHub repo in the Pages dashboard with build command `npm run build && npm run check`, output directory `dist` and production branch `trunk`, and every push to `trunk` deploys (other branches get preview deployments). Without Git integration, `npm run deploy` (or `nix run .#deploy`) builds, checks and runs `wrangler pages deploy --branch trunk`. Static requests are free and unlimited.
+Hosting is an assets-only Cloudflare Worker, `rfc-akl-run` (free plan, no Worker script), configured by `wrangler.jsonc` (`assets.directory: ./dist`). Production is `https://rfc.akl.run`; `rfcs.akl.run` redirects to it. Setup, domains and limits are in [docs/cloudflare.md](docs/cloudflare.md). In short: Workers Builds is connected to the GitHub repo with build command `npm run build && npm run check`, deploy command `npx wrangler deploy` and production branch `trunk`, so every push to `trunk` deploys (other branches get preview URLs). By hand, `npm run deploy` (or `nix run .#deploy`) builds, checks and runs `wrangler deploy`. Static asset requests are free and unlimited.
 
 ### Why file count matters
 
-The free plan allows 20,000 files per deployment and 25 MiB per file. Every RFC is one `rfc<n>.html`, so `dist/` is about 10.2k files today. To stay well under the limit, the build emits no per-RFC redirect stubs and no sharded search chunks; redirects live in a generated `_redirects` file and caching in a generated `_headers` file (both written by `src/integrations/build-files.ts`). RFCs grow by about 300 per year, so the headroom is decades. `scripts/check-dist.ts` fails the build at 20,000 files, warns at 18,000, and checks `_redirects` against the 2,000 static / 100 dynamic rule caps.
+The free plan allows 20,000 files per version and 25 MiB per file. Every RFC is one `rfc<n>.html`, so `dist/` is about 10.2k files today. To stay well under the limit, the build emits no per-RFC redirect stubs and no sharded search chunks; redirects live in a generated `_redirects` file and caching in a generated `_headers` file (both written by `src/integrations/build-files.ts`). RFCs grow by about 300 per year, so the headroom is decades. `scripts/check-dist.ts` fails the build at 20,000 files, warns at 18,000, and checks `_redirects` against the 2,000 static / 100 dynamic rule caps.
 
 ### Redirects and caching
 
 - **URL scheme:** the site has no trailing slashes anywhere. RFC pages are `/rfc903` (file `rfc903.html`, built with `build.format: 'file'` and `trailingSlash: 'never'`), sections are `/rfc903#packet-format`, other pages are `/areas/core`, `/glossary/m`, `/journeys/request`, `/graph`; only the root is `/`. Numbers are never zero-padded. Not-issued and reserved numbers also live at `/rfc<n>` (so `/rfc404` is the RFC 404 page, and the error page is the ordinary `404.html`).
-- Cloudflare Pages serves `foo.html` at `/foo` with a 200 and redirects `/foo/` and `/foo.html` to `/foo` (308). No `_redirects` rule is needed for this; e2e checks it. The old `/<n>/` URLs were never deployed, so there are no redirects for them.
+- `html_handling: "auto-trailing-slash"` in `wrangler.jsonc` serves `foo.html` at `/foo` with a 200 and redirects `/foo/` to `/foo` (307). No `_redirects` rule is needed for this; e2e checks it. The old `/<n>/` URLs were never deployed, so there are no redirects for them.
 - Legacy `/#rfcNNN` links are forwarded to `/rfcNNN` by the Atlas page's inline script.
 - Slug aliases for explainers (`/<slug>` -> `/rfc<n>`) are the only `_redirects` rules.
 - `_headers`: `/assets/*` is `public, max-age=31536000, immutable`; everything else (HTML, `data/`) is `public, max-age=300`; the static search index under `data/search/` is `max-age=60` since its file names are not hashed. Cloudflare handles edge caching for static assets itself.
@@ -137,8 +137,8 @@ The free plan allows 20,000 files per deployment and 25 MiB per file. Every RFC 
 
 ### One-time owner setup
 
-1. Create the Pages project `rfc-akl-run`, either Git-integrated (recommended) or Direct Upload; Cloudflare cannot switch a Direct Upload project to Git later. Settings are in [docs/cloudflare.md](docs/cloudflare.md).
-2. Workers & Pages > `rfc-akl-run` > Custom domains: add `rfc.akl.run`.
+1. Import the repo as the Worker `rfc-akl-run` with Workers Builds (build and deploy commands in [docs/cloudflare.md](docs/cloudflare.md)).
+2. Workers & Pages > `rfc-akl-run` > Settings > Domains & Routes: add the custom domain `rfc.akl.run`.
 3. Redirect `rfcs.akl.run` to `https://rfc.akl.run` with a Redirect Rule in the `akl.run` zone (details in docs/cloudflare.md).
 
 ## License

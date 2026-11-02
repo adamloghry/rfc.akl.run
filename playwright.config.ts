@@ -3,7 +3,7 @@ import path from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * End-to-end tests against Cloudflare Pages' local runtime (workerd via `wrangler pages dev`) serving dist/.
+ * End-to-end tests against Cloudflare's local runtime (workerd via `wrangler dev --local`) serving dist/.
  *
  *   npm run build:offline      # dist/ must exist first
  *   npm run test:e2e
@@ -60,7 +60,7 @@ export default defineConfig({
   webServer: external
     ? undefined
     : {
-        command: `${wrangler} pages dev --port ${PORT}`,
+        command: `${wrangler} dev --local --port ${PORT}`,
         url: `http://localhost:${PORT}/rfc903`,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,

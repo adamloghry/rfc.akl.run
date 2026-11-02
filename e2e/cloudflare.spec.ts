@@ -1,5 +1,5 @@
 /**
- * Cloudflare Pages behaviour (`wrangler pages dev`, the same workerd runtime as production), driven by the
+ * Cloudflare Workers static-assets behaviour (wrangler's local runtime = workerd), driven by the
  * generated dist/_redirects, dist/_headers and dist/404.html. These settle the "does Cloudflare do X" questions.
  */
 
@@ -11,7 +11,7 @@ import { expect, test } from './fixtures';
 const DIST = path.join(process.cwd(), 'dist');
 const noFollow = { maxRedirects: 0 };
 
-test.describe('URL scheme (Pages HTML handling)', () => {
+test.describe('URL scheme (html_handling auto-trailing-slash)', () => {
   test('/rfc903 is served from rfc903.html: 200, no redirect', async ({ request }) => {
     const r = await request.get('/rfc903', noFollow);
     expect(r.status()).toBe(200);
@@ -53,7 +53,7 @@ test.describe('URL scheme (Pages HTML handling)', () => {
     for (const p of ['/903', '/903/']) expect((await request.get(p, noFollow)).status(), p).toBe(404);
   });
 
-  test('every page names https://rfc.akl.run as canonical (pages.dev also serves production)', async ({ request }) => {
+  test('every page names https://rfc.akl.run as canonical (workers.dev also serves production)', async ({ request }) => {
     for (const p of ['/', '/rfc903', '/glossary', '/graph']) {
       const html = await (await request.get(p)).text();
       const canon = /<link rel="canonical" href="([^"]+)"/.exec(html)?.[1];
