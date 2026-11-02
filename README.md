@@ -77,7 +77,7 @@ Refresh it with `npm run refresh-index` or `nix run .#refresh-index`. The script
 
 ### Parity tool
 
-`scripts/parity.ts` compares built pages with the output of the pre-Astro generator and prints a similarity score per page. It is only useful while checking a migration or large template change. Produce a golden directory by building the reference revision (the commit before the Astro port, `9f95045`, with `node scripts/build.js --out .work/golden`), then:
+`scripts/parity.ts` compares built pages with the output of the pre-Astro generator and prints a similarity score per page. It is only useful while checking a migration or large template change. Produce a golden directory by checking out the reference revision, the commit before the Astro port (`git log -1 --format=%h --grep "Stay on free Cloudflare"`), and running `node scripts/build.js --out .work/golden`, then:
 
 ```sh
 node --import tsx scripts/parity.ts [paths...] [--golden .work/golden] [--dist dist] [--full]
@@ -141,4 +141,8 @@ The free plan allows 20,000 files per deployment and 25 MiB per file. Every RFC 
 2. Workers & Pages > `rfc-akl-run` > Custom domains: add `rfc.akl.run`.
 3. Redirect `rfcs.akl.run` to `https://rfc.akl.run` with a Redirect Rule in the `akl.run` zone (details in docs/cloudflare.md).
 
-RFC text is (c) IETF Trust; explanations are on rfc.akl.run.
+## License
+
+- **Code** (everything outside `content/` and `data/`): MIT, see [LICENSE](LICENSE).
+- **RFC text** (`data/rfc-text/`) and the RFC Editor index (`data/rfc-index.xml`): © IETF Trust and the persons identified as the document authors, from the [RFC Editor](https://www.rfc-editor.org), reproduced under the [IETF Trust Legal Provisions](https://trustee.ietf.org/documents/trust-legal-provisions/).
+- **Site content** (`content/`: summaries, AI explainers, journeys, glossary): not yet licensed; all rights reserved for now.
